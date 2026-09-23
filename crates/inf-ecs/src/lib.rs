@@ -32,6 +32,13 @@ pub mod band;
 // a dead engine, a flat and a fire. A resource, so no schema moves; the 18th
 // section of the determinism trace, empty until something breaks.
 pub mod bodywork;
+// VEH3d: BOARDING -- the eight sockets a car offers a body (DERIVED from the
+// chassis half-extents and the family's own parts, never persisted: VEH3a
+// priced them and refused them by name), the state machine that walks a body
+// into one of them, and the approach spline. A field on `MovementRuntime`,
+// which is `#[serde(skip)]`, so no schema moves; the 19th section of the
+// determinism trace, empty on a level where nobody is boarding.
+pub mod boarding;
 // P29.6: the locomotion camera's pure half. NOT sim state — it is owned by a
 // host, never a component and never a resource (Ruling 4).
 pub mod camera;

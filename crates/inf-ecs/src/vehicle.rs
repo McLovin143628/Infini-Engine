@@ -177,9 +177,16 @@ pub struct PartMount {
 pub struct VehicleRig {
     /// The chassis entity — the dynamic body the forces are applied to.
     pub chassis: Uuid,
-    /// Where a driver sits, in the chassis frame, metres. Derived from the
-    /// chassis collider rather than authored: the top face's centre, so a
-    /// character's **feet** land on the chassis and the seat needs no field.
+    /// Where a driver sits, in the chassis frame, metres — the point its
+    /// **feet** are placed on, which `step_driving` lifts the capsule from by
+    /// `stand_half_height_m + radius`.
+    ///
+    /// Derived from the chassis collider rather than authored, and since wave
+    /// VEH3d it is the driver's **foot well** — inside the cabin, on the `+X`
+    /// side, at [`crate::boarding::SEAT_FLOOR_FRAC_Y`] of the half-height. It
+    /// was the collider's TOP FACE from P29.7 until then, so every driver on
+    /// the island was parked standing on its own roof (CHAR1c's carried 160).
+    /// See [`chassis_of`].
     pub seat_local: Vec3d,
     /// The wheels, sorted by `Guid` so the order is a function of the level's
     /// contents and not of a bevy archetype walk.
@@ -247,19 +254,80 @@ pub fn part_of(
 
 /// Whether `entity`'s components describe a **chassis** — a dynamic body with a
 /// collider to hang wheels off.
+///
+/// # THE SEAT IS INSIDE THE CABIN (wave VEH3d — CHAR1c carried 160, closed)
+///
+/// From P29.7 until this wave the answer was the collider's **top face**, and
+/// its own doc said so: *"the top face's centre, so a character's feet land on
+/// the chassis and the seat needs no field"*. They landed on the ROOF. The
+/// CHAR1c audit measured three of the island's four drivers at `-0.000 m` and
+/// `-0.001 m` of their own car's roof and filed
+/// `an_island_driver_is_seated_inside_its_car_and_not_on_top_of_it` as an
+/// `#[ignore]`d arm rather than write the defect down as a rule; the VEH3a
+/// audit then had to make `ENTER_REACH_M` a GROUND-plane reach because the
+/// three-dimensional one was measuring the height of a roof.
+///
+/// It is now [`inf_ecs::boarding::sockets_of`](crate::boarding::sockets_of)'s
+/// driver seat at foot-well height —
+/// [`SEAT_FLOOR_FRAC_Y`](crate::boarding::SEAT_FLOOR_FRAC_Y) of the chassis
+/// half-height, on the `+X` (driver's) side. The sockets are **derived and
+/// never persisted**, which is VEH3a's own ruling: they are a function of the
+/// half-extents the level already carries.
+///
+/// A capsule or a sphere chassis has no cabin to be inside, so the half-extents
+/// it is measured against are its bounding box — the rule still composes over
+/// the whole authored vocabulary, and a boat's helm comes out where a boat's
+/// helm is.
 pub fn chassis_of(collider: Option<&Collider3D>, body: Option<&RigidBody3D>) -> Option<Vec3d> {
     let (c, b) = (collider?, body?);
     if b.kind != BodyKind3D::Dynamic {
         return None;
     }
-    // The seat is the top face's centre. A capsule or a sphere chassis answers
-    // with its radius, so the rule composes over the whole authored vocabulary.
-    let top = match c.shape_kind {
-        ColliderShape3DKind::Box => c.half_extents.y,
-        ColliderShape3DKind::Sphere => c.radius,
-        ColliderShape3DKind::Capsule => c.half_extents.y + c.radius,
-    };
-    Some(Vec3d::new(c.offset.x, c.offset.y + top, c.offset.z))
+    Some(seat_local_of(c))
+}
+
+/// **Where the driver's feet go**, in the chassis frame — the one arithmetic,
+/// so a bridge walk and `rig_of` cannot disagree about it.
+///
+/// Split out of [`chassis_of`] because the physics bridge asks the question
+/// about a `Collider3D` it has already fetched and a gate asks it about one it
+/// has built, and two spellings of "where the seat is" is the defect this file
+/// has paid for at four separate seams.
+pub fn seat_local_of(c: &Collider3D) -> Vec3d {
+    let half = chassis_half_extents(c);
+    let s = crate::boarding::sockets_of(half, c.offset, &[]);
+    s.seat_floor(
+        crate::boarding::SeatIndex::Driver,
+        c.offset.y + crate::boarding::SEAT_FLOOR_FRAC_Y * half.y,
+    )
+}
+
+/// **The box a chassis collider fills**, whatever shape it was authored as.
+///
+/// The sockets are fractions of half-extents, and a sphere and a capsule have
+/// none — so they answer their bounding box, which is the same number the seat
+/// used to be read off (`radius`, `half_extents.y + radius`) generalised to
+/// three axes.
+pub fn chassis_half_extents(c: &Collider3D) -> Vec3d {
+    match c.shape_kind {
+        ColliderShape3DKind::Box => c.half_extents,
+        ColliderShape3DKind::Sphere => Vec3d::splat(c.radius),
+        ColliderShape3DKind::Capsule => Vec3d::new(
+            c.radius,
+            c.half_extents.y + c.radius,
+            c.radius,
+        ),
+    }
+}
+
+/// **The eight sockets of one chassis**, derived — the door every consumer that
+/// wants more than the driver's seat calls.
+///
+/// `parts` is the family's own parts as the world holds them
+/// ([`crate::boarding::part_geoms`]); an empty slice is legal and gives the
+/// flank fallback for the two handles.
+pub fn sockets_for(c: &Collider3D, parts: &[crate::boarding::PartGeom]) -> crate::boarding::VehicleSockets {
+    crate::boarding::sockets_of(chassis_half_extents(c), c.offset, parts)
 }
 
 /// **Derive a vehicle rig from the scene**, or `None` if `chassis` is not one.
@@ -10404,8 +10472,20 @@ mod tests {
         assert_eq!(rig.parts[0].mount_local, Vec3d::new(0.0, -0.2, -2.0));
         assert_eq!(rig.parts_of(PartKind::Thruster).count(), 1);
         assert_eq!(rig.parts_of(PartKind::Rotor).count(), 0);
-        // The seat is still derived from the chassis collider, unchanged.
-        assert_eq!(rig.seat_local, Vec3d::new(0.0, def.half_extents.y, 0.0));
+        // The seat is still derived from the chassis collider — and since wave
+        // VEH3d it is derived INSIDE it. Re-blessed with the cause: `seat_local`
+        // was `(0, half.y, 0)` (the roof) and is now the driver's foot well.
+        assert_eq!(
+            rig.seat_local,
+            crate::boarding::sockets_of(def.half_extents, Vec3d::ZERO, &[]).seat_floor(
+                crate::boarding::SeatIndex::Driver,
+                crate::boarding::SEAT_FLOOR_FRAC_Y * def.half_extents.y
+            )
+        );
+        assert!(
+            rig.seat_local.y < 0.0 && rig.seat_local.x > 0.0,
+            "a driver sits below the chassis centre on the `+X` side, not on the roof"
+        );
     }
 
     /// The parts come back in `Guid` order, like the wheels — so a rig's part
@@ -10484,10 +10564,18 @@ mod tests {
         );
     }
 
-    /// The seat is the chassis collider's top face, so a character's feet land
-    /// on it — over the whole authored shape vocabulary.
+    /// **The seat is INSIDE the cabin**, over the whole authored shape
+    /// vocabulary — wave VEH3d, CHAR1c's carried 160.
+    ///
+    /// **Re-blessed with its cause.** This arm was
+    /// `the_seat_is_the_top_of_whatever_the_chassis_is` and asserted
+    /// `(0, half.y, 0)` — the ROOF — which is exactly the number the CHAR1c
+    /// audit measured three of the island's four drivers standing on. The seat
+    /// is now [`crate::boarding::sockets_of`]'s driver foot well, and this arm
+    /// asserts the property that number exists for: **below the roof, by more
+    /// than the body's own cushion depth**, for a box AND for a capsule.
     #[test]
-    fn the_seat_is_the_top_of_whatever_the_chassis_is() {
+    fn the_seat_is_inside_whatever_the_chassis_is_and_never_on_top_of_it() {
         let dynamic = RigidBody3D {
             kind: BodyKind3D::Dynamic,
             ..Default::default()
@@ -10497,21 +10585,31 @@ mod tests {
             half_extents: Vec3d::new(2.0, 0.5, 1.0),
             ..Default::default()
         };
-        assert_eq!(
-            chassis_of(Some(&boxy), Some(&dynamic)),
-            Some(Vec3d::new(0.0, 0.5, 0.0))
+        let seat = chassis_of(Some(&boxy), Some(&dynamic)).expect("a dynamic box is a chassis");
+        // The roof is `+0.5`; the seat is a metre of body below it.
+        assert!(
+            seat.y < -0.2,
+            "the seat is at {:.3} and the roof at 0.5",
+            seat.y
         );
+        assert!(seat.x > 0.0, "the driver is on the `+X` side, which is the exit's");
+        assert!(seat.z > 0.0, "a front seat is ahead of the chassis centre");
         // …and a static body is scenery, not a vehicle.
         assert_eq!(chassis_of(Some(&boxy), Some(&RigidBody3D::default())), None);
+        // A capsule chassis has no cabin, so it is measured against its own
+        // bounding box: the top face used to answer `1.1` and the seat is now
+        // well under it.
         let capsule = Collider3D {
             shape_kind: ColliderShape3DKind::Capsule,
             half_extents: Vec3d::new(0.3, 0.8, 0.3),
             radius: 0.3,
             ..Default::default()
         };
-        assert_eq!(
-            chassis_of(Some(&capsule), Some(&dynamic)).map(|s| s.y),
-            Some(1.1)
+        let hull = chassis_of(Some(&capsule), Some(&dynamic)).expect("a dynamic capsule too");
+        assert!(
+            hull.y < 0.0 && hull.y > -1.1,
+            "a hull's helm is inside it: {:.3} against a 1.1 m top face",
+            hull.y
         );
     }
 

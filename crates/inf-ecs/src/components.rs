@@ -2015,6 +2015,17 @@ pub struct MovementRuntime {
     /// other through [`MantleState`] without either of them learning about the
     /// other's fields.
     pub cover: crate::cover::CoverState,
+    /// **The boarding machine**, if this body is getting into or out of a car
+    /// (wave VEH3d).
+    ///
+    /// Beside the mantle and the cover for the same reason those two are beside
+    /// each other: it is the same kind of thing — a mode with a warp and a
+    /// clock — and the phase a body is in decides what the seat step does with
+    /// its position, its hands and its feet. `MovementRuntime` is
+    /// `#[serde(skip)]` and never reflected, so a whole state machine lands
+    /// here at **zero schema cost**, which is the law wave VEH3d runs under:
+    /// VEH3a's window is spent.
+    pub boarding: crate::boarding::BoardingState,
     /// How close a predicted landing is, `[0, 1]`; `0` when none is predicted.
     /// The value an in-air animation blends a landing pose on.
     pub land_alpha: f64,
