@@ -568,8 +568,9 @@ pub fn door_for_seat(world: &EcsWorld, chassis: Uuid, seat: SeatIndex) -> Option
     let side = VehicleSockets::side_sign(seat);
     let row = crate::bodywork::damage_row(world, chassis)?;
     let mut best: Option<(Uuid, f64)> = None;
+    let mut attached = false;
     for (guid, st) in row.parts.iter() {
-        if st.kind != crate::vehicle::KIND_DOOR || !st.latch.attached() {
+        if st.kind != crate::vehicle::KIND_DOOR {
             continue;
         }
         if st.centre_frac.x * side <= 0.0 {
@@ -581,9 +582,14 @@ pub fn door_for_seat(world: &EcsWorld, chassis: Uuid, seat: SeatIndex) -> Option
         let z = st.centre_frac.z;
         if best.is_none_or(|(_, bz)| z > bz) {
             best = Some((*guid, z));
+            attached = st.latch.attached();
         }
     }
-    best.map(|(g, _)| g)
+    // The seat's door is the FRONT door whatever became of it: a torn-off one
+    // answers `None` (board through the opening) rather than the next door
+    // back — which the first version answered, measured by the gate's torn-off
+    // arm as a driver reaching for the REAR door's handle.
+    best.filter(|_| attached).map(|(g, _)| g)
 }
 
 // ── the geometry a boarding walks through ───────────────────────────────────
@@ -792,8 +798,21 @@ pub fn rim_angle_deg(steer_deg: f64, max_steer_deg: f64) -> f64 {
 /// spoke, anticlockwise seen from the driver: the quarter-to-three grip.
 pub const RIM_GRIP_DEG: f64 = 20.0;
 
+/// How far round the rim the hands RIDE with it, degrees, before the rim
+/// slides through them — the push-pull technique driving schools teach.
+///
+/// A full lock is [`WHEEL_LOCK_DEG`] = 450° of rim, and hands that rode all of
+/// it would cross and wind past each other: measured, the gate's full-lock arm
+/// found a hand 111.7 mm short of its grip where a grip had wrapped to the far
+/// side of the hub. So each hand turns with the rim to this angle and holds
+/// there while the rim keeps turning under it; the grip is on the rim at every
+/// angle, the hands never cross, and the function stays pure (no re-grip state
+/// to fold).
+pub const RIM_RIDE_DEG: f64 = 50.0;
+
 /// **The two grips on the rim**, chassis frame, metres: `[the one on the +X
-/// side, the one on the -X side]` at rest, both turned by `rim_deg`.
+/// side, the one on the -X side]` at rest, both turned by `rim_deg` up to
+/// [`RIM_RIDE_DEG`] either way (the rim slides through the hands past it).
 ///
 /// The rim's plane is raked back [`WHEEL_RAKE_DEG`] from vertical, so its "up"
 /// axis tilts toward the driver; a positive `rim_deg` turns the wheel the way a
@@ -814,9 +833,14 @@ pub fn wheel_grips(sockets: &VehicleSockets, rim_deg: f64) -> [Vec3d; 2] {
     };
     // A right turn is CLOCKWISE seen from the seat, which is a negative angle
     // in this plane's own sense.
+    let ride = if rim_deg.is_finite() {
+        rim_deg.clamp(-RIM_RIDE_DEG, RIM_RIDE_DEG)
+    } else {
+        0.0
+    };
     [
-        at(RIM_GRIP_DEG - rim_deg),
-        at(180.0 - RIM_GRIP_DEG - rim_deg),
+        at(RIM_GRIP_DEG - ride),
+        at(180.0 - RIM_GRIP_DEG - ride),
     ]
 }
 
@@ -878,7 +902,11 @@ pub fn passenger_grips(sockets: &VehicleSockets, seat: SeatIndex) -> [Vec3d; 2] 
     let s = sockets.seat(seat);
     let (y, z) = match seat {
         SeatIndex::Rear => (s.y + 0.42, sockets.seat_r.z - 0.18),
-        _ => (sockets.wheel_hub.y + 0.04, sockets.wheel_hub.z + 0.02),
+        // The dash face, 10 cm nearer the seat than the wheel hub's plane: at
+        // the hub's own depth (the first version) a seated passenger's hands
+        // were measured 66 mm short of the bar, because the rim is raked back
+        // toward the driver and the dash is not.
+        _ => (sockets.wheel_hub.y + 0.04, sockets.wheel_hub.z - 0.08),
     };
     [
         Vec3d::new(s.x - GRIP_SPAN_M, y, z),

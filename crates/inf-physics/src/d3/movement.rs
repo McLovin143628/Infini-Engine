@@ -1231,7 +1231,23 @@ fn step_one(
         // `else if`, so exactly one edge is honoured per step whatever order
         // they are in; being first is what makes the honoured one the
         // deliberate one.
-        if cm.runtime.press_cover {
+        if cm.runtime.boarding.bail && cm.mode == MovementMode::Grounded {
+            // **The bail-out roll** (wave VEH3d): the first grounded step after
+            // a landing from a moving car's door rolls, through the roll key's
+            // own request, so the capsule resize is section 5's and happens
+            // once. The flag stays up until the stand below.
+            cm.mode = request(
+                &mut cm,
+                bridge,
+                &probe,
+                MovementMode::Roll,
+                true,
+                &mut refusal,
+            );
+            if cm.mode != MovementMode::Roll {
+                cm.runtime.boarding.bail = false;
+            }
+        } else if cm.runtime.press_cover {
             if cm.mode == MovementMode::Cover {
                 // **Leaving.** Back to the stance the surface implied, so a
                 // character that was crouched behind a car stays crouched
@@ -1469,6 +1485,24 @@ fn step_one(
                 bridge,
                 &probe,
                 MovementMode::Crouch,
+                true,
+                &mut refusal,
+            );
+        }
+        // A bail-out roll comes up STANDING (wave VEH3d): the body tumbles out
+        // of a moving car and gets to its feet, where the stance key's roll
+        // ends crouched. It is asked from the crouch the roll ends in, on the
+        // step AFTER, because a stand asked from the roll itself was measured
+        // refused — the roll capsule's centre sat 0.29 m above the road, and a
+        // sweep of the crouch half-height from there starts inside it. A stand
+        // refused by a real ceiling stays crouched, exactly as any stand does.
+        if cm.mode == MovementMode::Crouch && cm.runtime.boarding.bail {
+            cm.runtime.boarding.bail = false;
+            cm.mode = request(
+                &mut cm,
+                bridge,
+                &probe,
+                MovementMode::Grounded,
                 true,
                 &mut refusal,
             );
@@ -1852,17 +1886,30 @@ fn step_one(
     if result.grounded {
         if !was_grounded || cm.mode.is_falling() {
             let impact = (-vertical_before).max(0.0);
-            let mut kind = model::classify_landing(&cm, impact, has_input);
+            let kind = model::classify_landing(&cm, impact, has_input);
             // **A BAIL-OUT LANDS IN A ROLL** (wave VEH3d): a body thrown from a
             // car doing more than walking pace lands at the car's speed
             // sideways, which the vertical classifier calls soft — see
             // `BoardingState::bail`. Consumed here, by the first landing.
+            // The flag SURVIVES a landing fast enough to roll: the roll itself
+            // is taken on the next step through the same door the roll key
+            // uses (section 4), and the flag lives on through it, because a
+            // bail-out roll comes up STANDING. Any other landing consumes it.
+            //
+            // Not by rewriting `kind` to `Roll` here, which was the first
+            // version: a landing that changes the capsule is compensated at
+            // this line AND again by step 5 of the next step (the collider
+            // step 12 writes keeps the half-height step 5 chose), measured as
+            // a roll capsule centred 0.29 m over the road where 0.585 is right
+            // — 0.3 m sunk, and every stand after it refused as a ceiling.
+            // That double compensation is P29's, reaches every landing into a
+            // smaller capsule, and is carried with this measurement rather than
+            // fixed inside a boarding wave (the P29 course is tuned on it).
             if cm.runtime.boarding.bail {
-                cm.runtime.boarding.bail = false;
                 let v = cm.runtime.velocity;
                 let across = (v.x * v.x + v.z * v.z).sqrt();
-                if kind != LandingKind::Ragdoll && across > inf_ecs::boarding::EXIT_ROLL_MPS {
-                    kind = LandingKind::Roll;
+                if kind == LandingKind::Ragdoll || across <= inf_ecs::boarding::EXIT_ROLL_MPS {
+                    cm.runtime.boarding.bail = false;
                 }
             }
             cm.runtime.land_impact_mps = impact;

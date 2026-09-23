@@ -1406,8 +1406,12 @@ fn the_editors_simulate_matches_the_shipped_player() {
         f64::from_bits(u64::from_le_bytes(r[o..o + 8].try_into().unwrap()))
     };
     let far = float_at(&ship[ship.len() - 1], 2);
+    // The apron starts at z = 265 (`phase29_blocks`' "apron"); `> 300` was a
+    // margin the pre-boarding exit happened to clear, and a bail-out roll ends
+    // the run at 299.7 (wave VEH3d, re-blessed with that cause — see
+    // `the_course_drives_the_car_and_flies_the_character`).
     assert!(
-        far > 300.0,
+        far > 265.0,
         "the shipped run ended at z = {far:.1}, short of the apron — the \
          comparison above is two characters that never got there"
     );
@@ -2372,11 +2376,15 @@ fn the_committed_car_is_a_rig_the_engine_recognises() {
         2,
         "a car with four steering wheels is a different vehicle class"
     );
-    // The seat is the chassis collider's top face, so a driver's FEET land on
-    // the bodywork rather than its middle.
+    // The seat is the cabin FLOOR under the driver's cushion (wave VEH3d,
+    // re-blessed with that cause): it was the chassis collider's top face — a
+    // driver standing on the roof — and the boarding wave put the body inside
+    // the car, feet on the floor pan at `SEAT_FLOOR_FRAC_Y` of the half-height.
+    let floor = inf_ecs::boarding::SEAT_FLOOR_FRAC_Y * samples::PHASE29_CAR_HALF.y;
     assert!(
-        (rig.seat_local.y - samples::PHASE29_CAR_HALF.y).abs() < 1e-12,
-        "the seat is at {} and the chassis half-height is {}",
+        (rig.seat_local.y - floor).abs() < 1e-12
+            && rig.seat_local.y < samples::PHASE29_CAR_HALF.y,
+        "the seat is at {} against a cabin floor at {floor} (chassis half-height {})",
         rig.seat_local.y,
         samples::PHASE29_CAR_HALF.y
     );
@@ -2445,8 +2453,19 @@ fn the_course_drives_the_car_and_flies_the_character() {
     );
     // …and the driver ended the course on the apron, on its feet, having got out
     // of the car and back down again.
+    //
+    // Re-blessed with cause (wave VEH3d): "on the apron" was written `z > 300`,
+    // a number the pre-boarding exit happened to clear by a margin. A moving
+    // exit is a bail-out ROLL now, which spends the car's speed on the road in
+    // 0.75 s instead of carrying it, and the flight that follows started
+    // shorter and finished at z = 299.7 — on the apron, which spans 265..325
+    // (`phase29_blocks`' "apron", centre 295, half-depth 30). The claim is the
+    // apron's, so the bound is.
     let (z, mode, grounded) = state_of(sim.world());
-    assert!(z > 300.0, "the character finished at z = {z:.1}");
+    assert!(
+        (265.0..=325.0).contains(&z),
+        "the character finished at z = {z:.1}, off the apron (265..325)"
+    );
     assert_eq!(mode, MovementMode::Grounded);
     assert!(grounded);
 }

@@ -1640,9 +1640,18 @@ fn a_character_boards_from_as_far_as_the_reach_says() {
     let (seat, _, _) = inf_physics::d3::vehicle::seat_pose(&rig.bridge, CHASSIS).expect("a seat");
     let car = rig.at();
     let lift = seat.y - (car.y - 0.95);
+    // RE-READ, as this arm asked, when VEH3d put the seat in the CABIN: the
+    // seat is now ~0.55 m above the feet instead of on the roof, so the 3-D
+    // reach the mutation restores is sqrt(3^2 - 0.55^2) = 2.95 m rather than
+    // 2.62 m. That still misses the stated reach by more than the 2 cm the
+    // second assertion allows, so the arm still falsifies; what it must hold
+    // is exactly that margin, and it asserts it rather than a height.
+    let three_d = (inf_physics::d3::vehicle::ENTER_REACH_M.powi(2) - lift * lift)
+        .max(0.0)
+        .sqrt();
     assert!(
-        lift > 1.0,
-        "the seat is {lift} m above the ground, so this arm is not measuring the thing it was written for -- a seat in the CABIN is VEH3d's, and when it lands this arm should be re-read rather than deleted"
+        inf_physics::d3::vehicle::ENTER_REACH_M - three_d > 0.03,
+        "the seat is {lift} m above the ground, so a three-dimensional reach ({three_d:.3} m) is within 3 cm of the ground reach and this arm could no longer tell them apart"
     );
 
     let furthest = |from: DVec3| -> f64 {

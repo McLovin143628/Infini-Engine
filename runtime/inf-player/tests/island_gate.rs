@@ -6252,9 +6252,28 @@ fn drive_a_car(sim: &mut RuntimeSim) -> CarTrace {
     // Beside the driver's door and level with the ground the car is on, so the
     // hero is standing rather than falling: `step_driving` is entered through
     // `request(Driving)`, which refuses from a non-grounded mode.
-    let beside = glam::DVec3::new(seat.x + 1.7, seat.y - 0.2, seat.z);
+    //
+    // Re-blessed with cause (wave VEH3d): "level with the ground" was read off
+    // the SEAT, and the seat was on the roof; it is in the cabin now, ~0.6 m
+    // lower, and a capsule put 0.2 m under a cabin seat is a capsule in the
+    // road — depenetrated upward and FALLING on the press, which boarding
+    // refuses exactly as `request(Driving)` did. So the hero is put down a
+    // little ABOVE the seat and allowed to land (bounded, counted).
+    let beside = glam::DVec3::new(seat.x + 1.7, seat.y + 0.6, seat.z);
     for _ in 0..24 {
         set_hero(sim, hero, beside);
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+        pre_steps += 1;
+    }
+    for _ in 0..120 {
+        let landed = sim
+            .world()
+            .world()
+            .get::<inf_ecs::components::CharacterMovement>(hero)
+            .is_some_and(|m| m.mode.is_grounded_family());
+        if landed {
+            break;
+        }
         sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
         pre_steps += 1;
     }

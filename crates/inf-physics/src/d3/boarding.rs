@@ -1128,13 +1128,25 @@ pub fn follow_boarding(bridge: &mut PhysicsBridge3D, world: &mut EcsWorld) -> Bo
             }
         };
         let mut hand_side = b.hand_side;
+        let mut redip: Option<f64> = None;
         match phase {
             BoardPhase::OpeningDoor | BoardPhase::ClosingDoor => {
                 if let Some(h) = (!b.door.is_nil())
                     .then(|| handle_world(world, bridge, &car, b.door, false))
                     .flatten()
                 {
-                    let side = if b.time_s <= dt_eps() {
+                    // Chosen at the phase's first step — and chosen AGAIN while
+                    // the hand is still arriving, once the rig's own shoulders
+                    // are on the report: the first step's are the capsule's
+                    // estimate, whose "right" is the template's +X, and on the
+                    // island's MetaHuman that picked the FAR hand (measured:
+                    // the right shoulder 0.44 m from the handle, the left
+                    // 0.24 m), which no dip could bring within reach.
+                    let from_rig = last
+                        .as_ref()
+                        .is_some_and(|r| r.shoulder.iter().all(Option::is_some));
+                    let arriving = b.mark_s < 0.0 && b.time_s < board::HAND_REACH_S;
+                    let side = if b.time_s <= dt_eps() || (from_rig && arriving) {
                         nearest_hand(h)
                     } else {
                         usize::from(b.hand_side != 0)
@@ -1150,6 +1162,29 @@ pub fn follow_boarding(bridge: &mut PhysicsBridge3D, world: &mut EcsWorld) -> Bo
                         ramp
                     };
                     hands[side] = Some((h, w));
+                    // **The dip, re-priced on the body's OWN arm** while the
+                    // hand is still reaching: `begin` priced it off the
+                    // capsule's proportions, which are the template
+                    // mannequin's. Measured on the island's MetaHuman, that
+                    // plan left the hand 75.5 mm short of the handle at weight
+                    // 1. The shoulder is last step's pose, so the pelvis offset
+                    // it was dipped by is added back to find the undipped one;
+                    // the answer converges once the ramp saturates.
+                    if phase == BoardPhase::OpeningDoor && b.mark_s < 0.0 {
+                        let arm = last.as_ref().and_then(|r| r.arm_len[side]);
+                        if let (Some(s), Some(len)) = (shoulders[side], arm) {
+                            let plan = DVec3::new(h.x - s.x, 0.0, h.z - s.z).length();
+                            let upright = s.y - cm.runtime.pelvis_offset.y;
+                            let l = REACH_USE_FRAC * len;
+                            let want_dy = (l * l - plan * plan).max(0.0).sqrt();
+                            let target = (upright - h.y - want_dy).clamp(0.0, board::MAX_REACH_DIP_M);
+                            // HALF the way each step: the shoulder read is one
+                            // step old, so a full correction overshoots and the
+                            // pelvis was measured bobbing 0.25 <-> 0.30 m on
+                            // alternate steps; half a step's error converges.
+                            redip = Some(b.dip_m + REDIP_GAIN * (target - b.dip_m));
+                        }
+                    }
                 }
                 // The dip needs the feet held on the ground, or the whole
                 // leg chain goes down with the pelvis.
@@ -1348,11 +1383,22 @@ pub fn follow_boarding(bridge: &mut PhysicsBridge3D, world: &mut EcsWorld) -> Bo
             if bb.phase != BoardPhase::Idle {
                 bb.hand_weight = hand_weight;
                 bb.hand_side = hand_side;
+                if let Some(d) = redip {
+                    bb.dip_m = d;
+                }
             }
         }
     }
     report
 }
+
+/// The share of the re-priced dip's error taken per step — see the call.
+pub const REDIP_GAIN: f64 = 0.5;
+
+/// How much of a measured arm the re-priced reach dip plans to use: a hand
+/// asked for at the arm's full length is a straight elbow, which the two-bone
+/// solve reaches only in the limit.
+pub const REACH_USE_FRAC: f64 = 0.96;
 
 /// **How far above the knee a seated leg's pole is**, metres -- the point the
 /// knee bends toward, above the midpoint of cushion and pedal.

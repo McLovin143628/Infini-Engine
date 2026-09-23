@@ -477,6 +477,13 @@ pub struct HandIkReport {
     /// written by `solve_arm` at all. A hold point anchored here is therefore
     /// anchored to the body the overlay posed.
     pub shoulder: [Option<Vec3d>; 2],
+    /// **How long each arm is**, metres, `[left, right]` — upper arm plus
+    /// forearm, the chain's own two bone lengths off the same pre-solve pose
+    /// (wave VEH3d). A reach that is priced against a capsule's proportions is
+    /// priced against somebody else's arms: the boarding dip was tuned on the
+    /// template mannequin and left the MetaHuman's hand 75.5 mm short of a door
+    /// handle, and this is the number that closes it.
+    pub arm_len: [Option<f64>; 2],
 }
 
 impl HandIkReport {
@@ -3243,6 +3250,12 @@ fn apply_hand_ik(
             let Some(chain) = chain else { continue };
             report.shoulder[side] = at(chain[0]);
             report.base_hand[side] = at(chain[2]);
+            report.arm_len[side] = match (at(chain[0]), at(chain[1]), at(chain[2])) {
+                (Some(a), Some(b), Some(c)) => Some(
+                    (b.to_dvec3() - a.to_dvec3()).length() + (c.to_dvec3() - b.to_dvec3()).length(),
+                ),
+                _ => None,
+            };
         }
     }
 
