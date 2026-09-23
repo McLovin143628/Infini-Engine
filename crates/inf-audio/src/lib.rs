@@ -55,6 +55,7 @@
 //! (see its module docs for why not PCM).
 
 mod backend;
+pub mod capture;
 pub mod command;
 mod engine;
 pub mod filter;
@@ -67,6 +68,7 @@ pub mod vehicle_synth;
 pub mod asset;
 
 pub use asset::{AudioAsset, AudioFormat, AudioImportSettings, BusChoice};
+pub use capture::WavCapture;
 pub use command::{AudioCommand, AudioCommandQueue, PlayCommand, AUDIO_LOG_CAPACITY};
 pub use engine::{AudioEngine, Bus, BusRef, OcclusionHook, PlaySettings, SoundHandle};
 pub use filter::OnePole;

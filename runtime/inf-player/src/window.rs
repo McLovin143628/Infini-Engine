@@ -287,6 +287,21 @@ impl PlayerApp {
         // dev level, or the shipped default for a cooked pack — and the player's
         // overrides are applied on top of it, so a rebinding survives a level
         // change and a level that ships its own table still gets one.
+        // **THE RENDER-TO-FILE CAPTURE** (wave VEH3e): with
+        // `INF_RENDER_AUDIO` naming a `.wav`, this session's audio engine is the
+        // offline one and every fixed step's block is appended to that file —
+        // what the command stream plays, written down, for a report that has
+        // to say what a drive SOUNDS like. Before the player's settings are
+        // applied, so their volumes reach the capture's engine.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Ok(path) = std::env::var(crate::pie_drive::RENDER_AUDIO_ENV) {
+            if !path.trim().is_empty() {
+                match sim.capture_audio_to(std::path::Path::new(&path), 48_000) {
+                    Ok(()) => tracing::info!("inf-player: capturing the audio to {path}"),
+                    Err(e) => eprintln!("inf-player: cannot capture the audio to {path}: {e}"),
+                }
+            }
+        }
         let (ui, map) = crate::ui::PlayerUi::open(crate::ui::settings_dir(), map);
         if let Some(e) = &ui.load_error {
             tracing::warn!("inf-player: {e}");

@@ -6196,6 +6196,9 @@ struct CarTrace {
     window: Vec<inf_audio::AudioCommand>,
     /// Commands that addressed the car's BARE chassis key.
     bare: usize,
+    /// `Play`s on each of the three GRAIN keys — the loops an engine start
+    /// begins, which a restart would begin again.
+    grain_plays: [usize; 3],
     /// Fixed steps taken **before** the drive loop — the settle step, the ones
     /// the hero spends being stood beside the car, and the press/release pairs
     /// the interact edge needs (VEH1a audit).
@@ -6385,6 +6388,7 @@ fn drive_a_car(sim: &mut RuntimeSim) -> CarTrace {
         audio: (0, 0, 0),
         window: Vec::new(),
         bare: 0,
+        grain_plays: [0; 3],
         pre_steps,
         entered,
     };
@@ -6439,6 +6443,18 @@ fn drive_a_car(sim: &mut RuntimeSim) -> CarTrace {
         };
         if source == chassis_key {
             t.bare += 1;
+        }
+        for (i, layer) in [
+            inf_ecs::vehicle_audio::VoiceLayer::GrainIdle,
+            inf_ecs::vehicle_audio::VoiceLayer::GrainMid,
+            inf_ecs::vehicle_audio::VoiceLayer::GrainFull,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if kind == 0 && source == inf_ecs::vehicle_audio::voice_key(chassis_key, layer) {
+                t.grain_plays[i] += 1;
+            }
         }
         if keys.contains(&source) {
             match kind {
@@ -6587,12 +6603,16 @@ fn pie_equals_shipping_when_the_car_drives_the_circuit() {
     // longer `steps`; what stays arithmetic is the Plays. The bare chassis key
     // is never addressed at all (the salts keep the car's voices off its own
     // emitter namespace).
-    let loops = if a.audio.0 == 7 { 7 } else { 6 };
+    println!(
+        "THE STACK: grain Plays {:?}, {} Plays on the car's keys in all (loops, a squeal re-Played onto a new surface, strut impulses)",
+        a.grain_plays, a.audio.0
+    );
     assert_eq!(
-        a.audio.0, loops,
-        "the engine's layer stack queued {} `Play`s for one car -- each loop is \
-         started ONCE and then addressed, or a clip restarts sixty times a second",
-        a.audio.0
+        a.grain_plays,
+        [1, 1, 1],
+        "the engine's three grains were started {:?} times -- an engine is started ONCE \
+         and then addressed, or its clips restart sixty times a second",
+        a.grain_plays
     );
     assert_eq!(a.bare, 0, "a command addressed the car's bare chassis key");
     assert!(

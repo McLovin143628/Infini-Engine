@@ -336,6 +336,9 @@ pub struct RuntimeSim {
     /// How many commands the last drain added to the log (wave VEH3e) — see
     /// [`RuntimeSim::last_step_audio`].
     last_audio_len: usize,
+    /// **The render-to-file capture** (wave VEH3e): the WAV being written and
+    /// its sample rate, when [`RuntimeSim::capture_audio_to`] armed one.
+    audio_capture: Option<(inf_audio::WavCapture, u32)>,
     /// Accumulated drained audio command stream (determinism telemetry / test seam).
     ///
     /// **Bounded** (Hardening D): a listener command is enqueued at least once per
@@ -614,6 +617,7 @@ impl RuntimeSim {
             audio_started: BTreeSet::new(),
             vehicle_voices: inf_ecs::vehicle_audio::VoiceMemory::new(),
             last_audio_len: 0,
+            audio_capture: None,
             audio_log: BoundedLog::new(inf_audio::AUDIO_LOG_CAPACITY),
             steps: 0,
             prev_positions: BTreeMap::new(),
@@ -2699,6 +2703,42 @@ impl RuntimeSim {
         // Host-side reap of naturally-finished voices (device bookkeeping only —
         // not sim state, so the command stream above is untouched).
         self.audio.reap();
+        // **THE CAPTURE** (wave VEH3e): one fixed step of the offline mixer,
+        // appended to the WAV. Clocked by the STEP, not by a wall clock, so the
+        // file is what these commands play and not what a busy frame skipped.
+        if let Some((cap, rate)) = self.audio_capture.as_mut() {
+            let frames = (f64::from(*rate) * self.stepper.fixed_dt()).round() as usize;
+            let pcm = self.audio.render(frames);
+            let _ = cap.append(&pcm);
+            if self.steps % 60 == 0 {
+                let _ = cap.patch();
+            }
+        }
+    }
+
+    /// **Capture what this session's audio engine plays into a WAV** (wave
+    /// VEH3e) — the render-to-file door. The engine is swapped for
+    /// `inf_audio::AudioEngine::offline` at `sample_rate` (the same kira mixer the
+    /// device path plays through, clocked once per fixed step) and every step's
+    /// block is appended to `path`. The command stream is untouched: this is a
+    /// different DEVICE, not a different sim, and a capture session plays
+    /// nothing out loud.
+    pub fn capture_audio_to(
+        &mut self,
+        path: &std::path::Path,
+        sample_rate: u32,
+    ) -> std::io::Result<()> {
+        let cap = inf_audio::WavCapture::create(path, sample_rate)?;
+        let mixer = self.audio.mixer().clone();
+        self.audio = AudioEngine::offline(sample_rate);
+        self.audio.set_mixer(mixer);
+        self.audio_capture = Some((cap, sample_rate));
+        Ok(())
+    }
+
+    /// How many stereo frames the capture has written, or `None` with no capture.
+    pub fn captured_frames(&self) -> Option<u64> {
+        self.audio_capture.as_ref().map(|(c, _)| c.frames())
     }
 
     /// Step every entity's [`AnimStateMachine`] (P11.2) **and evaluate the pose it

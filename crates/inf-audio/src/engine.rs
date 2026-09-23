@@ -278,6 +278,20 @@ impl AudioEngine {
         Self::with_backend(Backend::disabled())
     }
 
+    /// **An engine whose mixer renders to memory** (wave VEH3e) at
+    /// `sample_rate` — the same kira mixer the device path plays through,
+    /// clocked by [`render`](Self::render). What a capture run swaps in to write
+    /// a WAV of exactly what the command stream would have played.
+    pub fn offline(sample_rate: u32) -> Self {
+        Self::with_backend(Backend::offline(sample_rate))
+    }
+
+    /// **Render the next `frames` stereo frames** of an [`offline`](Self::offline)
+    /// engine, interleaved `L R`; empty on any other engine.
+    pub fn render(&mut self, frames: usize) -> Vec<f32> {
+        self.backend.render(frames)
+    }
+
     fn with_backend(backend: Backend) -> Self {
         let mixer = MixerConfig::default();
         let resolved = mixer.resolve();

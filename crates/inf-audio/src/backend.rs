@@ -31,6 +31,10 @@ pub(crate) type VoiceId = u64;
 pub(crate) struct Backend {
     #[cfg(feature = "cpal")]
     inner: Option<cpal_impl::Inner>,
+    /// **The render-to-file door** (wave VEH3e): kira's own mixer driven by
+    /// the caller one block at a time instead of by a device — see
+    /// [`offline_impl`]. `None` everywhere but a capture run.
+    offline: Option<offline_impl::Inner>,
     /// No-device voice tracking for the reap seam (`id → looping`). Populated only
     /// when there is no live device (the `cpal` feature is off, or it is on but no
     /// device opened): a non-looping voice is reported finished on the next
@@ -47,12 +51,14 @@ impl Backend {
         {
             Self {
                 inner: cpal_impl::Inner::try_new(),
+                offline: None,
                 null_voices: BTreeMap::new(),
             }
         }
         #[cfg(not(feature = "cpal"))]
         {
             Self {
+                offline: None,
                 null_voices: BTreeMap::new(),
             }
         }
@@ -65,19 +71,43 @@ impl Backend {
         {
             Self {
                 inner: None,
+                offline: None,
                 null_voices: BTreeMap::new(),
             }
         }
         #[cfg(not(feature = "cpal"))]
         {
             Self {
+                offline: None,
                 null_voices: BTreeMap::new(),
             }
         }
     }
 
     /// Whether a real audio device is currently driving playback.
+    /// **A backend that renders to memory** (wave VEH3e) at `sample_rate`: the
+    /// real kira mixer, clocked by [`render`](Self::render) instead of a device.
+    /// Falls back to the no-device path if kira will not start (it has no reason
+    /// not to: there is no device to fail to open).
+    pub(crate) fn offline(sample_rate: u32) -> Self {
+        let mut b = Self::disabled();
+        b.offline = offline_impl::Inner::try_new(sample_rate);
+        b
+    }
+
+    /// **Render `frames` stereo frames** through the offline mixer, interleaved
+    /// `L R L R`, or an empty buffer on any other backend.
+    pub(crate) fn render(&mut self, frames: usize) -> Vec<f32> {
+        match self.offline.as_mut() {
+            Some(o) => o.render(frames),
+            None => Vec::new(),
+        }
+    }
+
     pub(crate) fn is_active(&self) -> bool {
+        if self.offline.is_some() {
+            return true;
+        }
         #[cfg(feature = "cpal")]
         {
             self.inner.is_some()
@@ -117,6 +147,9 @@ impl Backend {
         looping: bool,
         start_s: f64,
     ) -> bool {
+        if let Some(o) = self.offline.as_mut() {
+            return o.play(id, data, gain, panning, rate, looping, start_s);
+        }
         #[cfg(feature = "cpal")]
         if let Some(inner) = self.inner.as_mut() {
             return inner.play(id, data, gain, panning, rate, looping, start_s);
@@ -134,6 +167,9 @@ impl Backend {
     /// somebody opened a door would be worse than the muffling it buys.
     #[allow(unused_variables)]
     pub(crate) fn position(&self, id: VoiceId) -> f64 {
+        if let Some(o) = self.offline.as_ref() {
+            return o.position(id);
+        }
         #[cfg(feature = "cpal")]
         if let Some(inner) = self.inner.as_ref() {
             return inner.position(id);
@@ -145,6 +181,10 @@ impl Backend {
     /// voice is unknown.
     #[allow(unused_variables)]
     pub(crate) fn set_params(&mut self, id: VoiceId, gain: f64, panning: f64, rate: f64) {
+        if let Some(o) = self.offline.as_mut() {
+            o.set_params(id, gain, panning, rate);
+            return;
+        }
         #[cfg(feature = "cpal")]
         if let Some(inner) = self.inner.as_mut() {
             inner.set_params(id, gain, panning, rate);
@@ -154,6 +194,10 @@ impl Backend {
     /// Pause a voice. No-op when disabled.
     #[allow(unused_variables)]
     pub(crate) fn pause(&mut self, id: VoiceId) {
+        if let Some(o) = self.offline.as_mut() {
+            o.pause(id);
+            return;
+        }
         #[cfg(feature = "cpal")]
         if let Some(inner) = self.inner.as_mut() {
             inner.pause(id);
@@ -163,6 +207,10 @@ impl Backend {
     /// Resume a paused voice. No-op when disabled.
     #[allow(unused_variables)]
     pub(crate) fn resume(&mut self, id: VoiceId) {
+        if let Some(o) = self.offline.as_mut() {
+            o.resume(id);
+            return;
+        }
         #[cfg(feature = "cpal")]
         if let Some(inner) = self.inner.as_mut() {
             inner.resume(id);
@@ -171,6 +219,9 @@ impl Backend {
 
     /// Stop and forget a voice. No-op when disabled.
     pub(crate) fn stop(&mut self, id: VoiceId) {
+        if let Some(o) = self.offline.as_mut() {
+            o.stop(id);
+        }
         #[cfg(feature = "cpal")]
         if let Some(inner) = self.inner.as_mut() {
             inner.stop(id);
@@ -185,6 +236,9 @@ impl Backend {
     /// clock to observe an end) and a looping one never — the deterministic choice
     /// the reap tests pin.
     pub(crate) fn drain_finished(&mut self) -> Vec<VoiceId> {
+        if let Some(o) = self.offline.as_mut() {
+            return o.drain_finished();
+        }
         #[cfg(feature = "cpal")]
         if let Some(inner) = self.inner.as_mut() {
             return inner.drain_finished();
@@ -327,6 +381,173 @@ mod cpal_impl {
         /// handles and return their ids so the engine reaps its own bookkeeping.
         /// An explicitly-stopped voice is already gone from `voices`, so this only
         /// ever reports natural completion.
+        pub(super) fn drain_finished(&mut self) -> Vec<VoiceId> {
+            let done: Vec<VoiceId> = self
+                .voices
+                .iter()
+                .filter(|(_, h)| h.state() == PlaybackState::Stopped)
+                .map(|(id, _)| *id)
+                .collect();
+            for id in &done {
+                self.voices.remove(id);
+            }
+            done
+        }
+    }
+}
+
+/// **The render-to-file door** (wave VEH3e) — kira's real mixer (its static
+/// sounds, playback rates, volumes, pannings and loops: everything the device
+/// path plays through) clocked by the CALLER.
+///
+/// A [`kira::backend::Backend`] that holds the [`Renderer`](kira::backend::Renderer)
+/// kira hands it instead of giving it to an audio thread: each
+/// [`render`](Inner::render) runs the renderer's `on_start_processing` (which
+/// applies every handle command queued since the last block) and then
+/// `process` for the requested frames. Nothing here reads a clock, so a capture
+/// driven once per fixed step is a function of the command stream, and a WAV
+/// of a drive is what the device would have played for it.
+///
+/// No new dependency: `kira::backend` is public in the pinned kira with default
+/// features off, which is what this crate already builds.
+mod offline_impl {
+    use std::collections::HashMap;
+
+    use kira::backend::{Backend as KiraBackend, Renderer};
+    use kira::sound::static_sound::StaticSoundHandle;
+    use kira::sound::PlaybackState;
+    use kira::{AudioManager, AudioManagerSettings, Decibels, Panning, PlaybackRate, Tween};
+
+    use super::VoiceId;
+    use crate::sound::SoundData;
+
+    /// The backend kira starts: it keeps the renderer for the caller to clock.
+    pub(super) struct OfflineBackend {
+        renderer: Option<Renderer>,
+    }
+
+    impl KiraBackend for OfflineBackend {
+        type Settings = u32;
+        type Error = ();
+
+        fn setup(sample_rate: u32, _internal_buffer_size: usize) -> Result<(Self, u32), ()> {
+            Ok((Self { renderer: None }, sample_rate.max(1)))
+        }
+
+        fn start(&mut self, renderer: Renderer) -> Result<(), ()> {
+            self.renderer = Some(renderer);
+            Ok(())
+        }
+    }
+
+    fn to_decibels(gain: f64) -> Decibels {
+        let db = if gain <= 1e-4 {
+            -80.0
+        } else {
+            20.0 * gain.log10()
+        };
+        Decibels(db as f32)
+    }
+
+    fn instant() -> Tween {
+        Tween {
+            duration: std::time::Duration::ZERO,
+            ..Default::default()
+        }
+    }
+
+    pub(super) struct Inner {
+        manager: AudioManager<OfflineBackend>,
+        voices: HashMap<VoiceId, StaticSoundHandle>,
+    }
+
+    impl Inner {
+        pub(super) fn try_new(sample_rate: u32) -> Option<Self> {
+            let settings = AudioManagerSettings::<OfflineBackend> {
+                capacities: Default::default(),
+                main_track_builder: Default::default(),
+                internal_buffer_size: 128,
+                backend_settings: sample_rate,
+            };
+            AudioManager::<OfflineBackend>::new(settings)
+                .ok()
+                .map(|manager| Self {
+                    manager,
+                    voices: HashMap::new(),
+                })
+        }
+
+        pub(super) fn render(&mut self, frames: usize) -> Vec<f32> {
+            let mut out = vec![0.0f32; frames * 2];
+            if let Some(r) = self.manager.backend_mut().renderer.as_mut() {
+                r.on_start_processing();
+                r.process(&mut out, 2);
+            }
+            out
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub(super) fn play(
+            &mut self,
+            id: VoiceId,
+            data: &SoundData,
+            gain: f64,
+            panning: f64,
+            rate: f64,
+            looping: bool,
+            start_s: f64,
+        ) -> bool {
+            let mut sound = data
+                .inner
+                .clone()
+                .volume(to_decibels(gain))
+                .panning(Panning(panning as f32))
+                .playback_rate(PlaybackRate(rate));
+            if start_s > 0.0 {
+                sound = sound.start_position(start_s);
+            }
+            if looping {
+                sound = sound.loop_region(0.0..);
+            }
+            match self.manager.play(sound) {
+                Ok(handle) => {
+                    self.voices.insert(id, handle);
+                    true
+                }
+                Err(_) => false,
+            }
+        }
+
+        pub(super) fn position(&self, id: VoiceId) -> f64 {
+            self.voices.get(&id).map(|h| h.position()).unwrap_or(0.0)
+        }
+
+        pub(super) fn set_params(&mut self, id: VoiceId, gain: f64, panning: f64, rate: f64) {
+            if let Some(h) = self.voices.get_mut(&id) {
+                h.set_volume(to_decibels(gain), instant());
+                h.set_panning(Panning(panning as f32), instant());
+                h.set_playback_rate(PlaybackRate(rate), instant());
+            }
+        }
+
+        pub(super) fn pause(&mut self, id: VoiceId) {
+            if let Some(h) = self.voices.get_mut(&id) {
+                h.pause(instant());
+            }
+        }
+
+        pub(super) fn resume(&mut self, id: VoiceId) {
+            if let Some(h) = self.voices.get_mut(&id) {
+                h.resume(instant());
+            }
+        }
+
+        pub(super) fn stop(&mut self, id: VoiceId) {
+            if let Some(mut h) = self.voices.remove(&id) {
+                h.stop(instant());
+            }
+        }
+
         pub(super) fn drain_finished(&mut self) -> Vec<VoiceId> {
             let done: Vec<VoiceId> = self
                 .voices

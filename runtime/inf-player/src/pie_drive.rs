@@ -418,6 +418,12 @@ pub fn world_probe(
 /// **The env var that turns on the demo loop's hero log** (wave FIX1).
 pub const HERO_LOG_ENV: &str = "INF_PIE_HERO_LOG";
 
+/// **Where a session writes a WAV of what its audio engine plays** (wave
+/// VEH3e), or unset for none — see `RuntimeSim::capture_audio_to`. An
+/// instrument like [`HERO_LOG_ENV`]: a capture session plays nothing out loud,
+/// because its mixer renders to the file instead of to a device.
+pub const RENDER_AUDIO_ENV: &str = "INF_RENDER_AUDIO";
+
 /// **Where a PREVIEW session should put the hero, and when** (CHAR1b.2 audit) —
 /// `"x,y,z@t"` world metres and seconds, `;`-separated, and nothing at all when
 /// unset. The `@t` is optional and defaults to [`SPAWN_DELAY_S`].
