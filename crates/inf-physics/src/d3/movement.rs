@@ -3791,8 +3791,8 @@ fn step_driving(
     //    leaves, so a second press made while the door was still being pulled
     //    shut turned round in the seat and climbed straight back out. The
     //    machine owns the body until it reaches the wheel.
-    let can_leave = !cm.runtime.seat.entering
-        && matches!(b.phase, BoardPhase::Idle | BoardPhase::Driving);
+    let can_leave =
+        !cm.runtime.seat.entering && matches!(b.phase, BoardPhase::Idle | BoardPhase::Driving);
     let leaving = cm.runtime.press_interact && can_leave;
     clear_edges(&mut cm);
     if leaving {

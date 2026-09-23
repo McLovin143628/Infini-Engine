@@ -7478,11 +7478,15 @@ fn rush_hour(sim: &mut RuntimeSim, centre: glam::DVec3) -> RushRun {
     let top_y = sim
         .world()
         .entity_of(chassis)
-        .and_then(|e| sim.world().world().get::<inf_ecs::components::Collider3D>(e).copied())
+        .and_then(|e| {
+            sim.world()
+                .world()
+                .get::<inf_ecs::components::Collider3D>(e)
+                .copied()
+        })
         .map(|c| chassis_at(sim, chassis).y + c.half_extents.y)
         .unwrap_or(seat.y);
-    let beside =
-        glam::DVec3::new(seat.x, top_y - 0.2, seat.z) + (rot * glam::DVec3::X) * 1.7;
+    let beside = glam::DVec3::new(seat.x, top_y - 0.2, seat.z) + (rot * glam::DVec3::X) * 1.7;
     for _ in 0..24 {
         set_hero(sim, hero, beside);
         sim.step_once(inf_player::runtime_sim::RuntimeInput::default());

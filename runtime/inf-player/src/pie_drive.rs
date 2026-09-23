@@ -982,9 +982,7 @@ impl SpawnOverride {
                 .iter()
                 .find(|(n, _)| n == DOORS_OPEN_NAME)
                 .map(|(_, v)| *v != 0.0);
-            let occupy = pairs
-                .iter()
-                .any(|(n, v)| n == OCCUPY_NAME && *v != 0.0);
+            let occupy = pairs.iter().any(|(n, v)| n == OCCUPY_NAME && *v != 0.0);
             let pairs: Vec<(String, f64)> = pairs
                 .into_iter()
                 .filter(|(n, _)| n != DOORS_OPEN_NAME && n != OCCUPY_NAME)
@@ -1638,7 +1636,11 @@ impl HeroLog {
                         | BoardPhase::ClosingDoor
                 );
                 let rim = if seat.is_driving() {
-                    inf_physics::d3::boarding::vehicle_steer(sim.world(), sim.bridge3d(), seat.vehicle)
+                    inf_physics::d3::boarding::vehicle_steer(
+                        sim.world(),
+                        sim.bridge3d(),
+                        seat.vehicle,
+                    )
                 } else {
                     0.0
                 };
@@ -1649,7 +1651,11 @@ impl HeroLog {
                         phase.name().to_string()
                     },
                     seat_name,
-                    if on_door && holding { b.hand_err_m } else { -1.0 },
+                    if on_door && holding {
+                        b.hand_err_m
+                    } else {
+                        -1.0
+                    },
                     b.door_deg,
                     if phase == BoardPhase::Driving && holding {
                         b.hand_err_m

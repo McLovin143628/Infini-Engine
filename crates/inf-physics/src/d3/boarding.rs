@@ -371,7 +371,11 @@ pub fn clear_exit(
         // have to pass through the wall to reach. The body's own capsule is
         // swept from inside the car (the car's own colliders excluded) out to
         // the point; anything in between refuses the candidate.
-        let side = if cand.x - car.offset.x >= 0.0 { 1.0 } else { -1.0 };
+        let side = if cand.x - car.offset.x >= 0.0 {
+            1.0
+        } else {
+            -1.0
+        };
         let inside = Vec3d::new(
             car.offset.x + side * 0.4 * car.half.x.abs(),
             0.0,
@@ -707,9 +711,14 @@ pub fn start_pull(
     let preferred = board::pull_out_point(&car.sockets, seat, car.half, car.offset);
     let mut people_here = people(world, bridge);
     people_here.extend(bridge.collider_of(victim));
-    let Some((feet, _)) =
-        clear_exit(bridge, car, preferred, cm.stand_half_height_m, radius, &people_here)
-    else {
+    let Some((feet, _)) = clear_exit(
+        bridge,
+        car,
+        preferred,
+        cm.stand_half_height_m,
+        radius,
+        &people_here,
+    ) else {
         return false;
     };
     let by = cm.runtime.boarding.other;
@@ -771,9 +780,14 @@ fn force_out(
     let preferred = board::pull_out_point(&car.sockets, seat, car.half, car.offset);
     let mut people_here = people(world, bridge);
     people_here.extend(bridge.collider_of(who));
-    let Some((feet, _)) =
-        clear_exit(bridge, car, preferred, cm.stand_half_height_m, radius, &people_here)
-    else {
+    let Some((feet, _)) = clear_exit(
+        bridge,
+        car,
+        preferred,
+        cm.stand_half_height_m,
+        radius,
+        &people_here,
+    ) else {
         return false;
     };
     let door = board::door_for_seat(world, car.chassis, seat).unwrap_or(Uuid::nil());
@@ -1191,7 +1205,8 @@ pub fn follow_boarding(bridge: &mut PhysicsBridge3D, world: &mut EcsWorld) -> Bo
                             let upright = s.y - cm.runtime.pelvis_offset.y;
                             let l = REACH_USE_FRAC * len;
                             let want_dy = (l * l - plan * plan).max(0.0).sqrt();
-                            let target = (upright - h.y - want_dy).clamp(0.0, board::MAX_REACH_DIP_M);
+                            let target =
+                                (upright - h.y - want_dy).clamp(0.0, board::MAX_REACH_DIP_M);
                             // HALF the way each step: the shoulder read is one
                             // step old, so a full correction overshoots and the
                             // pelvis was measured bobbing 0.25 <-> 0.30 m on

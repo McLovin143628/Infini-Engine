@@ -838,10 +838,7 @@ pub fn wheel_grips(sockets: &VehicleSockets, rim_deg: f64) -> [Vec3d; 2] {
     } else {
         0.0
     };
-    [
-        at(RIM_GRIP_DEG - ride),
-        at(180.0 - RIM_GRIP_DEG - ride),
-    ]
+    [at(RIM_GRIP_DEG - ride), at(180.0 - RIM_GRIP_DEG - ride)]
 }
 
 /// **The two pedal faces with the driver's feet on them**, chassis frame,

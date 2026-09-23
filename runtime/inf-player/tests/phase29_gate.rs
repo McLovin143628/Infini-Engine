@@ -2382,8 +2382,7 @@ fn the_committed_car_is_a_rig_the_engine_recognises() {
     // the car, feet on the floor pan at `SEAT_FLOOR_FRAC_Y` of the half-height.
     let floor = inf_ecs::boarding::SEAT_FLOOR_FRAC_Y * samples::PHASE29_CAR_HALF.y;
     assert!(
-        (rig.seat_local.y - floor).abs() < 1e-12
-            && rig.seat_local.y < samples::PHASE29_CAR_HALF.y,
+        (rig.seat_local.y - floor).abs() < 1e-12 && rig.seat_local.y < samples::PHASE29_CAR_HALF.y,
         "the seat is at {} against a cabin floor at {floor} (chassis half-height {})",
         rig.seat_local.y,
         samples::PHASE29_CAR_HALF.y

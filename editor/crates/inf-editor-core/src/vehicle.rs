@@ -1480,7 +1480,12 @@ mod tests {
             let collider = doc
                 .world()
                 .entity_of(chassis)
-                .and_then(|e| doc.world().world().get::<inf_ecs::components::Collider3D>(e).copied())
+                .and_then(|e| {
+                    doc.world()
+                        .world()
+                        .get::<inf_ecs::components::Collider3D>(e)
+                        .copied()
+                })
                 .unwrap_or_else(|| panic!("{id}: the chassis has no collider"));
             assert_eq!(
                 rig.seat_local,

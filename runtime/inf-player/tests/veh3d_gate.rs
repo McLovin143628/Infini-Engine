@@ -366,11 +366,7 @@ impl Yard {
         let to_world = inf_ecs::pose::model_to_world_of(&self.world, who)?;
         let g = inf_anim::pose::global_transforms(&rig.skeleton, &posed.pose);
         let p = g.get(j as usize)?.to_scale_rotation_translation().2;
-        Some(to_world.transform_point3(DVec3::new(
-            f64::from(p.x),
-            f64::from(p.y),
-            f64::from(p.z),
-        )))
+        Some(to_world.transform_point3(DVec3::new(f64::from(p.x), f64::from(p.y), f64::from(p.z))))
     }
 
     /// `[left, right]` hand joints.
@@ -541,7 +537,12 @@ fn the_machine_walks_its_phases_in_order_with_their_durations() {
         BoardPhase::ENTER_ORDER.to_vec(),
         "the machine did not walk its six phases in order: {order:?}"
     );
-    let len = |p: BoardPhase| d.iter().find(|(q, _, _)| *q == p).map(|(_, t, _)| *t).unwrap();
+    let len = |p: BoardPhase| {
+        d.iter()
+            .find(|(q, _, _)| *q == p)
+            .map(|(_, t, _)| *t)
+            .unwrap()
+    };
     // `Locked`: the check, one clock.
     assert!(
         (len(BoardPhase::Locked) - board::LOCKED_S).abs() <= 1.5 * DT,
@@ -550,11 +551,7 @@ fn the_machine_walks_its_phases_in_order_with_their_durations() {
         board::LOCKED_S
     );
     // `EnteringIK`: P29.7's own window, from the car.
-    let (enter_s, _) = y
-        .bridge
-        .vehicle_of(CHASSIS)
-        .expect("the car")
-        .seat_warp();
+    let (enter_s, _) = y.bridge.vehicle_of(CHASSIS).expect("the car").seat_warp();
     assert!(
         (len(BoardPhase::EnteringIK) - enter_s).abs() <= 1.5 * DT,
         "`EnteringIK` lasted {:.3} s and the car's own seat warp is {enter_s:.3} s — the old warp is not this phase",
@@ -665,7 +662,11 @@ fn the_hand_takes_the_outer_handle_within_two_centimetres() {
     }
     println!("=== the hand on the outer handle ===");
     for (t, w) in &ramp {
-        println!("  t {:.3} s  weight {w:.3}  (owed {:.3})", t, (t / board::HAND_REACH_S).min(1.0));
+        println!(
+            "  t {:.3} s  weight {w:.3}  (owed {:.3})",
+            t,
+            (t / board::HAND_REACH_S).min(1.0)
+        );
     }
     println!(
         "  at weight 1 before the latch: {} steps, worst {:.2} mm, pelvis dipped {:.3} m",
@@ -762,7 +763,13 @@ fn the_door_opens_on_its_revolute_motor_as_the_hand_reaches() {
         .unwrap_or(0.0);
     println!("=== the hinge, read off the joint ===");
     for (ph, t, w, a) in trace.iter().step_by(6) {
-        println!("  {:<10} t {:.2}  hand {:.2}  hinge {:.1} deg", ph.name(), t, w, a);
+        println!(
+            "  {:<10} t {:.2}  hand {:.2}  hinge {:.1} deg",
+            ph.name(),
+            t,
+            w,
+            a
+        );
     }
     println!(
         "  before the latch {before_latch:.2} deg; {at_enter:.1} deg when the body went in; peak {peak_before_seat:.1}; {:.2} deg at the wheel",
@@ -786,10 +793,7 @@ fn the_door_opens_on_its_revolute_motor_as_the_hand_reaches() {
         "the door was at {closed_at:?} deg when the hero reached the wheel — the inner pull did not shut it"
     );
     // The engagement: it TRAVELLED, both ways, on the joint.
-    let travelled: f64 = trace
-        .windows(2)
-        .map(|w| (w[1].3 - w[0].3).abs())
-        .sum();
+    let travelled: f64 = trace.windows(2).map(|w| (w[1].3 - w[0].3).abs()).sum();
     println!("  the hinge travelled {travelled:.1} deg in all");
     assert!(travelled > 80.0, "the hinge travelled {travelled:.1} deg");
 }
@@ -821,14 +825,28 @@ fn the_seat_is_inside_the_cabin_on_every_family() {
         y.step(30);
         let car = y.frame();
         let up = |local: Vec3d| car.world(local).y;
-        let top = up(Vec3d::new(car.offset.x, car.offset.y + car.half.y, car.offset.z));
-        let floor = car.world(car.sockets.seat_floor(SeatIndex::Driver, car.floor_y())).y;
+        let top = up(Vec3d::new(
+            car.offset.x,
+            car.offset.y + car.half.y,
+            car.offset.z,
+        ));
+        let floor = car
+            .world(car.sockets.seat_floor(SeatIndex::Driver, car.floor_y()))
+            .y;
         let cushion = car.world(car.sockets.seat(SeatIndex::Driver));
         let pelvis = y
-            .joint(HERO, inf_anim::BoneRoleKind::Pelvis, inf_anim::BoneSide::Center)
+            .joint(
+                HERO,
+                inf_anim::BoneRoleKind::Pelvis,
+                inf_anim::BoneSide::Center,
+            )
             .expect("a pelvis");
         let head = y
-            .joint(HERO, inf_anim::BoneRoleKind::Head, inf_anim::BoneSide::Center)
+            .joint(
+                HERO,
+                inf_anim::BoneRoleKind::Head,
+                inf_anim::BoneSide::Center,
+            )
             .expect("a head");
         let asks = y.foot_asks(HERO);
         let feet = y.feet(HERO);
@@ -892,7 +910,12 @@ fn the_hands_follow_the_rim_through_a_full_lock() {
     let max = y
         .world
         .entity_of(CHASSIS)
-        .and_then(|e| y.world.world().get::<inf_ecs::components::VehicleClass>(e).copied())
+        .and_then(|e| {
+            y.world
+                .world()
+                .get::<inf_ecs::components::VehicleClass>(e)
+                .copied()
+        })
         .map(|c| c.max_steer_deg)
         .expect("the row's class");
     let rim = |y: &Yard| -> f64 {
@@ -1018,7 +1041,10 @@ fn the_feet_press_the_pedals_with_the_inputs() {
         left_on * 1000.0,
         board::PEDAL_TRAVEL_M * 1000.0
     );
-    assert!(throttle > 0.9, "the throttle the car was given is {throttle:.2}");
+    assert!(
+        throttle > 0.9,
+        "the throttle the car was given is {throttle:.2}"
+    );
     assert!(
         right_travel > 0.8 * board::PEDAL_TRAVEL_M * throttle,
         "the throttle foot moved {:.1} mm with the throttle at {throttle:.2}",
@@ -1029,7 +1055,10 @@ fn the_feet_press_the_pedals_with_the_inputs() {
         "the BRAKE foot moved {:.1} mm on the throttle",
         left_still * 1000.0
     );
-    assert!(right_on <= 0.02 && left_on <= 0.02, "a foot is off its pedal");
+    assert!(
+        right_on <= 0.02 && left_on <= 0.02,
+        "a foot is off its pedal"
+    );
     assert!(brake > 0.5, "the brake the car was given is {brake:.2}");
     assert!(
         left_travel > 0.8 * board::PEDAL_TRAVEL_M * brake,
@@ -1067,7 +1096,11 @@ fn a_passenger_rides_its_own_seat_and_does_not_drive() {
     let car = y.frame();
     let cushion = car.world(car.sockets.seat(SeatIndex::Passenger));
     let pelvis = y
-        .joint(RIDER, inf_anim::BoneRoleKind::Pelvis, inf_anim::BoneSide::Center)
+        .joint(
+            RIDER,
+            inf_anim::BoneRoleKind::Pelvis,
+            inf_anim::BoneSide::Center,
+        )
         .expect("a passenger pelvis");
     let asks = y.hand_asks(RIDER);
     let hands = y.hands(RIDER);
@@ -1144,8 +1177,11 @@ fn an_occupied_seat_is_never_entered() {
     // (i) From the FAR side: the prompt names the refusal.
     let far = DVec3::new(-2.2, 0.0, -0.5);
     let e = y.world.entity_of(HERO).unwrap();
-    y.world.world_mut().get_mut::<Transform>(e).unwrap().translation =
-        Vec3d::new(far.x, far.y + 0.9, far.z);
+    y.world
+        .world_mut()
+        .get_mut::<Transform>(e)
+        .unwrap()
+        .translation = Vec3d::new(far.x, far.y + 0.9, far.z);
     y.bridge.sync_from_world(&y.world);
     y.step(10);
     let feet = y.at(HERO) - DVec3::Y * 0.9;
@@ -1177,15 +1213,25 @@ fn an_occupied_seat_is_never_entered() {
         }
     }
     let refused = y.cm(HERO).runtime.refusals - refusals0;
-    println!("  six presses from the far side: {refused} refused, the busiest seat held {worst_census}");
+    println!(
+        "  six presses from the far side: {refused} refused, the busiest seat held {worst_census}"
+    );
     assert!(refused >= 6, "only {refused} of six presses were refused");
     assert_eq!(worst_census, 1, "a seat held {worst_census} bodies");
     assert_eq!(y.cm(HERO).runtime.boarding.phase, BoardPhase::Idle);
     // (ii) The door itself: an Enter into an occupied seat is refused by value.
     let mut cm = y.cm(HERO);
     let pos = y.at(HERO);
-    let verdict =
-        d3::boarding::begin(&mut y.world, &mut y.bridge, HERO, &mut cm, pos, RADIUS, CHASSIS, false);
+    let verdict = d3::boarding::begin(
+        &mut y.world,
+        &mut y.bridge,
+        HERO,
+        &mut cm,
+        pos,
+        RADIUS,
+        CHASSIS,
+        false,
+    );
     println!("  `begin` asked for an ENTER into the occupied seat answers {verdict:?}");
     assert_eq!(verdict, d3::boarding::Begin::Occupied);
 }
@@ -1287,7 +1333,11 @@ fn the_carjack_plays_the_same_pipeline() {
         "  {presses} press(es); the driver landed {mode:?} at {:.3?} in the car's frame; the car stood at {braked_speed:.3} m/s while it was held; the busiest seat held {worst_census}",
         local
     );
-    assert_eq!(mode, MovementMode::FallControlled, "pulled out, not stepped out");
+    assert_eq!(
+        mode,
+        MovementMode::FallControlled,
+        "pulled out, not stepped out"
+    );
     assert!(
         local.x > car.half.x + 0.3,
         "the driver landed {:.3} m from the car's centreline — inside the bodywork",
@@ -1324,7 +1374,8 @@ fn the_victim_is_never_put_down_inside_a_wall() {
         car.offset,
     ));
     let inside = |p: DVec3| {
-        (p.x - slab_at.x).abs() < slab_half.x + RADIUS && (p.z - slab_at.z).abs() < slab_half.z + RADIUS
+        (p.x - slab_at.x).abs() < slab_half.x + RADIUS
+            && (p.z - slab_at.z).abs() < slab_half.z + RADIUS
     };
     assert!(
         inside(preferred),
@@ -1353,8 +1404,14 @@ fn the_victim_is_never_put_down_inside_a_wall() {
     println!(
         "=== the pull-out against a wall ===\n  the preferred point {preferred:.3?} is inside the wall; the driver landed at {at:.3?}, clear: {clear}"
     );
-    assert!(!inside(at), "the driver was put down inside the wall at {at:?}");
-    assert!(clear, "the driver's capsule overlaps something where it landed");
+    assert!(
+        !inside(at),
+        "the driver was put down inside the wall at {at:?}"
+    );
+    assert!(
+        clear,
+        "the driver's capsule overlaps something where it landed"
+    );
 
     // WEDGED: walls on every side the candidates look. The carjack is refused
     // and the driver stays at the wheel.
@@ -1379,7 +1436,8 @@ fn the_victim_is_never_put_down_inside_a_wall() {
     let preferred = board::pull_out_point(&car.sockets, SeatIndex::Driver, car.half, car.offset);
     let stand_half = y.cm(VICTIM).stand_half_height_m;
     let own: std::collections::BTreeSet<_> = y.bridge.collider_of(VICTIM).into_iter().collect();
-    let refusal = d3::boarding::clear_exit(&mut y.bridge, &car, preferred, stand_half, RADIUS, &own);
+    let refusal =
+        d3::boarding::clear_exit(&mut y.bridge, &car, preferred, stand_half, RADIUS, &own);
     println!("  wedged on every side, `clear_exit` answers {refusal:?}");
     assert!(
         refusal.is_none(),
@@ -1406,7 +1464,12 @@ fn the_exit_is_the_reverse_and_never_lands_in_geometry() {
     for walled in [false, true] {
         let mut y = if walled {
             Yard::build("sedan", |w| {
-                wall(w, WALL, DVec3::new(1.55, 1.0, -0.4), DVec3::new(0.2, 1.0, 0.9));
+                wall(
+                    w,
+                    WALL,
+                    DVec3::new(1.55, 1.0, -0.4),
+                    DVec3::new(0.2, 1.0, 0.9),
+                );
             })
         } else {
             Yard::new("sedan")
@@ -1415,8 +1478,11 @@ fn the_exit_is_the_reverse_and_never_lands_in_geometry() {
             // Seat the hero directly: the wall is where the approach would
             // walk, and this half is about the way OUT.
             let e = y.world.entity_of(HERO).unwrap();
-            y.world.world_mut().get_mut::<Transform>(e).unwrap().translation =
-                Vec3d::new(-2.4, 0.9, 0.2);
+            y.world
+                .world_mut()
+                .get_mut::<Transform>(e)
+                .unwrap()
+                .translation = Vec3d::new(-2.4, 0.9, 0.2);
             y.bridge.sync_from_world(&y.world);
             y.with_cm(HERO, |cm| {
                 cm.mode = MovementMode::Driving;
@@ -1447,11 +1513,22 @@ fn the_exit_is_the_reverse_and_never_lands_in_geometry() {
                 break;
             }
         }
-        print_trace(if walled { "the exit, walled" } else { "the exit" }, &trace);
+        print_trace(
+            if walled {
+                "the exit, walled"
+            } else {
+                "the exit"
+            },
+            &trace,
+        );
         let order: Vec<BoardPhase> = durations(&trace).iter().map(|(p, _, _)| *p).collect();
         assert_eq!(
             order,
-            vec![BoardPhase::Exiting, BoardPhase::ClosingDoor, BoardPhase::Idle],
+            vec![
+                BoardPhase::Exiting,
+                BoardPhase::ClosingDoor,
+                BoardPhase::Idle
+            ],
             "the exit is not the reverse pipeline"
         );
         let clear = y.clear(HERO);
@@ -1477,8 +1554,14 @@ fn the_exit_is_the_reverse_and_never_lands_in_geometry() {
                 "with a wall at the driver's door the body left by it, at {local:?}"
             );
         } else {
-            assert!(peak >= board::DOOR_BOARD_DEG - 0.5, "the door opened only {peak:.1} deg");
-            assert!(shut <= board::DOOR_SHUT_DEG + 0.5, "the door was left at {shut:.2} deg");
+            assert!(
+                peak >= board::DOOR_BOARD_DEG - 0.5,
+                "the door opened only {peak:.1} deg"
+            );
+            assert!(
+                shut <= board::DOOR_SHUT_DEG + 0.5,
+                "the door was left at {shut:.2} deg"
+            );
         }
     }
 }
@@ -1531,7 +1614,10 @@ fn a_moving_exit_is_a_roll() {
         "=== the bail-out ===\n  the car at {speed:.2} m/s; the body left at {:.2} m/s; modes {modes:?}; landing {landing:?}",
         left_at.unwrap_or(0.0)
     );
-    assert!(speed > board::EXIT_ROLL_MPS * 2.0, "the car only reached {speed:.2} m/s");
+    assert!(
+        speed > board::EXIT_ROLL_MPS * 2.0,
+        "the car only reached {speed:.2} m/s"
+    );
     assert_eq!(modes.first(), Some(&MovementMode::FallControlled));
     assert!(
         modes.contains(&MovementMode::Roll),
@@ -1585,7 +1671,10 @@ fn a_door_torn_off_is_boarded_through_the_opening() {
         .map(|(_, t, _)| *t)
         .unwrap_or(f64::INFINITY);
     assert_eq!(y.cm(HERO).runtime.boarding.phase, BoardPhase::Driving);
-    assert_eq!(asked, 0, "a hand reached for a handle on a door that is not there");
+    assert_eq!(
+        asked, 0,
+        "a hand reached for a handle on a door that is not there"
+    );
     assert!(
         opening < board::HAND_REACH_S + board::HANDLE_HOLD_S + board::STEP_BACK_S + 0.1,
         "the door phase lasted {opening:.3} s with no door to open"
@@ -1644,7 +1733,11 @@ fn the_boarding_camera_rides_the_director() {
     // The drive pivot: the roof over the chassis centre, plus the tuning's
     // ratio of the body's height — what P29.6 derived from feet ON the roof.
     let car = y.frame();
-    let roof = car.world(Vec3d::new(car.offset.x, car.offset.y + car.half.y, car.offset.z));
+    let roof = car.world(Vec3d::new(
+        car.offset.x,
+        car.offset.y + car.half.y,
+        car.offset.z,
+    ));
     let cm = y.cm(HERO);
     let standing = cm.stand_half_height_m + RADIUS;
     let want = roof + DVec3::Y * (2.0 * standing * cam.tuning.pivot_height_ratio);
@@ -1652,7 +1745,10 @@ fn the_boarding_camera_rides_the_director() {
     println!(
         "=== the boarding camera ===\n  the claim held {held} of {ground_steps} ground steps; {after_driving_held} steps after the wheel; the drive pivot is {pivot_off:.4} m from the roof-derived one"
     );
-    assert!(ground_steps > 60, "the choreography took {ground_steps} ground steps");
+    assert!(
+        ground_steps > 60,
+        "the choreography took {ground_steps} ground steps"
+    );
     assert!(
         held >= ground_steps - 2,
         "the boarding claim held the camera for {held} of {ground_steps} ground steps"
@@ -1836,17 +1932,29 @@ fn pie_equals_shipping_on_a_board_drive_exit_course() {
         (t, body, col, ctl, cm)
     }
     let def = catalogue_def("sedan");
-    let at = DVec3::new(0.0, inf_ecs::vehicle::resting_origin_y(&def, 0.0) + 0.15, 0.0);
+    let at = DVec3::new(
+        0.0,
+        inf_ecs::vehicle::resting_origin_y(&def, 0.0) + 0.15,
+        0.0,
+    );
 
     type Row = (Vec<u8>, [u64; 3], u8, [u64; 3], u8);
     let hero_row = |world: &EcsWorld| -> Row {
         let e = world.entity_of(HERO).expect("the hero");
-        let t = world.world().get::<Transform>(e).expect("placed").translation;
+        let t = world
+            .world()
+            .get::<Transform>(e)
+            .expect("placed")
+            .translation;
         let cm = world.world().get::<CharacterMovement>(e).expect("a mover");
         let (vt, vp) = world
             .entity_of(VICTIM)
             .map(|v| {
-                let t = world.world().get::<Transform>(v).expect("placed").translation;
+                let t = world
+                    .world()
+                    .get::<Transform>(v)
+                    .expect("placed")
+                    .translation;
                 let cm = world.world().get::<CharacterMovement>(v).expect("a mover");
                 (
                     [t.x.to_bits(), t.y.to_bits(), t.z.to_bits()],
@@ -1863,139 +1971,146 @@ fn pie_equals_shipping_on_a_board_drive_exit_course() {
         )
     };
     let run = |jack: bool| -> (Vec<Row>, Vec<Row>) {
+        let shipped: Vec<Row> = {
+            let mut world = EcsWorld::new();
+            let g = world.spawn_with_guid(GROUND, "slab", None);
+            world.world_mut().entity_mut(g).insert(slab());
+            car(&mut world, CHASSIS, at, 0.0, &def);
+            let h = world.spawn_with_guid(HERO, "Hero", None);
+            world.world_mut().entity_mut(h).insert(hero_bits());
+            if jack {
+                let v = world.spawn_with_guid(VICTIM, "Driver", None);
+                world.world_mut().entity_mut(v).insert(victim_bits());
+            }
+            world.propagate();
+            let mut sim = RuntimeSim::new(world, Vec::new(), glam::DVec2::new(0.0, -9.81), HZ);
+            (0..STEPS)
+                .map(|i| {
+                    let (press, y, brake) = course(i, jack);
+                    let mut input = RuntimeInput::default();
+                    if press {
+                        input = input.press(INTERACT);
+                    }
+                    if brake {
+                        input = input.press(HANDBRAKE);
+                    }
+                    if y != 0.0 {
+                        input = input.axis_at(MOVE_Y, y);
+                    }
+                    sim.step_once(input);
+                    // The nineteenth section is the TAIL of the shipped trace: a
+                    // fold turned into `let _ =` keeps the name `projector_mirror`
+                    // searches for, and is read here instead.
+                    let folded = board::boarding_state_bytes(sim.world());
+                    if !folded.is_empty() {
+                        assert!(
+                            sim.state_bytes().ends_with(&folded),
+                            "step {i}: the shipped trace does not END with the boarding section"
+                        );
+                    }
+                    hero_row(sim.world())
+                })
+                .collect()
+        };
 
-    let shipped: Vec<Row> = {
-        let mut world = EcsWorld::new();
-        let g = world.spawn_with_guid(GROUND, "slab", None);
-        world.world_mut().entity_mut(g).insert(slab());
-        car(&mut world, CHASSIS, at, 0.0, &def);
-        let h = world.spawn_with_guid(HERO, "Hero", None);
-        world.world_mut().entity_mut(h).insert(hero_bits());
-        if jack {
-            let v = world.spawn_with_guid(VICTIM, "Driver", None);
-            world.world_mut().entity_mut(v).insert(victim_bits());
-        }
-        world.propagate();
-        let mut sim = RuntimeSim::new(world, Vec::new(), glam::DVec2::new(0.0, -9.81), HZ);
-        (0..STEPS)
-            .map(|i| {
-                let (press, y, brake) = course(i, jack);
-                let mut input = RuntimeInput::default();
-                if press {
-                    input = input.press(INTERACT);
-                }
-                if brake {
-                    input = input.press(HANDBRAKE);
-                }
-                if y != 0.0 {
-                    input = input.axis_at(MOVE_Y, y);
-                }
-                sim.step_once(input);
-                // The nineteenth section is the TAIL of the shipped trace: a
-                // fold turned into `let _ =` keeps the name `projector_mirror`
-                // searches for, and is read here instead.
-                let folded = board::boarding_state_bytes(sim.world());
-                if !folded.is_empty() {
-                    assert!(
-                        sim.state_bytes().ends_with(&folded),
-                        "step {i}: the shipped trace does not END with the boarding section"
-                    );
-                }
-                hero_row(sim.world())
-            })
-            .collect()
-    };
-
-    let preview: Vec<Row> = {
-        use inf_editor_core::ipc::SpawnKind;
-        let mut doc = SceneDoc::new();
-        let g = doc.create_with_guid(GROUND, SpawnKind::Empty, "slab", None);
-        doc.world_mut().world_mut().entity_mut(g).insert(slab());
-        inf_editor_core::vehicle::spawn_vehicle(
-            &mut doc,
-            CHASSIS,
-            &def,
-            inf_editor_core::vehicle::VehicleSpawn {
-                name: "Car",
-                at,
-                yaw_deg: 0.0,
-                paint: inf_ecs::math::Color::new(0.2, 0.2, 0.6, 1.0),
-                clip: None,
-                engine_voice: false,
-                livery: None,
-            },
-        );
-        let h = doc.create_with_guid(HERO, SpawnKind::Empty, "Hero", None);
-        doc.world_mut().world_mut().entity_mut(h).insert(hero_bits());
-        if jack {
-            let v = doc.create_with_guid(VICTIM, SpawnKind::Empty, "Driver", None);
-            doc.world_mut().world_mut().entity_mut(v).insert(victim_bits());
-        }
-        doc.world_mut().propagate();
-        let mut session =
-            SimSession::enter(&mut doc, Vec::new(), glam::DVec2::new(0.0, -9.81), HZ);
-        let out = (0..STEPS)
-            .map(|i| {
-                let (press, y, brake) = course(i, jack);
-                let mut down: Vec<&str> = if press { vec![INTERACT] } else { Vec::new() };
-                if brake {
-                    down.push(HANDBRAKE);
-                }
-                let mut axes: BTreeMap<String, f32> = BTreeMap::new();
-                if y != 0.0 {
-                    axes.insert(MOVE_Y.to_string(), y);
-                }
-                session.step_once(&mut doc, SimInput::with_down(down).with_axes(axes));
-                hero_row(doc.world())
-            })
-            .collect();
-        session.exit(&mut doc);
-        out
-    };
-    (shipped, preview)
+        let preview: Vec<Row> = {
+            use inf_editor_core::ipc::SpawnKind;
+            let mut doc = SceneDoc::new();
+            let g = doc.create_with_guid(GROUND, SpawnKind::Empty, "slab", None);
+            doc.world_mut().world_mut().entity_mut(g).insert(slab());
+            inf_editor_core::vehicle::spawn_vehicle(
+                &mut doc,
+                CHASSIS,
+                &def,
+                inf_editor_core::vehicle::VehicleSpawn {
+                    name: "Car",
+                    at,
+                    yaw_deg: 0.0,
+                    paint: inf_ecs::math::Color::new(0.2, 0.2, 0.6, 1.0),
+                    clip: None,
+                    engine_voice: false,
+                    livery: None,
+                },
+            );
+            let h = doc.create_with_guid(HERO, SpawnKind::Empty, "Hero", None);
+            doc.world_mut()
+                .world_mut()
+                .entity_mut(h)
+                .insert(hero_bits());
+            if jack {
+                let v = doc.create_with_guid(VICTIM, SpawnKind::Empty, "Driver", None);
+                doc.world_mut()
+                    .world_mut()
+                    .entity_mut(v)
+                    .insert(victim_bits());
+            }
+            doc.world_mut().propagate();
+            let mut session =
+                SimSession::enter(&mut doc, Vec::new(), glam::DVec2::new(0.0, -9.81), HZ);
+            let out = (0..STEPS)
+                .map(|i| {
+                    let (press, y, brake) = course(i, jack);
+                    let mut down: Vec<&str> = if press { vec![INTERACT] } else { Vec::new() };
+                    if brake {
+                        down.push(HANDBRAKE);
+                    }
+                    let mut axes: BTreeMap<String, f32> = BTreeMap::new();
+                    if y != 0.0 {
+                        axes.insert(MOVE_Y.to_string(), y);
+                    }
+                    session.step_once(&mut doc, SimInput::with_down(down).with_axes(axes));
+                    hero_row(doc.world())
+                })
+                .collect();
+            session.exit(&mut doc);
+            out
+        };
+        (shipped, preview)
     };
 
     for jack in [false, true] {
-    let (shipped, preview) = run(jack);
-    let what = if jack { "carjack" } else { "board" };
-    let loud = shipped.iter().filter(|r| !r.0.is_empty()).count();
-    let phases: std::collections::BTreeSet<u8> = shipped.iter().map(|r| r.2).collect();
-    let victim: std::collections::BTreeSet<u8> = shipped.iter().map(|r| r.4).collect();
-    println!(
+        let (shipped, preview) = run(jack);
+        let what = if jack { "carjack" } else { "board" };
+        let loud = shipped.iter().filter(|r| !r.0.is_empty()).count();
+        let phases: std::collections::BTreeSet<u8> = shipped.iter().map(|r| r.2).collect();
+        let victim: std::collections::BTreeSet<u8> = shipped.iter().map(|r| r.4).collect();
+        println!(
         "=== PIE == shipping on a {what} / drive / exit course ===\n  {STEPS} steps; {loud} folded boarding bytes; phases seen {phases:?}; the driver's {victim:?}"
     );
-    if jack {
-        assert!(
-            victim.contains(&BoardPhase::Jacked.as_u8()),
-            "the carjack course never pulled the driver out — it compares a boarding"
-        );
-        assert!(
-            shipped.iter().any(|r| r.0.len() >= 2 * board::BOARDING_TRACE_BYTES),
-            "the carjack never folded two rows at once (the hero and the victim)"
-        );
-    }
-    for p in [
-        BoardPhase::Unlocking,
-        BoardPhase::OpeningDoor,
-        BoardPhase::EnteringIK,
-        BoardPhase::Seated,
-        BoardPhase::Driving,
-        BoardPhase::Exiting,
-        BoardPhase::ClosingDoor,
-    ] {
-        assert!(
-            phases.contains(&p.as_u8()),
-            "the shipped course never reached `{}` — this arm compares less than it claims",
-            p.name()
-        );
-    }
-    assert!(loud > 120, "only {loud} steps folded boarding bytes");
-    if let Some(i) = (0..shipped.len()).find(|i| shipped[*i] != preview[*i]) {
-        panic!(
+        if jack {
+            assert!(
+                victim.contains(&BoardPhase::Jacked.as_u8()),
+                "the carjack course never pulled the driver out — it compares a boarding"
+            );
+            assert!(
+                shipped
+                    .iter()
+                    .any(|r| r.0.len() >= 2 * board::BOARDING_TRACE_BYTES),
+                "the carjack never folded two rows at once (the hero and the victim)"
+            );
+        }
+        for p in [
+            BoardPhase::Unlocking,
+            BoardPhase::OpeningDoor,
+            BoardPhase::EnteringIK,
+            BoardPhase::Seated,
+            BoardPhase::Driving,
+            BoardPhase::Exiting,
+            BoardPhase::ClosingDoor,
+        ] {
+            assert!(
+                phases.contains(&p.as_u8()),
+                "the shipped course never reached `{}` — this arm compares less than it claims",
+                p.name()
+            );
+        }
+        assert!(loud > 120, "only {loud} steps folded boarding bytes");
+        if let Some(i) = (0..shipped.len()).find(|i| shipped[*i] != preview[*i]) {
+            panic!(
             "PIE and shipping diverged on the {what} course at step {i}: shipped phase {} at {:?}, preview phase {} at {:?}",
             shipped[i].2, shipped[i].1, preview[i].2, preview[i].1
         );
-    }
+        }
     }
 }
 
@@ -2017,7 +2132,11 @@ fn a_press_on_a_frame_that_runs_no_step_still_boards() {
     car(
         &mut world,
         CHASSIS,
-        DVec3::new(0.0, inf_ecs::vehicle::resting_origin_y(&def, 0.0) + 0.15, 0.0),
+        DVec3::new(
+            0.0,
+            inf_ecs::vehicle::resting_origin_y(&def, 0.0) + 0.15,
+            0.0,
+        ),
         0.0,
         &def,
     );
@@ -2029,13 +2148,22 @@ fn a_press_on_a_frame_that_runs_no_step_still_boards() {
     }
     let phase = |sim: &RuntimeSim| {
         let e = sim.world().entity_of(HERO).unwrap();
-        sim.world().world().get::<CharacterMovement>(e).unwrap().runtime.boarding.phase
+        sim.world()
+            .world()
+            .get::<CharacterMovement>(e)
+            .unwrap()
+            .runtime
+            .boarding
+            .phase
     };
     assert_eq!(phase(&sim), BoardPhase::Idle);
     // The press lands on a frame too short to run a step, and is let go on the
     // next frame, which runs one.
     let before = sim.steps();
-    let ran = sim.run_frame(0.001, RuntimeInput::default().press(inf_ecs::movement::actions::INTERACT));
+    let ran = sim.run_frame(
+        0.001,
+        RuntimeInput::default().press(inf_ecs::movement::actions::INTERACT),
+    );
     assert_eq!(ran, 0, "the first frame was meant to run no step");
     assert_eq!(sim.steps(), before);
     let ran = sim.run_frame(1.0 / 60.0, RuntimeInput::default());
@@ -2172,7 +2300,14 @@ fn sixty_four_seated_drivers_cost_what_they_cost() {
         .collect();
     for (i, d) in drivers.iter().enumerate() {
         let c = Uuid::from_u128(0x5E3D_2000 + i as u128);
-        stand(&mut y.world, *d, "Driver", DVec3::new(0.0, 0.0, 60.0 + i as f64), 0.0, false);
+        stand(
+            &mut y.world,
+            *d,
+            "Driver",
+            DVec3::new(0.0, 0.0, 60.0 + i as f64),
+            0.0,
+            false,
+        );
         y.with_cm(*d, |cm| {
             cm.mode = MovementMode::Driving;
             cm.runtime.seat = inf_ecs::components::SeatState {
@@ -2209,8 +2344,14 @@ fn sixty_four_seated_drivers_cost_what_they_cost() {
         report.seated
     );
     assert_eq!(report.seated as usize, CARS, "not every driver was walked");
-    assert_eq!(report.hands as usize, CARS, "not every driver's hands were placed");
-    assert_eq!(report.feet as usize, CARS, "not every driver's feet were placed");
+    assert_eq!(
+        report.hands as usize, CARS,
+        "not every driver's hands were placed"
+    );
+    assert_eq!(
+        report.feet as usize, CARS,
+        "not every driver's feet were placed"
+    );
     if clock_may_assert() {
         assert!(
             best <= d3::boarding::SEATED_POSTURE_BUDGET_MS,
@@ -2260,7 +2401,11 @@ fn the_level_camera_table_round_trips_through_the_write_half() {
     // Two knobs are THREE leaves: a gait block's key lives in both rotation-
     // mode tables (`velocity_direction` and `looking_direction`), which `set`
     // keeps in step, so `run.arm_length_m` changed two of them.
-    assert_eq!(keys.len(), 3, "the file names more than what changed: {keys:?}");
+    assert_eq!(
+        keys.len(),
+        3,
+        "the file names more than what changed: {keys:?}"
+    );
     // Untouched writes nothing but the header.
     let plain = inf_ecs::camera::write_camera_beside(&level, &Default::default()).unwrap();
     let plain_text = std::fs::read_to_string(&plain).unwrap();
@@ -2300,7 +2445,10 @@ fn the_shipped_host_draws_the_boarding_row() {
     b.door_deg = 32.4;
     let row = inf_ecs::boarding::boarding_readout(&b).expect("a row");
     println!("the boarding row reads: {row}");
-    assert_eq!(row, "BOARDING opening  SEAT driver  HAND 0.012 m  DOOR 32 deg");
+    assert_eq!(
+        row,
+        "BOARDING opening  SEAT driver  HAND 0.012 m  DOOR 32 deg"
+    );
 }
 
 /// **Every new number this wave added is a RUNTIME one** — no persisted field
@@ -2326,13 +2474,17 @@ fn this_wave_moved_no_schema() {
         "`CharacterMovement::runtime` is no longer `#[serde(skip)]` — the machine would be on the wire"
     );
     const BOARDING: &str = include_str!("../../../crates/inf-ecs/src/boarding.rs");
-    let at = BOARDING.find("pub struct BoardingState {").expect("the machine");
+    let at = BOARDING
+        .find("pub struct BoardingState {")
+        .expect("the machine");
     let head = &BOARDING[at.saturating_sub(300)..at];
     assert!(
         !head.contains("Serialize"),
         "`BoardingState` grew a `Serialize`"
     );
-    let at = BOARDING.find("pub struct VehicleSockets {").expect("the sockets");
+    let at = BOARDING
+        .find("pub struct VehicleSockets {")
+        .expect("the sockets");
     let head = &BOARDING[at.saturating_sub(300)..at];
     assert!(
         !head.contains("Serialize"),
@@ -2404,7 +2556,11 @@ fn sim_joint(
     let skel = sim
         .world()
         .entity_of(who)
-        .and_then(|e| sim.world().world().get::<inf_ecs::components::SkeletalMesh>(e))
+        .and_then(|e| {
+            sim.world()
+                .world()
+                .get::<inf_ecs::components::SkeletalMesh>(e)
+        })
         .and_then(|m| m.skeleton)?;
     let rig = sim.skeleton_of(skel)?;
     let j = rig.role_index().first(role, side)?;
@@ -2412,11 +2568,7 @@ fn sim_joint(
     let to_world = inf_ecs::pose::model_to_world_of(sim.world(), who)?;
     let g = inf_anim::pose::global_transforms(&rig.skeleton, &posed.pose);
     let p = g.get(j as usize)?.to_scale_rotation_translation().2;
-    Some(to_world.transform_point3(DVec3::new(
-        f64::from(p.x),
-        f64::from(p.y),
-        f64::from(p.z),
-    )))
+    Some(to_world.transform_point3(DVec3::new(f64::from(p.x), f64::from(p.y), f64::from(p.z))))
 }
 
 /// **THE ISLAND'S OWN HERO boards a parked car, drives it, and bails out of
@@ -2469,7 +2621,12 @@ fn the_islands_hero_boards_drives_and_rolls_out() {
         .filter(|g| {
             sim.world()
                 .entity_of(*g)
-                .and_then(|e| sim.world().world().get::<inf_ecs::components::VehicleClass>(e).copied())
+                .and_then(|e| {
+                    sim.world()
+                        .world()
+                        .get::<inf_ecs::components::VehicleClass>(e)
+                        .copied()
+                })
                 .is_none_or(|c| !emergency.contains(&c))
         })
         .filter_map(|g| {
@@ -2494,11 +2651,24 @@ fn the_islands_hero_boards_drives_and_rolls_out() {
         // 0.8 m on against something off its centreline, both driven wheels
         // spinning.
         let ahead = car.dir(DVec3::Z);
-        let rays = [car.offset.y + 0.2, car.offset.y - car.half.y + 0.12].iter().all(|y| {
-            let from = car.world(Vec3d::new(car.offset.x, *y, car.offset.z + car.half.z + 0.3));
-            sim.bridge3d_mut().world_mut().cast_ray(from, ahead, 20.0).is_none()
-        });
-        let from = car.world(Vec3d::new(car.offset.x, car.offset.y + 0.1, car.offset.z + car.half.z + 0.5));
+        let rays = [car.offset.y + 0.2, car.offset.y - car.half.y + 0.12]
+            .iter()
+            .all(|y| {
+                let from = car.world(Vec3d::new(
+                    car.offset.x,
+                    *y,
+                    car.offset.z + car.half.z + 0.3,
+                ));
+                sim.bridge3d_mut()
+                    .world_mut()
+                    .cast_ray(from, ahead, 20.0)
+                    .is_none()
+            });
+        let from = car.world(Vec3d::new(
+            car.offset.x,
+            car.offset.y + 0.1,
+            car.offset.z + car.half.z + 0.5,
+        ));
         let body = d3::ColliderShape3D::Box {
             half_extents: DVec3::new(car.half.x + 0.1, 0.3, 0.2),
         };
@@ -2516,22 +2686,36 @@ fn the_islands_hero_boards_drives_and_rolls_out() {
         .find(|g| clear_ahead(&mut sim, *g))
         .expect("an empty parked car on the island with road ahead of it");
     println!("  candidates {}, chose {chassis}", cars.len());
-    let car = d3::boarding::car_frame(sim.world(), sim.bridge3d(), chassis, true).expect("its frame");
+    let car =
+        d3::boarding::car_frame(sim.world(), sim.bridge3d(), chassis, true).expect("its frame");
     let lift = {
         let e = sim.world().entity_of(hero).unwrap();
         let cm = sim.world().world().get::<CharacterMovement>(e).unwrap();
-        let r = sim.world().world().get::<Collider3D>(e).map(|c| c.radius).unwrap_or(0.3);
+        let r = sim
+            .world()
+            .world()
+            .get::<Collider3D>(e)
+            .map(|c| c.radius)
+            .unwrap_or(0.3);
         cm.stand_half_height_m + r
     };
     let beside = car.world(Vec3d::new(car.half.x + 1.6, 0.0, -1.2));
     let ground = sim.terrain_height_at(beside.x, beside.z);
-    set_hero(&mut sim, hero, DVec3::new(beside.x, ground + lift + 0.05, beside.z));
+    set_hero(
+        &mut sim,
+        hero,
+        DVec3::new(beside.x, ground + lift + 0.05, beside.z),
+    );
     for _ in 0..30 {
         sim.step_once(RuntimeInput::default());
     }
     let mode_at_press = {
         let e = sim.world().entity_of(hero).unwrap();
-        sim.world().world().get::<CharacterMovement>(e).unwrap().mode
+        sim.world()
+            .world()
+            .get::<CharacterMovement>(e)
+            .unwrap()
+            .mode
     };
     sim.step_once(RuntimeInput::default().press(inf_ecs::movement::actions::INTERACT));
     let mut takes: Vec<f64> = Vec::new();
@@ -2548,7 +2732,8 @@ fn the_islands_hero_boards_drives_and_rolls_out() {
         }
         if b.phase == BoardPhase::OpeningDoor && b.mark_s < 0.0 && b.hand_weight >= 1.0 - 1e-9 {
             let car = d3::boarding::car_frame(sim.world(), sim.bridge3d(), chassis, true).unwrap();
-            if let Some(h) = d3::boarding::handle_world(sim.world(), sim.bridge3d(), &car, b.door, false)
+            if let Some(h) =
+                d3::boarding::handle_world(sim.world(), sim.bridge3d(), &car, b.door, false)
             {
                 let side = if b.hand_side == 0 {
                     inf_anim::BoneSide::Left
@@ -2574,23 +2759,49 @@ fn the_islands_hero_boards_drives_and_rolls_out() {
         MovementMode::Grounded,
         "the hero was not standing when E was pressed — this arm would be measuring a ragdoll"
     );
-    assert_eq!(phases.last(), Some(&BoardPhase::Driving), "the hero never reached the wheel");
-    assert!(!takes.is_empty(), "the hand was never measured on the handle");
+    assert_eq!(
+        phases.last(),
+        Some(&BoardPhase::Driving),
+        "the hero never reached the wheel"
+    );
+    assert!(
+        !takes.is_empty(),
+        "the hand was never measured on the handle"
+    );
     let worst_take = takes.iter().copied().fold(0.0f64, f64::max);
     // Seated: the pelvis inside, the hands on the rim, the feet on the pedals.
     for _ in 0..30 {
         sim.step_once(RuntimeInput::default());
     }
     let car = d3::boarding::car_frame(sim.world(), sim.bridge3d(), chassis, true).unwrap();
-    let roof = car.world(Vec3d::new(car.offset.x, car.offset.y + car.half.y, car.offset.z)).y;
-    let pelvis = sim_joint(&sim, hero, inf_anim::BoneRoleKind::Pelvis, inf_anim::BoneSide::Center)
-        .expect("a pelvis");
-    let asks = inf_ecs::pose::hand_ik(sim.world(), hero).cloned().unwrap_or_default();
+    let roof = car
+        .world(Vec3d::new(
+            car.offset.x,
+            car.offset.y + car.half.y,
+            car.offset.z,
+        ))
+        .y;
+    let pelvis = sim_joint(
+        &sim,
+        hero,
+        inf_anim::BoneRoleKind::Pelvis,
+        inf_anim::BoneSide::Center,
+    )
+    .expect("a pelvis");
+    let asks = inf_ecs::pose::hand_ik(sim.world(), hero)
+        .cloned()
+        .unwrap_or_default();
     let mut rim_err = 0.0f64;
-    for (i, side) in [inf_anim::BoneSide::Left, inf_anim::BoneSide::Right].iter().enumerate() {
+    for (i, side) in [inf_anim::BoneSide::Left, inf_anim::BoneSide::Right]
+        .iter()
+        .enumerate()
+    {
         if let Some(r) = asks.reach[i] {
             let j = sim_joint(&sim, hero, inf_anim::BoneRoleKind::Hand, *side);
-            rim_err = rim_err.max(j.map(|p| (p - r.target.to_dvec3()).length()).unwrap_or(f64::INFINITY));
+            rim_err = rim_err.max(
+                j.map(|p| (p - r.target.to_dvec3()).length())
+                    .unwrap_or(f64::INFINITY),
+            );
         }
     }
     println!(
@@ -2600,9 +2811,7 @@ fn the_islands_hero_boards_drives_and_rolls_out() {
     );
     // Drive, then bail.
     for _ in 0..240 {
-        sim.step_once(
-            RuntimeInput::default().axis_at(inf_ecs::movement::actions::MOVE_Y, 1.0),
-        );
+        sim.step_once(RuntimeInput::default().axis_at(inf_ecs::movement::actions::MOVE_Y, 1.0));
         let v = d3::boarding::car_frame(sim.world(), sim.bridge3d(), chassis, false)
             .map(|c| c.vel.length())
             .unwrap_or(0.0);
@@ -2619,7 +2828,12 @@ fn the_islands_hero_boards_drives_and_rolls_out() {
     for _ in 0..120 {
         sim.step_once(RuntimeInput::default());
         let e = sim.world().entity_of(hero).unwrap();
-        let mode = sim.world().world().get::<CharacterMovement>(e).unwrap().mode;
+        let mode = sim
+            .world()
+            .world()
+            .get::<CharacterMovement>(e)
+            .unwrap()
+            .mode;
         if modes.last() != Some(&mode) {
             modes.push(mode);
         }
@@ -2629,17 +2843,25 @@ fn the_islands_hero_boards_drives_and_rolls_out() {
             }
         }
     }
-    println!(
-        "  bailed out at {speed:.2} m/s: modes {modes:?}; machine states {states:?}"
-    );
+    println!("  bailed out at {speed:.2} m/s: modes {modes:?}; machine states {states:?}");
     assert!(
         worst_take <= 0.02,
         "the island hero's hand ended {:.2} mm from the handle at weight 1",
         worst_take * 1000.0
     );
-    assert!(pelvis.y < roof - 0.3, "the island hero is not inside the car");
-    assert!(rim_err <= 0.02, "the island hero's hands are {:.2} mm off the rim", rim_err * 1000.0);
-    assert!(speed > 2.0 * board::EXIT_ROLL_MPS, "the car only reached {speed:.2} m/s");
+    assert!(
+        pelvis.y < roof - 0.3,
+        "the island hero is not inside the car"
+    );
+    assert!(
+        rim_err <= 0.02,
+        "the island hero's hands are {:.2} mm off the rim",
+        rim_err * 1000.0
+    );
+    assert!(
+        speed > 2.0 * board::EXIT_ROLL_MPS,
+        "the car only reached {speed:.2} m/s"
+    );
     assert!(
         modes.contains(&MovementMode::Roll),
         "no roll mode after bailing out at {speed:.2} m/s: {modes:?}"
@@ -2677,6 +2899,9 @@ fn the_island_census_has_no_doubly_occupied_seat() {
         "=== the island census ===\n  {STEPS} steps ({:.1} min), {samples} samples: at most {seats_seen} seats held at once, {passengers} of them passengers; the busiest seat ever held {worst}",
         f64::from(STEPS) / 3600.0
     );
-    assert!(seats_seen > 0, "nobody sat in anything on the island — the census is about nothing");
+    assert!(
+        seats_seen > 0,
+        "nobody sat in anything on the island — the census is about nothing"
+    );
     assert!(worst <= 1, "a seat on the island held {worst} bodies");
 }
