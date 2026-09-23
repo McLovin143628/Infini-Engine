@@ -205,17 +205,44 @@ fn both_audio_steps_drive_the_engine_loop_the_same_way() {
             "the engine loop no longer carries `{needle}`: {why}"
         );
     }
-    // …and it still adds no COMMAND KIND beyond the three P12.3 already had.
-    // `AudioCommand` is an enum the whole tree matches on exhaustively, and a
-    // new variant would be a new API. `Stop` in particular stays out: an engine
-    // loop this step never ends is one the despawn sweep owns.
-    let forbidden = "AudioCommand::Stop";
-    let n: String = forbidden.chars().filter(|c| !c.is_whitespace()).collect();
-    assert!(
-        !editor.contains(&n),
-        "the engine loop reaches for `{forbidden}`, which is a lifetime \
-         decision and belongs to whoever despawns the vehicle"
-    );
+    // **THE LAYER STACK** (wave VEH3e). The stack's decision is ONE Ring-0
+    // planner fed this step's published voices, and the fence is its mapping.
+    //
+    // This clause used to FORBID `AudioCommand::Stop` here ("an engine loop
+    // this step never ends is one the despawn sweep owns"). That was true of
+    // ONE loop on the chassis's own key. The stack's voices live on SALTED
+    // keys the despawn sweep has never heard of, and a parked car nobody is in
+    // now switches its engine OFF -- so the lifetime decision is the
+    // planner's, and the tripwire is inverted rather than deleted: the Stop
+    // must be here, mapped from the planner's own cue.
+    for (needle, why) in [
+        (
+            "voices.plan(world,&voiced,dt)",
+            "the layer stack is ONE Ring-0 planner both hosts call with the same \
+             outcomes and the same fixed step",
+        ),
+        (
+            "o.voice.map(|v|(o.chassis,v))",
+            "the planner reads the voice the vehicle door PUBLISHED this step, \
+             never the model's state when the audio phase asks",
+        ),
+        (
+            "inf_ecs::vehicle_audio::VoiceCue::Stop{source}=>{cmds.push(AudioCommand::Stop{source});",
+            "an engine switched off and a car despawned stop their salted voices \
+             here, because nothing else knows those keys",
+        ),
+        (
+            "vehicles.iter().filter(|o|o.voice.is_none())",
+            "VEH1a's single loop is kept for exactly the classes the stack does \
+             not voice, so a car is never voiced twice",
+        ),
+    ] {
+        let n: String = needle.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            editor.contains(&n),
+            "the engine audio no longer carries `{needle}`: {why}"
+        );
+    }
 }
 
 /// **Both hosts step their TRAFFIC the same way** (wave VEH2b).

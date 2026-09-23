@@ -50,8 +50,10 @@ hero.csv          t,frame,x,y,z,mode,speed,camera_clip,aim_yaw,head_yaw,head_pit
                   tyre_temp_fl,tyre_temp_fr,tyre_temp_rl,tyre_temp_rr,surface,
                   slip_ratio,slip_lat,mu,rpm,clutch,boost,cut,
                   car_health,engine_scale,flats,panes_broken,parts_shed,
-                  board,seat,hand_m,hinge_deg,wheel_m,pedal_m,rim_deg
-                  — SIXTY-ONE columns, four rows a second, and NO header line:
+                  board,seat,hand_m,hinge_deg,wheel_m,pedal_m,rim_deg,
+                  gear,load,slip_front,slip_rear,voice_surface,grain_pitch,
+                  whine_pitch,squeal_front,squeal_rear,voice_cmds
+                  — SEVENTY-ONE columns, four rows a second, and NO header line:
                   every consumer filters on `^[0-9]`, and the `#` lines are the
                   driver's own notes. Columns are only ever APPENDED, so every
                   index a script already reads keeps its meaning: 14-17 are wave
@@ -88,7 +90,16 @@ hero.csv          t,frame,x,y,z,mode,speed,camera_clip,aim_yaw,head_yaw,head_pit
                   wheel through a lock and feet on the pedals have to be
                   triggered on, because walking up to a car, opening it and
                   sitting in it all read `Grounded` or `Driving` in the mode
-                  column),
+                  column), 62-71 are VEH3e's (the gear engaged, the load the
+                  grains are crossfaded by — `0` under a fuel cut — the front
+                  and rear axles' worst NORMALISED slip, where `1` is the peak
+                  of the tyre curve, and the surface voice the rear squeal is
+                  chosen by — `sealed`, `loose`, `soft` or `-`; then five read
+                  back off the AUDIO ENGINE's own voices, never off the planner:
+                  the loudest grain's playback rate, the whine's playback rate,
+                  the front and rear squeals' volumes, and how many commands the
+                  car's keys queued per fixed step since the last row — the ten
+                  a shift, a burnout and a kerb have to be triggered on),
                   24-27 are WPN2b's (the
                   hold-point spring in millimetres, the aim's own recoil offset
                   in degrees, the whole cone the next round would leave through,
@@ -155,7 +166,12 @@ hero.csv          t,frame,x,y,z,mode,speed,camera_clip,aim_yaw,head_yaw,head_pit
                   `panes_broken` is `$c[52]`, `parts_shed` is `$c[53]`,
                   `board` is `$c[54]`, `seat` is `$c[55]`, `hand_m` is
                   `$c[56]`, `hinge_deg` is `$c[57]`, `wheel_m` is `$c[58]`,
-                  `pedal_m` is `$c[59]` and `rim_deg` is `$c[60]`.
+                  `pedal_m` is `$c[59]`, `rim_deg` is `$c[60]`, `gear` is
+                  `$c[61]`, `load` is `$c[62]`, `slip_front` is `$c[63]`,
+                  `slip_rear` is `$c[64]`, `voice_surface` is `$c[65]`,
+                  `grain_pitch` is `$c[66]`, `whine_pitch` is `$c[67]`,
+                  `squeal_front` is `$c[68]`, `squeal_rear` is `$c[69]` and
+                  `voice_cmds` is `$c[70]`.
 demo.log          every step the driver took, with timings
 ```
 

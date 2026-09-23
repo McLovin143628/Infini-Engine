@@ -1137,6 +1137,11 @@ const HERO_LOG_PERIOD_S: f64 = 0.25;
 pub struct HeroLog {
     file: Option<std::fs::File>,
     accum: f64,
+    /// The session's queued-command count at the last row (wave VEH3e), so
+    /// the `voice_cmds` column is a difference of two readings of the stream.
+    audio_seen: u64,
+    /// The fixed-step count at the last row, same purpose.
+    steps_seen: u64,
 }
 
 impl Default for HeroLog {
@@ -1144,6 +1149,8 @@ impl Default for HeroLog {
         Self {
             file: None,
             accum: 0.0,
+            audio_seen: 0,
+            steps_seen: 0,
         }
     }
 }
@@ -1670,9 +1677,89 @@ impl HeroLog {
                 )
             })
             .unwrap_or(("-".to_string(), "-", -1.0, 0.0, -1.0, -1.0, 0.0));
+        // **THE AUDIO COLUMNS** (wave VEH3e), APPENDED for the reason every
+        // block before them was: a frame of a shift, a burnout or a kerb has to
+        // be triggered on a column that can see it. The telemetry four (gear,
+        // load, |slip| per axle and the surface the rear axle's squeal is
+        // chosen by) are what the vehicle door PUBLISHED; the other five are
+        // what the AUDIO ENGINE HOLDS — the loudest grain's pitch, the whine's
+        // pitch, the two squeals' volumes, read back off its voices with
+        // `voice_params` — and how many commands the car's keys queued a step
+        // since the last row, read off the stream. None of the five is what the
+        // planner meant to send.
+        let queued = sim.audio_commands_queued();
+        let fresh = queued.saturating_sub(self.audio_seen) as usize;
+        let stepped = sim.steps().saturating_sub(self.steps_seen).max(1);
+        self.audio_seen = queued;
+        self.steps_seen = sim.steps();
+        let voice = guid
+            .and_then(|g| sim.world().entity_of(g))
+            .and_then(|e| {
+                sim.world()
+                    .world()
+                    .get::<inf_ecs::components::CharacterMovement>(e)
+                    .map(|cm| cm.runtime.seat)
+            })
+            .filter(|seat| seat.is_seated())
+            .and_then(|seat| {
+                sim.vehicles()
+                    .iter()
+                    .find(|o| o.chassis == seat.vehicle)
+                    .and_then(|o| o.voice.map(|t| (seat.vehicle, t)))
+            });
+        let (
+            v_gear,
+            v_load,
+            v_slip_f,
+            v_slip_r,
+            v_surface,
+            v_grain,
+            v_whine,
+            v_sq_f,
+            v_sq_r,
+            v_cmds,
+        ) = match voice {
+            Some((car, t)) => {
+                use inf_ecs::vehicle_audio::{entity_key, voice_key, SurfaceVoice, VoiceLayer};
+                let key = entity_key(car);
+                let params = |l| sim.voice_params(voice_key(key, l));
+                let grain = [
+                    VoiceLayer::GrainIdle,
+                    VoiceLayer::GrainMid,
+                    VoiceLayer::GrainFull,
+                ]
+                .into_iter()
+                .filter_map(params)
+                .fold(
+                    (0.0f64, 0.0f64),
+                    |a, (v, p)| if v > a.0 { (v, p) } else { a },
+                )
+                .1;
+                let keys: Vec<u64> = VoiceLayer::ALL.iter().map(|l| voice_key(key, *l)).collect();
+                let log = sim.audio_command_log();
+                let tail = &log[log.len().saturating_sub(fresh)..];
+                let n = tail
+                    .iter()
+                    .filter(|c| c.source().is_some_and(|s| keys.contains(&s)))
+                    .count();
+                (
+                    t.gear,
+                    t.load(),
+                    t.axles[0].slip,
+                    t.axles[1].slip,
+                    SurfaceVoice::of(t.axles[1].surface).name(),
+                    grain,
+                    params(VoiceLayer::Whine).map(|x| x.1).unwrap_or(0.0),
+                    params(VoiceLayer::SquealFront).map(|x| x.0).unwrap_or(0.0),
+                    params(VoiceLayer::SquealRear).map(|x| x.0).unwrap_or(0.0),
+                    n as f64 / stepped as f64,
+                )
+            }
+            None => (0, 0.0, 0.0, 0.0, "-", 0.0, 0.0, 0.0, 0.0, 0.0),
+        };
         let line = match &probe.hero {
             Some(h) => format!(
-                "{:.3},{},{:.4},{:.4},{:.4},{},{:.4},{:.4},{:.2},{:.2},{:.2},{},{},{:.4},{:.4},{:.2},{},{},{},{:.3},{},{:.3},{},{:.3},{:.4},{:.4},{:.4},{},{},{},{},{},{},{},{},{},{:.1},{:.1},{:.1},{:.1},{:.1},{},{:.4},{:.4},{:.3},{:.0},{:.3},{:.3},{},{:.1},{:.1},{},{},{},{},{},{:.4},{:.1},{:.4},{:.4},{:.1}\n",
+                "{:.3},{},{:.4},{:.4},{:.4},{},{:.4},{:.4},{:.2},{:.2},{:.2},{},{},{:.4},{:.4},{:.2},{},{},{},{:.3},{},{:.3},{},{:.3},{:.4},{:.4},{:.4},{},{},{},{},{},{},{},{},{},{:.1},{:.1},{:.1},{:.1},{:.1},{},{:.4},{:.4},{:.3},{:.0},{:.3},{:.3},{},{:.1},{:.1},{},{},{},{},{},{:.4},{:.1},{:.4},{:.4},{:.1},{},{:.2},{:.3},{:.3},{},{:.3},{:.3},{:.3},{:.3},{:.2}\n",
                 sim.steps() as f64 / 60.0,
                 probe.frame,
                 h.position[0],
@@ -1744,7 +1831,17 @@ impl HeroLog {
                 hinge_deg,
                 wheel_m,
                 pedal_m,
-                rim_deg
+                rim_deg,
+                v_gear,
+                v_load,
+                v_slip_f,
+                v_slip_r,
+                v_surface,
+                v_grain,
+                v_whine,
+                v_sq_f,
+                v_sq_r,
+                v_cmds
             ),
             // **`no-hero` NAMES THE MODE COLUMN** (WPN2b audit, carried 224).
             //
@@ -1758,11 +1855,11 @@ impl HeroLog {
             // wave FIX1 and harmless only because no predicate happened to
             // match either spelling.
             //
-            // The row is 61 fields wide since wave VEH3d — 54 at VEH3c plus
-            // the seven boarding columns — which the gate asserts against the
+            // The row is 71 fields wide since wave VEH3e — 61 at VEH3d plus
+            // the ten audio columns — which the gate asserts against the
             // armed branch above it and against the demo README.
             None => format!(
-                "{:.3},{},,,,no-hero,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,\n",
+                "{:.3},{},,,,no-hero,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,\n",
                 sim.steps() as f64 / 60.0,
                 probe.frame
             ),

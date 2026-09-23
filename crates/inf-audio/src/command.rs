@@ -168,6 +168,22 @@ pub enum AudioCommand {
     SetListener(Listener),
 }
 
+impl AudioCommand {
+    /// **The source key this command addresses**, or `None` for the listener
+    /// (wave VEH3e) — what an instrument filters a stream by.
+    pub fn source(&self) -> Option<u64> {
+        match self {
+            AudioCommand::Play(p) => Some(p.source),
+            AudioCommand::Stop { source }
+            | AudioCommand::SetVolume { source, .. }
+            | AudioCommand::SetPitch { source, .. }
+            | AudioCommand::SetOcclusion { source, .. }
+            | AudioCommand::SetPosition { source, .. } => Some(*source),
+            AudioCommand::SetListener(_) => None,
+        }
+    }
+}
+
 /// **How many commands a host's audio log keeps** (wave WPN2c) — the ring the
 /// two hosts' `audio_log`s are built with, and the reason it is not
 /// `inf_core::DEFAULT_LOG_CAPACITY` any more.

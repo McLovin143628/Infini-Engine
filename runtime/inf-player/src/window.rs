@@ -724,8 +724,39 @@ impl PlayerApp {
                 _ => String::new(),
             }
         };
+        // **THE AUDIO ROW** (wave VEH3e), under the others: the engine's family,
+        // the crank and the load it sings from, and what the MIXER holds for the
+        // whine, the turbo and the two squeals — read back off the audio
+        // engine's own voices (`voice_params`), never off the planner's intent —
+        // and how many commands the car's keys queued on the last step. A car
+        // the layer stack does not voice (a boat, a helicopter) draws none.
+        let audio = sim
+            .vehicles()
+            .iter()
+            .find(|o| o.chassis == vehicle)
+            .and_then(|o| o.voice)
+            .map(|t| {
+                use inf_ecs::vehicle_audio::{entity_key, voice_key, VoiceLayer};
+                let key = entity_key(vehicle);
+                let pitch = |l| sim.voice_params(voice_key(key, l)).map(|(_, p)| p);
+                let vol = |l| sim.voice_params(voice_key(key, l)).map(|(v, _)| v);
+                let keys: Vec<u64> = VoiceLayer::ALL.iter().map(|l| voice_key(key, *l)).collect();
+                let cmds = sim
+                    .last_step_audio()
+                    .iter()
+                    .filter(|c| c.source().is_some_and(|s| keys.contains(&s)))
+                    .count();
+                inf_ecs::vehicle_audio::voice_readout(
+                    &t,
+                    pitch(VoiceLayer::Whine),
+                    pitch(VoiceLayer::Turbo),
+                    [vol(VoiceLayer::SquealFront), vol(VoiceLayer::SquealRear)],
+                    cmds,
+                )
+            })
+            .unwrap_or_default();
         let mut text = head;
-        for line in [drive, row, damage] {
+        for line in [drive, row, damage, audio] {
             if !line.is_empty() {
                 text.push('\n');
                 text.push_str(&line);

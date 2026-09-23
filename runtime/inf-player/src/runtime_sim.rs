@@ -329,6 +329,13 @@ pub struct RuntimeSim {
     audio_cmds: Vec<AudioCommand>,
     /// Entity `Guid`s whose autoplay `AudioSource` has already started.
     audio_started: BTreeSet<Uuid>,
+    /// **The vehicle layer planner's memory** (wave VEH3e) -- what each car's
+    /// and each boarding body's voices were last told, fresh each session. See
+    /// `inf_ecs::vehicle_audio::VoiceMemory`.
+    vehicle_voices: inf_ecs::vehicle_audio::VoiceMemory,
+    /// How many commands the last drain added to the log (wave VEH3e) — see
+    /// [`RuntimeSim::last_step_audio`].
+    last_audio_len: usize,
     /// Accumulated drained audio command stream (determinism telemetry / test seam).
     ///
     /// **Bounded** (Hardening D): a listener command is enqueued at least once per
@@ -605,6 +612,8 @@ impl RuntimeSim {
             audio_clips: BTreeMap::new(),
             audio_cmds: Vec::new(),
             audio_started: BTreeSet::new(),
+            vehicle_voices: inf_ecs::vehicle_audio::VoiceMemory::new(),
+            last_audio_len: 0,
             audio_log: BoundedLog::new(inf_audio::AUDIO_LOG_CAPACITY),
             steps: 0,
             prev_positions: BTreeMap::new(),
@@ -1082,6 +1091,27 @@ impl RuntimeSim {
     /// set sequence a headless test asserts against instead of device output.
     pub fn audio_command_log(&self) -> &[AudioCommand] {
         self.audio_log.as_slice()
+    }
+
+    /// **What the audio engine holds for one source's voice** (wave VEH3e):
+    /// `(base volume, pitch)` — see `inf_audio::AudioEngine::voice_params`.
+    pub fn voice_params(&self, source: u64) -> Option<(f64, f64)> {
+        self.audio.voice_params(source)
+    }
+
+    /// **The commands the last fixed step queued** (wave VEH3e), in order — the
+    /// tail of [`audio_command_log`](Self::audio_command_log) the last drain
+    /// added. What a HUD's per-step command count reads.
+    pub fn last_step_audio(&self) -> &[AudioCommand] {
+        let log = self.audio_log.as_slice();
+        &log[log.len().saturating_sub(self.last_audio_len)..]
+    }
+
+    /// **Every audio command this session has queued**, evicted or not — the
+    /// log's length plus what fell off it. Monotonic, so an instrument can
+    /// difference two readings.
+    pub fn audio_commands_queued(&self) -> u64 {
+        self.audio_log.as_slice().len() as u64 + self.audio_log.dropped()
     }
 
     /// How many audio commands fell off the front of
@@ -2340,14 +2370,66 @@ impl RuntimeSim {
         //
         //    Inert on a level with no vehicle, and on a vehicle with no
         //    `AudioSource`. (MIRROR of `SimSession::audio_step`.)
-        let (vehicles, world, started, cmds) = (
+        let dt = self.stepper.fixed_dt();
+        let (vehicles, world, started, cmds, voices) = (
             &self.vehicles,
             &self.world,
             &mut self.audio_started,
             &mut self.audio_cmds,
+            &mut self.vehicle_voices,
         );
         // MIRROR-BEGIN vehicle_engine_audio
-        for out in vehicles {
+        // **THE LAYER STACK** (wave VEH3e): every car whose class publishes a
+        // voice is planned by ONE Ring-0 function -- grains crossfaded by
+        // load, the whine, the turbo and its blow-off, a squeal per axle by
+        // slip and surface, an impulse per strut spike, and the door and body
+        // sounds boarding makes -- and what is left here is a `match` from
+        // its cues onto the P12.3 queue, one command per cue. The planner's
+        // memory is this host's, fresh each session, fed the same outcomes in
+        // both hosts.
+        let voiced: Vec<(Uuid, inf_ecs::vehicle_audio::VoiceTelemetry)> = vehicles
+            .iter()
+            .filter_map(|o| o.voice.map(|v| (o.chassis, v)))
+            .collect();
+        for cue in voices.plan(world, &voiced, dt) {
+            match cue {
+                inf_ecs::vehicle_audio::VoiceCue::Play {
+                    source,
+                    emitter,
+                    clip,
+                    volume,
+                    pitch,
+                    looping,
+                    at,
+                } => {
+                    let src = audio_source_of(world, emitter).unwrap_or_default();
+                    let mut cmd = play_command_for(source, &src, at);
+                    cmd.clip = clip;
+                    cmd.volume = volume;
+                    cmd.pitch = pitch;
+                    cmd.looping = looping;
+                    cmds.push(AudioCommand::Play(cmd));
+                }
+                inf_ecs::vehicle_audio::VoiceCue::Volume { source, volume } => {
+                    cmds.push(AudioCommand::SetVolume { source, volume });
+                }
+                inf_ecs::vehicle_audio::VoiceCue::Pitch { source, pitch } => {
+                    cmds.push(AudioCommand::SetPitch { source, pitch });
+                }
+                inf_ecs::vehicle_audio::VoiceCue::Move { source, at } => {
+                    cmds.push(AudioCommand::SetPosition {
+                        source,
+                        position: at,
+                    });
+                }
+                inf_ecs::vehicle_audio::VoiceCue::Stop { source } => {
+                    cmds.push(AudioCommand::Stop { source });
+                }
+            }
+        }
+        // **VEH1a's single loop** for a class the stack does not voice -- a
+        // hull, a rotorcraft (VEH3g's voices).
+        for out in vehicles.iter().filter(|o| o.voice.is_none()) {
             let Some(src) = audio_source_of(world, out.chassis) else {
                 continue;
             };
@@ -2370,15 +2452,8 @@ impl RuntimeSim {
                 volume: cue.volume,
             });
             // …and THE EMITTER FOLLOWS THE VEHICLE (wave VEH2c). VEH1a's
-            // carried item 5, carried again by VEH2a and by VEH2b's silent
-            // traffic: an engine loop was `Play`ed at the position the car
-            // happened to be in on the step it was first seen, and stayed
-            // there. `AudioCommand::SetPosition` arrived at EMS2 for sirens and
-            // this is the same command on the same queue, one line down from
-            // the pitch that was already being written every step.
-            //
-            // Only for a SPATIAL source: a non-spatial one has no position to
-            // move and `Play` was issued without one.
+            // carried item 5, closed: `AudioCommand::SetPosition` every step,
+            // for a SPATIAL source only (a non-spatial one has no position).
             if src.spatial {
                 cmds.push(AudioCommand::SetPosition {
                     source: key,
@@ -2616,6 +2691,7 @@ impl RuntimeSim {
         }
 
         let cmds = std::mem::take(&mut self.audio_cmds);
+        self.last_audio_len = cmds.len();
         self.audio_log.extend(cmds.iter().cloned());
         let clips = &self.audio_clips;
         self.audio

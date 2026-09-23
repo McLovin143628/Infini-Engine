@@ -2595,10 +2595,14 @@ fn the_hero_log_and_its_readme_agree() {
     // it are three things that all read `Grounded` or `Driving` in the mode
     // column, and a frame of a hand on a handle has to be triggered on a
     // column that can see it.
+    // **Seventy-one since wave VEH3e**, which appended the ten audio columns
+    // on the same argument: a shift, a burnout and a kerb all read the same in
+    // `speed`, and a frame of the whine stepping, a squeal or a thump has to be
+    // triggered on a column that can see it.
     let n = width(&armed);
-    assert_eq!(n, 61, "the row is {n} fields and this arm's word is 61");
+    assert_eq!(n, 71, "the row is {n} fields and this arm's word is 71");
     assert!(
-        README.contains("SIXTY-ONE") || README.contains("sixty-one"),
+        README.contains("SEVENTY-ONE") || README.contains("seventy-one"),
         "`tools/demo/README.md` does not say how many columns hero.csv has"
     );
     for col in [
@@ -2643,6 +2647,17 @@ fn the_hero_log_and_its_readme_agree() {
         "wheel_m",
         "pedal_m",
         "rim_deg",
+        // Wave VEH3e's ten.
+        "gear",
+        "load",
+        "slip_front",
+        "slip_rear",
+        "voice_surface",
+        "grain_pitch",
+        "whine_pitch",
+        "squeal_front",
+        "squeal_rear",
+        "voice_cmds",
     ] {
         assert!(
             README.contains(col),

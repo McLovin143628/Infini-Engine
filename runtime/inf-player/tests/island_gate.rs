@@ -6188,8 +6188,14 @@ struct CarTrace {
     load: Vec<f64>,
     /// The chassis position each step.
     at: Vec<glam::DVec3>,
-    /// The audio commands the drive queued, by kind: Play, SetPitch, SetVolume.
+    /// The audio commands the drive queued ON THE CAR'S OWN VOICE KEYS (wave
+    /// VEH3e's layer stack), by kind: Play, SetPitch, SetVolume.
     audio: (usize, usize, usize),
+    /// Every audio command the window queued, in order — compared WHOLE
+    /// between the two hosts.
+    window: Vec<inf_audio::AudioCommand>,
+    /// Commands that addressed the car's BARE chassis key.
+    bare: usize,
     /// Fixed steps taken **before** the drive loop — the settle step, the ones
     /// the hero spends being stood beside the car, and the press/release pairs
     /// the interact edge needs (VEH1a audit).
@@ -6377,6 +6383,8 @@ fn drive_a_car(sim: &mut RuntimeSim) -> CarTrace {
         load: Vec::with_capacity(DRIVE_STEPS as usize),
         at: Vec::with_capacity(DRIVE_STEPS as usize),
         audio: (0, 0, 0),
+        window: Vec::new(),
+        bare: 0,
         pre_steps,
         entered,
     };
@@ -6411,12 +6419,34 @@ fn drive_a_car(sim: &mut RuntimeSim) -> CarTrace {
         t.load.push(out.load);
         t.at.push(chassis_at(sim, car));
     }
-    for cmd in &sim.audio_command_log()[before_audio..] {
-        match cmd {
-            inf_audio::AudioCommand::Play(_) => t.audio.0 += 1,
-            inf_audio::AudioCommand::SetPitch { .. } => t.audio.1 += 1,
-            inf_audio::AudioCommand::SetVolume { .. } => t.audio.2 += 1,
-            _ => {}
+    // **THE LAYER STACK'S KEYS** (wave VEH3e): the car sings on salted keys
+    // now, so the counts are read per KEY rather than per kind over the whole
+    // stream (which also holds the hero's footsteps and the listener).
+    let chassis_key = car.as_u128() as u64;
+    let keys: std::collections::BTreeSet<u64> = inf_ecs::vehicle_audio::VoiceLayer::ALL
+        .iter()
+        .map(|l| inf_ecs::vehicle_audio::voice_key(chassis_key, *l))
+        .collect();
+    t.window = sim.audio_command_log()[before_audio..].to_vec();
+    for cmd in &t.window {
+        let (source, kind) = match cmd {
+            inf_audio::AudioCommand::Play(p) => (p.source, 0),
+            inf_audio::AudioCommand::SetPitch { source, .. } => (*source, 1),
+            inf_audio::AudioCommand::SetVolume { source, .. } => (*source, 2),
+            inf_audio::AudioCommand::SetPosition { source, .. }
+            | inf_audio::AudioCommand::Stop { source } => (*source, 3),
+            _ => continue,
+        };
+        if source == chassis_key {
+            t.bare += 1;
+        }
+        if keys.contains(&source) {
+            match kind {
+                0 => t.audio.0 += 1,
+                1 => t.audio.1 += 1,
+                2 => t.audio.2 += 1,
+                _ => {}
+            }
         }
     }
     t
@@ -6548,40 +6578,36 @@ fn pie_equals_shipping_when_the_car_drives_the_circuit() {
          car spent the drive in the air, so the suspension was never solved",
         steps * 4
     );
-    // The ENGINE spoke, and it spoke every step: the loop is one `Play` and a
-    // pitch/volume pair per step per car, which is what makes the stream a pure
-    // function of sim state rather than an event somebody remembered to fire.
+    // THE ENGINE SPOKE, as a LAYER STACK (wave VEH3e; re-blessed with this
+    // cause). VEH1a's arm counted one `Play` and one pitch/volume pair per step
+    // on the chassis's own key, which was the single pitched loop's shape. The
+    // stack starts its loops ONCE when the hero gets in -- three grains, the
+    // whine, a squeal per axle, and the turbo on a turbocharged row -- and
+    // sends a pitch or a volume only when one CHANGED, so the count is no
+    // longer `steps`; what stays arithmetic is the Plays. The bare chassis key
+    // is never addressed at all (the salts keep the car's voices off its own
+    // emitter namespace).
+    let loops = if a.audio.0 == 7 { 7 } else { 6 };
     assert_eq!(
-        a.audio.0, 1,
-        "the engine loop queued {} `Play`s for one car — a voice is started \
-         ONCE and then addressed, or the clip restarts sixty times a second",
+        a.audio.0, loops,
+        "the engine's layer stack queued {} `Play`s for one car -- each loop is \
+         started ONCE and then addressed, or a clip restarts sixty times a second",
         a.audio.0
     );
-    // …and the count is ARITHMETIC, not a floor (VEH1a audit). The window opens
-    // before the hero has even walked to the car, so it also holds the settle
-    // step, the twenty-four the hero spends standing beside it and the
-    // press/release pairs the interact edge needs — `pre_steps`, counted rather
-    // than assumed, because the fixture's ground is sampled and the number of
-    // enter attempts is a fact about the machine.
-    //
-    // An equality rather than `>= steps` because equality is the claim: ONE car
-    // is being addressed, on EVERY step it is in an outcome, exactly once each.
-    // `>=` passed a second resident car paging in halfway and doubling the
-    // stream, and it also passed the 334 in the ledger without anybody being
-    // able to derive it.
-    assert_eq!(
-        (a.audio.1, a.audio.2),
-        (a.pre_steps + steps, a.pre_steps + steps),
-        "the engine loop queued {:?} (Play, SetPitch, SetVolume) over \
-         {} pre-drive steps plus {steps} driving ones — a loop that is a pure \
-         function of sim state emits exactly one pair per car per step it is \
-         published on",
-        a.audio,
-        a.pre_steps
+    assert_eq!(a.bare, 0, "a command addressed the car's bare chassis key");
+    assert!(
+        a.audio.1 > steps / 2,
+        "the stack re-pitched its voices on {} of {steps} driving steps -- the \
+         revs never moved the grains",
+        a.audio.1
     );
     assert_eq!(
         a.audio, b.audio,
         "the two hosts queued different engine audio for the same drive"
+    );
+    assert_eq!(
+        a.window, b.window,
+        "the two hosts queued different audio streams over the same drive"
     );
     // …and the pitch really MOVED: a constant cue would satisfy every count.
     let (rlo, rhi) = a

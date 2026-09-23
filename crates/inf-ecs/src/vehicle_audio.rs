@@ -675,6 +675,7 @@ struct DoorMemory {
     phase: BoardPhase,
     mark_s: f64,
     door_deg: f64,
+    door: Uuid,
     roll: bool,
     bail: bool,
     creak: Option<LoopState>,
@@ -806,6 +807,7 @@ impl VoiceMemory {
                 phase: BoardPhase::Idle,
                 mark_s: -1.0,
                 door_deg: b.door_deg,
+                door: b.door,
                 roll,
                 bail: b.bail,
                 creak: None,
@@ -835,14 +837,36 @@ impl VoiceMemory {
             if !b.door.is_nil() && (latched || pushed) {
                 cues.push(one_shot(DoorLayer::Latch, LATCH_GAIN));
             }
-            // THE SLAM: the hinge crossing shut while it was being closed.
+            // The hinge's rate, from two steps on which the machine READ the
+            // hinge: `door_deg` is written in the four door phases and left
+            // stale in the others, so a rate across a stale step is a jump
+            // between two readings minutes apart, not a swing.
+            let read = |p: BoardPhase| {
+                matches!(
+                    p,
+                    BoardPhase::OpeningDoor
+                        | BoardPhase::Seated
+                        | BoardPhase::Exiting
+                        | BoardPhase::ClosingDoor
+                )
+            };
+            let rate = if read(mem.phase) && read(b.phase) {
+                (b.door_deg - mem.door_deg) / dt
+            } else {
+                0.0
+            };
+            // THE SLAM: the hinge crossing shut while it was being closed —
+            // including the step a closing boarding ENDS on, where the
+            // machine has just measured the door shut and reset itself (its
+            // `door` is nil by then, so the door is the one remembered).
             let closing = matches!(mem.phase, BoardPhase::Seated | BoardPhase::ClosingDoor);
-            let rate = (b.door_deg - mem.door_deg) / dt;
-            if !b.door.is_nil()
+            let slam_door = if b.door.is_nil() { mem.door } else { b.door };
+            if !slam_door.is_nil()
                 && closing
                 && mem.door_deg > DOOR_SHUT_DEG
                 && b.door_deg <= DOOR_SHUT_DEG
             {
+                let rate = (b.door_deg - mem.door_deg) / dt;
                 let v = SLAM_GAIN * (rate.abs() / 150.0).clamp(0.4, 1.0);
                 cues.push(one_shot(DoorLayer::Slam, v));
             }
@@ -890,6 +914,9 @@ impl VoiceMemory {
             mem.phase = b.phase;
             mem.mark_s = b.mark_s;
             mem.door_deg = b.door_deg;
+            if !b.door.is_nil() {
+                mem.door = b.door;
+            }
             mem.roll = roll;
             mem.bail = b.bail;
         }
@@ -915,6 +942,25 @@ impl VoiceMemory {
     }
 }
 
+/// **The quietest volume a voice is asked for**: anything below it is sent as
+/// silence. A thousandth is -60 dB under the emitter — and without a floor, a
+/// whine at an idle's 2 rpm of shaft would be re-sent every step at 0.00006.
+pub const VOICE_FLOOR: f64 = 1e-3;
+
+/// **How far an emitter moves before it is moved**, metres. A centimetre: a
+/// parked car's chassis settles by micrometres a step, and a `SetPosition` for
+/// each of them is a command about nothing.
+pub const MOVE_EPS_M: f64 = 0.01;
+
+/// A volume below [`VOICE_FLOOR`] is silence.
+fn floored(volume: f64) -> f64 {
+    if volume.is_finite() && volume >= VOICE_FLOOR {
+        volume
+    } else {
+        0.0
+    }
+}
+
 /// Tell a live loop what changed — and nothing, while it is silent and stays
 /// silent: a voice at volume zero is not re-pitched or moved until it is heard.
 fn update_loop(
@@ -925,6 +971,7 @@ fn update_loop(
     pitch: f64,
     at: Option<DVec3>,
 ) {
+    let volume = floored(volume);
     if s.volume == 0.0 && volume == 0.0 {
         return;
     }
@@ -937,7 +984,9 @@ fn update_loop(
         s.pitch = pitch;
     }
     if let Some(p) = at {
-        if s.at != Some(p) {
+        let moved =
+            s.at.is_none_or(|q| (p - q).length_squared() >= MOVE_EPS_M * MOVE_EPS_M);
+        if moved {
             cues.push(VoiceCue::Move { source, at: p });
             s.at = Some(p);
         }
@@ -1017,6 +1066,7 @@ fn plan_car(
                 // (re)start it with everything it needs in one command.
                 Some(s) if s.clip == clip => update_loop(cues, source, s, volume, pitch, at),
                 _ => {
+                    let volume = floored(volume);
                     cues.push(VoiceCue::Play {
                         source,
                         emitter: chassis,

@@ -694,6 +694,18 @@ impl AudioEngine {
         self.voices.get(&handle.0).map(|v| self.compute(v).1)
     }
 
+    /// **What the engine holds for one source's voice** (wave VEH3e): its base
+    /// volume and its pitch — the values the queue's commands LEFT it at, read
+    /// back off the voice the drain built. `None` for a source with no voice.
+    ///
+    /// A HUD or a log column that prints this is printing what the mixer is
+    /// playing, which is the measurement; printing what the planner meant to
+    /// send is not.
+    pub fn voice_params(&self, source: u64) -> Option<(f64, f64)> {
+        let h = self.sources.get(&source)?;
+        self.voices.get(&h.0).map(|v| (v.base_volume, v.pitch))
+    }
+
     /// Number of live voices (played, not yet stopped).
     pub fn voice_count(&self) -> usize {
         self.voices.len()
