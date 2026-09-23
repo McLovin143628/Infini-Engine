@@ -794,10 +794,15 @@ fn pie_equals_shipping_on_an_island_drive() {
         // people the level has, and the drivers are people.
         // …and since wave VEH3d the passengers a quarter of those cars carry,
         // for the drivers' reason exactly (re-blessed with that cause).
+        // …and the `Near` tier's drawn RIDERS (VEH3d audit, re-blessed with
+        // that cause: a `Near` car that is driving draws a seated body in its
+        // driver's seat and a quarter of them a passenger — people the crowd
+        // population has never heard of, posed at the `Near` LOD).
         posed_ceilings.push(
             1 + sim.society_stats().agents
                 + sim.traffic_stats().drivers
-                + sim.traffic_stats().passengers,
+                + sim.traffic_stats().passengers
+                + sim.traffic_stats().near_riders,
         );
         assert!(
             bytes.len() >= POSED_BYTES,
@@ -1217,16 +1222,20 @@ fn pie_equals_shipping_with_a_crowd_across_tier_transitions() {
     // …and their PASSENGERS (wave VEH3d, re-blessed with that cause): a quarter
     // of the driven fleet carries one, a person the crowd has never heard of
     // for exactly the driver's reason, posing exactly while its car is `Full`.
+    // …and the `Near` tier's drawn RIDERS (VEH3d audit, re-blessed with that
+    // cause): a `Near` car that is driving poses a seated body in its seat.
     let drivers = ship.traffic_stats().drivers;
     let passengers = ship.traffic_stats().passengers;
+    let riders = ship.traffic_stats().near_riders;
     let hero_and_posing = 1
         + drivers
         + passengers
+        + riders
         + stats.at(inf_ecs::crowd::CrowdTier::Full)
         + stats.at(inf_ecs::crowd::CrowdTier::Near);
     assert_eq!(
         posed_agents, hero_and_posing,
-        "{posed_agents} characters were posed against {hero_and_posing} the ladder admits (the hero, {drivers} traffic driver(s) and {passengers} passenger(s), plus {} Full and {} Near of {CROWD_N} agents) - the pose door is not reading the tier",
+        "{posed_agents} characters were posed against {hero_and_posing} the ladder admits (the hero, {drivers} traffic driver(s), {passengers} passenger(s) and {riders} Near rider(s), plus {} Full and {} Near of {CROWD_N} agents) - the pose door is not reading the tier",
         stats.at(inf_ecs::crowd::CrowdTier::Full),
         stats.at(inf_ecs::crowd::CrowdTier::Near),
     );
