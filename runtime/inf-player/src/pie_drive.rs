@@ -1811,6 +1811,10 @@ pub struct BoardHold {
     left_s: f64,
     fired: u8,
     focus: Option<glam::DVec3>,
+    /// The horizontal across the body at the beat (perpendicular to pelvis ->
+    /// joint): a close-up from BEHIND a body reaching forward sees its back,
+    /// so the close-up is taken from the side.
+    aside: Option<glam::DVec3>,
 }
 
 impl BoardHold {
@@ -1861,6 +1865,11 @@ impl BoardHold {
             return None;
         }
         self.focus.map(|f| (f, self.close_m))
+    }
+
+    /// The side the close-up looks from — see the field.
+    pub fn close_up_aside(&self) -> Option<glam::DVec3> {
+        self.aside
     }
 
     /// One display frame: count a running hold down, or start one on a beat not
@@ -1938,6 +1947,22 @@ impl BoardHold {
         self.fired |= 1 << bit;
         self.left_s = self.hold_s;
         self.focus = focus;
+        // The side of the body the beat's joint is on: its offset from the
+        // pelvis across the body's own facing, so the close-up looks at the
+        // reaching arm and not at the back hiding it.
+        let (_, _, fwd) = inf_ecs::camera::basis(cm.runtime.body_yaw_deg, 0.0);
+        let fwd = glam::DVec3::new(fwd.x, 0.0, fwd.z).normalize_or_zero();
+        self.aside = focus
+            .zip(sim.posed_joint(
+                hero,
+                inf_anim::BoneRoleKind::Pelvis,
+                inf_anim::BoneSide::Center,
+            ))
+            .map(|(f, p)| {
+                let d = glam::DVec3::new(f.x - p.x, 0.0, f.z - p.z);
+                (d - fwd * d.dot(fwd)).normalize_or_zero()
+            })
+            .filter(|a| a.length_squared() > 0.5);
         Some(format!(
             "{BOARD_HOLD_ENV} held `{}` for {:.1}s at step {} (residual {}; close-up {})",
             BOARD_HOLD_BEATS[bit as usize],

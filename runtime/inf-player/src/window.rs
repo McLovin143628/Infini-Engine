@@ -447,7 +447,13 @@ impl PlayerApp {
             if let Some((focus, metres)) = self.board_hold.close_up().filter(|_| self.pie.is_some())
             {
                 let back = (pose.position.to_dvec3() - focus).normalize_or(-forward);
-                let eye = focus + back * metres;
+                // From the SIDE of the reach — the side the reaching joint is
+                // on — and a little behind and above it.
+                let dir = match self.board_hold.close_up_aside() {
+                    Some(a) => (a * 0.85 + back * 0.45 + DVec3::Y * 0.25).normalize_or(back),
+                    None => back,
+                };
+                let eye = focus + dir * metres;
                 let look = (focus - eye).normalize_or(forward).as_vec3();
                 let side = look.cross(Vec3::Y).normalize_or(Vec3::X);
                 return Some(RenderView {
