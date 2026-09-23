@@ -40,6 +40,7 @@
 //! | `the_boarding_camera_rides_the_director` | the director's holder, the drive pivot | the claim not pushed | steps held | **fails** — no claim |
 //! | `the_boarding_section_is_empty_until_somebody_boards` | the nineteenth section's bytes | `is_quiet` answering false | bytes per phase | **fails** — no section |
 //! | `pie_equals_shipping_on_a_board_drive_exit_course` | both hosts' boarding bytes, step by step | either host's fold deleted (the anti-vacuity half) | steps with bytes | **fails** — nothing to compare |
+//! | `the_shipped_host_measures_the_posed_joints_against_the_sockets` (audit) | `RuntimeSim::boarding_residuals`: the POSED hand/foot joints vs the live outer/inner handle, rim grips, pedals | the reach solve's weight forced to 0 (723 / 494 / 796 mm); the foot pass skipped (1068 mm); the inner pull back on the door's centre (0 rows held) | rows at weight 1 per socket, the rim's 450 deg | **fails** — no hand request |
 //! | `a_boarding_costs_what_it_costs` | the step's own milliseconds, control vs boarding | n/a — a COST arm | the boarding really ran | n/a |
 //! | `sixty_four_seated_drivers_cost_what_they_cost` | the post-solve pass's milliseconds at 64 rigs | n/a — a COST arm | 64 hands placed | n/a |
 //! | `the_level_camera_table_round_trips_through_the_write_half` | the file on disk, read back | `to_toml_changed` writing the whole table | keys written | n/a — a camera arm |
@@ -2114,6 +2115,246 @@ fn pie_equals_shipping_on_a_board_drive_exit_course() {
     }
 }
 
+/// **THE SHIPPED HOST MEASURES THE POSED JOINTS AGAINST THE SOCKETS** (VEH3d
+/// audit, priority a') — `RuntimeSim::boarding_residuals`, the number
+/// `hero.csv`'s boarding columns and the HUD row carry, on the shipped
+/// player's own sim with the mannequin rig, over a board / full lock both ways
+/// / throttle / exit course driven through the INPUT door.
+///
+/// The implementer's columns carried the IK solver's `reach_error` — the chain
+/// end against the target the boarding module handed it — so they read 0.0 mm
+/// on every row by construction. This arm reads the evaluated pose's hand and
+/// foot JOINTS (the pose the GPU skins) against sockets recomputed from the
+/// live chassis, the door's own body and the rack.
+///
+/// * the OUTER handle, the INNER handle, the rim through a full lock, the
+///   pedals under throttle: each at weight 1, each <= 2 cm, each with an
+///   engagement count;
+/// * **the mutation** (run in the audit): the reach solve's weight forced to 0
+///   in `pose::apply_hand_ik` — the old columns still read 0.0; this arm reds
+///   with the hand hundreds of millimetres off.
+#[test]
+fn the_shipped_host_measures_the_posed_joints_against_the_sockets() {
+    use inf_ecs::movement::actions::{HANDBRAKE, INTERACT, MOVE_X, MOVE_Y};
+    use inf_player::runtime_sim::{RuntimeInput, RuntimeSim};
+    const IDLE: inf_anim::ClipRef = [0xd3; 16];
+    let def = catalogue_def("sedan");
+    let mut world = EcsWorld::new();
+    ground(&mut world);
+    car(
+        &mut world,
+        CHASSIS,
+        DVec3::new(
+            0.0,
+            inf_ecs::vehicle::resting_origin_y(&def, 0.0) + 0.15,
+            0.0,
+        ),
+        0.0,
+        &def,
+    );
+    stand(&mut world, HERO, "Hero", HERO_AT, 0.0, true);
+    let e = world.entity_of(HERO).expect("the hero");
+    world.world_mut().entity_mut(e).insert((
+        inf_ecs::components::AnimStateMachine {
+            sm: Some(SM_GUID),
+            ..Default::default()
+        },
+        inf_ecs::components::SkeletalMesh {
+            mesh: None,
+            skeleton: Some(SKEL_GUID),
+        },
+    ));
+    world.propagate();
+    let mut sim = RuntimeSim::new(world, Vec::new(), glam::DVec2::new(0.0, -9.81), 60.0);
+    let skeleton = inf_anim::build_template(
+        inf_anim::BodyPlan::Biped,
+        &inf_anim::BodyParams {
+            height_m: 1.8,
+            ..Default::default()
+        },
+    )
+    .expect("the mannequin builds");
+    sim.set_skeletons([(SKEL_GUID, skeleton)].into_iter().collect());
+    sim.set_state_machines(
+        [(
+            SM_GUID,
+            inf_anim::StateMachine {
+                states: vec![inf_anim::SmState::clip("idle", IDLE)],
+                entry: 0,
+                ..Default::default()
+            },
+        )]
+        .into_iter()
+        .collect(),
+    );
+    sim.set_pose_clips(
+        [(
+            Uuid::from_bytes(IDLE),
+            inf_anim::AnimClip::new("idle", Vec::new()),
+        )]
+        .into_iter()
+        .collect(),
+    );
+    let phase = |sim: &RuntimeSim| {
+        let e = sim.world().entity_of(HERO).unwrap();
+        let cm = sim.world().world().get::<CharacterMovement>(e).unwrap();
+        (cm.runtime.boarding.phase, cm.runtime.seat.is_seated())
+    };
+    let mut outer: Vec<f64> = Vec::new();
+    let mut inner: Vec<f64> = Vec::new();
+    let mut inner_reached: Vec<f64> = Vec::new();
+    let mut inner_held: Vec<(BoardPhase, f64)> = Vec::new();
+    let mut rim: Vec<f64> = Vec::new();
+    let mut pedal: Vec<f64> = Vec::new();
+    let mut rim_seen = 0.0f64;
+    let mut driving_at: Option<u32> = None;
+    let mut exited = false;
+    for i in 0..2400u32 {
+        let (p, seated) = phase(&sim);
+        let mut input = RuntimeInput::default();
+        if i == 60 {
+            input = input.press(INTERACT);
+        }
+        if let Some(d) = driving_at {
+            let k = i - d;
+            match k {
+                30..=150 => input = input.axis_at(MOVE_X, 1.0),
+                151..=270 => input = input.axis_at(MOVE_X, -1.0),
+                300..=360 => input = input.axis_at(MOVE_Y, 1.0),
+                361..=560 => input = input.press(HANDBRAKE),
+                600 => input = input.press(INTERACT),
+                _ => {}
+            }
+        } else if p == BoardPhase::Driving || (p == BoardPhase::Idle && seated) {
+            driving_at = Some(i);
+        }
+        sim.step_once(input);
+        let (p, seated) = phase(&sim);
+        if driving_at.is_some() && p == BoardPhase::Idle && !seated {
+            exited = true;
+            break;
+        }
+        let Some(r) = sim.boarding_residuals(HERO) else {
+            continue;
+        };
+        let holding = r.sockets.hand_weight >= 0.999;
+        let on_handle = r.sockets.handle_weight >= 0.999;
+        match r.sockets.phase {
+            BoardPhase::OpeningDoor if on_handle => outer.extend(r.handle_m),
+            BoardPhase::Seated | BoardPhase::Exiting => {
+                if let Some(h) = r.handle_m {
+                    if on_handle {
+                        inner.push(h);
+                        let e = sim.world().entity_of(HERO).expect("the hero");
+                        let deg = sim
+                            .world()
+                            .world()
+                            .get::<CharacterMovement>(e)
+                            .expect("a mover")
+                            .runtime
+                            .boarding
+                            .door_deg;
+                        inner_held.push((r.sockets.phase, deg));
+                    }
+                    inner_reached.push(h);
+                }
+            }
+            BoardPhase::Driving => {
+                if holding {
+                    rim.extend(r.grips_m);
+                }
+                pedal.extend(r.feet_m);
+                rim_seen = rim_seen
+                    .max(d3::boarding::vehicle_steer(sim.world(), sim.bridge3d(), CHASSIS).abs());
+            }
+            _ => {}
+        }
+    }
+    let worst = |v: &[f64]| v.iter().copied().fold(0.0f64, f64::max) * 1000.0;
+    let best = |v: &[f64]| v.iter().copied().fold(f64::INFINITY, f64::min) * 1000.0;
+    println!("=== the shipped host: POSED joints against the LIVE sockets ===");
+    println!(
+        "  outer handle at weight 1: {} rows, worst {:.2} mm",
+        outer.len(),
+        worst(&outer)
+    );
+    println!(
+        "  inner handle at weight 1: {} rows, worst {:.2} mm (every inner row: {}, nearest {:.2} mm)",
+        inner.len(),
+        worst(&inner),
+        inner_reached.len(),
+        best(&inner_reached)
+    );
+    for p in [BoardPhase::Seated, BoardPhase::Exiting] {
+        let d: Vec<f64> = inner_held
+            .iter()
+            .filter(|x| x.0 == p)
+            .map(|x| x.1)
+            .collect();
+        println!(
+            "    held the inner handle in `{}`: {} rows, the door {:.1} .. {:.1} deg",
+            p.name(),
+            d.len(),
+            d.iter().copied().fold(f64::INFINITY, f64::min),
+            d.iter().copied().fold(0.0f64, f64::max)
+        );
+    }
+    println!(
+        "  rim at weight 1: {} rows, worst {:.2} mm, the rim reached {rim_seen:.1} deg",
+        rim.len(),
+        worst(&rim)
+    );
+    println!(
+        "  pedals while driving: {} rows, worst {:.2} mm",
+        pedal.len(),
+        worst(&pedal)
+    );
+    assert!(exited, "the course never got the hero back out of the car");
+    assert!(
+        outer.len() >= 5,
+        "only {} rows held the outer handle",
+        outer.len()
+    );
+    assert!(
+        worst(&outer) <= 20.0,
+        "the posed hand was {:.2} mm off the outer handle at weight 1",
+        worst(&outer)
+    );
+    assert!(
+        rim.len() >= 60 && rim_seen > 400.0,
+        "the rim course was not driven: {} rows, {rim_seen:.1} deg",
+        rim.len()
+    );
+    assert!(
+        worst(&rim) <= 20.0,
+        "the posed hands were {:.2} mm off the rim grips at weight 1",
+        worst(&rim)
+    );
+    assert!(pedal.len() >= 60, "only {} pedal rows", pedal.len());
+    assert!(
+        worst(&pedal) <= 20.0,
+        "the posed feet were {:.2} mm off the pedals",
+        worst(&pedal)
+    );
+    assert!(
+        inner.len() >= 3,
+        "only {} rows held the INNER handle at weight 1",
+        inner.len()
+    );
+    for p in [BoardPhase::Seated, BoardPhase::Exiting] {
+        assert!(
+            inner_held.iter().any(|x| x.0 == p),
+            "no hand held the INNER handle at weight 1 in `{}` — the door moved with no hand on it",
+            p.name()
+        );
+    }
+    assert!(
+        worst(&inner) <= 20.0,
+        "the posed hand was {:.2} mm off the INNER handle at weight 1",
+        worst(&inner)
+    );
+}
+
 /// **A press of E is seen by exactly one step, whatever the frame rate** —
 /// `RuntimeSim::run_frame`, the shipped window's own door. A frame that runs
 /// no fixed step (a display faster than 60 Hz, or the demo's slow motion)
@@ -2436,14 +2677,17 @@ fn the_shipped_host_draws_the_boarding_row() {
         SRC.contains("inf_ecs::boarding::boarding_readout"),
         "`window.rs` no longer calls `boarding_readout` — the boarding is simulated and nothing draws it"
     );
+    assert!(
+        SRC.contains("sim.boarding_residuals(guid)"),
+        "`window.rs`'s boarding row no longer measures the POSED joints against the sockets"
+    );
     let mut b = inf_ecs::boarding::BoardingState::default();
-    assert_eq!(inf_ecs::boarding::boarding_readout(&b), None);
+    assert_eq!(inf_ecs::boarding::boarding_readout(&b, None, None), None);
     b.enter(BoardPhase::OpeningDoor, 0.0);
     b.hand_weight = 1.0;
-    b.hand_err_m = 0.0123;
     b.door = Uuid::from_u128(9);
     b.door_deg = 32.4;
-    let row = inf_ecs::boarding::boarding_readout(&b).expect("a row");
+    let row = inf_ecs::boarding::boarding_readout(&b, Some(0.0123), None).expect("a row");
     println!("the boarding row reads: {row}");
     assert_eq!(
         row,
@@ -2719,6 +2963,7 @@ fn the_islands_hero_boards_drives_and_rolls_out() {
     };
     sim.step_once(RuntimeInput::default().press(inf_ecs::movement::actions::INTERACT));
     let mut takes: Vec<f64> = Vec::new();
+    let mut inner: Vec<f64> = Vec::new();
     let mut phases: Vec<BoardPhase> = Vec::new();
     for _ in 0..900 {
         sim.step_once(RuntimeInput::default());
@@ -2742,6 +2987,11 @@ fn the_islands_hero_boards_drives_and_rolls_out() {
                 };
                 let hand = sim_joint(&sim, hero, inf_anim::BoneRoleKind::Hand, side);
                 takes.push(hand.map(|p| (p - h).length()).unwrap_or(f64::INFINITY));
+            }
+        }
+        if b.phase == BoardPhase::Seated && b.handle_weight >= 0.999 {
+            if let Some(h) = sim.boarding_residuals(hero).and_then(|r| r.handle_m) {
+                inner.push(h);
             }
         }
         if b.phase == BoardPhase::Driving {
@@ -2788,26 +3038,24 @@ fn the_islands_hero_boards_drives_and_rolls_out() {
         inf_anim::BoneSide::Center,
     )
     .expect("a pelvis");
-    let asks = inf_ecs::pose::hand_ik(sim.world(), hero)
-        .cloned()
-        .unwrap_or_default();
-    let mut rim_err = 0.0f64;
-    for (i, side) in [inf_anim::BoneSide::Left, inf_anim::BoneSide::Right]
-        .iter()
-        .enumerate()
-    {
-        if let Some(r) = asks.reach[i] {
-            let j = sim_joint(&sim, hero, inf_anim::BoneRoleKind::Hand, *side);
-            rim_err = rim_err.max(
-                j.map(|p| (p - r.target.to_dvec3()).length())
-                    .unwrap_or(f64::INFINITY),
-            );
-        }
-    }
+    // The POSED hands and feet against the live sockets (VEH3d audit): this
+    // arm used to measure the hands against the hand REQUEST's own target and
+    // did not measure the feet at all (carried 7).
+    let seated = sim
+        .boarding_residuals(hero)
+        .expect("the seated hero has sockets");
+    let rim_err = seated.grips_m.unwrap_or(f64::INFINITY);
+    let feet_err = seated.feet_m.unwrap_or(f64::INFINITY);
     println!(
-        "  seated: the pelvis {:+.3} m from the roof; the hands {:.2} mm off the rim",
+        "  seated: the pelvis {:+.3} m from the roof; the hands {:.2} mm off the rim; the feet {:.2} mm off the pedals",
         pelvis.y - roof,
-        rim_err * 1000.0
+        rim_err * 1000.0,
+        feet_err * 1000.0
+    );
+    println!(
+        "  the inner handle at weight 1 while boarding: {} rows, worst {:.2} mm",
+        inner.len(),
+        inner.iter().copied().fold(0.0f64, f64::max) * 1000.0
     );
     // Drive, then bail.
     for _ in 0..240 {
@@ -2857,6 +3105,20 @@ fn the_islands_hero_boards_drives_and_rolls_out() {
         rim_err <= 0.02,
         "the island hero's hands are {:.2} mm off the rim",
         rim_err * 1000.0
+    );
+    assert!(
+        feet_err <= 0.02,
+        "the island hero's feet are {:.2} mm off the pedals",
+        feet_err * 1000.0
+    );
+    assert!(
+        !inner.is_empty(),
+        "no hand held the island car's INNER handle at weight 1"
+    );
+    assert!(
+        inner.iter().all(|h| *h <= 0.02),
+        "the island hero's hand was {:.2} mm off the INNER handle at weight 1",
+        inner.iter().copied().fold(0.0f64, f64::max) * 1000.0
     );
     assert!(
         speed > 2.0 * board::EXIT_ROLL_MPS,

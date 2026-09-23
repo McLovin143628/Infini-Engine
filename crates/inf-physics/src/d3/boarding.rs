@@ -189,7 +189,19 @@ pub fn handle_world(
     };
     let (centre, half_m) = board::door_metres(car.half, Vec3d::ZERO, &geom);
     let off = if inner {
-        board::inner_handle_in_door(half_m, side)
+        // The seat on the door's own flank, in the frame the door's centre is
+        // in (the sockets carry the collider's offset; the door here does not).
+        let seat = if side > 0.0 {
+            car.sockets.seat_r
+        } else {
+            car.sockets.seat_l
+        };
+        let cushion = Vec3d::new(
+            seat.x - car.offset.x,
+            seat.y - car.offset.y,
+            seat.z - car.offset.z,
+        );
+        board::inner_handle_in_door(centre, half_m, cushion, side)
     } else {
         board::outer_handle_in_door(half_m, side)
     };
@@ -615,8 +627,6 @@ pub fn begin(
     // The approach length is decided NOW, from the curve as laid — the clock is
     // what makes two hosts agree about when the body arrives.
     b.phase_len_s = board::LOCKED_S;
-    b.hand_err_m = 0.0;
-    b.foot_err_m = 0.0;
     b.tangent_end_len = chord;
     // `mark_s` carries the approach's own length into `Unlocking`.
     b.mark_s = board::approach_s(len);
@@ -1094,22 +1104,6 @@ pub fn follow_boarding(bridge: &mut PhysicsBridge3D, world: &mut EcsWorld) -> Bo
             ],
             None => [Some(estimate[0]), Some(estimate[1])],
         };
-        let hand_err = last
-            .as_ref()
-            .map(|r| {
-                r.reach
-                    .iter()
-                    .flatten()
-                    .filter_map(|o| match o {
-                        inf_ecs::pose::IkOutcome::Solved(s) => Some(f64::from(s.reach_error)),
-                        _ => None,
-                    })
-                    .fold(0.0f64, f64::max)
-            })
-            .unwrap_or(0.0);
-        let foot_err = inf_ecs::anim_bridge::foot_error(world, guid)
-            .map(|e| e.iter().flatten().fold(0.0f64, |a, v| a.max(v.abs())))
-            .unwrap_or(0.0);
         // The body's own lateral: which chassis side its RIGHT shoulder is on.
         // A rig built by `inf_anim::build_template` answers `+X`; an import that
         // kept glTF's handedness answers `-X`. Unknown until the first pose.
@@ -1149,13 +1143,23 @@ pub fn follow_boarding(bridge: &mut PhysicsBridge3D, world: &mut EcsWorld) -> Bo
                 _ => usize::from(b.hand_side != 0),
             }
         };
+        // The reach a hand is faded by: the RIG's own arm when the pose has
+        // published it (VEH3d audit — the capsule's 0.28 of standing height is
+        // the template's arm, and a request priced on it either reaches for a
+        // point the drawn arm cannot touch or lets go of one it can).
         let reach_w = |side: usize, target: DVec3| -> f64 {
+            let arm = last
+                .as_ref()
+                .and_then(|r| r.arm_len[side])
+                .map(|l| REACH_USE_FRAC * l)
+                .unwrap_or(reach);
             match shoulders[side] {
-                Some(s) => board::reach_weight((s - target).length(), reach),
+                Some(s) => board::reach_weight((s - target).length(), arm),
                 None => 1.0,
             }
         };
         let mut hand_side = b.hand_side;
+        let mut handle_weight = 0.0f64;
         let mut redip: Option<f64> = None;
         match phase {
             BoardPhase::OpeningDoor | BoardPhase::ClosingDoor => {
@@ -1190,6 +1194,7 @@ pub fn follow_boarding(bridge: &mut PhysicsBridge3D, world: &mut EcsWorld) -> Bo
                         ramp
                     };
                     hands[side] = Some((h, w));
+                    handle_weight = w;
                     // **The dip, re-priced on the body's OWN arm** while the
                     // hand is still reaching: `begin` priced it off the
                     // capsule's proportions, which are the template
@@ -1274,7 +1279,9 @@ pub fn follow_boarding(bridge: &mut PhysicsBridge3D, world: &mut EcsWorld) -> Bo
                             _ => !warping,
                         };
                         if pulling {
-                            hands[side] = Some((h, ramp * reach_w(side, h)));
+                            let w = ramp * reach_w(side, h);
+                            hands[side] = Some((h, w));
+                            handle_weight = w;
                             hand_side = side as u8;
                             if side == 1 {
                                 rw = 0.0;
@@ -1407,8 +1414,7 @@ pub fn follow_boarding(bridge: &mut PhysicsBridge3D, world: &mut EcsWorld) -> Bo
             .fold(0.0f64, f64::max);
         if let Some(mut slot) = world.world_mut().get_mut::<CharacterMovement>(e) {
             let bb = &mut slot.runtime.boarding;
-            bb.hand_err_m = hand_err;
-            bb.foot_err_m = foot_err;
+            bb.handle_weight = handle_weight;
             if bb.phase != BoardPhase::Idle {
                 bb.hand_weight = hand_weight;
                 bb.hand_side = hand_side;
@@ -1497,6 +1503,119 @@ pub fn vehicle_steer(world: &EcsWorld, bridge: &PhysicsBridge3D, chassis: Uuid) 
         .map(|c| c.max_steer_deg)
         .unwrap_or(inf_ecs::vehicle::VehicleTuning::default().max_steer_deg);
     board::rim_angle_deg(sum / n as f64, max)
+}
+
+/// **Where the boarding's sockets are RIGHT NOW**, world metres, for the phase
+/// `guid` is in (wave VEH3d audit) — what a residual is measured AGAINST.
+///
+/// It is recomputed here from the live chassis pose, the door's own body and
+/// the rack, and never read back from the hand or foot request: the implementer's
+/// `hero.csv` and HUD carried the IK solver's own `reach_error` (the chain's end
+/// against the target it was GIVEN), which is the solver grading itself. A
+/// residual is the POSED joint against this socket, which a caller that holds
+/// the skeleton computes (`RuntimeSim::boarding_residuals`).
+///
+/// `lr_shoulders` is `(left, right)` upper-arm joints in the world, when the
+/// caller has a pose: a body whose right is the chassis's `-X` presses mirrored
+/// pedals, exactly as [`follow_boarding`] lays them. `None` when nobody is
+/// boarding or seated.
+pub fn board_sockets(
+    world: &EcsWorld,
+    bridge: &PhysicsBridge3D,
+    guid: Uuid,
+    lr_shoulders: Option<(DVec3, DVec3)>,
+) -> Option<BoardSockets> {
+    let e = world.entity_of(guid)?;
+    let cm = world.world().get::<CharacterMovement>(e)?;
+    let b = cm.runtime.boarding;
+    let seated = cm.runtime.seat.is_seated() && !cm.runtime.seat.entering;
+    let phase = match (b.phase, seated) {
+        (BoardPhase::Idle, true) => BoardPhase::Driving,
+        (BoardPhase::Idle, false) => return None,
+        (p, _) => p,
+    };
+    let chassis = if b.phase != BoardPhase::Idle {
+        b.vehicle
+    } else {
+        cm.runtime.seat.vehicle
+    };
+    let car = car_frame(world, bridge, chassis, !b.door.is_nil())?;
+    let seat = if b.phase != BoardPhase::Idle {
+        b.seat_index()
+    } else {
+        SeatIndex::from_u8(cm.runtime.seat.seat)
+    };
+    let door = |inner: bool| {
+        (!b.door.is_nil())
+            .then(|| handle_world(world, bridge, &car, b.door, inner))
+            .flatten()
+    };
+    let handle = match phase {
+        BoardPhase::OpeningDoor | BoardPhase::ClosingDoor => door(false),
+        BoardPhase::Seated | BoardPhase::Exiting => door(true),
+        _ => None,
+    };
+    let in_seat = matches!(
+        phase,
+        BoardPhase::Seated | BoardPhase::Driving | BoardPhase::Exiting
+    );
+    let grips = in_seat.then(|| {
+        let g = if seat.drives() {
+            board::wheel_grips(&car.sockets, vehicle_steer(world, bridge, chassis))
+        } else {
+            board::passenger_grips(&car.sockets, seat)
+        };
+        [car.world(g[0]), car.world(g[1])]
+    });
+    let right_is_plus_x = lr_shoulders
+        .map(|(l, r)| car.local(r).x - car.local(l).x >= 0.0)
+        .unwrap_or(true);
+    let feet = matches!(phase, BoardPhase::Seated | BoardPhase::Driving).then(|| {
+        if seat.drives() {
+            let (throttle, brake) = pedal_inputs(cm);
+            let (mut tp, mut bp) = board::pedal_faces(&car.sockets, throttle, brake);
+            if !right_is_plus_x {
+                let sx = car.sockets.seat(seat).x;
+                tp = board::mirror_about_seat(tp, sx);
+                bp = board::mirror_about_seat(bp, sx);
+            }
+            [car.world(bp), car.world(tp)]
+        } else {
+            let f = board::floor_feet(&car.sockets, seat, car.floor_y());
+            [car.world(f[0]), car.world(f[1])]
+        }
+    });
+    Some(BoardSockets {
+        phase,
+        hand_weight: b.hand_weight,
+        handle_weight: b.handle_weight,
+        hand_side: b.hand_side,
+        handle,
+        grips,
+        feet,
+    })
+}
+
+/// What [`board_sockets`] answers: the sockets a boarding body's hands and feet
+/// belong on this step, world metres. A pair is unordered — which hand takes
+/// which grip is the pose's business, and a residual takes the better pairing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BoardSockets {
+    /// The phase, with a seated `Idle` read as `Driving`.
+    pub phase: BoardPhase,
+    /// The heaviest hand request's weight, either hand.
+    pub hand_weight: f64,
+    /// The HANDLE hand's own request weight — `1` is "holding the handle".
+    pub handle_weight: f64,
+    /// Which hand the machine put on the handle: `0` left, `1` right.
+    pub hand_side: u8,
+    /// The door handle a hand belongs on: the OUTER one on the ground, the
+    /// INNER one while seated or getting out.
+    pub handle: Option<DVec3>,
+    /// The rim grips (a driver) or the grab bar and knee (a passenger).
+    pub grips: Option<[DVec3; 2]>,
+    /// The pedals (a driver) or the floor (a passenger).
+    pub feet: Option<[DVec3; 2]>,
 }
 
 /// The throttle and the brake this body asked for, `[0, 1]` each — recorded by

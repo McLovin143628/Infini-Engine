@@ -703,13 +703,21 @@ impl PlayerApp {
     /// `None` while nobody is boarding. The FORMATTING is
     /// `inf_ecs::boarding::boarding_readout`, in Ring 0, for `drive_readout`'s
     /// reason: this function cannot be tested and that one can.
+    ///
+    /// The HAND and PEDAL numbers are the POSED joints against the live
+    /// sockets (`RuntimeSim::boarding_residuals`, VEH3d audit), not the IK
+    /// solver's report on its own target.
     fn boarding_row(sim: &RuntimeSim) -> Option<String> {
         let world = sim.world();
-        let entity = world.entity_of(inf_ecs::movement::camera_subject(world)?)?;
+        let guid = inf_ecs::movement::camera_subject(world)?;
+        let entity = world.entity_of(guid)?;
         let cm = world
             .world()
             .get::<inf_ecs::components::CharacterMovement>(entity)?;
-        inf_ecs::boarding::boarding_readout(&cm.runtime.boarding)
+        let r = sim.boarding_residuals(guid);
+        let hand = r.and_then(|r| r.handle_m.or(r.grips_m));
+        let pedal = r.and_then(|r| r.feet_m);
+        inf_ecs::boarding::boarding_readout(&cm.runtime.boarding, hand, pedal)
     }
 
     /// **The shooter's readout** (wave WPN1) — the magazine and the reserve for

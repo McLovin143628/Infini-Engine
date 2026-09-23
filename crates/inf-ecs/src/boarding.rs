@@ -649,19 +649,43 @@ pub fn outer_handle_in_door(door_half_m: Vec3d, side: f64) -> Vec3d {
     )
 }
 
-/// **The inner pull** — the door's INSIDE face, at the handle's height and a
-/// little further forward (the arm-rest pull a driver shuts a door with).
-pub fn inner_handle_in_door(door_half_m: Vec3d, side: f64) -> Vec3d {
+/// **The inner pull** — the door's INSIDE face, beside the SEAT it serves: the
+/// arm-rest pull a seated driver shuts a door with, [`INNER_PULL_AHEAD_M`]
+/// ahead of the cushion's H-point and [`INNER_PULL_ABOVE_CUSHION_M`] above it,
+/// in the door's own frame at zero degrees (the chassis's axes), clamped onto
+/// the door's box.
+///
+/// **Derived from the seat, not from the door's centre** (VEH3d audit). The
+/// first derivation put it at the door's own centre plus a tenth of its
+/// half-length forward and seven tenths of its half-height up — measured on
+/// the saloon, **0.655 m from the near shoulder with the door SHUT** against
+/// an arm of 0.54 m, so no hand ever took it: the request was faded to nothing
+/// by the reach, the door shut on its motor alone, and the column that said
+/// "46.2 mm" was the other hand's solve on the rim.
+///
+/// `door_centre_m` and `cushion` are in the same chassis frame; the answer is
+/// an offset from the door's centre.
+pub fn inner_handle_in_door(
+    door_centre_m: Vec3d,
+    door_half_m: Vec3d,
+    cushion: Vec3d,
+    side: f64,
+) -> Vec3d {
+    let hy = door_half_m.y.abs();
+    let hz = door_half_m.z.abs();
     Vec3d::new(
         -side.signum() * door_half_m.x.abs(),
-        HANDLE_HEIGHT_FRAC * door_half_m.y.abs(),
-        INNER_PULL_FWD_FRAC * door_half_m.z.abs(),
+        (cushion.y + INNER_PULL_ABOVE_CUSHION_M - door_centre_m.y).clamp(-hy, hy),
+        (cushion.z + INNER_PULL_AHEAD_M - door_centre_m.z).clamp(-0.9 * hz, 0.9 * hz),
     )
 }
 
-/// How far FORWARD of the door's centre the inner pull is, as a fraction of its
-/// half-length — the arm rest, which is nearer the hinge than the outer handle.
-pub const INNER_PULL_FWD_FRAC: f64 = 0.10;
+/// How far AHEAD of the seat's H-point the inner pull is, metres — the front of
+/// the arm rest, under a seated elbow.
+pub const INNER_PULL_AHEAD_M: f64 = 0.25;
+
+/// How far ABOVE the cushion the inner pull is, metres — arm-rest height.
+pub const INNER_PULL_ABOVE_CUSHION_M: f64 = 0.20;
 
 /// **The two ground points a boarding walks between**, chassis frame, metres:
 /// `(take, back)` — where the body stands to TAKE the handle (the approach's
@@ -1222,6 +1246,12 @@ pub struct BoardingState {
     pub hand_weight: f64,
     /// Which hand is on the handle: `0` left, `1` right.
     pub hand_side: u8,
+    /// **The weight of the HANDLE hand's request alone**, `[0, 1]` (VEH3d
+    /// audit) — `hand_weight` is the heaviest request of either hand, and while
+    /// seated the other hand is on the rim at 1, so "holding the inner handle"
+    /// read off `hand_weight` was true while no hand was asked to the handle
+    /// at all. Not folded: a function of the requests the pose already solves.
+    pub handle_weight: f64,
     /// The TAKE — where the approach ends and the hand takes the handle.
     /// Chassis frame, metres; `y` unused.
     pub take_local: Vec3d,
@@ -1255,13 +1285,6 @@ pub struct BoardingState {
     /// The hinge angle the door stood at last step, degrees — VEH3c's joint,
     /// read back. The instrument `hero.csv` carries.
     pub door_deg: f64,
-    /// **How far the hand joint ended from its target last step**, metres.
-    /// Measured off the solved pose by the hand pass's own report, never
-    /// predicted: it is the number the gate's two-centimetre law reads and the
-    /// number `hero.csv` carries.
-    pub hand_err_m: f64,
-    /// The same for the worst foot against its pedal (or floor) goal, metres.
-    pub foot_err_m: f64,
     /// **The throttle this body's seat step sent the car**, `[0, 1]` — what the
     /// right foot presses. Recorded from the same `VehicleControls` the car was
     /// given, so the pedal and the engine cannot disagree. Not folded: it is a
@@ -1296,6 +1319,7 @@ impl Default for BoardingState {
             door: Uuid::nil(),
             hand_weight: 0.0,
             hand_side: 1,
+            handle_weight: 0.0,
             take_local: Vec3d::ZERO,
             back_local: Vec3d::ZERO,
             ground_y: 0.0,
@@ -1309,8 +1333,6 @@ impl Default for BoardingState {
             mark_s: -1.0,
             dip_m: 0.0,
             door_deg: 0.0,
-            hand_err_m: 0.0,
-            foot_err_m: 0.0,
             throttle_in: 0.0,
             brake_in: 0.0,
             bail: false,
@@ -1507,7 +1529,17 @@ pub fn boarding_state_bytes(world: &EcsWorld) -> Vec<u8> {
 ///
 /// `BOARDING opening  SEAT driver  HAND 0.014 m  DOOR 32 deg`, and nothing at
 /// all while a body is neither boarding nor driving.
-pub fn boarding_readout(b: &BoardingState) -> Option<String> {
+///
+/// `hand_m` and `pedal_m` are RESIDUALS the host measured — the posed hand
+/// joint against the door handle (or the rim), the worst posed foot against its
+/// pedal — never the IK solver's own report about the target it was handed
+/// (VEH3d audit: the row used to print the solver's `reach_error`, which read
+/// `0.000` whatever the drawn arm was doing). `None` prints nothing.
+pub fn boarding_readout(
+    b: &BoardingState,
+    hand_m: Option<f64>,
+    pedal_m: Option<f64>,
+) -> Option<String> {
     if b.phase == BoardPhase::Idle {
         return None;
     }
@@ -1516,11 +1548,11 @@ pub fn boarding_readout(b: &BoardingState) -> Option<String> {
         b.phase.name(),
         b.seat_index().name()
     );
-    if b.hand_weight > 0.0 {
-        row.push_str(&format!("  HAND {:.3} m", b.hand_err_m));
+    if let Some(h) = hand_m.filter(|_| b.hand_weight > 0.0) {
+        row.push_str(&format!("  HAND {h:.3} m"));
     }
-    if b.phase == BoardPhase::Driving {
-        row.push_str(&format!("  PEDAL {:.3} m", b.foot_err_m));
+    if let Some(p) = pedal_m.filter(|_| b.phase == BoardPhase::Driving) {
+        row.push_str(&format!("  PEDAL {p:.3} m"));
     }
     if !b.door.is_nil() {
         row.push_str(&format!("  DOOR {:.0} deg", b.door_deg));

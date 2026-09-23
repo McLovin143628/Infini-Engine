@@ -682,6 +682,82 @@ impl RuntimeSim {
         self.skeletons.get(&guid)
     }
 
+    /// **A joint of `who`'s POSED skeleton, in the world** (VEH3d audit) — the
+    /// evaluated pose after every pass (the animation, the hand and foot IK,
+    /// the grip curl, the correction re-drive), which is the pose
+    /// `SkinnedRegistry::resolve_skinned` hands the GPU. `None` for a body with
+    /// no rig, no pose this step, or no bone in `role` on `side`.
+    pub fn posed_joint(
+        &self,
+        who: Uuid,
+        role: inf_anim::BoneRoleKind,
+        side: inf_anim::BoneSide,
+    ) -> Option<DVec3> {
+        let world = self.world();
+        let skel = world
+            .entity_of(who)
+            .and_then(|e| world.world().get::<inf_ecs::components::SkeletalMesh>(e))
+            .and_then(|m| m.skeleton)?;
+        let rig = self.skeleton_of(skel)?;
+        let j = rig.role_index().first(role, side)?;
+        let posed = inf_ecs::pose::evaluated_pose(world, who)?;
+        if posed.skeleton != skel || posed.pose.len() != rig.skeleton.len() {
+            return None;
+        }
+        let to_world = inf_ecs::pose::model_to_world_of(world, who)?;
+        let g = inf_anim::pose::global_transforms(&rig.skeleton, &posed.pose);
+        let p = g.get(j as usize)?.to_scale_rotation_translation().2;
+        Some(to_world.transform_point3(DVec3::new(f64::from(p.x), f64::from(p.y), f64::from(p.z))))
+    }
+
+    /// **How far `who`'s POSED hands and feet are from the sockets they belong
+    /// on this step**, metres (VEH3d audit) — the number `hero.csv`'s boarding
+    /// columns and the HUD row carry.
+    ///
+    /// Joint against socket, both read NOW: the joints off [`posed_joint`]
+    /// (the drawn pose), the sockets off
+    /// [`inf_physics::d3::boarding::board_sockets`] (the live chassis, the door's
+    /// own body, the rack). The implementer's columns carried the IK solver's
+    /// `reach_error` instead — the chain's end against the target the boarding
+    /// module had handed it — which is the solver grading its own homework and
+    /// read 0.0 mm on every row whatever the drawn arm was doing. With the reach
+    /// solve's weight forced to 0 the gate's fixture arms read 723 / 796 mm, and
+    /// the old columns would still have read 0.0.
+    ///
+    /// A pair (two grips, two pedals) takes the better of the two hand-to-grip
+    /// pairings and reports its WORSE hand; a handle is measured on the hand
+    /// the machine put on it (`hand_side`), never "whichever is nearer".
+    ///
+    /// [`posed_joint`]: Self::posed_joint
+    pub fn boarding_residuals(&self, who: Uuid) -> Option<BoardResiduals> {
+        use inf_anim::{BoneRoleKind as R, BoneSide as S};
+        let shoulders = self
+            .posed_joint(who, R::UpperArm, S::Left)
+            .zip(self.posed_joint(who, R::UpperArm, S::Right));
+        let sockets = inf_physics::d3::boarding::board_sockets(
+            self.world(),
+            self.bridge3d(),
+            who,
+            shoulders,
+        )?;
+        let hands = [
+            self.posed_joint(who, R::Hand, S::Left),
+            self.posed_joint(who, R::Hand, S::Right),
+        ];
+        let feet = [
+            self.posed_joint(who, R::Foot, S::Left),
+            self.posed_joint(who, R::Foot, S::Right),
+        ];
+        Some(BoardResiduals {
+            handle_m: sockets
+                .handle
+                .and_then(|h| hands[usize::from(sockets.hand_side != 0)].map(|j| (j - h).length())),
+            grips_m: sockets.grips.and_then(|g| paired(&hands, g)),
+            feet_m: sockets.feet.and_then(|f| paired(&feet, f)),
+            sockets,
+        })
+    }
+
     /// Seed the resolvable `.inf_anim` clips a state machine's states play
     /// (P24.1) — the runtime mirror of `SimSession::set_pose_clips`.
     pub fn set_pose_clips(&mut self, clips: BTreeMap<Uuid, AnimClip>) {
@@ -4914,4 +4990,29 @@ fn value_as_f64(v: &Value) -> Option<f64> {
         Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
         _ => None,
     }
+}
+
+/// What [`RuntimeSim::boarding_residuals`] measured (VEH3d audit): the sockets,
+/// and the posed joints' distances to them, metres. `None` where the phase has
+/// no such socket or the rig no such joint.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BoardResiduals {
+    /// The sockets the residuals are against.
+    pub sockets: inf_physics::d3::boarding::BoardSockets,
+    /// The handle hand's posed joint to the door handle.
+    pub handle_m: Option<f64>,
+    /// The worse hand of the better hand-to-grip pairing.
+    pub grips_m: Option<f64>,
+    /// The worse foot of the better foot-to-pedal pairing.
+    pub feet_m: Option<f64>,
+}
+
+/// Two joints against two sockets: the better pairing's worse distance.
+fn paired(joints: &[Option<DVec3>; 2], at: [DVec3; 2]) -> Option<f64> {
+    let (Some(a), Some(b)) = (joints[0], joints[1]) else {
+        return None;
+    };
+    let straight = (a - at[0]).length().max((b - at[1]).length());
+    let crossed = (a - at[1]).length().max((b - at[0]).length());
+    Some(straight.min(crossed))
 }

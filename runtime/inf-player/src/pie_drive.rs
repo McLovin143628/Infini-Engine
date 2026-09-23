@@ -1603,14 +1603,19 @@ impl HeroLog {
         // All seven read `-` / `-1` / `0` for a session in which nobody boards,
         // which is every session before this wave.
         let (board_phase, board_seat, hand_m, hinge_deg, wheel_m, pedal_m, rim_deg) = guid
-            .and_then(|g| sim.world().entity_of(g))
-            .and_then(|e| {
+            .and_then(|g| sim.world().entity_of(g).map(|e| (g, e)))
+            .and_then(|(g, e)| {
                 sim.world()
                     .world()
                     .get::<inf_ecs::components::CharacterMovement>(e)
-                    .map(|cm| (cm.runtime.boarding, cm.runtime.seat))
+                    .map(|cm| (cm.runtime.boarding, cm.runtime.seat, g))
             })
-            .map(|(b, seat)| {
+            .map(|(b, seat, g)| {
+                // The POSED joints against the live sockets (VEH3d audit) —
+                // never the IK solver's `reach_error` on its own target, which
+                // these columns carried and which read 0.0 whatever the drawn
+                // arm was doing.
+                let res = sim.boarding_residuals(g);
                 use inf_ecs::boarding::BoardPhase;
                 let holding = b.hand_weight >= 0.999;
                 let phase = if b.phase == BoardPhase::Idle && seat.is_seated() {
@@ -1651,22 +1656,16 @@ impl HeroLog {
                         phase.name().to_string()
                     },
                     seat_name,
-                    if on_door && holding {
-                        b.hand_err_m
-                    } else {
-                        -1.0
-                    },
+                    res.and_then(|r| r.handle_m)
+                        .filter(|_| on_door && b.handle_weight >= 0.999)
+                        .unwrap_or(-1.0),
                     b.door_deg,
-                    if phase == BoardPhase::Driving && holding {
-                        b.hand_err_m
-                    } else {
-                        -1.0
-                    },
-                    if matches!(phase, BoardPhase::Driving | BoardPhase::Seated) {
-                        b.foot_err_m
-                    } else {
-                        -1.0
-                    },
+                    res.and_then(|r| r.grips_m)
+                        .filter(|_| phase == BoardPhase::Driving && holding)
+                        .unwrap_or(-1.0),
+                    res.and_then(|r| r.feet_m)
+                        .filter(|_| matches!(phase, BoardPhase::Driving | BoardPhase::Seated))
+                        .unwrap_or(-1.0),
                     rim,
                 )
             })
