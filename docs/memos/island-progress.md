@@ -40618,3 +40618,62 @@ Carried besides the ten above: **11.** the `bail` flag is not folded (it rides
 stays up while the carjack runs; **13.** the saloon's primitive body is opaque,
 so in the seated frames the hands on the rim are behind the bodywork and are
 read off the columns, not seen.
+
+## WAVE VEH3d — THE AUDIT (2026-09-23)
+
+### audit: the columns graded the solver; the inner handle was never held
+
+Every gate arm that measures a hand or a foot reads the evaluated pose's JOINT —
+forcing the reach solve's weight to 0 reds them at 723 / 796 / 989 mm (fixture)
+and 104.55 / 471.40 mm (MetaHuman); skipping the foot pass reds the pedals at
+1 068 / 906 mm. But `hero.csv`'s `hand_m / wheel_m / pedal_m` and the HUD's
+`HAND` / `PEDAL` carried the IK solver's own `reach_error` against the target the
+boarding module handed it, and four fixture arms measured the joint against the
+REQUEST's target. Both now read the posed joint against sockets recomputed from
+the live car (`RuntimeSim::boarding_residuals`, `d3::boarding::board_sockets`).
+
+Measured that way, the inner handle the wave reported at 46.2 / 35.7 mm was never
+held: its socket sat 0.655 m from the near shoulder with the door SHUT (arm
+0.54 m), the reach faded the request to zero, and the number was the other hand
+on the rim. The inner pull is now derived from the SEAT (0.25 m ahead of the
+H-point, 0.20 m above the cushion) and the reach from the rig's own arm; at weight
+1 it reads 0.00 mm on the rows a hand holds (fixture: the last 5.5° of the pull
+and the first 2.2° of the push; MetaHuman 14 rows; the shipped player's demo 310
+handle rows, worst 0.5 mm). The first ~60° of the pull is the motor's alone:
+carried.
+
+### audit: built, not carried
+
+* **Near riders**: a `Near` car that is driving draws a seated body in its
+  driver's seat and a quarter a passenger (`crowd::spawn_rider`, the traffic's
+  `seat_riders`, a pelvis pin in the pose step). 20 occupied Near cars on the
+  08:30 town, pelvis 0.00 mm off the cushion, head ≥ 0.156 m under the roof;
+  0.420 ms release for 32 (13.1 µs each) of a 0.5 ms budget. `island_gate`'s pose
+  accounting re-blessed with that cause.
+* **Edges on every host**: the editor's Simulate (`SimSession::tick`) had its own
+  accumulator and still dropped zero-step presses and doubled two-step releases;
+  the weapon wheel was lost / doubled on both hosts. Mirrored and armed on both.
+* **The boarding camera** is anchored on the car (the claim's target no longer
+  rides the seat warp: `entering` 0.3354 → 0.0005 m a step) and the director
+  remembers its holder's blend on release (CHAR1c's vehicle entry 8.8 → 5.5 % of
+  the move).
+* **The camera table reaches the running rig**: PIE reads beside
+  `INF_PIE_LEVEL_PATH` (the editor names its open level on the spawn), the cook
+  copies `camera.toml` beside the pack and `--pack` reads it, and the ADS blend's
+  new rig starts from the level table (`LevelCameraRes`) — running boom 6.516 m on
+  both, before and after an aim.
+* **Preview doors**: `INF_PIE_BOARD_HOLD=seconds[@metres]` freezes each boarding
+  beat with a close-up from the reaching side; `INF_PIE_CUTAWAY=alpha` draws the
+  seated car translucent. Neither changes a step (a twin fold is byte-identical).
+* The census boards (10 boardings, 3 carjacks, 11 seats, busiest 1);
+  `capsule_clear` has its arm (the car's own open door); `projector_mirror` pins
+  all 19 sections as the statement that appends them.
+
+### carried, by name
+
+The knee (not a sign: the walk generator and two authored clips author the
+negative flex; the template elbow is inverted too; re-bless of three `.inf_skel`
+and their clips, no schema); the motor-only first 60° of the inner pull; the wrist
+(not the palm) on a handle; no drawn steering wheel; 6 of 268 demo pedal rows at
+37.8 mm on the first seated step; mouse-look deltas on a zero-step frame; riders
+in a bench posture. Report: `campaign-briefs/veh3d-audit-report.md`.
