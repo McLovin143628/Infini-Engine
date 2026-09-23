@@ -1683,6 +1683,15 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
     };
     let manifest_path = out_dir.join(MANIFEST_FILE);
     std::fs::write(&manifest_path, manifest.to_toml()?)?;
+    // **The level's camera table rides BESIDE the pack** (VEH3d audit): a
+    // `--pack` boot reads `camera.toml` from the pack's own directory, and until
+    // this line nothing put one there, so a shipped game ran the ALS defaults
+    // whatever the editor's "Save camera to level" wrote. Loose text, like
+    // `player.toml`: a camera is not sim state and has no home in the pack.
+    let camera = project.content_root().join("camera.toml");
+    if camera.is_file() {
+        std::fs::copy(&camera, out_dir.join("camera.toml"))?;
+    }
 
     Ok(CookReport {
         project_name: project.manifest.name.clone(),

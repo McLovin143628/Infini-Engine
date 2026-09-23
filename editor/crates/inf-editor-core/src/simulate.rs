@@ -119,6 +119,10 @@ pub struct SimInput {
     axes: BTreeMap<String, f32>,
 }
 
+/// The one AXIS that is an edge: a wheel notch switches the weapon once, so a
+/// frame's tick carries it like a press (VEH3d audit).
+const WHEEL: &str = inf_ecs::movement::actions::WEAPON_SWITCH;
+
 impl SimInput {
     /// An input state with the given keys/actions held down and no axes.
     pub fn with_down<I, S>(keys: I) -> Self
@@ -307,6 +311,10 @@ pub struct SimSession {
     prev_down: BTreeSet<String>,
     /// Rising edges pending this fixed step (consumed after the first step).
     just_pressed: BTreeSet<String>,
+    /// **Edges a frame that ran no step is still owed** (VEH3d audit) — MIRROR
+    /// of `RuntimeSim::frame_edges`: pressed, released, and the weapon wheel's
+    /// notch (an edge wearing an axis).
+    frame_edges: (BTreeSet<String>, BTreeSet<String>, f32),
     /// Falling edges pending this fixed step (Wave 3 input events): actions
     /// released since the previous tick (`prev_down − down`).
     just_released: BTreeSet<String>,
@@ -663,6 +671,7 @@ impl SimSession {
             input: SimInput::default(),
             prev_down: BTreeSet::new(),
             just_pressed: BTreeSet::new(),
+            frame_edges: (BTreeSet::new(), BTreeSet::new(), 0.0),
             just_released: BTreeSet::new(),
             holds: inf_input::HoldClock::new(),
             press_threshold_s: inf_ecs::movement::DEFAULT_PRESS_THRESHOLD_S,
@@ -748,6 +757,19 @@ impl SimSession {
     /// the current held-key state.
     pub fn tick(&mut self, doc: &mut SceneDoc, frame_dt: f64, input: SimInput) {
         self.set_input(input);
+        // **A press is seen by exactly ONE step** (VEH3d audit) — MIRROR of
+        // `RuntimeSim::run_frame`, which wave VEH3d fixed and this host did not:
+        // a frame that runs no step (an editor viewport faster than 60 Hz)
+        // dropped the press it carried, and a frame that runs two gave its
+        // RELEASE to both (a tapped crouch toggled twice). Edges now wait for the
+        // next step, and only the first step of a frame sees them — the wheel's
+        // notch with them.
+        let (p, r, wheel) = std::mem::take(&mut self.frame_edges);
+        self.just_pressed.extend(p);
+        self.just_released.extend(r);
+        if wheel != 0.0 && self.input.axis(WHEEL) == 0.0 {
+            self.input.axes.insert(WHEEL.to_string(), wheel);
+        }
         // **A paused session accumulates nothing** (I5 audit, A2) — MIRROR of
         // `RuntimeSim::run_frame`, and it has to be one or the mirror is only
         // half built: `step_once` froze and this did not, so a host driving
@@ -760,7 +782,19 @@ impl SimSession {
             return;
         }
         let n = self.stepper.accumulate(frame_dt);
-        for _ in 0..n {
+        if n == 0 {
+            self.frame_edges = (
+                std::mem::take(&mut self.just_pressed),
+                std::mem::take(&mut self.just_released),
+                self.input.axis(WHEEL),
+            );
+        }
+        for i in 0..n {
+            if i > 0 {
+                self.just_pressed.clear();
+                self.just_released.clear();
+                self.input.axes.remove(WHEEL);
+            }
             self.fixed_step(doc);
         }
     }

@@ -118,11 +118,6 @@ pub fn step_locomotion_camera(
     // so the camera's pivot and the character's feet cannot disagree.
     let drop = inf_ecs::movement::feet_offset_m(&cm, collider.as_ref());
     let mut feet = centre - DVec3::Y * drop;
-    // The BODY's own feet, kept before the roof rule below: the boarding camera
-    // frames the body, and `EnteringIK` is `Driving` with a seat — reading the
-    // roof there moved the claim's pivot 2.57 m in one step, a cut the CHAR1c
-    // gate's vehicle-entry arm caught.
-    let body_feet = feet;
     // **THE DRIVE CAMERA HANGS OFF THE ROOF, WHERE IT ALWAYS DID** (wave VEH3d).
     //
     // The pivot is "the subject's feet plus a ratio of its height", and until
@@ -487,7 +482,7 @@ pub fn step_locomotion_camera(
     // `Driving` it stops being pushed, so the director blends from it to the
     // drive block — which is the blended vehicle-entry the CHAR1c director was
     // built for.
-    if let Some(pose) = boarding_camera_pose(cam, &cm, body_feet, bridge, &exclude) {
+    if let Some(pose) = boarding_camera_pose(world, cam, &cm, bridge, &exclude) {
         cam.director
             .request(inf_ecs::camera::CameraRequest::blended(
                 inf_ecs::camera::CameraLayer::Override,
@@ -501,7 +496,7 @@ pub fn step_locomotion_camera(
 }
 
 /// How long the boarding camera takes to arrive, and to leave, seconds.
-pub const BOARDING_CAMERA_BLEND_S: f64 = 0.45;
+pub const BOARDING_CAMERA_BLEND_S: f64 = 0.8;
 
 /// How far behind the boarding body the camera sits, metres.
 pub const BOARDING_CAMERA_BACK_M: f64 = 2.6;
@@ -513,30 +508,47 @@ pub const BOARDING_CAMERA_UP_M: f64 = 1.9;
 pub const BOARDING_CAMERA_PITCH_DEG: f64 = -18.0;
 
 /// **Where the camera goes while its subject boards a car** (wave VEH3d) —
-/// behind the body and above it, looking along the body's own facing (which,
-/// from the end of the approach on, is locked to the flank's inward normal:
-/// the camera looks AT the door the hand is on).
+/// behind the boarding's own STANCE NODE and above it, looking along the
+/// stance's facing (the flank's inward normal while getting in: the camera
+/// looks AT the door the hand is on; the car's heading while getting out).
+///
+/// **Anchored on the CAR, never on the body** (VEH3d audit, priority f'). The
+/// first cut framed the body's feet and yaw, so the claim's TARGET rode the
+/// seat warp and the approach's turn: measured 0.335 m of camera in one step
+/// through `EnteringIK` (5.8x the walking control's worst step) and 12.2 m of
+/// camera path for a 5.7 m move. The take node (getting in) and the landing
+/// (getting out) are fixed in the chassis frame from the press on, so the only
+/// thing that moves the camera is the director's own blend.
 ///
 /// `None` when the subject is not boarding. Swept like the rig's own boom, so
 /// a car parked against a wall does not put the camera inside the wall; a
 /// pivot that is itself inside something answers `None` and the director keeps
 /// whatever it had.
 fn boarding_camera_pose(
+    world: &EcsWorld,
     cam: &LocomotionCamera,
     cm: &CharacterMovement,
-    feet: DVec3,
     bridge: &mut PhysicsBridge3D,
     exclude: &std::collections::BTreeSet<ColliderId3D>,
 ) -> Option<CameraPose> {
     use inf_ecs::boarding::BoardPhase;
-    let phase = cm.runtime.boarding.phase;
+    let b = cm.runtime.boarding;
+    let phase = b.phase;
     if matches!(
         phase,
         BoardPhase::Idle | BoardPhase::Driving | BoardPhase::Jacked
     ) {
         return None;
     }
-    let yaw = cm.runtime.body_yaw_deg;
+    let car = super::boarding::car_frame(world, bridge, b.vehicle, false)?;
+    let local = if matches!(phase, BoardPhase::Exiting | BoardPhase::ClosingDoor) {
+        b.back_local
+    } else {
+        b.take_local
+    };
+    let node = car.world(local);
+    let feet = DVec3::new(node.x, b.ground_y, node.z);
+    let yaw = b.stance_yaw_deg;
     let (_, _, forward) = inf_ecs::camera::basis(yaw, BOARDING_CAMERA_PITCH_DEG);
     let pivot = feet + DVec3::Y * BOARDING_CAMERA_UP_M;
     let want = pivot - forward * BOARDING_CAMERA_BACK_M;
@@ -756,6 +768,24 @@ pub fn step_camera_with_requests(
 ) -> Option<CameraPose> {
     for r in inf_ecs::camera::take_camera_requests(world) {
         cam.director.request(r);
+    }
+    // **A subject with NO rig publishes the table the host is running** (VEH3d
+    // audit), so a rig created mid-session — the weapon's ADS blend writes one
+    // key through `set_camera_rig_value` — starts from the level's
+    // `camera.toml` and not from the defaults. See
+    // `inf_ecs::camera::LevelCameraRes`. Written only when it differs.
+    let rigged = world
+        .entity_of(subject)
+        .is_some_and(|e| world.world().get::<inf_ecs::camera::CameraRig>(e).is_some());
+    if !rigged
+        && world
+            .world()
+            .get_resource::<inf_ecs::camera::LevelCameraRes>()
+            .is_none_or(|r| r.0 != cam.tuning)
+    {
+        world
+            .world_mut()
+            .insert_resource(inf_ecs::camera::LevelCameraRes(cam.tuning));
     }
     step_locomotion_camera(world, bridge, cam, subject, dt)
 }

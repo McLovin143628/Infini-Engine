@@ -173,3 +173,35 @@ fn a_graphless_pcg_payload_is_not_an_unreadable_edge() {
         report.blocking
     );
 }
+
+/// **The level's camera table rides beside the pack** (VEH3d audit, priority
+/// g'). A `--pack` boot reads `camera.toml` from the pack's own directory, and
+/// until this wave nothing put one there: the editor's "Save camera to level"
+/// wrote a file the shipped game never read. A table saved beside the level
+/// through the write half is in the cook's output, byte for byte.
+///
+/// **The mutation** (run in the audit): the copy deleted from `cook` — the
+/// output has no table.
+#[test]
+fn a_cook_carries_the_level_camera_table_beside_the_pack() {
+    let dir = tempfile::tempdir().unwrap();
+    let proj = dir.path().join("proj");
+    make_platformer_project(&proj);
+    let level = proj.join("Content").join("Platformer.inf_lvl");
+    let mut t = inf_ecs::camera::CameraTuning::default();
+    assert!(t.set("walk.arm_length_m", 6.5));
+    let written = inf_ecs::camera::write_camera_beside(&level, &t).expect("the write half");
+    let out = dir.path().join("out");
+    let report = cook(&proj, &out, &CookOptions::default()).expect("cook");
+    assert!(!report.has_blocking(), "{:?}", report.blocking);
+    let shipped = out.join("camera.toml");
+    assert!(
+        shipped.is_file(),
+        "the cook left no camera table beside the pack"
+    );
+    assert_eq!(
+        std::fs::read(&shipped).unwrap(),
+        std::fs::read(&written).unwrap(),
+        "the table beside the pack is not the one the editor saved"
+    );
+}

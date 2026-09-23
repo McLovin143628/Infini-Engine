@@ -124,6 +124,10 @@ pub struct RuntimeInput {
     axes: BTreeMap<String, f32>,
 }
 
+/// The one AXIS that is an edge: a wheel notch switches the weapon once, so
+/// `run_frame` carries it like a press (VEH3d audit).
+const WHEEL: &str = inf_ecs::movement::actions::WEAPON_SWITCH;
+
 impl RuntimeInput {
     /// An input state with the given actions/keys held and no axes.
     pub fn with_down<I, S>(keys: I) -> Self
@@ -290,6 +294,9 @@ pub struct RuntimeSim {
     /// for the next frame that does, `(pressed, released)`. See
     /// [`run_frame`](Self::run_frame).
     frame_edges: (BTreeSet<String>, BTreeSet<String>),
+    /// The weapon wheel's notch a frame that ran no step still owes (VEH3d
+    /// audit) — see `run_frame`.
+    frame_wheel: f32,
     /// Wave 3 event dispatchers (MIRROR of `SimSession::bindings`): `(source
     /// entity, event name) → {listener entity → handler custom-event name}`.
     bindings: BTreeMap<(i64, String), BTreeMap<i64, String>>,
@@ -588,6 +595,7 @@ impl RuntimeSim {
             press_threshold_s: inf_ecs::movement::DEFAULT_PRESS_THRESHOLD_S,
             sim_paused: false,
             frame_edges: (BTreeSet::new(), BTreeSet::new()),
+            frame_wheel: 0.0,
             bindings: BTreeMap::new(),
             dispatch_queue: VecDeque::new(),
             drained_overlaps: Vec::new(),
@@ -1317,6 +1325,14 @@ impl RuntimeSim {
         let (p, r) = std::mem::take(&mut self.frame_edges);
         self.just_pressed.extend(p);
         self.just_released.extend(r);
+        // …and the weapon wheel's notch (VEH3d audit): an EDGE wearing an axis.
+        // `MovementIntent::from_actions` reads its sign per step, so a notch on
+        // a frame that ran no step was lost and one on a frame that ran two
+        // switched the weapon twice.
+        let wheel = std::mem::take(&mut self.frame_wheel);
+        if wheel != 0.0 && self.input.axis(WHEEL) == 0.0 {
+            self.input.axes.insert(WHEEL.to_string(), wheel);
+        }
         // **A paused sim accumulates nothing** (I5), rather than accumulating
         // and then declining to spend it: an accumulator that filled while a
         // menu was open would empty itself in one burst the moment it closed,
@@ -1335,11 +1351,13 @@ impl RuntimeSim {
                 std::mem::take(&mut self.just_pressed),
                 std::mem::take(&mut self.just_released),
             );
+            self.frame_wheel = self.input.axis(WHEEL);
         }
         for i in 0..n {
             if i > 0 {
                 self.just_pressed.clear();
                 self.just_released.clear();
+                self.input.axes.remove(WHEEL);
             }
             self.fixed_step();
         }

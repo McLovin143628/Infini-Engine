@@ -174,6 +174,11 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// `console=none` on its `PIE session ready` stderr line, and
 /// `a_pie_player_is_spawned_with_no_console` reads that back off a real
 /// subprocess.
+/// The variable a PIE player reads the open level's path from (VEH3d audit) —
+/// `inf_player::PIE_LEVEL_ENV`, spelled here because this crate cannot name
+/// that one; `veh3d_gate` pins the two equal.
+pub const PIE_LEVEL_ENV: &str = "INF_PIE_LEVEL_PATH";
+
 fn player_command(player_bin: &Path) -> Command {
     let mut cmd = Command::new(player_bin);
     cmd.arg("--pie");
@@ -189,7 +194,16 @@ impl PieSession {
     /// Spawn `player_bin --pie`, wire the reader threads, and complete the
     /// version-checked `Ready` handshake (no content sent yet).
     fn spawn_ready(player_bin: &Path) -> Result<Self, PieError> {
-        let mut child = player_command(player_bin)
+        Self::spawn_ready_env(player_bin, None)
+    }
+
+    /// [`Self::spawn_ready`], with the open level named on the child.
+    fn spawn_ready_env(player_bin: &Path, level: Option<&Path>) -> Result<Self, PieError> {
+        let mut cmd = player_command(player_bin);
+        if let Some(level) = level {
+            cmd.env(PIE_LEVEL_ENV, level);
+        }
+        let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -283,7 +297,20 @@ impl PieSession {
     /// wait for `Loaded`. The player builds the world exactly like the shipping
     /// pack path — the PIE == shipping guarantee.
     pub fn spawn_scene(player_bin: &Path, payload: &ScenePayload) -> Result<Self, PieError> {
-        let mut session = Self::spawn_ready(player_bin)?;
+        Self::spawn_scene_for_level(player_bin, payload, None)
+    }
+
+    /// [`Self::spawn_scene`], naming the level the editor has open in
+    /// [`PIE_LEVEL_ENV`] on the child (VEH3d audit): the payload carries no
+    /// camera, so the player reads the level's `camera.toml` from beside that
+    /// path — the file the editor's Simulate reads and its "Save camera to
+    /// level" writes. `None` (an unsaved level) sets nothing.
+    pub fn spawn_scene_for_level(
+        player_bin: &Path,
+        payload: &ScenePayload,
+        level: Option<&Path>,
+    ) -> Result<Self, PieError> {
+        let mut session = Self::spawn_ready_env(player_bin, level)?;
         session.send(&EditorToPlayer::LoadScene(Box::new(payload.clone())))?;
         session.await_loaded()
     }

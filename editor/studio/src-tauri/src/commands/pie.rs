@@ -246,7 +246,14 @@ pub async fn pie_start(
     if let Some(advice) = inf_editor_core::pie::missing_player_advice(&bin) {
         return Err(advice);
     }
-    let session = PieSession::spawn_scene(&bin, &payload)
+    // The open level, so the player reads the `camera.toml` beside it (VEH3d
+    // audit): the payload carries no camera table.
+    let level = scene
+        .current_level_path
+        .lock()
+        .map_err(|_| "scene path lock poisoned")?
+        .clone();
+    let session = PieSession::spawn_scene_for_level(&bin, &payload, level.as_deref())
         .map_err(|e| format!("could not start the player ({}): {e}", bin.display()))?;
 
     let embedded = mode == "embedded" && cfg!(windows);

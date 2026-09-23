@@ -1301,6 +1301,13 @@ pub struct CameraDirector {
     /// Whether the last [`resolve`](Self::resolve) was a **cut**.
     cut: bool,
     seeded: bool,
+    /// **The current holder's own blend length**, seconds (VEH3d audit) — what
+    /// a release blends back over. `len_s` is zeroed the step a blend settles,
+    /// so "the last winner's length" the release rule names was forgotten by
+    /// then and every release took [`DEFAULT_RELEASE_BLEND_S`]: measured on the
+    /// boarding claim, the hand-back to the drive block moved the camera 0.368 m
+    /// in one step whatever the claim's own blend said.
+    holder_len_s: f64,
 }
 
 impl CameraDirector {
@@ -1345,7 +1352,13 @@ impl CameraDirector {
             // The gameplay rig's own claim is implicit and blends back over the
             // *last winner's* length, which is what makes a shot's exit as smooth
             // as its entrance without a second number on the request.
-            None => (None, gameplay, self.len_s.max(DEFAULT_RELEASE_BLEND_S)),
+            None => (
+                None,
+                gameplay,
+                self.len_s
+                    .max(self.holder_len_s)
+                    .max(DEFAULT_RELEASE_BLEND_S),
+            ),
         };
         self.requests.clear();
 
@@ -1366,6 +1379,7 @@ impl CameraDirector {
             self.from = self.last;
             self.elapsed_s = 0.0;
             self.len_s = blend_s.max(0.0);
+            self.holder_len_s = if key.is_some() { self.len_s } else { 0.0 };
             self.cut = self.len_s <= 0.0;
             self.active = key;
         } else if dt.is_finite() && dt > 0.0 {
@@ -2359,6 +2373,14 @@ pub fn set_view_mode(world: &mut crate::EcsWorld, guid: uuid::Uuid, first_person
     }
 }
 
+/// **The table the host's camera is running** (VEH3d audit) — published by the
+/// locomotion camera step for a subject with no [`CameraRig`], so the one door
+/// that creates a rig mid-session ([`set_camera_rig_value`], the weapon's ADS
+/// blend) starts it from the level's `camera.toml` rather than from the
+/// defaults. Runtime only; never folded, never saved.
+#[derive(bevy_ecs::prelude::Resource, Clone, Copy, Debug, Default, PartialEq)]
+pub struct LevelCameraRes(pub CameraTuning);
+
 /// **Write one of `guid`'s rig values by name.**
 ///
 /// Answers whether it landed. A character with no rig **gets one** — the
@@ -2378,7 +2400,19 @@ pub fn set_camera_rig_value(
     if let Some(mut rig) = w.get_mut::<CameraRig>(e) {
         return rig.set(name, value);
     }
-    let mut rig = CameraRig::default();
+    // **Built on the LEVEL's table, not the defaults** (VEH3d audit). The
+    // weapon's ADS blend writes one key through here, and a subject with no rig
+    // got `CameraRig::default()` -- whose WHOLE table then overrode the one the
+    // level's `camera.toml` gave the session, for the rest of the session, the
+    // moment the hero aimed. The host publishes the table it runs
+    // (`LevelCameraRes`) and a new rig starts from it.
+    let mut rig = CameraRig {
+        tuning: w
+            .get_resource::<LevelCameraRes>()
+            .map(|r| r.0)
+            .unwrap_or_default(),
+        ..CameraRig::default()
+    };
     if !rig.set(name, value) {
         return false;
     }

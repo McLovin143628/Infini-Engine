@@ -441,6 +441,53 @@ pub fn run_headless(args: &Args) -> ExitCode {
     }
 }
 
+/// **Which `camera.toml` a boot reads, and what it says** (VEH3d audit) —
+/// `None` for the demo world. A `--level` boot reads the file beside the level;
+/// a `--pack` boot the one beside the pack (the cook copies it there). See
+/// [`pie_camera_table`] for the PIE boot.
+pub fn camera_table_for(world: &WorldChoice) -> Option<inf_ecs::camera::CameraTuning> {
+    match world {
+        WorldChoice::Level(path) => Some(input::load_camera_beside(path)),
+        WorldChoice::Pack(path) => {
+            let beside = if path.is_dir() {
+                path.join(DEFAULT_PACK_FILE)
+            } else {
+                path.clone()
+            };
+            Some(input::load_camera_beside(&beside))
+        }
+        WorldChoice::Demo => None,
+    }
+}
+
+/// The pack file name a `--pack DIR` boot looks for (the cook's own default).
+const DEFAULT_PACK_FILE: &str = "content.ipack";
+
+/// **The PIE boot's camera table** (VEH3d audit): the level the editor has open
+/// names itself in [`PIE_LEVEL_ENV`] when it spawns the player, and the player
+/// reads the `camera.toml` beside it — the same file the editor's Simulate and
+/// its "Save camera to level" read and write. `None` when the variable is
+/// absent (an unsaved level, or a host that is not the editor).
+pub fn pie_camera_table() -> Option<inf_ecs::camera::CameraTuning> {
+    pie_camera_table_from(
+        std::env::var_os(PIE_LEVEL_ENV)
+            .as_deref()
+            .map(std::path::Path::new),
+    )
+}
+
+/// [`pie_camera_table`] for an explicit level path — the reader, apart from the
+/// environment, for a gate.
+pub fn pie_camera_table_from(
+    level: Option<&std::path::Path>,
+) -> Option<inf_ecs::camera::CameraTuning> {
+    level.map(input::load_camera_beside)
+}
+
+/// The environment variable the editor names its open level in when it spawns
+/// a PIE player — see [`pie_camera_table`].
+pub const PIE_LEVEL_ENV: &str = "INF_PIE_LEVEL_PATH";
+
 /// Windowed path: open a window and play. Human-verified (needs a GPU + display).
 pub fn run_windowed(args: &Args) -> ExitCode {
     let (mut built, terrain_content) = match build_world(args) {
@@ -484,8 +531,14 @@ pub fn run_windowed(args: &Args) -> ExitCode {
     //    and has no home in the scene schema, so its tunables live as text an
     //    author owns and a reviewer can read; the character wizard writes one,
     //    and a level with none gets the ported ALS defaults.
-    if let WorldChoice::Level(path) = &args.world {
-        sim.camera_mut().tuning = input::load_camera_beside(path);
+    //
+    //    **And the shipped pack reads it too** (VEH3d audit): `inf_packager::cook`
+    //    copies the content root's `camera.toml` beside the pack, and a
+    //    `--pack` boot reads it from there. Before, only a `--level` dev boot and
+    //    the editor's Simulate ever read the file the editor's "Save camera to
+    //    level" writes — the shipped game and PIE ran the defaults.
+    if let Some(t) = camera_table_for(&args.world) {
+        sim.camera_mut().tuning = t;
     }
     attach_cell_streaming(&mut sim, &partition, pcg_ctx);
     attach_terrain_streaming(&mut sim, &terrain_content);
@@ -1419,6 +1472,13 @@ pub fn sim_from_payload(payload: &ScenePayload) -> Result<PayloadSim, String> {
                 .collect(),
         };
         attach_terrain_streaming(&mut sim, &content);
+    }
+    // The level's camera table (VEH3d audit): the payload carries no camera,
+    // so a PIE session ran the ALS defaults whatever the level's `camera.toml`
+    // said. The editor names the open level on the spawn; a host that does not
+    // (every gate, every trace) leaves the table where it was.
+    if let Some(t) = pie_camera_table() {
+        sim.camera_mut().tuning = t;
     }
     Ok(PayloadSim {
         sim,

@@ -2972,7 +2972,14 @@ fn every_trace_section_is_folded_in_its_frozen_order() {
     let at: Vec<usize> = SECTIONS
         .iter()
         .map(|s| {
-            body.find(s).unwrap_or_else(|| {
+            // **The FOLD, not the name** (VEH3d audit, the implementer's carried
+            // 3): a substring search for `cloth::cloth_state_bytes` is satisfied
+            // by `let _ = inf_ecs::cloth::cloth_state_bytes(&self.world);`, which
+            // computes the section and throws it away -- measured on the
+            // nineteenth section, and true of all nineteen. Each is found as the
+            // statement that APPENDS it.
+            let fold = format!("out.extend_from_slice(&inf_ecs::{s}(&self.world));");
+            body.find(&fold).unwrap_or_else(|| {
                 panic!(
                     "`{s}` is not appended to `state_bytes` at all — a section \
                         missing from BOTH hosts is invisible to every trace comparison \

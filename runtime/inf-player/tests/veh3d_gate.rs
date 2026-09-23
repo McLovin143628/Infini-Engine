@@ -1582,6 +1582,82 @@ fn the_exit_is_the_reverse_and_never_lands_in_geometry() {
     }
 }
 
+/// **`capsule_clear` is a lock of its own: the car's OWN parts** (VEH3d audit,
+/// priority j'). The implementer's one mutation survivor was `capsule_clear`
+/// answering `true`, "because the path sweep is a second lock on the same
+/// candidates". It is not the same lock: the path sweep EXCLUDES the car's own
+/// colliders (it starts inside the car), and `capsule_clear` does not — it is
+/// the only thing standing between an exit point and the car's own open door.
+///
+/// The driver's door opened on its motor; the exit asked for with the door
+/// LEAF itself as the preferred point. The leaf is a collider, the capsule at
+/// candidate 0 is inside it, the sweep from inside the cabin excludes it — so
+/// only `capsule_clear` can refuse candidate 0.
+///
+/// **The mutation** (run in the audit): `capsule_clear` answering `true` — the
+/// exit takes candidate 0 and the body is put down inside its own car door.
+#[test]
+fn an_exit_is_never_put_down_inside_the_cars_own_open_door() {
+    let mut y = Yard::new("sedan");
+    let door = y.door();
+    assert!(d3::bodywork::set_part_open(
+        &mut y.world,
+        &mut y.bridge,
+        CHASSIS,
+        door,
+        true
+    ));
+    y.step(90);
+    let car = y.frame();
+    let leaf = y
+        .bridge
+        .part_body(door)
+        .and_then(|p| y.bridge.world().body_translation(p.body))
+        .expect("the open door is a live body");
+    let deg = d3::boarding::door_angle_deg(&y.world, &y.bridge, CHASSIS, door);
+    let preferred = {
+        let l = car.local(leaf);
+        Vec3d::new(l.x, 0.0, l.z)
+    };
+    let cm = y.cm(HERO);
+    let own: std::collections::BTreeSet<_> = y.bridge.collider_of(HERO).into_iter().collect();
+    // Candidate 0, standing on the road: inside the leaf.
+    let at0 = {
+        let mut p = car.world(preferred);
+        p.y = 0.0 + d3::boarding::PLACE_SKIN_M;
+        p
+    };
+    let inside_leaf =
+        !d3::boarding::capsule_clear(&mut y.bridge, at0, cm.stand_half_height_m, RADIUS, &own);
+    let people = d3::boarding::people(&y.world, &y.bridge);
+    let got = d3::boarding::clear_exit(
+        &mut y.bridge,
+        &car,
+        preferred,
+        cm.stand_half_height_m,
+        RADIUS,
+        &people,
+    );
+    println!(
+        "=== the car's own door ===\n  the door open {deg:.1} deg; candidate 0 (the leaf) inside it: {inside_leaf}; the exit took {:?}",
+        got.map(|(_, i)| i)
+    );
+    assert!(deg > 30.0, "the door only opened {deg:.1} deg");
+    assert!(
+        inside_leaf,
+        "a capsule at the door leaf is clear of it — this arm tests nothing"
+    );
+    let (feet, i) = got.expect("a sedan in an empty yard has somewhere to get out");
+    assert_ne!(
+        i, 0,
+        "the exit put the body down inside its own car's open door"
+    );
+    assert!(
+        d3::boarding::capsule_clear(&mut y.bridge, feet, cm.stand_half_height_m, RADIUS, &own),
+        "the exit point it chose is inside something"
+    );
+}
+
 /// **A moving exit is a ROLL** — above [`board::EXIT_ROLL_MPS`] the body
 /// leaves the car in `FallControlled` with the car's velocity, its first
 /// grounded step ROLLS (through the roll key's own request, so the capsule is
@@ -1778,6 +1854,161 @@ fn the_boarding_camera_rides_the_director() {
         "the drive camera's pivot is {pivot_off:.3} m off the roof — it followed the seat into the cabin"
     );
 }
+
+/// **The boarding camera never pops** (VEH3d audit, priority f') — the
+/// camera's own per-step translation over the WHOLE board (press to a second
+/// at the wheel) and the WHOLE exit (press to a second standing), against the
+/// CHAR1c director's blend law: no single step may carry CHAR1c's own measured
+/// worst share of the move (15.9 %, [`CHAR1C_WORST_STEP_FRAC`]; its arm's
+/// bound is 20 %). The multiple of the walking control's worst step is
+/// REPORTED: the change-over into the drive block is a blend of several
+/// metres in [`d3::camera::BOARDING_CAMERA_BLEND_S`], and it is the director's
+/// blend that moves the camera there, not a target.
+///
+/// The implementer's claim target was framed off the BODY's feet and yaw, so
+/// it rode the seat warp: 0.42 m in one step through `EnteringIK`, a camera
+/// doing 25 m/s beside a body doing 2. The claim is anchored on the CAR now
+/// (the take node in the chassis frame, the flank's own facing), so the only
+/// thing that moves the camera is the director's blend.
+///
+/// **The mutation** (run in the audit): the claim framed off the body's feet
+/// again — the per-step bound reds.
+#[test]
+fn the_boarding_camera_never_pops() {
+    let mut y = Yard::new("sedan");
+    let mut cam = inf_ecs::camera::LocomotionCamera::default();
+    for _ in 0..20 {
+        d3::step_camera_with_requests(&mut y.world, &mut y.bridge, &mut cam, HERO, DT);
+    }
+    // The walking control: the camera's worst step while the hero walks.
+    let mut walking = 0.0f64;
+    let mut prev = cam.pose.position.to_dvec3();
+    y.stick(HERO, 0.0, 1.0);
+    for _ in 0..60 {
+        y.step(1);
+        d3::step_camera_with_requests(&mut y.world, &mut y.bridge, &mut cam, HERO, DT);
+        let p = cam.pose.position.to_dvec3();
+        walking = walking.max((p - prev).length());
+        prev = p;
+    }
+    y.stick(HERO, 0.0, 0.0);
+    for _ in 0..60 {
+        y.step(1);
+        d3::step_camera_with_requests(&mut y.world, &mut y.bridge, &mut cam, HERO, DT);
+    }
+    // One leg: press E, then step until `done`, then a second more.
+    let leg = |y: &mut Yard,
+               cam: &mut inf_ecs::camera::LocomotionCamera,
+               done: &dyn Fn(&Yard) -> bool| {
+        y.press(HERO);
+        let from = cam.pose.position.to_dvec3();
+        let mut prev = from;
+        let (mut worst, mut worst_phase, mut path) = (0.0f64, BoardPhase::Idle, 0.0f64);
+        let mut per_phase: std::collections::BTreeMap<u8, f64> = std::collections::BTreeMap::new();
+        let mut after = 0;
+        for _ in 0..1200 {
+            y.step(1);
+            d3::step_camera_with_requests(&mut y.world, &mut y.bridge, cam, HERO, DT);
+            let p = cam.pose.position.to_dvec3();
+            let d = (p - prev).length();
+            path += d;
+            let ph = y.cm(HERO).runtime.boarding.phase.as_u8();
+            let e = per_phase.entry(ph).or_insert(0.0);
+            *e = e.max(d);
+            if d > worst {
+                worst = d;
+                worst_phase = y.cm(HERO).runtime.boarding.phase;
+            }
+            prev = p;
+            if done(y) {
+                after += 1;
+                if after > 60 {
+                    break;
+                }
+            }
+        }
+        let phases: Vec<String> = per_phase
+            .iter()
+            .map(|(p, d)| {
+                let name = [
+                    BoardPhase::Idle,
+                    BoardPhase::Locked,
+                    BoardPhase::Unlocking,
+                    BoardPhase::OpeningDoor,
+                    BoardPhase::EnteringIK,
+                    BoardPhase::Seated,
+                    BoardPhase::Driving,
+                    BoardPhase::Exiting,
+                    BoardPhase::ClosingDoor,
+                    BoardPhase::Jacked,
+                ]
+                .into_iter()
+                .find(|x| x.as_u8() == *p)
+                .map(|x| x.name())
+                .unwrap_or("?");
+                format!("{name} {d:.4}")
+            })
+            .collect();
+        println!("    worst step per phase: {}", phases.join(", "));
+        // **The claim's own target is still** while the body does its work at
+        // the car: no step in the door, the seat warp, the seat or the shut may
+        // move the camera further than a walk does.
+        for ph in [
+            BoardPhase::OpeningDoor,
+            BoardPhase::EnteringIK,
+            BoardPhase::Seated,
+            BoardPhase::ClosingDoor,
+        ] {
+            let d = per_phase.get(&ph.as_u8()).copied().unwrap_or(0.0);
+            assert!(
+                d <= walking,
+                "in `{}` the camera moved {d:.4} m in one step, more than a walk's {walking:.4} m — its target is riding the body",
+                ph.name()
+            );
+        }
+        (worst, worst_phase, (prev - from).length(), path)
+    };
+    let board = leg(&mut y, &mut cam, &|y: &Yard| {
+        y.cm(HERO).runtime.boarding.phase == BoardPhase::Driving
+    });
+    let exit = leg(&mut y, &mut cam, &|y: &Yard| {
+        let cm = y.cm(HERO);
+        cm.runtime.boarding.phase == BoardPhase::Idle && !cm.runtime.seat.is_seated()
+    });
+    println!(
+        "=== the boarding camera, per step ===\n  walking control: worst {walking:.4} m a step"
+    );
+    for (name, (worst, phase, total, path)) in [("board", board), ("exit", exit)] {
+        println!(
+            "  {name}: worst {worst:.4} m a step (in `{}`), {:.1} % of the {total:.3} m move ({path:.3} m of path), {:.2}x the walking step",
+            phase.name(),
+            worst / total.max(1e-9) * 100.0,
+            worst / walking.max(1e-9)
+        );
+    }
+    for (name, (worst, phase, total, _)) in [("board", board), ("exit", exit)] {
+        assert!(
+            total > 0.5,
+            "{name}: the camera barely moved ({total:.3} m) — nothing was measured"
+        );
+        assert!(
+            worst < 0.2 * total,
+            "{name}: one step (in `{}`) took {:.1} % of the camera's move — a pop, not a blend",
+            phase.name(),
+            worst / total * 100.0
+        );
+        assert!(
+            worst < CHAR1C_WORST_STEP_FRAC * total,
+            "{name}: one step (in `{}`) took {:.1} % of the move — over CHAR1c's own measured worst",
+            phase.name(),
+            worst / total * 100.0
+        );
+    }
+}
+
+/// CHAR1c's own measured worst step of a vehicle entry, as a share of the move
+/// (15.9 %): the brief's "a step over that is a pop".
+const CHAR1C_WORST_STEP_FRAC: f64 = 0.159;
 
 // ── (g) DETERMINISM ─────────────────────────────────────────────────────────
 
@@ -2874,6 +3105,178 @@ fn a_press_on_a_frame_that_runs_no_step_still_boards() {
     );
 }
 
+/// **EVERY host that owns a frame loop sees a press exactly once, whatever its
+/// frame rate** (VEH3d audit, priority e'). Wave VEH3d fixed
+/// `RuntimeSim::run_frame` (the shipped window, both PIE windows, web,
+/// android — they all reach it through `PlayerApp::frame`) and armed only the
+/// zero-step shape on that one host. The editor's Simulate runs its OWN
+/// accumulator (`SimSession::tick`) and still dropped a press on a zero-step
+/// frame and gave a RELEASE to both steps of a two-step frame; and the weapon
+/// wheel, an edge wearing an axis, was lost on a zero-step frame and switched
+/// twice on a two-step one, on both hosts.
+///
+/// Both hosts, three shapes each, through the hosts' own frame doors:
+/// * **a press on a zero-step frame** boards the car;
+/// * **a release on a two-step frame** is ONE crouch click (two were a crouch
+///   and an un-crouch);
+/// * **a wheel notch** on a zero-step frame equips the next weapon, and one on
+///   a two-step frame equips the next weapon and not the one after it.
+///
+/// **The mutations** (run in the audit): the zero-step carry deleted from
+/// either host; the `i > 0` clear deleted from either host; the wheel carry
+/// deleted from either host.
+#[test]
+fn every_host_sees_a_press_once_whatever_its_frame_rate() {
+    use inf_ecs::item::{Inventory, ItemDef, ItemDefs};
+    use inf_ecs::movement::actions::{CROUCH, INTERACT, WEAPON_SWITCH};
+    use inf_editor_core::scene::SceneDoc;
+    use inf_editor_core::simulate::{SimInput, SimSession};
+    use inf_player::runtime_sim::{RuntimeInput, RuntimeSim};
+    use std::collections::BTreeMap;
+
+    fn defs() -> ItemDefs {
+        let mut d = ItemDefs::default();
+        for id in ["pistol_a", "pistol_b"] {
+            d.insert(ItemDef {
+                id: id.into(),
+                label: id.into(),
+                stack_max: 1,
+                mass_kg: 1.0,
+                mesh: None,
+                weapon: Some(inf_ecs::weapon::WeaponDef {
+                    magazine: 5,
+                    reserve: 10,
+                    ..Default::default()
+                }),
+            });
+        }
+        d
+    }
+    /// The saloon, the hero beside it with two pistols in the bag.
+    fn build(world: &mut EcsWorld) {
+        let def = catalogue_def("sedan");
+        ground(world);
+        car(
+            world,
+            CHASSIS,
+            DVec3::new(
+                0.0,
+                inf_ecs::vehicle::resting_origin_y(&def, 0.0) + 0.15,
+                0.0,
+            ),
+            0.0,
+            &def,
+        );
+        stand(world, HERO, "Hero", HERO_AT, 0.0, true);
+        let d = defs();
+        let mut inv = Inventory::default();
+        inv.add(&d, "pistol_a", 1);
+        inv.add(&d, "pistol_b", 1);
+        let e = world.entity_of(HERO).expect("the hero");
+        world.world_mut().entity_mut(e).insert(inv);
+        world.world_mut().insert_resource(d);
+        world.propagate();
+    }
+    /// One frame: `(frame seconds, keys held, the wheel)`.
+    type Frame = (f64, Vec<&'static str>, f32);
+    const F: f64 = 1.0 / 60.0;
+    /// What the course ends in: the boarding phase, the mode, the equipped slot.
+    type End = (BoardPhase, MovementMode, Option<usize>);
+    let read = |w: &EcsWorld| -> End {
+        let e = w.entity_of(HERO).expect("the hero");
+        let cm = w.world().get::<CharacterMovement>(e).expect("a mover");
+        let inv = w.world().get::<Inventory>(e).expect("a bag");
+        (cm.runtime.boarding.phase, cm.mode, inv.equipped)
+    };
+    let shipped = |frames: &[Frame]| -> End {
+        let mut world = EcsWorld::new();
+        build(&mut world);
+        let mut sim = RuntimeSim::new(world, Vec::new(), glam::DVec2::new(0.0, -9.81), 60.0);
+        for _ in 0..60 {
+            sim.run_frame(F, RuntimeInput::default());
+        }
+        for (dt, keys, wheel) in frames {
+            let mut i = RuntimeInput::with_down(keys.iter().copied());
+            if *wheel != 0.0 {
+                i = i.axis_at(WEAPON_SWITCH, *wheel);
+            }
+            sim.run_frame(*dt, i);
+        }
+        read(sim.world())
+    };
+    let preview = |frames: &[Frame]| -> End {
+        let mut doc = SceneDoc::new();
+        build(doc.world_mut());
+        let mut session =
+            SimSession::enter(&mut doc, Vec::new(), glam::DVec2::new(0.0, -9.81), 60.0);
+        for _ in 0..60 {
+            session.tick(&mut doc, F, SimInput::default());
+        }
+        for (dt, keys, wheel) in frames {
+            let mut axes: BTreeMap<String, f32> = BTreeMap::new();
+            if *wheel != 0.0 {
+                axes.insert(WEAPON_SWITCH.to_string(), *wheel);
+            }
+            session.tick(
+                &mut doc,
+                *dt,
+                SimInput::with_down(keys.iter().copied()).with_axes(axes),
+            );
+        }
+        let end = read(doc.world());
+        session.exit(&mut doc);
+        end
+    };
+    let idle = |n: usize| -> Vec<Frame> { (0..n).map(|_| (F, Vec::new(), 0.0)).collect() };
+    // (1) E on a frame too short to run a step, let go on the next.
+    let mut press: Vec<Frame> = vec![(0.001, vec![INTERACT], 0.0)];
+    press.extend(idle(3));
+    // (2) C held for one step, let go on a frame that runs two.
+    let mut release: Vec<Frame> = vec![(F, vec![CROUCH], 0.0), (2.5 * F, Vec::new(), 0.0)];
+    release.extend(idle(40));
+    // (3a) a notch on a zero-step frame; (3b) a notch on a two-step frame.
+    let mut notch0: Vec<Frame> = vec![(0.001, Vec::new(), 1.0)];
+    notch0.extend(idle(3));
+    let mut notch2: Vec<Frame> = vec![(2.5 * F, Vec::new(), 1.0)];
+    notch2.extend(idle(3));
+    for (host, run) in [
+        (
+            "shipped (RuntimeSim::run_frame)",
+            &shipped as &dyn Fn(&[Frame]) -> End,
+        ),
+        ("preview (SimSession::tick)", &preview),
+    ] {
+        let (p1, _, _) = run(&press);
+        let (_, m2, _) = run(&release);
+        let (_, _, e3a) = run(&notch0);
+        let (_, _, e3b) = run(&notch2);
+        println!(
+            "=== {host} ===\n  a zero-step press of E: the hero is `{}`\n  a release on a two-step frame: the hero is {m2:?}\n  a wheel notch on a zero-step frame: slot {e3a:?}; on a two-step frame: slot {e3b:?}",
+            p1.name()
+        );
+        assert_ne!(
+            p1,
+            BoardPhase::Idle,
+            "{host}: a press on a zero-step frame was dropped"
+        );
+        assert_eq!(
+            m2,
+            MovementMode::Crouch,
+            "{host}: a tap of crouch released on a two-step frame did not end crouched"
+        );
+        assert_eq!(
+            e3a,
+            Some(1),
+            "{host}: a wheel notch on a zero-step frame was dropped"
+        );
+        assert_eq!(
+            e3b,
+            Some(1),
+            "{host}: a wheel notch on a two-step frame switched more than once"
+        );
+    }
+}
+
 // ── (h) COST ────────────────────────────────────────────────────────────────
 
 /// Whether a clock assert may run here: a RELEASE build, off CI — the house
@@ -3117,6 +3520,115 @@ fn the_level_camera_table_round_trips_through_the_write_half() {
 }
 
 // ── INSTRUMENTS ─────────────────────────────────────────────────────────────
+
+/// **A changed camera table reaches the RUNNING rig on both hosts** (VEH3d
+/// audit, priority g'). The implementer shipped the write half
+/// (`write_camera_beside`, Live Tuning's "Save camera to level") and it wrote a
+/// file only the `--level` dev boot and the editor's Simulate ever read: a PIE
+/// session built its world from a payload that carries no camera, and a
+/// `--pack` boot never looked — the VEH3b tuning-door lesson, a door that wrote
+/// a thing nothing read. And a rig created mid-session (the weapon's ADS blend
+/// writes one key through `set_camera_rig_value`) started from the DEFAULTS,
+/// so the level's table was thrown away the first time the hero aimed.
+///
+/// Which file each host reads now:
+/// * **PIE**: the editor names its open level in `INF_PIE_LEVEL_PATH` on the
+///   spawned player (`PieSession::spawn_scene_for_level`), and
+///   `sim_from_payload` reads the `camera.toml` beside it;
+/// * **shipped** (`--pack`): the `camera.toml` beside the pack, which the cook
+///   copies there (`cook_blocking::a_cook_carries_the_level_camera_table_beside_the_pack`);
+/// * **`--level`** and **Simulate**: the `camera.toml` beside the level, as before.
+///
+/// The arm writes a table through the write half with the walk boom at 6.5 m
+/// (the default is 3), reads it back through BOTH hosts' boot doors, installs
+/// each on the shipped sim, and reads the camera's own boom after it settles
+/// — then aims (the ADS door) and reads it again.
+///
+/// **The mutations** (run in the audit): `set_camera_rig_value` back on
+/// `CameraRig::default()` — the boom snaps to 3 m on the aim; the PIE reader
+/// answering `None` — the PIE boom is 3 m.
+#[test]
+fn a_changed_camera_table_reaches_the_running_rig_on_both_hosts() {
+    use inf_player::runtime_sim::{RuntimeInput, RuntimeSim};
+    const BOOM: f64 = 6.5;
+    const SRC: &str = include_str!("../../../editor/studio/src-tauri/src/commands/pie.rs");
+    assert_eq!(
+        inf_player::PIE_LEVEL_ENV,
+        inf_editor_core::pie::PIE_LEVEL_ENV
+    );
+    assert!(
+        SRC.contains("PieSession::spawn_scene_for_level(&bin, &payload, level.as_deref())"),
+        "the editor's Play no longer names its level to the player"
+    );
+    let dir = std::env::temp_dir().join(format!("veh3d-camrig-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a temp dir");
+    let level = dir.join("Level.inf_lvl");
+    let mut t = inf_ecs::camera::CameraTuning::default();
+    assert!(t.set("walk.arm_length_m", BOOM));
+    inf_ecs::camera::write_camera_beside(&level, &t).expect("the write half");
+    let pie = inf_player::pie_camera_table_from(Some(&level)).expect("the PIE reader");
+    let shipped = inf_player::camera_table_for(&inf_player::args::WorldChoice::Pack(dir.clone()))
+        .expect("the pack reader");
+    let boom_of = |table: Option<inf_ecs::camera::CameraTuning>| -> (f64, f64) {
+        let def = catalogue_def("sedan");
+        let mut world = EcsWorld::new();
+        ground(&mut world);
+        car(
+            &mut world,
+            CHASSIS,
+            DVec3::new(
+                0.0,
+                inf_ecs::vehicle::resting_origin_y(&def, 0.0) + 0.15,
+                0.0,
+            ),
+            0.0,
+            &def,
+        );
+        stand(&mut world, HERO, "Hero", HERO_AT, 0.0, true);
+        world.propagate();
+        let mut sim = RuntimeSim::new(world, Vec::new(), glam::DVec2::new(0.0, -9.81), 60.0);
+        if let Some(t) = table {
+            sim.camera_mut().tuning = t;
+        }
+        for _ in 0..240 {
+            sim.step_once(RuntimeInput::default());
+        }
+        let before = sim.camera().arm_m;
+        // The ADS door: one key of a rig the hero did not have.
+        assert!(inf_ecs::camera::set_camera_rig_value(
+            sim.world_mut(),
+            HERO,
+            "aim_blend_speed",
+            12.0
+        ));
+        for _ in 0..240 {
+            sim.step_once(RuntimeInput::default());
+        }
+        (before, sim.camera().arm_m)
+    };
+    let control = boom_of(None);
+    let on_pie = boom_of(Some(pie));
+    let on_pack = boom_of(Some(shipped));
+    std::fs::remove_dir_all(&dir).ok();
+    println!(
+        "=== the level's camera table, in the running rig ===\n  the boom (settled, then after an ADS rig was created): defaults {:.3} / {:.3} m; PIE {:.3} / {:.3} m; shipped pack {:.3} / {:.3} m (the table says {BOOM} m)",
+        control.0, control.1, on_pie.0, on_pie.1, on_pack.0, on_pack.1
+    );
+    assert!(
+        (control.0 - BOOM).abs() > 1.0,
+        "the default boom is already {BOOM} m — the arm cannot tell the table from the defaults"
+    );
+    for (host, (a, b)) in [("PIE", on_pie), ("shipped", on_pack)] {
+        assert!(
+            (a - BOOM).abs() < 0.05,
+            "{host}: the running boom is {a:.3} m, not the table's {BOOM}"
+        );
+        assert!(
+            (b - BOOM).abs() < 0.05,
+            "{host}: after the ADS door made a rig the boom is {b:.3} m — the rig threw the level's table away"
+        );
+    }
+}
 
 /// **The shipped host draws the boarding row**, and the row reads what the
 /// machine is doing.
@@ -3596,9 +4108,109 @@ fn the_island_census_has_no_doubly_occupied_seat() {
     };
     let mut sim = island_sim(&content);
     const STEPS: u32 = 36_000;
+    // **THE ENGAGEMENT HALF** (VEH3d audit, priority i'): the census with no
+    // boarding in it "would pass with no boarding at all" — the implementer's
+    // own words. So the hero boards during the window: every 6 000 steps it is
+    // put beside the nearest STANDING car — an empty one on even rounds, an
+    // OCCUPIED one on odd rounds (the carjack) — and presses E, drives nowhere,
+    // and presses E again to get out. The arm counts boardings that reached the
+    // wheel and seats held, and a census that saw neither is not an arm.
+    const ROUND: u32 = 6_000;
+    let hero = {
+        for _ in 0..240 {
+            sim.step_once(RuntimeInput::default());
+        }
+        inf_ecs::movement::camera_subject(sim.world()).expect("the island's hero")
+    };
     let (mut worst, mut samples, mut seats_seen, mut passengers) = (0u32, 0u32, 0usize, 0usize);
+    let (mut boarded, mut jacked, mut attempts) = (0u32, 0u32, 0u32);
+    let mut at_wheel_since: Option<u32> = None;
+    let mut last_phase = BoardPhase::Idle;
     for i in 0..STEPS {
-        sim.step_once(RuntimeInput::default());
+        let mut input = RuntimeInput::default();
+        if i % ROUND == 60 {
+            // Beside the nearest standing car of the round's kind.
+            let want_occupied = (i / ROUND) % 2 == 1;
+            let here = d3::boarding::capsule_centre(sim.world(), hero).expect("placed");
+            let occupied = d3::carjack::occupied_chassis(sim.world());
+            let mut cars: Vec<(f64, Uuid)> = sim
+                .bridge3d()
+                .vehicle_guids()
+                .into_iter()
+                .filter(|g| occupied.contains(g) == want_occupied)
+                .filter_map(|g| {
+                    let (seat, _, v) = d3::vehicle::seat_pose(sim.bridge3d(), g)?;
+                    (v.length() < 0.2).then(|| ((seat - here).length(), g))
+                })
+                .collect();
+            cars.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+            if let Some(car) = cars
+                .first()
+                .and_then(|(_, g)| d3::boarding::car_frame(sim.world(), sim.bridge3d(), *g, false))
+            {
+                let beside = car.world(Vec3d::new(car.half.x + 1.6, 0.0, -1.2));
+                let ground = sim.terrain_height_at(beside.x, beside.z);
+                let lift = {
+                    let e = sim.world().entity_of(hero).unwrap();
+                    let cm = sim.world().world().get::<CharacterMovement>(e).unwrap();
+                    cm.stand_half_height_m + RADIUS
+                };
+                set_hero(
+                    &mut sim,
+                    hero,
+                    DVec3::new(beside.x, ground + lift + 0.05, beside.z),
+                );
+                attempts += 1;
+            }
+        }
+        // Press E through the round's first seconds (a carjack's victim resists
+        // a few presses), and again to get out after two seconds at the wheel.
+        let phase = {
+            let e = sim.world().entity_of(hero).unwrap();
+            let cm = sim.world().world().get::<CharacterMovement>(e).unwrap();
+            if cm.runtime.seat.is_seated()
+                && !cm.runtime.seat.entering
+                && cm.runtime.boarding.phase == BoardPhase::Driving
+            {
+                BoardPhase::Driving
+            } else {
+                cm.runtime.boarding.phase
+            }
+        };
+        let r = i % ROUND;
+        if (90..=600).contains(&r)
+            && r % 8 == 0
+            && phase == BoardPhase::Idle
+            && at_wheel_since.is_none()
+        {
+            input = input.press(inf_ecs::movement::actions::INTERACT);
+        }
+        if phase == BoardPhase::Driving && last_phase != BoardPhase::Driving {
+            boarded += 1;
+            at_wheel_since = Some(i);
+            let e = sim.world().entity_of(hero).unwrap();
+            if sim
+                .world()
+                .world()
+                .get::<CharacterMovement>(e)
+                .unwrap()
+                .runtime
+                .boarding
+                .carjack
+            {
+                jacked += 1;
+            }
+        }
+        if let Some(t) = at_wheel_since {
+            if i == t + 120 {
+                input = input.press(inf_ecs::movement::actions::INTERACT);
+            }
+            if i > t + 120 && phase == BoardPhase::Idle {
+                at_wheel_since = None;
+            }
+        }
+        last_phase = phase;
+        sim.step_once(input);
         if i % 30 == 0 {
             let census = d3::boarding::seat_census(sim.world());
             worst = worst.max(census.values().copied().max().unwrap_or(0));
@@ -3608,12 +4220,16 @@ fn the_island_census_has_no_doubly_occupied_seat() {
         }
     }
     println!(
-        "=== the island census ===\n  {STEPS} steps ({:.1} min), {samples} samples: at most {seats_seen} seats held at once, {passengers} of them passengers; the busiest seat ever held {worst}",
+        "=== the island census ===\n  {STEPS} steps ({:.1} min), {samples} samples: at most {seats_seen} seats held at once, {passengers} of them passengers; the busiest seat ever held {worst}\n  the hero was put beside a standing car {attempts} times and reached the wheel {boarded} times ({jacked} of them carjacks)",
         f64::from(STEPS) / 3600.0
     );
     assert!(
-        seats_seen > 0,
-        "nobody sat in anything on the island — the census is about nothing"
+        seats_seen >= 5,
+        "only {seats_seen} seats were ever held on the island — the census is about nothing"
+    );
+    assert!(
+        boarded >= 2,
+        "the hero reached the wheel {boarded} times in {attempts} attempts — the census measured no boarding"
     );
     assert!(worst <= 1, "a seat on the island held {worst} bodies");
 }
