@@ -544,6 +544,29 @@ pub const ARM_HERO_ENV: &str = "INF_PIE_ARM_HERO";
 /// reason on stderr, which is the whole point of an operator's switch.
 pub const TUNE_VEHICLE_ENV: &str = "INF_PIE_TUNE_VEHICLE";
 
+/// **The demo loop's slow motion** (wave VEH3d): a factor on the WALL time a
+/// preview feeds its fixed-step accumulator, in `[0.05, 1]`, default `1`.
+///
+/// The steps are the same steps — same `dt`, same inputs, same world — there
+/// are just fewer of them per wall second, so nothing the simulation does
+/// depends on it. It exists because a boarding's beats are shorter than the
+/// loop's screenshot: the hand holds the handle for 0.1 s, the seat warp is
+/// 0.55 s, the log is sampled at 4 Hz and a frame takes about a second to
+/// capture, and two sessions at full speed photographed the moment AFTER
+/// three of the beats the wave is about. Read only in a `--pie` preview, for
+/// [`SPAWN_AT_ENV`]'s reason.
+pub const TIME_SCALE_ENV: &str = "INF_PIE_TIME_SCALE";
+
+/// [`TIME_SCALE_ENV`], read and clamped; `1.0` when absent or unreadable.
+pub fn time_scale_from_env() -> f64 {
+    std::env::var(TIME_SCALE_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|v| v.is_finite())
+        .map(|v| v.clamp(0.05, 1.0))
+        .unwrap_or(1.0)
+}
+
 /// **How often [`TUNE_VEHICLE_ENV`] re-applies itself**, seconds (VEH3c audit).
 ///
 /// Twenty is a measurement of what it has to outrun rather than a round number:

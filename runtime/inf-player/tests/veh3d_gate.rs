@@ -1378,8 +1378,8 @@ fn the_victim_is_never_put_down_inside_a_wall() {
     let car = y.frame();
     let preferred = board::pull_out_point(&car.sockets, SeatIndex::Driver, car.half, car.offset);
     let stand_half = y.cm(VICTIM).stand_half_height_m;
-    let own = y.bridge.collider_of(VICTIM);
-    let refusal = d3::boarding::clear_exit(&mut y.bridge, &car, preferred, stand_half, RADIUS, own);
+    let own: std::collections::BTreeSet<_> = y.bridge.collider_of(VICTIM).into_iter().collect();
+    let refusal = d3::boarding::clear_exit(&mut y.bridge, &car, preferred, stand_half, RADIUS, &own);
     println!("  wedged on every side, `clear_exit` answers {refusal:?}");
     assert!(
         refusal.is_none(),

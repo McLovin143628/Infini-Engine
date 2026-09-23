@@ -200,6 +200,10 @@ pub struct PlayerApp {
     /// which is the same guard the hero log is behind). A shipped boot never
     /// reaches it. See [`crate::pie_drive::SpawnOverride`].
     spawn_override: crate::pie_drive::SpawnOverride,
+    /// **The demo loop's slow motion** (wave VEH3d) — `1.0` unless
+    /// `INF_PIE_TIME_SCALE` says otherwise, and applied only in a PREVIEW
+    /// session. See [`crate::pie_drive::TIME_SCALE_ENV`].
+    time_scale: f64,
     /// **The in-game UI session** (island wave I5): the settings dialog, the
     /// toasts and the interaction prompt. Present in the shipped player **and**
     /// in a windowed PIE preview, because a preview that could not open the menu
@@ -298,6 +302,7 @@ impl PlayerApp {
             keyboard_grabbed: false,
             hero_log: crate::pie_drive::HeroLog::from_env(),
             spawn_override: crate::pie_drive::SpawnOverride::from_env(),
+            time_scale: crate::pie_drive::time_scale_from_env(),
             vmeshes,
             scatter_meshes: Arc::new(inf_render::ScatterMeshes::new()),
             skinned: Arc::new(SkinnedRegistry::new()),
@@ -1125,7 +1130,12 @@ impl PlayerApp {
         let held = input::held_actions(&self.input_state, dt);
         // PIE pause freezes the sim but keeps rendering the last frame.
         if !self.paused {
-            self.sim.run_frame(dt, held);
+            let sim_dt = if self.pie.is_some() {
+                dt * self.time_scale
+            } else {
+                dt
+            };
+            self.sim.run_frame(sim_dt, held);
         }
 
         let alpha = self.sim.alpha();

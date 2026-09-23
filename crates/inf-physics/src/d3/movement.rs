@@ -3827,9 +3827,17 @@ fn step_driving(
                 )
                 .1
             };
-            let own = bridge.collider_of(guid);
-            super::boarding::clear_exit(bridge, c, preferred, cm.stand_half_height_m, radius, own)
-                .map(|(feet, _)| (feet, c.clone()))
+            let mut people_here = super::boarding::people(world, bridge);
+            people_here.extend(bridge.collider_of(guid));
+            super::boarding::clear_exit(
+                bridge,
+                c,
+                preferred,
+                cm.stand_half_height_m,
+                radius,
+                &people_here,
+            )
+            .map(|(feet, _)| (feet, c.clone()))
         });
         match (verdict.refusal, placed) {
             (MovementRefusal::None, Some((feet, c))) => {

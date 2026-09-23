@@ -306,6 +306,15 @@ pub fn capsule_clear(
     !matches!(hit, Some(h) if h.started_penetrating)
 }
 
+/// **Every character's capsule** — the set [`clear_exit`] lets step aside.
+/// Walked only on an exit or a pull, which is a press and not a step.
+pub fn people(world: &EcsWorld, bridge: &PhysicsBridge3D) -> BTreeSet<ColliderId3D> {
+    model::movement_targets(world)
+        .into_iter()
+        .filter_map(|g| bridge.collider_of(g))
+        .collect()
+}
+
 /// **Where a body may be put down beside a car**, world feet — the first of
 /// [`board::exit_candidates`] that has ground under it and a clear capsule.
 ///
@@ -313,22 +322,23 @@ pub fn capsule_clear(
 /// wedged, and the caller refuses the exit (or the pull) rather than put a body
 /// in a wall. Returns the chosen point's index with it, which is what a gate
 /// reads to know the preferred point was NOT the one taken.
+///
+/// `people` are the capsules that STEP ASIDE — the body's own and every other
+/// character's ([`people`]). A person is not a wall: measured in the wave's
+/// own demo, the carjacked driver and the passenger it forced out stood at
+/// both doors for fourteen seconds, and every press of E in that time was a
+/// refused exit from a car the hero had just stolen.
 pub fn clear_exit(
     bridge: &mut PhysicsBridge3D,
     car: &CarFrame,
     preferred_local: Vec3d,
     half_height: f64,
     radius: f64,
-    own: Option<ColliderId3D>,
+    people: &BTreeSet<ColliderId3D>,
 ) -> Option<(DVec3, usize)> {
     let mut ground_ex = car_colliders(bridge, car.chassis);
-    if let Some(c) = own {
-        ground_ex.insert(c);
-    }
-    let mut clear_ex = BTreeSet::new();
-    if let Some(c) = own {
-        clear_ex.insert(c);
-    }
+    ground_ex.extend(people.iter().copied());
+    let clear_ex = people.clone();
     // The ground a body may be put down on is the car's OWN ground: not a wall
     // top the probe happened to land on (a slab against the flank is ground
     // at two metres to a ray cast from above it), and not a drop.
@@ -695,8 +705,10 @@ pub fn start_pull(
         .unwrap_or(0.3);
     let seat = SeatIndex::from_u8(cm.runtime.seat.seat);
     let preferred = board::pull_out_point(&car.sockets, seat, car.half, car.offset);
-    let own = bridge.collider_of(victim);
-    let Some((feet, _)) = clear_exit(bridge, car, preferred, cm.stand_half_height_m, radius, own)
+    let mut people_here = people(world, bridge);
+    people_here.extend(bridge.collider_of(victim));
+    let Some((feet, _)) =
+        clear_exit(bridge, car, preferred, cm.stand_half_height_m, radius, &people_here)
     else {
         return false;
     };
@@ -757,8 +769,10 @@ fn force_out(
         .unwrap_or(0.3);
     let seat = SeatIndex::from_u8(cm.runtime.seat.seat);
     let preferred = board::pull_out_point(&car.sockets, seat, car.half, car.offset);
-    let own = bridge.collider_of(who);
-    let Some((feet, _)) = clear_exit(bridge, car, preferred, cm.stand_half_height_m, radius, own)
+    let mut people_here = people(world, bridge);
+    people_here.extend(bridge.collider_of(who));
+    let Some((feet, _)) =
+        clear_exit(bridge, car, preferred, cm.stand_half_height_m, radius, &people_here)
     else {
         return false;
     };
