@@ -2710,7 +2710,7 @@ impl RuntimeSim {
             let frames = (f64::from(*rate) * self.stepper.fixed_dt()).round() as usize;
             let pcm = self.audio.render(frames);
             let _ = cap.append(&pcm);
-            if self.steps % 60 == 0 {
+            if self.steps.is_multiple_of(60) {
                 let _ = cap.patch();
             }
         }
