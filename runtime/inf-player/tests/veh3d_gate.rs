@@ -4179,7 +4179,7 @@ fn the_island_census_has_no_doubly_occupied_seat() {
         };
         let r = i % ROUND;
         if (90..=600).contains(&r)
-            && r % 8 == 0
+            && r.is_multiple_of(8)
             && phase == BoardPhase::Idle
             && at_wheel_since.is_none()
         {
