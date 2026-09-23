@@ -209,7 +209,12 @@ pub fn prompt(list: &mut UiDrawList, at: Vec2, text: &str, colour: Color) {
     }
     let scale = text_scale(vp.y);
     let w = measure(text, scale) + PAD;
-    let h = GLYPH_PX * scale + 10.0;
+    // As tall as its LINES (wave VEH3d): the driver's readout is five lines
+    // with the boarding row under it, and a box one glyph tall centred the
+    // five on it, so the bottom two ran off the viewport's edge. One line is
+    // `GLYPH_PX * scale` exactly as before, so every single-line prompt is
+    // byte-for-byte the rect it was.
+    let h = crate::draw::measure_height(text, scale) + 10.0;
     let x = (at.x - w * 0.5).clamp(0.0, (vp.x - w).max(0.0));
     let y = (at.y - h * 1.5).clamp(0.0, (vp.y - h).max(0.0));
     let r = Rect::new(x, y, w, h);

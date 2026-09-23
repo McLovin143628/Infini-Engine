@@ -882,6 +882,29 @@ function Stand-Up([string]$why) {
 # report's run-2 finding: a boarding leg must place the hero at a car INSIDE its
 # own window). With `-TuneVehicle "occupy=1"` the car nearest the hero gets an
 # NPC driver and passenger first, so the first press is a CARJACK.
+# One more boarding of the (stopped, empty) car the hero is standing beside:
+# press E, photograph the beat `$Pred` names, reach the wheel, get out again and
+# wait to be standing. Each beat of the choreography the first boarding could
+# not photograph gets a boarding of its own.
+function Invoke-Veh3dReboard([string]$What, [scriptblock]$Pred, [string]$File, [int]$StepBackMs = 0) {
+    Start-Sleep -Milliseconds 600
+    if ($StepBackMs -gt 0) {
+        # Walk away first, so the approach is a walk and not a shuffle.
+        [InfInput]::Down(0x1F); Start-Sleep -Milliseconds $StepBackMs; [InfInput]::Up(0x1F)   # S
+        Start-Sleep -Milliseconds 400
+    }
+    [InfInput]::Down(0x12); Start-Sleep -Milliseconds 70; [InfInput]::Up(0x12)   # E
+    Wait-ForHero -Csv $heroCsv -What $What -TimeoutS 6.0 -Predicate $Pred `
+        -Out (Join-Path $OutDir $File) | Out-Null
+    $in = @(Wait-ForHero -Csv $heroCsv -What "at the wheel ($File)" -TimeoutS 8.0 `
+        -Predicate { param($c) ($c.Count -gt 60) -and ($c[54] -match "^driving") })[-1]
+    if (-not $in) { Say "VEH3d: the boarding for $File never reached the wheel"; return }
+    Start-Sleep -Milliseconds 500
+    [InfInput]::Down(0x12); Start-Sleep -Milliseconds 70; [InfInput]::Up(0x12)   # E
+    Wait-ForHero -Csv $heroCsv -What "standing again ($File)" -TimeoutS 6.0 `
+        -Predicate { param($c) ($c.Count -gt 60) -and ($c[54] -eq "-") -and ($c[5] -eq "Grounded") } | Out-Null
+}
+
 function Invoke-Veh3dLeg {
     Restore-PlayerFocus "before the boarding leg"
     Stand-Up "before the boarding leg" | Out-Null
@@ -919,26 +942,27 @@ function Invoke-Veh3dLeg {
     }
     $jack = [bool](@(Get-Content $heroCsv -ErrorAction Ignore | Where-Object { $_ -match "^[0-9]" })[-1].Split(",")[54] -match "!$")
     Say ("VEH3d: the boarding began" + $(if ($jack) { " -- and it is a CARJACK" } else { "" }))
-    Wait-ForHero -Csv $heroCsv -What "the approach (unlocking)" -TimeoutS 3.0 `
-        -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^unlocking") } `
-        -Out (Join-Path $OutDir "107-veh3d-approach.png") | Out-Null
     Wait-ForHero -Csv $heroCsv -What "the hand on the outer handle (held, door shut)" -TimeoutS 4.0 `
         -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^opening") -and ([double]$c[56] -ge 0.0) -and ([double]$c[56] -le 0.02) -and ([double]$c[57] -lt 2.0) } `
         -Out (Join-Path $OutDir "108-veh3d-hand-on-handle.png") | Out-Null
-    Wait-ForHero -Csv $heroCsv -What "the door opening on its hinge" -TimeoutS 4.0 `
-        -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^opening") -and ([double]$c[57] -gt 25.0) } `
-        -Out (Join-Path $OutDir "109-veh3d-door-opening.png") | Out-Null
+    # **ONE FRAME PER BEAT, AND A BEAT PER BOARDING** (the leg's first two runs).
+    # The door swings 0 -> 66 deg in half a second, `entering` lasts 0.55 s and
+    # `seated` 0.6 s, the log is sampled at ~4 Hz and a screenshot takes about a
+    # second -- so a leg that photographed door, pull-out, entering and seated
+    # off ONE boarding photographed the first and then waited for rows that had
+    # already gone by (both runs: the door frame fired on the 65.8-deg row and
+    # three triggers timed out behind it). The carjack takes its PULL-OUT here;
+    # the door, the seat warp and the seat are each taken on a boarding of
+    # their own below (`Invoke-Veh3dReboard`), the car being the hero's by then.
     if ($jack) {
-        Wait-ForHero -Csv $heroCsv -What "the pull-out (the door wide, the driver coming out)" -TimeoutS 4.0 `
-            -Predicate { param($c) (& $isRow $c) -and ($c[54] -eq "opening!") -and ([double]$c[57] -gt 50.0) } `
+        Wait-ForHero -Csv $heroCsv -What "the pull-out (the door open, the driver coming out)" -TimeoutS 4.0 `
+            -Predicate { param($c) (& $isRow $c) -and ($c[54] -eq "opening!") -and ([double]$c[57] -gt 8.0) } `
             -Out (Join-Path $OutDir "116-veh3d-carjack-pullout.png") | Out-Null
+    } else {
+        Wait-ForHero -Csv $heroCsv -What "the door opening on its hinge" -TimeoutS 4.0 `
+            -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^opening") -and ([double]$c[57] -gt 8.0) } `
+            -Out (Join-Path $OutDir "109-veh3d-door-opening.png") | Out-Null
     }
-    Wait-ForHero -Csv $heroCsv -What "entering (the seat warp)" -TimeoutS 5.0 `
-        -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^entering") } `
-        -Out (Join-Path $OutDir "110-veh3d-entering.png") | Out-Null
-    Wait-ForHero -Csv $heroCsv -What "seated, feet on the pedals, the door still open" -TimeoutS 4.0 `
-        -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^seated") -and ([double]$c[59] -ge 0.0) -and ([double]$c[59] -le 0.02) -and ([double]$c[57] -gt 15.0) } `
-        -Out (Join-Path $OutDir "111-veh3d-seated-feet.png") | Out-Null
     $atWheel = @(Wait-ForHero -Csv $heroCsv -What "at the wheel" -TimeoutS 5.0 `
         -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^driving") })[-1]
     if (-not $atWheel) {
@@ -973,7 +997,22 @@ function Invoke-Veh3dLeg {
         -Out (Join-Path $OutDir "115-veh3d-closing.png") | Out-Null
     Wait-ForHero -Csv $heroCsv -What "standing clear of the car" -TimeoutS 4.0 `
         -Predicate { param($c) (& $isRow $c) -and ($c[54] -eq "-") -and ($c[5] -eq "Grounded") } | Out-Null
-    # (d) IN AGAIN -- an ordinary enter now the car is the hero's -- and the BAIL.
+    # (d) THE BEATS ONE BOARDING CANNOT HOLD, one boarding each -- see above.
+    Invoke-Veh3dReboard "the approach (unlocking)" `
+        { param($c) (& $isRow $c) -and ($c[54] -match "^unlocking") } `
+        "107-veh3d-approach.png" 900
+    if ($jack) {
+        Invoke-Veh3dReboard "the door opening on its hinge" `
+            { param($c) (& $isRow $c) -and ($c[54] -match "^opening") -and ([double]$c[57] -gt 8.0) } `
+            "109-veh3d-door-opening.png"
+    }
+    Invoke-Veh3dReboard "entering (the seat warp)" `
+        { param($c) (& $isRow $c) -and ($c[54] -match "^entering") } `
+        "110-veh3d-entering.png"
+    Invoke-Veh3dReboard "seated, feet on the pedals, the door still open" `
+        { param($c) (& $isRow $c) -and ($c[54] -match "^seated") -and ([double]$c[59] -ge 0.0) -and ([double]$c[59] -le 0.02) -and ([double]$c[57] -gt 15.0) } `
+        "111-veh3d-seated-feet.png"
+    # (e) IN AGAIN -- an ordinary enter now the car is the hero's -- and the BAIL.
     Start-Sleep -Milliseconds 600
     [InfInput]::Down(0x12); Start-Sleep -Milliseconds 70; [InfInput]::Up(0x12)   # E
     $again = @(Wait-ForHero -Csv $heroCsv -What "back at the wheel" -TimeoutS 10.0 `
