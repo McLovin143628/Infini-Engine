@@ -463,7 +463,13 @@ pub fn load_weights(load: f64) -> [f64; 3] {
 
 /// How loud the whole engine is before the crossfade: louder with revs and
 /// with load.
-pub const ENGINE_GAIN: f64 = 0.8;
+///
+/// The layer gains are set for HEADROOM, measured through the render-to-file
+/// door: with the listener in the driver's seat the first set (engine 0.8,
+/// squeal 0.8, turbo 0.3, whine 0.16) summed past full scale under a full-
+/// throttle wheelspin and clipped 1 723 of 796 800 samples of the course; this
+/// set is the one the capture was re-measured at.
+pub const ENGINE_GAIN: f64 = 0.55;
 
 /// The engine's level at this step, before the emitter's own volume.
 pub fn engine_level(t: &VoiceTelemetry) -> f64 {
@@ -492,7 +498,7 @@ pub const PITCH_MIN: f64 = 0.05;
 pub const PITCH_MAX: f64 = 4.0;
 
 /// How loud the whine gets.
-pub const WHINE_GAIN: f64 = 0.16;
+pub const WHINE_GAIN: f64 = 0.12;
 
 /// **The gear whine**: pitched by the input shaft (`shaft_rpm /
 /// WHINE_REF_RPM`), louder with shaft speed and with load.
@@ -508,7 +514,7 @@ pub fn whine_voice(t: &VoiceTelemetry) -> (f64, f64) {
 }
 
 /// How loud the turbo gets at full boost.
-pub const TURBO_GAIN: f64 = 0.3;
+pub const TURBO_GAIN: f64 = 0.2;
 
 /// **The turbo's whistle**: pitched and voiced by boost.
 pub fn turbo_voice(t: &VoiceTelemetry) -> (f64, f64) {
@@ -523,7 +529,7 @@ pub const BLOW_OFF_TO: f64 = 0.2;
 /// The boost there has to be to dump.
 pub const BLOW_OFF_MIN_BOOST: f64 = 0.3;
 /// How loud a blow-off at full boost is.
-pub const BLOW_OFF_GAIN: f64 = 0.6;
+pub const BLOW_OFF_GAIN: f64 = 0.45;
 
 /// Where the squeal starts, in normalised slip — a little before the tyre
 /// curve's peak, because a tyre at its limit is already audible.
@@ -531,7 +537,7 @@ pub const SQUEAL_ONSET: f64 = 0.8;
 /// Where it is at full voice.
 pub const SQUEAL_FULL: f64 = 2.2;
 /// How loud a tyre at full voice is.
-pub const SQUEAL_GAIN: f64 = 0.8;
+pub const SQUEAL_GAIN: f64 = 0.5;
 
 /// **THE SQUEAL, BY SLIP AND NOT BY SPEED** (the research doc: *"a car sliding
 /// sideways at 10 km/h should squeal just as hard as one sliding at 100
@@ -550,7 +556,7 @@ pub const IMPULSE_ONSET_MPS: f64 = 0.8;
 /// The speed at which it is at full voice.
 pub const IMPULSE_FULL_MPS: f64 = 3.0;
 /// How loud a full impulse is.
-pub const IMPULSE_GAIN: f64 = 0.9;
+pub const IMPULSE_GAIN: f64 = 0.7;
 
 /// **A suspension spike's volume**, or `None` below the onset.
 pub fn impulse_volume(strut_mps: f64) -> Option<f64> {
