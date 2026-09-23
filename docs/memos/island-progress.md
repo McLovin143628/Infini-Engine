@@ -40347,3 +40347,238 @@ carefulness has now failed four times in this repository — twice on waves, twi
 on an auditor — and that the gate has to run on the CLOSING battery and not only
 mid-wave, because the writing that produced these seven happened after the
 mid-audit catch.
+
+## WAVE VEH3d — BOARDING (2026-09-23)
+
+A car is got into now, not warped into. The press on E BEGINS a machine on the
+character — `Locked → Unlocking → OpeningDoor → EnteringIK → Seated → Driving`,
+and back out through `Exiting → ClosingDoor` — and every phase is read off the
+world: the approach is root motion along a cubic Hermite at walk speed with the
+facing locked to the flank's inward normal; the near hand takes the OUTER
+handle on a 0.2 s ramp and holds it; the door opens on VEH3c's own revolute
+motor; the body steps back out of the leaf's swept disc; P29.7's 0.55 s quintic
+window is the `EnteringIK` phase, unchanged in length and ease, on a path that
+goes round the open door rather than through the B-pillar; the INNER pull shuts
+the door; the hands take the rim and turn with the rack, and the feet press the
+pedals with the controls the car was actually given.
+
+**No schema moved.** `BoardingState` rides `MovementRuntime`, which is
+`#[serde(skip)]`; the eight sockets are DERIVED from the chassis half-extents and
+the family's own door parts; the seat index is a `u8` on the same skip block.
+Scene **v28**, `ScenePayload` **13**, `EXPECTED_LEVELS` **24**, goldens **64**,
+`Cargo.lock` untouched, no new dependency, nothing from Unreal. The determinism
+trace grows its **nineteenth** section, `boarding_state_bytes` (100 bytes a
+boarding body), EMPTY while nobody boards — a body walking, or sitting at a
+wheel, is quiet — pinned in `projector_mirror`'s `SECTIONS`.
+
+### the phases, measured (the saloon, the template mannequin, from 2 m back)
+
+| phase | seconds | what ends it |
+|---|---|---|
+| locked | 0.067 | `LOCKED_S` |
+| unlocking | 1.433 | the Hermite's own length at `APPROACH_MPS` 1.7 (2.409 m walked at 1.681 m/s, longest step 30 mm) |
+| opening | 0.750 | reach 0.2 s + hold 0.1 s, then the latch; the body steps back while the leaf swings to 45° |
+| entering | 0.550 | the car's own `seat_warp()` — P29.7's window, BECOME a phase |
+| seated | 0.600 | the inner pull: the door from 65.6° to under `DOOR_SHUT_DEG` |
+| driving | — | |
+
+The facing through the door phase is at most **0.026°** off the flank's inward
+normal. A carjack runs the same table with a longer `opening` (1.217 s — the
+victim is pulled through the door first, its own `Jacked` 2.233 s then a forced
+`Exiting` 0.450 s); a torn-off door boards through the opening with no hand
+asked for (`opening` 0.617 s).
+
+### the seat is in the cabin
+
+| row | old seat (roof) | floor | cushion | pelvis | pelvis − roof | feet off pedal |
+|---|---|---|---|---|---|---|
+| sedan | 1.466 | 0.349 | 0.566 | 0.566 | −0.900 | 0.0 mm |
+| sports | 1.357 | 0.312 | 0.515 | 0.515 | −0.842 | 0.0 mm |
+| suv | 1.853 | 0.303 | 0.604 | 0.604 | −1.248 | 0.0 mm |
+| van | 2.879 | 1.007 | 1.403 | 1.427 | −1.452 | 0.0 mm |
+| truck | 1.880 | 0.395 | 0.682 | 0.682 | −1.198 | 0.0 mm |
+| cruiser | 1.546 | 0.356 | 0.587 | 0.587 | −0.958 | 0.0 mm |
+
+(metres above the road, measured against VEH3b's rest heights.) The drive camera
+still hangs off the ROOF — the point the seated feet used to be — so the drive
+block frames the car as before: the gate reads the pivot **0.8 mm** from the
+roof-derived one. CHAR1c's ignored arm
+`an_island_driver_is_seated_inside_its_car_and_not_on_top_of_it` is un-ignored
+and green.
+
+### the hands and the feet
+
+* the outer handle, at weight 1 before the latch: **0.00 mm** (the mannequin,
+  pelvis dipped 0.358 m) and **0.00 mm** on the island's MetaHuman;
+* the rim through a full lock both ways (±450° of rim): **0.00 mm** worst over
+  880 hand-steps at weight 1;
+* the pedals: the right foot presses **70.0 mm** at full throttle while the left
+  moves 0.0, the left **70.0 mm** at full brake — **0.00 mm** off each pedal;
+* a passenger: pelvis on its cushion to the millimetre, hands 0.00 mm on the
+  dash grab bar, feet 0.00 mm on the floor; a quarter of the driven traffic
+  fleet carries one (967 of 4 000 guids, 0.242).
+
+### eight findings, each measured before it was fixed
+
+1. **THE TEMPLATE'S KNEE LIMIT IS INVERTED against `solve_chain`'s flex.** The
+   Manny/template knee is `hinge_x(-150, 0)` and anatomical flex is +X, so a
+   seated leg clamped straight: a foot asked 15 cm up missed by 0.493 m standing
+   and 0.645 m seated. Seated legs are solved UNLIMITED with a pole above the
+   knee (`FootGoal::{pole, unlimited}`); the limit table itself is carried.
+2. **A reach priced on the capsule is priced on somebody else's arms.** The dip
+   and the hand choice were planned on the template's proportions; on the
+   island's MetaHuman the capsule's "right" picked the FAR hand (right shoulder
+   0.44 m from the handle, left 0.24 m) and the hand stopped **75.5 mm** short.
+   `HandIkReport::arm_len` publishes each arm's own two bone lengths; the reach
+   hand is re-chosen and the dip re-priced from the rig's own shoulder while the
+   hand is arriving, at half the error a step (a full correction on a one-step-
+   old shoulder bobbed the pelvis 0.25 ↔ 0.30 m). **0.00 mm.**
+3. **Hands that ride 450° of rim wind past each other.** Measured 111.7 mm off a
+   grip that had wrapped to the far side of the hub. The hands ride
+   `RIM_RIDE_DEG` = 50° and the rim slides through them — push-pull, what driving
+   schools teach; pure in the rim angle, nothing to fold.
+4. **A torn-off front door answered the REAR door.** `door_for_seat` took the
+   most-forward ATTACHED door; with the front one shed it answered the one
+   behind it and the driver reached for the rear handle. It takes the front door
+   whatever became of it and answers `None` when it is gone.
+5. **A landing into a smaller capsule is compensated TWICE** (P29's, carried).
+   The landing moves the centre for the new half-height AND step 12 writes the
+   collider with the falling one, so the next step's section 5 moves it again:
+   a bail-out landing into a roll sat **0.29 m** over the road where 0.585 is
+   right, and every stand after it was refused as a ceiling. The bail roll is
+   taken through the roll KEY's door instead, one step after the landing (one
+   resize), and comes up standing. The fix to the landing itself was measured
+   and it re-routes the P29 course (the dive station no longer sinks and pops),
+   so it is carried with the measurement, not fixed inside a boarding wave.
+6. **The boarding camera cut 2.57 m in one step** on `EnteringIK`, which is
+   `Driving` with a seat — the roof rule moved the claim's pivot. It frames the
+   body's own feet; CHAR1c's vehicle-entry arm now reads its worst step at
+   8.6 % of the move.
+7. **The seated-roof pivot, the exit and the ground.** An exit point on a wall
+   top is "ground" to a ray from above: the candidates keep a height band
+   (0.5 m up, 1.5 m down of the car's underside), sweep the body's own capsule
+   out from inside the car, and a candidate over no ground at all is water (a
+   boat's occupant steps over the side). A car wedged on every side is a
+   refused exit, never a body in a wall.
+8. **The rush-hour steal's target was wading a lake.** The most isolated driven
+   car on the fixture sat under a water surface and the hero at its door was
+   `SwimUnder` for twenty-four presses, which VEH2b's one-frame eject never cared
+   about. The target is chosen on dry ground now; the steal is a choreography and
+   its trace is **839** steps where VEH2b's was 631 (re-blessed with that cause).
+
+### the occupied seat (the VEH3b audit's inherited finding, closed)
+
+An occupied driver's seat is never an ENTER, by two locks: the interaction door
+offers a Carjack from the driver's door and **"[E] Occupied vehicle"** — a
+refusal by name — from anywhere else (six presses from the far side: six refused,
+the busiest seat held one), and `boarding::begin` answers `Begin::Occupied` to
+any caller that reaches it another way. Over **36 000 island steps** (ten minutes,
+1 200 samples, up to 13 seats held at once, two of them passengers) the busiest
+seat ever held **one** body.
+
+### the camera
+
+The boarding camera is an `Override` claim on the CHAR1c director under
+`CAMERA_TAG_BOARDING`, pushed every ground step (135 of 135) and released at the
+wheel (0 after), so the director BLENDS to the drive block — never a second
+camera. `CameraTuning::aim_blend_speed` (WPN2b carried 219) is the aim's own
+interpolation speed. The level's `camera.toml` has its WRITE half (CHAR1c
+carried 159): `write_camera_beside` writes only what differs from the default
+(two knobs are three leaves, because a gait key lives in both rotation-mode
+tables), the editor's Live Tuning panel gained "Save camera to level", and the
+island ships a header-only `camera.toml` in its content list.
+
+### cost
+
+| | dev | budget (asserted release, off CI) |
+|---|---|---|
+| a boarding step over a standing one, worst phase | +0.0327 ms (driving) | `BOARDING_STEP_BUDGET_MS` 0.25 |
+| 64 seated drivers' hands-and-feet pass | 0.0511 ms (0.80 µs a driver) | `SEATED_POSTURE_BUDGET_MS` 0.5 |
+
+Min of five warmed steps per phase; never a cold first step.
+
+### the gate
+
+`runtime/inf-player/tests/veh3d_gate.rs` — **23 arms**. For each: what it
+READS, the mutation measured to red it, and whether P29.7's old 0.55 s warp
+(press E, be in the seat) would pass it.
+
+| arm | reads | mutation → red | old warp passes? |
+|---|---|---|---|
+| `the_machine_walks_its_phases_in_order_with_their_durations` | the phase trace, the root's path, the body's yaw | approach clocked at `UNLOCK_MIN_S` → "walked at 11.113 m/s" | no — no phases |
+| `the_hand_takes_the_outer_handle_within_two_centimetres` | the hand JOINT against the handle, per step at weight 1 | the dip never applied → 268.30 mm | no — no hand |
+| `the_door_opens_on_its_revolute_motor_as_the_hand_reaches` | the hinge angle off VEH3c's joint, against the phase | the motor call deleted → "went in with the door at 0.0 deg" | no — the door never moves |
+| `the_seat_is_inside_the_cabin_on_every_family` | six families' pelvis joints against cushion and roof | `SEAT_FLOOR_FRAC_Y` = +1.0 → the van's pelvis 97 mm off its cushion | no — the roof |
+| `the_hands_follow_the_rim_through_a_full_lock` | the hand joints against the grips, the rim angle off the WHEELS | `vehicle_steer` → 0 → the hands travel 0.073 m | no — no hands on a rim |
+| `the_feet_press_the_pedals_with_the_inputs` | the foot joints in the CAR's frame | `pedal_inputs` → (0, 0) → 0.0 mm of throttle travel | no |
+| `a_passenger_rides_its_own_seat_and_does_not_drive` | the car's travel under two opposed sticks; the passenger's joints | the `drives()` guard made true → the car went −6.04 m | no — one seat |
+| `an_occupied_seat_is_never_entered` | the prompt, the refusal counter, the census, `begin` directly | the refusal candidate deleted → "the one door answers something"; `begin`'s check deleted → `Started` | **passes** half: the old door also refused (by silence) |
+| `the_carjack_plays_the_same_pipeline` | both bodies' phase traces, the door at the pull, the census, the brake | the pull skipped → the victim's order is `[Jacked]` | no |
+| `the_victim_is_never_put_down_inside_a_wall` | the landing point against the slab, the capsule's clearance | `clear_exit`'s two locks deleted → "put down inside the wall" | no — VEH2b's eject had no check |
+| `the_exit_is_the_reverse_and_never_lands_in_geometry` | the exit's phases, the hinge, clearance, the side it left by | the same → "stepped out into something"; **`capsule_clear` → true ALONE survives** (the path sweep is a second lock on the same candidates) | no |
+| `a_moving_exit_is_a_roll` | the mode trace after a press at 7 m/s | the bail flag never set → `[FallControlled, Grounded]` | no |
+| `a_door_torn_off_is_boarded_through_the_opening` | `door_for_seat`, the door phase's length, no hand asked | the latch ignored → the shed door answered | no |
+| `the_boarding_camera_rides_the_director` | the director's holder per step, the drive pivot | the pose answering `None` → 0 of 135 steps | no |
+| `the_boarding_section_is_empty_until_somebody_boards` | `boarding_state_bytes` standing, boarding, seated | `is_quiet` → false → 100 bytes with nobody boarding | passes — it is empty either way; armed by 204 loud steps |
+| `pie_equals_shipping_on_a_board_drive_exit_course` | both hosts, rows of trace + both bodies, two courses (board; CARJACK), and the shipped trace's TAIL | the 19th fold made `let _ =` → "does not END with the boarding section" (`projector_mirror` passes this one, measured); `begin` → `NoCar` → the anti-vacuity half | no — no phases |
+| `a_boarding_costs_what_it_costs` | the whole step per phase over a control, min of five | n/a — a clock | n/a |
+| `sixty_four_seated_drivers_cost_what_they_cost` | the posture pass's own time and counts | n/a — a clock; its counts (64/64/64) are asserted | n/a |
+| `the_level_camera_table_round_trips_through_the_write_half` | the written file's keys, the read-back, the island's committed file | `to_toml_changed` writing the whole table → 12+ keys | n/a |
+| `the_shipped_host_draws_the_boarding_row` | `window.rs`'s source, then the readout on real state | n/a — a source pin | n/a |
+| `this_wave_moved_no_schema` | the skip-block's exact text | n/a — asserts an absence | n/a |
+| `the_islands_hero_boards_drives_and_rolls_out` | the MetaHuman's joints, its own machine's states | the dip never applied → 233.48 mm; the bail flag never set → no `roll` state | no |
+| `the_island_census_has_no_doubly_occupied_seat` | the seat census over 36 000 island steps | none — a measurement of an absence, armed by its counts (13 seats, 2 passengers) | passes |
+
+**Vacuous list** (a no-op world passes these, on purpose): the census (an
+absence over the island's own population), `the_boarding_section_is_empty_…`'s
+first half, `this_wave_moved_no_schema`, and the two cost arms off release.
+
+### carried, by name, each with its cause
+
+1. **The template's knee limit is inverted** against the solver's flex
+   (`hinge_x(-150, 0)`, flex is +X). Seated legs go round it (unlimited, a pole
+   above the knee); the limit table is every rig's and is not a boarding wave's.
+2. **A landing into a smaller capsule is compensated twice** (P29's; finding
+   5). Measured, routed around for the bail roll, not fixed: the fix re-routes
+   the P29 course's dive station.
+3. **`projector_mirror`'s section-order pin is a substring search**: a fold
+   turned into `let _ =` keeps the name and passes it (measured). This wave's
+   own section is read at the shipped trace's TAIL by `veh3d_gate`; the other
+   eighteen are not.
+4. **Near-tier traffic carries nobody.** A driver and a passenger are drawn at
+   `Full` only; a Near car is an empty shell at 60 m.
+5. **The rear bench shares the front door.** `door_for_seat` is keyed on the
+   flank, so a rear passenger's boarding opens the front door; the socket table
+   has one door per side.
+6. **The closing hand is a gesture.** The inner pull reaches for the handle and
+   the motor shuts the door whether or not the hand arrives; on the exit the
+   body steps away as it shuts and the hand rarely lands (not asserted).
+7. **The island hero's FEET are not measured seated** — its hands (0.00 mm on
+   the rim) and pelvis (0.912 m under the roof) are; the pedal arm is the
+   mannequin's.
+8. **The boarding camera orbits** through `EnteringIK` as the body turns from
+   the flank to the wheel: up to 0.42 m a step, 8.6 % of the change-over, inside
+   CHAR1c's blend bound but visible.
+9. **The showcase project's copy of the island has no `camera.toml`.** The
+   committed one is header-only, so the two read the same defaults; refreshing
+   the project is a showcase step outside this tree (VEH3c's carried item, still).
+10. **`capsule_clear` alone is not an armed lock** — the path sweep refuses every
+    candidate it would. The exit arms are armed against losing both.
+
+### what VEH3e / VEH3f / VEH3h inherit
+
+* **VEH3e (audio)** gets the door as an EVENT: `BoardingState::mark_s` is the
+  latch step, `door_deg` the leaf, `Seated`'s shut the slam; the handle pull,
+  the latch clack, the seat creak and the door slam are all on phase edges the
+  trace already folds. The bail's `FallControlled → Grounded → Roll` is the body
+  thud. Nothing in this wave emits a sound.
+* **VEH3f (the roster)** gets the sockets DERIVED — any new body family is
+  boarded the day it has a chassis box and a `door` part per flank; the seat
+  table is a function of `half.y`, so a bus or a semi cab needs its floor and
+  cushion fractions re-read against a real interior (the van's pelvis already
+  sits 24 mm proud of its cushion). Articulated rigs and tracked rigs have no seat
+  rule yet; a two-door coupe's rear bench boards through the front door (5).
+* **VEH3h (the cert)** gets the hands-on script: walk to the cruiser, the
+  handle, the door, the wheel through a lock, the pedals, a stopped exit and a
+  bail — every beat is a hero.csv column (61 fields) and a HUD row, and
+  `demo.ps1 -BoardingOnly` films it.
