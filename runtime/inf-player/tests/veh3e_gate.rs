@@ -1874,4 +1874,8 @@ fn the_shipped_host_draws_the_audio_row_and_logs_the_columns() {
         );
     }
     assert!(window.contains("voice_readout("));
+    assert!(
+        window.contains("[drive, row, damage, audio]"),
+        "the audio row is built and never drawn"
+    );
 }
