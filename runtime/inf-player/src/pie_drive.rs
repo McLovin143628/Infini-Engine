@@ -1772,3 +1772,289 @@ impl HeroLog {
         let _ = file.flush();
     }
 }
+
+/// **The demo loop's HOLD on a boarding beat** (VEH3d audit), `INF_PIE_BOARD_HOLD`
+/// = `seconds[@metres]`: a PREVIEW session freezes its fixed steps for
+/// `seconds` of wall time the first time the camera subject reaches each beat of
+/// a boarding, and — with `@metres` — draws that frozen frame from a camera
+/// `metres` off the beat's joint, looking at it.
+///
+/// It exists because the beats the wave is about are shorter than a
+/// screenshot: the hand holds the outer handle for 0.1 s, the inner pull for a
+/// handful of steps, and the implementer's frame `108-veh3d-hand-on-handle`
+/// was taken with the hand already released (its HUD row carried no `HAND`)
+/// — a frame of a claim that could not be seen. The steps are the same steps:
+/// a hold runs NO step, it does not change one, so nothing the simulation does
+/// depends on it. Read only in a `--pie` preview, for [`SPAWN_AT_ENV`]'s reason.
+///
+/// The beats, once each per boarding (re-armed when the subject is standing
+/// idle again): `take` (the outer handle at weight 1 before the latch), `pull`
+/// (the inner handle at weight 1, seated), `lock` (both hands on the rim past
+/// 400 deg of rim), `throttle` (driving on more than 0.9 of throttle, faster
+/// than [`THROTTLE_BEAT_MPS`]), `push` (the inner handle at weight 1, getting
+/// out).
+pub const BOARD_HOLD_ENV: &str = "INF_PIE_BOARD_HOLD";
+
+/// The beat names [`BOARD_HOLD_ENV`] fires on, in bit order.
+pub const BOARD_HOLD_BEATS: [&str; 5] = ["take", "pull", "lock", "throttle", "push"];
+
+/// How fast the car must be going for the `throttle` beat, m/s — the demo
+/// loop's own throttle frame fires on a hero moving faster than 1.5 m/s, and a
+/// beat held at a standstill would be over before that row existed.
+pub const THROTTLE_BEAT_MPS: f64 = 1.5;
+
+/// See [`BOARD_HOLD_ENV`].
+#[derive(Debug, Default, Clone)]
+pub struct BoardHold {
+    hold_s: f64,
+    close_m: f64,
+    left_s: f64,
+    fired: u8,
+    focus: Option<glam::DVec3>,
+}
+
+impl BoardHold {
+    /// Read [`BOARD_HOLD_ENV`]; inert when absent or unreadable.
+    pub fn from_env() -> Self {
+        let Ok(v) = std::env::var(BOARD_HOLD_ENV) else {
+            return Self::default();
+        };
+        let mut it = v.trim().splitn(2, '@');
+        let hold_s = it
+            .next()
+            .and_then(|s| s.trim().parse::<f64>().ok())
+            .filter(|s| s.is_finite() && *s > 0.0)
+            .unwrap_or(0.0)
+            .min(30.0);
+        let close_m = it
+            .next()
+            .and_then(|s| s.trim().parse::<f64>().ok())
+            .filter(|s| s.is_finite() && *s > 0.0)
+            .unwrap_or(0.0)
+            .min(10.0);
+        Self {
+            hold_s,
+            close_m,
+            ..Default::default()
+        }
+    }
+
+    /// A hold of `hold_s` seconds with a close-up `close_m` off the joint (`0`
+    /// for none) — what [`Self::from_env`] builds, for a gate.
+    pub fn new(hold_s: f64, close_m: f64) -> Self {
+        Self {
+            hold_s,
+            close_m,
+            ..Default::default()
+        }
+    }
+
+    /// Whether this frame's fixed steps are held.
+    pub fn holding(&self) -> bool {
+        self.left_s > 0.0
+    }
+
+    /// `(the beat's joint, how far off it to draw from)` while a close-up hold
+    /// is running.
+    pub fn close_up(&self) -> Option<(glam::DVec3, f64)> {
+        if !self.holding() || self.close_m <= 0.0 {
+            return None;
+        }
+        self.focus.map(|f| (f, self.close_m))
+    }
+
+    /// One display frame: count a running hold down, or start one on a beat not
+    /// yet held this boarding. Answers a log line when a hold starts.
+    pub fn tick(&mut self, sim: &RuntimeSim, dt: f64) -> Option<String> {
+        use inf_ecs::boarding::BoardPhase;
+        if self.hold_s <= 0.0 {
+            return None;
+        }
+        if self.left_s > 0.0 {
+            self.left_s = (self.left_s - dt.max(0.0)).max(0.0);
+            return None;
+        }
+        let world = sim.world();
+        let hero = inf_ecs::movement::camera_subject(world)?;
+        let cm = world
+            .world()
+            .get::<inf_ecs::components::CharacterMovement>(world.entity_of(hero)?)?;
+        let b = cm.runtime.boarding;
+        if b.phase == BoardPhase::Idle && !cm.runtime.seat.is_seated() {
+            self.fired = 0;
+            return None;
+        }
+        let r = sim.boarding_residuals(hero);
+        let (role, side) = (inf_anim::BoneRoleKind::Hand, b.hand_side);
+        let joint = |role: inf_anim::BoneRoleKind, side: u8| {
+            let s = if side == 0 {
+                inf_anim::BoneSide::Left
+            } else {
+                inf_anim::BoneSide::Right
+            };
+            sim.posed_joint(hero, role, s)
+        };
+        let mid = |role: inf_anim::BoneRoleKind| match (joint(role, 0), joint(role, 1)) {
+            (Some(a), Some(b)) => Some((a + b) * 0.5),
+            _ => None,
+        };
+        let driving = b.phase == BoardPhase::Driving
+            || (b.phase == BoardPhase::Idle && cm.runtime.seat.is_seated());
+        let rim = if driving {
+            inf_physics::d3::boarding::vehicle_steer(world, sim.bridge3d(), cm.runtime.seat.vehicle)
+        } else {
+            0.0
+        };
+        let beat =
+            if b.phase == BoardPhase::OpeningDoor && b.mark_s < 0.0 && b.handle_weight >= 0.999 {
+                Some((0u8, joint(role, side), r.and_then(|r| r.handle_m)))
+            } else if b.phase == BoardPhase::Seated && b.handle_weight >= 0.999 {
+                Some((1, joint(role, side), r.and_then(|r| r.handle_m)))
+            } else if driving && rim.abs() > 400.0 && b.hand_weight >= 0.999 {
+                Some((2, mid(role), r.and_then(|r| r.grips_m)))
+            } else if driving && b.throttle_in > 0.9 && {
+                let car = inf_physics::d3::boarding::car_frame(
+                    world,
+                    sim.bridge3d(),
+                    cm.runtime.seat.vehicle,
+                    false,
+                );
+                car.is_some_and(|c| c.vel.length() > THROTTLE_BEAT_MPS)
+            } {
+                Some((
+                    3,
+                    mid(inf_anim::BoneRoleKind::Foot),
+                    r.and_then(|r| r.feet_m),
+                ))
+            } else if b.phase == BoardPhase::Exiting && b.handle_weight >= 0.999 {
+                Some((4, joint(role, side), r.and_then(|r| r.handle_m)))
+            } else {
+                None
+            };
+        let (bit, focus, residual) = beat?;
+        if self.fired & (1 << bit) != 0 {
+            return None;
+        }
+        self.fired |= 1 << bit;
+        self.left_s = self.hold_s;
+        self.focus = focus;
+        Some(format!(
+            "{BOARD_HOLD_ENV} held `{}` for {:.1}s at step {} (residual {}; close-up {})",
+            BOARD_HOLD_BEATS[bit as usize],
+            self.hold_s,
+            sim.steps(),
+            residual
+                .map(|m| format!("{:.1} mm", m * 1000.0))
+                .unwrap_or_else(|| "-".to_string()),
+            if self.close_m > 0.0 && focus.is_some() {
+                format!("{:.2} m", self.close_m)
+            } else {
+                "off".to_string()
+            }
+        ))
+    }
+}
+
+/// **The demo loop's see-through car** (VEH3d audit), `INF_PIE_CUTAWAY` = an
+/// alpha in `(0, 1)`: in a PREVIEW session, every drawn part of the car the
+/// camera subject is SEATED in (or climbing into) is drawn TRANSLUCENT at that
+/// alpha, and put back as it was the moment the subject is out of it.
+///
+/// It is VEH3c's `doors_open` doctrine for the seated frames: the saloon's
+/// primitive body is an opaque box, and the implementer's seated, full-lock and
+/// throttle frames showed the camera looking over a blue roof with no body in
+/// the car at all — the hands on the rim and the feet on the pedals were read
+/// off the columns and never seen. It writes the car's `Material` components
+/// only (`blend` and the base colour's alpha), which no fixed step reads and
+/// no trace section folds. Read only in a `--pie` preview.
+pub const CUTAWAY_ENV: &str = "INF_PIE_CUTAWAY";
+
+/// See [`CUTAWAY_ENV`].
+#[derive(Debug, Default, Clone)]
+pub struct Cutaway {
+    alpha: Option<f32>,
+    faded: Option<Uuid>,
+    kept: Vec<(Uuid, inf_ecs::components::Material)>,
+}
+
+impl Cutaway {
+    /// Read [`CUTAWAY_ENV`]; inert when absent, unreadable, or not in `(0, 1)`.
+    pub fn from_env() -> Self {
+        Self {
+            alpha: std::env::var(CUTAWAY_ENV)
+                .ok()
+                .and_then(|v| v.trim().parse::<f32>().ok())
+                .filter(|a| a.is_finite() && *a > 0.0 && *a < 1.0),
+            ..Default::default()
+        }
+    }
+
+    /// A cutaway at `alpha` — what [`Self::from_env`] builds, for a gate.
+    pub fn with_alpha(alpha: f32) -> Self {
+        Self {
+            alpha: Some(alpha),
+            ..Default::default()
+        }
+    }
+
+    /// One display frame: fade the subject's car, or put the last one back.
+    /// Answers a log line when the faded car changes.
+    pub fn tick(&mut self, sim: &mut RuntimeSim) -> Option<String> {
+        let alpha = self.alpha?;
+        let want = {
+            let world = sim.world();
+            inf_ecs::movement::camera_subject(world)
+                .and_then(|h| world.entity_of(h))
+                .and_then(|e| {
+                    world
+                        .world()
+                        .get::<inf_ecs::components::CharacterMovement>(e)
+                })
+                .filter(|cm| cm.runtime.seat.is_seated())
+                .map(|cm| cm.runtime.seat.vehicle)
+        };
+        if want == self.faded {
+            return None;
+        }
+        let world = sim.world_mut();
+        for (guid, m) in self.kept.drain(..) {
+            if let Some(e) = world.entity_of(guid) {
+                world.world_mut().entity_mut(e).insert(m);
+            }
+        }
+        self.faded = want;
+        let chassis = want?;
+        let root = world.entity_of(chassis)?;
+        let mut n = 0usize;
+        for e in world.subtree(root) {
+            let (Some(guid), Some(m)) = (
+                world
+                    .world()
+                    .get::<inf_ecs::components::Guid>(e)
+                    .map(|g| g.0),
+                world
+                    .world()
+                    .get::<inf_ecs::components::Material>(e)
+                    .copied(),
+            ) else {
+                continue;
+            };
+            if world
+                .world()
+                .get::<inf_ecs::components::MeshRef>(e)
+                .is_none()
+            {
+                continue;
+            }
+            self.kept.push((guid, m));
+            let mut faded = m;
+            faded.blend = inf_ecs::components::BlendMode::Translucent;
+            faded.base_color.a = alpha;
+            world.world_mut().entity_mut(e).insert(faded);
+            n += 1;
+        }
+        Some(format!(
+            "{CUTAWAY_ENV} drew {n} part(s) of {chassis} at alpha {alpha:.2}"
+        ))
+    }
+}

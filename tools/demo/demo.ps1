@@ -109,6 +109,19 @@ param(
     # photographed the moment after three of them. The boarding leg stretches
     # its own timeouts and key presses by the inverse.
     [double]$TimeScale = 1.0,
+    # **HOLD ON A BOARDING BEAT** (VEH3d audit), `INF_PIE_BOARD_HOLD` =
+    # `seconds[@metres]`: the preview freezes its fixed steps for `seconds` of
+    # wall time the first time the hero reaches each beat of a boarding (the
+    # outer handle held, the inner pull, full lock, throttle, the inner push)
+    # and, with `@metres`, draws the frozen frame from that far off the beat's
+    # joint. A hold runs no step, so nothing simulated depends on it. The
+    # implementer's `108` was taken with the hand already let go.
+    [string]$BoardHold = "",
+    # **THE SEE-THROUGH CAR** (VEH3d audit), `INF_PIE_CUTAWAY` = an alpha in
+    # (0, 1): the car the hero sits in is drawn translucent, and put back when
+    # he is out. The saloon's primitive body is an opaque box; without this the
+    # seated, full-lock and throttle frames show a roof and no body.
+    [double]$Cutaway = 0.0,
     # Place the second committed body beside the pawn before the editor frame,
     # in the DOCUMENT only. See tools/demo/place.mjs for why it is not saved.
     [bool]$PlaceFemale = $true,
@@ -497,6 +510,10 @@ if ($ArmHero -ne "") {
 if ($armList.Count -eq 0) { Remove-Item env:INF_PIE_ARM_HERO -ErrorAction Ignore }
 if ($TuneVehicle -ne "") { $env:INF_PIE_TUNE_VEHICLE = $TuneVehicle; Say "tune vehicle: $TuneVehicle" }
 else { Remove-Item env:INF_PIE_TUNE_VEHICLE -ErrorAction Ignore }
+if ($BoardHold -ne "") { $env:INF_PIE_BOARD_HOLD = $BoardHold; Say "board hold: $BoardHold (seconds[@close-up metres] per boarding beat)" }
+else { Remove-Item env:INF_PIE_BOARD_HOLD -ErrorAction Ignore }
+if ($Cutaway -gt 0.0 -and $Cutaway -lt 1.0) { $env:INF_PIE_CUTAWAY = "$Cutaway"; Say "cutaway: the seated car drawn at alpha $Cutaway" }
+else { Remove-Item env:INF_PIE_CUTAWAY -ErrorAction Ignore }
 if ($TimeScale -lt 1.0) { $env:INF_PIE_TIME_SCALE = "$TimeScale"; Say "time scale: $TimeScale (the preview's fixed steps per wall second)" }
 else { Remove-Item env:INF_PIE_TIME_SCALE -ErrorAction Ignore }
 # The boarding leg's stretch: its timeouts and its key presses, by 1/scale.
@@ -975,6 +992,12 @@ function Invoke-Veh3dLeg {
             -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^opening") -and ([double]$c[57] -gt 8.0) } `
             -Out (Join-Path $OutDir "109-veh3d-door-opening.png") | Out-Null
     }
+    # (a2) THE INNER PULL (VEH3d audit): the hand on the INNER handle at weight 1,
+    # seated, the door swinging shut under it -- the residual is the POSED joint
+    # against the live handle, and with `-BoardHold` the frame is taken frozen.
+    Wait-ForHero -Csv $heroCsv -What "the inner pull (the hand on the inner handle, seated)" -TimeoutS (6.0 * $ts) `
+        -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^seated") -and ([double]$c[56] -ge 0.0) -and ([double]$c[56] -le 0.02) } `
+        -Out (Join-Path $OutDir "118-veh3d-inner-pull.png") | Out-Null
     $atWheel = @(Wait-ForHero -Csv $heroCsv -What "at the wheel" -TimeoutS (5.0 * $ts) `
         -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^driving") })[-1]
     if (-not $atWheel) {
@@ -1001,7 +1024,10 @@ function Invoke-Veh3dLeg {
     [InfInput]::Up(0x1F)
     Start-Sleep -Milliseconds ([int](500 * $ts))
     [InfInput]::Down(0x12); Start-Sleep -Milliseconds ([int](70 * $ts)); [InfInput]::Up(0x12)   # E
-    Wait-ForHero -Csv $heroCsv -What "getting out (the door open, the body leaving the seat)" -TimeoutS (4.0 * $ts) `
+    Wait-ForHero -Csv $heroCsv -What "the inner push (the hand on the inner handle, getting out)" -TimeoutS (4.0 * $ts) `
+        -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^exiting") -and ([double]$c[56] -ge 0.0) -and ([double]$c[56] -le 0.02) } `
+        -Out (Join-Path $OutDir "119-veh3d-inner-push.png") | Out-Null
+    Wait-ForHero -Csv $heroCsv -What "getting out (the door open, the body leaving the seat)" -TimeoutS (8.0 * $ts) `
         -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^exiting") -and ([double]$c[57] -gt 40.0) } `
         -Out (Join-Path $OutDir "114-veh3d-exit.png") | Out-Null
     Wait-ForHero -Csv $heroCsv -What "out, the door closing" -TimeoutS (4.0 * $ts) `

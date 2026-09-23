@@ -2130,28 +2130,11 @@ fn pie_equals_shipping_on_a_board_drive_exit_course() {
     }
 }
 
-/// **THE SHIPPED HOST MEASURES THE POSED JOINTS AGAINST THE SOCKETS** (VEH3d
-/// audit, priority a') — `RuntimeSim::boarding_residuals`, the number
-/// `hero.csv`'s boarding columns and the HUD row carry, on the shipped
-/// player's own sim with the mannequin rig, over a board / full lock both ways
-/// / throttle / exit course driven through the INPUT door.
-///
-/// The implementer's columns carried the IK solver's `reach_error` — the chain
-/// end against the target the boarding module handed it — so they read 0.0 mm
-/// on every row by construction. This arm reads the evaluated pose's hand and
-/// foot JOINTS (the pose the GPU skins) against sockets recomputed from the
-/// live chassis, the door's own body and the rack.
-///
-/// * the OUTER handle, the INNER handle, the rim through a full lock, the
-///   pedals under throttle: each at weight 1, each <= 2 cm, each with an
-///   engagement count;
-/// * **the mutation** (run in the audit): the reach solve's weight forced to 0
-///   in `pose::apply_hand_ik` — the old columns still read 0.0; this arm reds
-///   with the hand hundreds of millimetres off.
-#[test]
-fn the_shipped_host_measures_the_posed_joints_against_the_sockets() {
-    use inf_ecs::movement::actions::{HANDBRAKE, INTERACT, MOVE_X, MOVE_Y};
-    use inf_player::runtime_sim::{RuntimeInput, RuntimeSim};
+/// The saloon, the hero beside it with the mannequin rig and a one-state
+/// machine, in the SHIPPED player's own sim (`RuntimeSim`) — the fixture the
+/// audit's shipped-host arms share.
+fn rigged_runtime_sim() -> inf_player::runtime_sim::RuntimeSim {
+    use inf_player::runtime_sim::RuntimeSim;
     const IDLE: inf_anim::ClipRef = [0xd3; 16];
     let def = catalogue_def("sedan");
     let mut world = EcsWorld::new();
@@ -2210,6 +2193,32 @@ fn the_shipped_host_measures_the_posed_joints_against_the_sockets() {
         .into_iter()
         .collect(),
     );
+    sim
+}
+
+/// **THE SHIPPED HOST MEASURES THE POSED JOINTS AGAINST THE SOCKETS** (VEH3d
+/// audit, priority a') — `RuntimeSim::boarding_residuals`, the number
+/// `hero.csv`'s boarding columns and the HUD row carry, on the shipped
+/// player's own sim with the mannequin rig, over a board / full lock both ways
+/// / throttle / exit course driven through the INPUT door.
+///
+/// The implementer's columns carried the IK solver's `reach_error` — the chain
+/// end against the target the boarding module handed it — so they read 0.0 mm
+/// on every row by construction. This arm reads the evaluated pose's hand and
+/// foot JOINTS (the pose the GPU skins) against sockets recomputed from the
+/// live chassis, the door's own body and the rack.
+///
+/// * the OUTER handle, the INNER handle, the rim through a full lock, the
+///   pedals under throttle: each at weight 1, each <= 2 cm, each with an
+///   engagement count;
+/// * **the mutation** (run in the audit): the reach solve's weight forced to 0
+///   in `pose::apply_hand_ik` — the old columns still read 0.0; this arm reds
+///   with the hand hundreds of millimetres off.
+#[test]
+fn the_shipped_host_measures_the_posed_joints_against_the_sockets() {
+    use inf_ecs::movement::actions::{HANDBRAKE, INTERACT, MOVE_X, MOVE_Y};
+    use inf_player::runtime_sim::{RuntimeInput, RuntimeSim};
+    let mut sim = rigged_runtime_sim();
     let phase = |sim: &RuntimeSim| {
         let e = sim.world().entity_of(HERO).unwrap();
         let cm = sim.world().world().get::<CharacterMovement>(e).unwrap();
@@ -2367,6 +2376,145 @@ fn the_shipped_host_measures_the_posed_joints_against_the_sockets() {
         worst(&inner) <= 20.0,
         "the posed hand was {:.2} mm off the INNER handle at weight 1",
         worst(&inner)
+    );
+}
+
+/// **THE PREVIEW DOORS HOLD A BEAT AND SEE THROUGH THE CAR, AND TOUCH NO
+/// STEP** (VEH3d audit, priorities a' and b') — `pie_drive::BoardHold`
+/// (`INF_PIE_BOARD_HOLD`) and `pie_drive::Cutaway` (`INF_PIE_CUTAWAY`), driven
+/// the way `window.rs` drives them: one `tick` per display frame, and no fixed
+/// step while a hold runs.
+///
+/// * a hold fires on `take`, `pull`, `lock`, `throttle` and `push`, once each,
+///   and its close-up joint is the beat's own joint: the hand residual at
+///   every hand beat <= 2 cm, read by `boarding_residuals` at the hold;
+/// * the car the subject sits in is drawn translucent while seated and every
+///   `Material` is put back exactly on the way out;
+/// * a twin sim stepped through the same inputs with no doors folds the
+///   byte-identical state at the end — the doors change which WALL frames run
+///   steps, never a step;
+/// * `window.rs` gates `run_frame` on the hold (a source pin: the window
+///   cannot be driven headless).
+#[test]
+fn the_preview_doors_hold_a_beat_and_see_through_the_car_and_touch_no_step() {
+    use inf_ecs::movement::actions::{HANDBRAKE, INTERACT, MOVE_X, MOVE_Y};
+    use inf_player::pie_drive::{BoardHold, Cutaway};
+    use inf_player::runtime_sim::RuntimeInput;
+    const SRC: &str = include_str!("../src/window.rs");
+    assert!(
+        SRC.contains("!(self.pie.is_some() && self.board_hold.holding())"),
+        "`window.rs` no longer holds its fixed steps on a boarding beat"
+    );
+    let input = |i: u32| -> RuntimeInput {
+        let mut r = RuntimeInput::default();
+        match i {
+            60 => r = r.press(INTERACT),
+            400..=520 => r = r.axis_at(MOVE_X, 1.0),
+            521..=600 => r = r.axis_at(MOVE_Y, 1.0),
+            601..=800 => r = r.press(HANDBRAKE),
+            840 => r = r.press(INTERACT),
+            _ => {}
+        }
+        r
+    };
+    const STEPS: u32 = 1100;
+    let mut doors = rigged_runtime_sim();
+    let mut twin = rigged_runtime_sim();
+    let mut hold = BoardHold::new(0.25, 1.2);
+    let mut cut = Cutaway::with_alpha(0.25);
+    let original: std::collections::BTreeMap<Uuid, inf_ecs::components::Material> = {
+        let w = twin.world();
+        let root = w.entity_of(CHASSIS).expect("the car");
+        w.subtree(root)
+            .into_iter()
+            .filter_map(|e| {
+                Some((
+                    w.world().get::<inf_ecs::components::Guid>(e)?.0,
+                    *w.world().get::<inf_ecs::components::Material>(e)?,
+                ))
+            })
+            .collect()
+    };
+    let mut notes: Vec<String> = Vec::new();
+    let mut held_frames = 0u32;
+    let mut translucent_max = 0usize;
+    let mut i = 0u32;
+    let mut frames = 0u32;
+    while i < STEPS {
+        frames += 1;
+        assert!(frames < 10 * STEPS, "the holds never let go");
+        if let Some(n) = hold.tick(&doors, 1.0 / 60.0) {
+            notes.push(n);
+        }
+        if let Some(n) = cut.tick(&mut doors) {
+            notes.push(n);
+        }
+        let w = doors.world();
+        let root = w.entity_of(CHASSIS).expect("the car");
+        let translucent = w
+            .subtree(root)
+            .into_iter()
+            .filter_map(|e| w.world().get::<inf_ecs::components::Material>(e))
+            .filter(|m| {
+                m.blend == inf_ecs::components::BlendMode::Translucent && m.base_color.a == 0.25
+            })
+            .count();
+        translucent_max = translucent_max.max(translucent);
+        if hold.holding() {
+            held_frames += 1;
+            continue;
+        }
+        doors.step_once(input(i));
+        twin.step_once(input(i));
+        i += 1;
+    }
+    println!("=== the preview doors ===");
+    for n in &notes {
+        println!("  {n}");
+    }
+    println!(
+        "  {held_frames} display frames held; at most {translucent_max} drawn parts translucent"
+    );
+    for beat in inf_player::pie_drive::BOARD_HOLD_BEATS {
+        let n = notes
+            .iter()
+            .filter(|s| s.contains(&format!("held `{beat}`")))
+            .count();
+        assert_eq!(n, 1, "the `{beat}` beat was held {n} times");
+    }
+    for n in notes.iter().filter(|s| s.contains("held `")) {
+        let mm: f64 = n
+            .split("(residual ")
+            .nth(1)
+            .and_then(|r| r.split(' ').next())
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(f64::INFINITY);
+        assert!(
+            mm <= 20.0,
+            "a hold was taken with the joint {mm} mm off its socket: {n}"
+        );
+    }
+    assert!(held_frames >= 5 * 15, "only {held_frames} frames were held");
+    assert!(
+        translucent_max >= 1,
+        "no part of the seated car was ever drawn translucent"
+    );
+    let w = doors.world();
+    for (g, m) in &original {
+        let now = w
+            .entity_of(*g)
+            .and_then(|e| w.world().get::<inf_ecs::components::Material>(e))
+            .copied();
+        assert_eq!(
+            now,
+            Some(*m),
+            "part {g}'s material was not put back after the cutaway"
+        );
+    }
+    assert_eq!(doors.steps(), twin.steps());
+    assert!(
+        doors.state_bytes() == twin.state_bytes(),
+        "the preview doors changed the simulation"
     );
 }
 

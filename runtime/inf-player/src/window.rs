@@ -200,6 +200,14 @@ pub struct PlayerApp {
     /// which is the same guard the hero log is behind). A shipped boot never
     /// reaches it. See [`crate::pie_drive::SpawnOverride`].
     spawn_override: crate::pie_drive::SpawnOverride,
+    /// **The demo loop's hold on a boarding beat** (VEH3d audit) — inert
+    /// unless `INF_PIE_BOARD_HOLD` is set, consulted only in a PREVIEW session.
+    /// See [`crate::pie_drive::BoardHold`].
+    board_hold: crate::pie_drive::BoardHold,
+    /// **The demo loop's see-through car** (VEH3d audit) — inert unless
+    /// `INF_PIE_CUTAWAY` is set, consulted only in a PREVIEW session. See
+    /// [`crate::pie_drive::Cutaway`].
+    cutaway: crate::pie_drive::Cutaway,
     /// **The demo loop's slow motion** (wave VEH3d) — `1.0` unless
     /// `INF_PIE_TIME_SCALE` says otherwise, and applied only in a PREVIEW
     /// session. See [`crate::pie_drive::TIME_SCALE_ENV`].
@@ -302,6 +310,8 @@ impl PlayerApp {
             keyboard_grabbed: false,
             hero_log: crate::pie_drive::HeroLog::from_env(),
             spawn_override: crate::pie_drive::SpawnOverride::from_env(),
+            board_hold: crate::pie_drive::BoardHold::from_env(),
+            cutaway: crate::pie_drive::Cutaway::from_env(),
             time_scale: crate::pie_drive::time_scale_from_env(),
             vmeshes,
             scatter_meshes: Arc::new(inf_render::ScatterMeshes::new()),
@@ -432,6 +442,26 @@ impl PlayerApp {
         let (w, h) = live.host.size();
         if let Some(pose) = self.sim.camera_pose() {
             let (_r, up, forward) = inf_ecs::camera::basis(pose.yaw_deg, pose.pitch_deg);
+            // A preview's CLOSE-UP on a held boarding beat (VEH3d audit): the
+            // same direction the camera looks from, `metres` off the joint.
+            if let Some((focus, metres)) = self.board_hold.close_up().filter(|_| self.pie.is_some())
+            {
+                let back = (pose.position.to_dvec3() - focus).normalize_or(-forward);
+                let eye = focus + back * metres;
+                let look = (focus - eye).normalize_or(forward).as_vec3();
+                let side = look.cross(Vec3::Y).normalize_or(Vec3::X);
+                return Some(RenderView {
+                    origin: live.host.origin(),
+                    eye_world: eye,
+                    forward: look,
+                    up: side.cross(look).normalize_or(Vec3::Y),
+                    fov_y: (pose.fov_deg as f32).to_radians(),
+                    near: 0.05,
+                    width: w,
+                    height: h,
+                    ortho: None,
+                });
+            }
             return Some(RenderView {
                 origin: live.host.origin(),
                 eye_world: pose.position.to_dvec3(),
@@ -1133,11 +1163,20 @@ impl PlayerApp {
             if let Some(said) = self.spawn_override.tick(&mut self.sim, dt) {
                 self.hero_log.note(&said);
             }
+            // …and the two VEH3d-audit preview doors: a hold on a boarding
+            // beat, and the see-through car the subject sits in.
+            if let Some(said) = self.board_hold.tick(&self.sim, dt) {
+                self.hero_log.note(&said);
+            }
+            if let Some(said) = self.cutaway.tick(&mut self.sim) {
+                self.hero_log.note(&said);
+            }
         }
         self.ui.report_unconsumed(&self.input_state);
         let held = input::held_actions(&self.input_state, dt);
-        // PIE pause freezes the sim but keeps rendering the last frame.
-        if !self.paused {
+        // PIE pause freezes the sim but keeps rendering the last frame; so does
+        // a preview's hold on a boarding beat (`INF_PIE_BOARD_HOLD`).
+        if !self.paused && !(self.pie.is_some() && self.board_hold.holding()) {
             let sim_dt = if self.pie.is_some() {
                 dt * self.time_scale
             } else {
