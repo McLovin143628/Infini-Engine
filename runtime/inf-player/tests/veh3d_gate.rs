@@ -507,6 +507,15 @@ fn dist(a: Option<DVec3>, b: DVec3) -> f64 {
     a.map(|a| (a - b).length()).unwrap_or(f64::INFINITY)
 }
 
+/// Two JOINTS against two SOCKETS (VEH3d audit): the better of the two
+/// pairings, its worse joint. The sockets are computed by the arm from the car
+/// (never read back off the IK request, which is the target the code set).
+fn pair(j: [Option<DVec3>; 2], at: [DVec3; 2]) -> f64 {
+    let straight = dist(j[0], at[0]).max(dist(j[1], at[1]));
+    let crossed = dist(j[0], at[1]).max(dist(j[1], at[0]));
+    straight.min(crossed)
+}
+
 // ── (b) THE MACHINE ─────────────────────────────────────────────────────────
 
 /// **The machine walks its phases in order, with their durations** — read on
@@ -849,14 +858,14 @@ fn the_seat_is_inside_the_cabin_on_every_family() {
                 inf_anim::BoneSide::Center,
             )
             .expect("a head");
-        let asks = y.foot_asks(HERO);
+        // The feet against the PEDALS the arm lays itself, at the inputs the
+        // car was given (VEH3d audit: this read the foot request's own target).
         let feet = y.feet(HERO);
-        let foot_err = (0..2)
-            .map(|i| match asks[i] {
-                Some((t, _)) => dist(feet[i], t),
-                None => f64::INFINITY,
-            })
-            .fold(0.0f64, f64::max);
+        let (tp, bp) = {
+            let b = y.cm(HERO).runtime.boarding;
+            board::pedal_faces(&car.sockets, b.throttle_in, b.brake_in)
+        };
+        let foot_err = pair(feet, [car.world(bp), car.world(tp)]);
         println!(
             "  {:<8} {:>6.2} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>+9.3} {:>+9.3} {:>6.1}mm",
             row,
@@ -948,13 +957,18 @@ fn the_hands_follow_the_rim_through_a_full_lock() {
             hi = hi.max(r);
             let asks = y.hand_asks(HERO);
             let hands = y.hands(HERO);
+            // The grips the arm lays itself, off the rim angle IT read off the
+            // wheels (VEH3d audit: this read the hand request's own target).
+            let car = y.frame();
+            let g = board::wheel_grips(&car.sockets, r);
+            let held = asks
+                .iter()
+                .all(|a| a.is_some_and(|(_, w)| (w - 1.0).abs() < 1e-9));
+            if held {
+                worst = worst.max(pair(hands, [car.world(g[0]), car.world(g[1])]));
+                placed += 2;
+            }
             for i in 0..2 {
-                if let Some((t, w)) = asks[i] {
-                    if (w - 1.0).abs() < 1e-9 {
-                        worst = worst.max(dist(hands[i], t));
-                        placed += 1;
-                    }
-                }
                 if let (Some(a), Some(b)) = (start[i], hands[i]) {
                     far[i] = far[i].max((a - b).length());
                 }
@@ -1011,14 +1025,17 @@ fn the_feet_press_the_pedals_with_the_inputs() {
     let throttle = y.cm(HERO).runtime.boarding.throttle_in;
     let pressed = y.feet_in_car(HERO);
     let pressed_world = y.feet(HERO);
-    let asks = y.foot_asks(HERO);
-    let on = |i: usize, f: [Option<DVec3>; 2]| match asks[i] {
-        Some((t, _)) => dist(f[i], t),
-        None => f64::INFINITY,
+    // The pedal faces the ARM lays at the input it read (VEH3d audit: this
+    // read the foot request's own target).
+    let pedals = |y: &Yard| {
+        let b = y.cm(HERO).runtime.boarding;
+        let car = y.frame();
+        let (tp, bp) = board::pedal_faces(&car.sockets, b.throttle_in, b.brake_in);
+        (car.world(tp), car.world(bp))
     };
     let right_travel = (pressed[1].unwrap() - rest[1].unwrap()).length();
     let left_still = (pressed[0].unwrap() - rest[0].unwrap()).length();
-    let right_on = on(1, pressed_world);
+    let right_on = dist(pressed_world[1], pedals(&y).0);
     // The brake: the stick pulled back while rolling forward is a brake, by
     // `VehicleControls::from_intent`'s own rule.
     let before_brake = y.feet_in_car(HERO);
@@ -1027,11 +1044,7 @@ fn the_feet_press_the_pedals_with_the_inputs() {
     let brake = y.cm(HERO).runtime.boarding.brake_in;
     let braked = y.feet_in_car(HERO);
     let braked_world = y.feet(HERO);
-    let asks = y.foot_asks(HERO);
-    let left_on = match asks[0] {
-        Some((t, _)) => dist(braked_world[0], t),
-        None => f64::INFINITY,
-    };
+    let left_on = dist(braked_world[0], pedals(&y).1);
     let left_travel = (braked[0].unwrap() - before_brake[0].unwrap()).length();
     println!(
         "=== the feet on the pedals ===\n  throttle {throttle:.2}: the right foot pressed {:.1} mm (the left moved {:.1} mm), {:.2} mm off its pedal\n  brake {brake:.2}: the left foot pressed {:.1} mm, {:.2} mm off its pedal (travel at full input {} mm)",
@@ -1114,17 +1127,19 @@ fn a_passenger_rides_its_own_seat_and_does_not_drive() {
     let mut on_grips = 0;
     for i in 0..2 {
         let (t, _) = asks[i].expect("both passenger hands are asked for");
-        hand_err = hand_err.max(dist(hands[i], t));
         if grips.iter().any(|g| (car.world(*g) - t).length() < 1e-6) {
             on_grips += 1;
         }
         let (f, _) = fasks[i].expect("both passenger feet are asked for");
-        foot_err = foot_err.max(dist(feet[i], f));
         assert!(
             floor.iter().any(|g| (car.world(*g) - f).length() < 1e-6),
             "a passenger foot was sent somewhere that is not the floor"
         );
     }
+    // The JOINTS against the sockets the arm laid (VEH3d audit: these read
+    // the requests' own targets).
+    hand_err = hand_err.max(pair(hands, [car.world(grips[0]), car.world(grips[1])]));
+    foot_err = foot_err.max(pair(feet, [car.world(floor[0]), car.world(floor[1])]));
     let census = d3::boarding::seat_census(&y.world);
     println!(
         "=== the passenger ===\n  the car moved {moved:.2} m forward under the DRIVER's stick with the passenger pulling back\n  the passenger's pelvis {:.3} against its cushion {:.3}; hands {:.2} mm off the grab bar, feet {:.2} mm off the floor\n  the census: {:?}",
