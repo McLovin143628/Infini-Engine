@@ -1134,7 +1134,17 @@ fn the_load_crossfade_moves_between_the_three_grains() {
             continue;
         }
         let level = src.volume * va::engine_level(&v);
-        let w = va::load_weights(v.load());
+        // The doc's three loads as TRIANGLES written out here (0 %, 50 %,
+        // 100 %) -- not `va::load_weights`, which is the function under test:
+        // an arm that asked it would pass whatever it answered (the audit's
+        // first mutation run: `load_weights` pinned to the mid grain stayed
+        // GREEN).
+        let l = v.load();
+        let w = [
+            (1.0 - 2.0 * l).max(0.0),
+            1.0 - (2.0 * l - 1.0).abs(),
+            (2.0 * l - 1.0).max(0.0),
+        ];
         for (i, layer) in [
             VoiceLayer::GrainIdle,
             VoiceLayer::GrainMid,
@@ -1153,10 +1163,13 @@ fn the_load_crossfade_moves_between_the_three_grains() {
             worst = worst.max((g.volume - want).abs());
         }
         checked += 1;
+        let audible = |layer| st.get(&key(layer)).is_some_and(|g: &Voice| g.volume > 0.0);
         if v.load() == 0.0 && !v.fuel_cut {
             at0 += 1;
+            assert!(audible(VoiceLayer::GrainIdle) && !audible(VoiceLayer::GrainFull));
         } else if v.load() == 1.0 {
             at1 += 1;
+            assert!(audible(VoiceLayer::GrainFull) && !audible(VoiceLayer::GrainIdle));
         }
         if v.fuel_cut && v.throttle > 0.5 {
             cut += 1;
@@ -1323,6 +1336,25 @@ fn the_kerb_thumps_front_then_rear() {
         assert_eq!(h.2, va::impulse_clip(SurfaceVoice::Sealed));
         assert!(h.3 > 5.0);
     }
+    // THE RISING EDGE, driven through the shipped planner: a strut closing
+    // above the onset for FOUR steps in a row (a long ramp, a landing that
+    // keeps compressing) is ONE thump, not four. The course's own kerb spike
+    // lasts a single step, so it cannot see this (the first mutation run:
+    // the edge guard dropped stayed GREEN on the course alone).
+    let world = planner_world();
+    let mut mem = VoiceMemory::new();
+    let mut t = telemetry(0.0, 10.0, SurfaceClass::Gravel);
+    let mut thumps = 0usize;
+    for step in 0..8 {
+        t.axles[0].compression_m = 0.05 + 0.03 * f64::from(step.clamp(1, 5) - 1);
+        let cues = mem.plan(&world, &[(CHASSIS, t)], DT);
+        thumps += cues
+            .iter()
+            .filter(|c| matches!(c, va::VoiceCue::Play { source, clip, .. } if *source == key(VoiceLayer::ImpulseFront) && *clip == va::impulse_clip(SurfaceVoice::Loose)))
+            .count();
+    }
+    println!("a strut closing at 1.8 m/s for four steps: {thumps} thump(s), with the gravel clip");
+    assert_eq!(thumps, 1, "a sustained spike thumped {thumps} times");
 }
 
 // ── 8. ENGINE ON / OFF ──────────────────────────────────────────────────────
@@ -1470,6 +1502,47 @@ fn the_door_slams_on_the_shut_step_and_the_motor_rows_are_silent() {
     assert!(!crossings.is_empty());
     assert_eq!(slams, crossings, "a slam is not on its shut step");
     assert_eq!(latches.len(), 2, "one latch in, one out");
+
+    // THE SHUT EDGE, driven through the shipped planner: a door that is
+    // pulled shut EARLY and then sits shut for several `Seated` steps (the
+    // machine leaves `Seated` only after `SEATED_MIN_S`) slams ONCE. The
+    // course's door shut after the minimum, so it left `Seated` on the very
+    // step it shut and could not see this (the first mutation run: the edge
+    // dropped stayed GREEN on the course alone).
+    let mut world = EcsWorld::new();
+    let e = world.spawn_with_guid(HERO, "Hero", None);
+    world.world_mut().entity_mut(e).insert(hero_bits());
+    world.propagate();
+    let door = Uuid::from_u128(0x5E3E_00D0);
+    let mut mem = VoiceMemory::new();
+    let mut slams_direct = 0usize;
+    for (i, deg) in [40.0, 20.0, 8.0, 2.0, 1.0, 0.5, 0.5, 0.5]
+        .into_iter()
+        .enumerate()
+    {
+        {
+            let mut cm = world
+                .world_mut()
+                .get_mut::<CharacterMovement>(e)
+                .expect("a mover");
+            let b = &mut cm.runtime.boarding;
+            b.phase = BoardPhase::Seated;
+            b.door = door;
+            b.door_deg = deg;
+            b.handle_weight = 1.0;
+            b.time_s = i as f64 * DT;
+        }
+        slams_direct += mem
+            .plan(&world, &[], DT)
+            .iter()
+            .filter(|c| c.source() == dk(DoorLayer::Slam))
+            .count();
+    }
+    println!("a door shut early and held shut for five Seated steps: {slams_direct} slam(s)");
+    assert_eq!(
+        slams_direct, 1,
+        "a door that stayed shut slammed {slams_direct} times"
+    );
 }
 
 /// **A BAIL-OUT LANDS WITH A THUD**: a press at speed throws the hero out of
