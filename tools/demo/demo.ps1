@@ -1146,10 +1146,21 @@ function Invoke-Veh3eLeg {
         -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^driving") -and ([double]$c[6] -lt 0.3) -and ([double]$c[66] -gt 0.0) -and ([double]$c[66] -lt 0.6) } `
         -Out (Join-Path $OutDir "120-veh3e-idle.png") | Out-Null
     Start-Sleep -Milliseconds 800
+    # BACK OFF THE KERB FIRST (the first run): the island's parked saloon sits
+    # nose-in, and a launch from where it stands spun its front wheels against
+    # the stop for eleven seconds at 0.03 m/s -- a burnout, and no drive.
+    [InfInput]::Down(0x1F); [InfInput]::Down(0x1E)   # S + A: reverse, steering away
+    Start-Sleep -Milliseconds 2200
+    [InfInput]::Up(0x1E); [InfInput]::Up(0x1F)
+    Wait-ForHero -Csv $heroCsv -What "stopped after backing off" -TimeoutS 4.0 `
+        -Predicate { param($c) (& $isRow $c) -and ([math]::Abs([double]$c[6]) -lt 0.4) } | Out-Null
     # THE LAUNCH: the burnout at the line, then the shifts.
     [InfInput]::Down(0x11)   # W
-    Wait-ForHero -Csv $heroCsv -What "the burnout (rear slip past the peak, below 5 m/s, the squeal loud)" -TimeoutS 4.0 `
-        -Predicate { param($c) (& $isRow $c) -and ([double]$c[64] -gt 1.5) -and ([double]$c[6] -lt 5.0) -and ([double]$c[69] -gt 0.2) } `
+    # EITHER axle: the island's saloons are front-drive (the first run's car
+    # spun its FRONT wheels at slip 24-174 against a kerb stop and this
+    # predicate, reading the rear, never fired).
+    Wait-ForHero -Csv $heroCsv -What "the burnout (an axle's slip past the peak, below 5 m/s, its squeal loud)" -TimeoutS 4.0 `
+        -Predicate { param($c) (& $isRow $c) -and ([math]::Max([double]$c[63], [double]$c[64]) -gt 1.5) -and ([double]$c[6] -lt 5.0) -and ([math]::Max([double]$c[68], [double]$c[69]) -gt 0.2) } `
         -Out (Join-Path $OutDir "121-veh3e-burnout.png") | Out-Null
     Wait-ForHero -Csv $heroCsv -What "the first upshift (gear 2, the whine stepped down)" -TimeoutS 10.0 `
         -Predicate { param($c) (& $isRow $c) -and ([int]$c[61] -ge 2) -and ([double]$c[67] -gt 0.0) } `
@@ -1161,7 +1172,7 @@ function Invoke-Veh3eLeg {
     # THE SLIDE: a handbrake turn at speed.
     [InfInput]::Down(0x20); [InfInput]::Down(0x39)   # D + space
     Wait-ForHero -Csv $heroCsv -What "the handbrake slide (the squeal loud above 8 m/s)" -TimeoutS 4.0 `
-        -Predicate { param($c) (& $isRow $c) -and ([double]$c[69] -gt 0.3) -and ([double]$c[6] -gt 8.0) } `
+        -Predicate { param($c) (& $isRow $c) -and ([math]::Max([double]$c[68], [double]$c[69]) -gt 0.3) -and ([double]$c[6] -gt 8.0) } `
         -Out (Join-Path $OutDir "124-veh3e-slide.png") | Out-Null
     [InfInput]::Up(0x20)
     Wait-ForHero -Csv $heroCsv -What "stopped" -TimeoutS 8.0 `

@@ -680,6 +680,16 @@ pub const DISPATCH_STEP_BUDGET_MS: f64 = 0.5;
 ///
 /// [`CITY_STEP_BUDGET_MS`]'s conditioning, for its reasons.
 ///
+/// # Held at wave VEH3e, with the vehicle layer stack in it
+///
+/// The stack is up to seven loops and three one-shots a car, sent only when a
+/// value changed. Priced by `veh3e_gate::sixty_four_cars_cost_what_they_print`
+/// at **64 driven cars**: with ONE voiced (the realistic case — traffic is
+/// voiceless by tier) 10.85 commands a step and **0.0177 ms** (release); with
+/// ALL 64 voiced, the worst case the tier rule exists to prevent, 694.6
+/// commands a step and **0.0620 ms** (release; 0.0940 dev). Held, not
+/// re-minted.
+///
 /// **RATCHET RULE (§8): this constant may only ever DECREASE.** Minted at 1.0
 /// (VEN1b audit).
 pub const AUDIO_STEP_BUDGET_MS: f64 = 1.0;

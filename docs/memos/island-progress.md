@@ -40677,3 +40677,149 @@ and their clips, no schema); the motor-only first 60° of the inner pull; the wr
 (not the palm) on a handle; no drawn steering wheel; 6 of 268 demo pedal rows at
 37.8 mm on the first seated step; mouse-look deltas on a zero-step frame; riders
 in a bench posture. Report: `campaign-briefs/veh3d-audit-report.md`.
+
+## WAVE VEH3e — VEHICLE AUDIO (2026-09-23)
+
+A car is a LAYER STACK now, not one pitched loop. VEH1a's `engine_cue` — one
+clip on the chassis's own key, `SetPitch` + `SetVolume` + `SetPosition` every
+step — is kept only for the classes the stack does not voice (a hull, a
+rotorcraft). A wheeled car whose `engine_voice_kind` has combustion grains is
+planned by ONE Ring-0 function, `inf_ecs::vehicle_audio::VoiceMemory::plan`,
+called inside the `vehicle_engine_audio` MIRROR fence of both hosts: three
+combustion grains crossfaded by load, the gear whine, the turbo and its
+blow-off, a squeal per axle by slip and surface, a surface impulse per strut
+spike, and — from VEH3d's boarding state — the door latch, the hinge creak, the
+slam and the bail-out thud. The fence is a `match` from the planner's cues onto
+the P12.3 queue, one command per cue, on keys salted off the chassis (and off
+the boarding body for the door) so no voice ever lands on an entity's own
+emitter key.
+
+**No schema moved.** The three v28 voice tunables VEH3a put on the wire
+(`cylinders`, `engine_voice_kind`, `firing_order_variant`) are read for the
+first time; the planner's memory (what each voice was last told, last step's
+struts, throttle and hinge) is a host field, fresh each session. Scene **v28**,
+payload **13**, `EXPECTED_LEVELS` **24**, goldens **64**, `Cargo.lock`
+untouched, no new dependency, nothing from Unreal.
+
+### who sings
+
+A car with an `AudioSource` (`RigSpawn::engine_voice` — never set on traffic,
+never on the parked emergency fleet) whose engine is RUNNING: somebody is in it
+or its drivetrain is not quiet. A parked car nobody is in is SILENT — its loops
+are stopped, and it queues nothing. On the island that is the hero's car and
+nothing else; the boat and the helicopter keep VEH1a's loop.
+
+### the grains, off the committed bytes
+
+Twenty-eight clips generated at asset-build time by `inf_audio::vehicle_synth`
+(parabolic sine, counter noise, one-pole decays — no libm, bit-identical on
+every machine), committed under `samples/vehicle-audio/` as 56 files,
+**463 414 bytes**, named by both island recipes and closed over by
+`engine_spawned_clips` (the cooked pack carries all 28: 458 542 bytes). A grain
+is eight engine cycles at 2 400 rpm, so its firing period is IN the file, and
+the host plays it at `rpm / 2400 × cyl / family_cyl`. Measured by `veh3e_gate`
+off the committed bytes with its own WAV parser and its own period estimator:
+
+| family | cyl | idle / mid / full period, ms | baked, ms |
+|---|---|---|---|
+| P4 | 4 | 12.5001 / 12.5043 / 12.5028 | 12.5000 |
+| P6 | 6 | 8.3338 / 8.3325 / 8.3323 | 8.3333 |
+| P8X (cross-plane) | 8 | 6.2492 / 6.2492 / 6.2464 | 6.2500 |
+| P8F (flat-plane) | 8 | 6.2500 / 6.2502 / 6.2478 | 6.2500 |
+| D6 (diesel) | 6 | 8.3332 / 8.3332 / 8.3328 | 8.3333 |
+
+A four against a V8 at the same revs: **2.0009**. Over the gate's course, the
+firing rate the listener hears — the measured grain frequency times the pitch
+the host SENT — is `(rpm/60)(cyl/2)` to **0.058 %** worst over 282 audible
+grain-steps.
+
+### the course (`veh3e_gate`, the shipped host, a turbo cross-plane V8)
+
+Board, idle, a full-throttle launch (the tyres let go at the line), two
+upshifts, a 12 cm kerb at 21 m/s, lift, a handbrake slide onto gravel, stop,
+get out. 996 steps, **3 115** commands, `dropped == 0`, identical on the
+editor's `SimSession` and the shipped `RuntimeSim` step for step.
+
+| state | steps | car commands / step (mean) | min |
+|---|---|---|---|
+| parked / boarding | 216 | 0.04 | 0 |
+| idle / stopped | 154 | **0.00** | 0 |
+| launch (burnout) | 45 | 6.89 | 4 |
+| full throttle | 195 | 8.08 | 6 |
+| lift / coast | 30 | 5.57 | 5 |
+| handbrake slide | 60 | 4.55 | 3 |
+| sliding to a stop | 210 | 2.30 | 0 |
+| engine off | 86 | 0.08 | 0 |
+
+Worst single step: 13. The shifts: the whine steps by the gears' own ratio
+(1→2 **0.6634** against 0.6591; 2→3 **0.6586** against 0.6552) while the grains,
+pitched by the CRANK, move 1 % on the shift step. The squeal is `squeal_voice
+(slip)` on every one of 763 checked steps (worst difference 0.0), loud on 176
+steps below 5 m/s and 45 above 15 m/s; the planner answers slip 1.6 at 10 km/h
+and at 100 km/h with the SAME two commands. The slide reaches the gravel and the
+rear squeal is re-`Play`ed with the loose clip. One blow-off, on the lift step,
+at boost 0.65. Kerb: front then rear impulse, sealed clip. The door (a rigged
+host): latch on the mark step, 21 motor-only `Seated` rows with NO door
+command, 15 hand rows (creak on all 15), the slam on the shut step.
+
+### the render-to-file door, and what a drive sounds like
+
+`inf_audio::AudioEngine::offline(rate)` is kira's own mixer behind a
+`kira::backend::Backend` that keeps the renderer for the caller to clock;
+`RuntimeSim::capture_audio_to` appends one fixed step of mix a step to a WAV
+(`INF_RENDER_AUDIO` in the player, `-RenderAudio` in the demo loop). Ring-0
+tests measure its output: the whine peaks at 1 225 Hz and follows a `SetPitch`
+to 1 835 Hz; a V8 grain pitched for 4 800 rpm renders a 320 Hz firing line.
+The gate course rendered to 16.6 s at 48 kHz: the rectified signal's firing
+line tracks `(rpm/60)(cyl/2)` with a median error of 1.0 % over 94 windows —
+the V8 idles at 60 Hz (900 rpm) and climbs to ~500 Hz on the limiter. On the
+island (the shipped player, the hero's saloon retuned to the V8 through
+`INF_PIE_TUNE_VEHICLE`), the idle renders at **53.5 Hz against 53.3**
+expected at 800 rpm.
+
+### cost
+
+| 64 driven cars | commands / step | audio phase, release | dev |
+|---|---|---|---|
+| none voiced (control) | 0.00 | 0.0146 ms | 0.0303 ms |
+| **one voiced** (the island's case) | 10.85 | **0.0177 ms** | 0.0339 ms |
+| all 64 voiced (what the tier rule prevents) | 694.6 | **0.0620 ms** | 0.0940 ms |
+
+`AUDIO_STEP_BUDGET_MS` 1.0 **held**. The 65 536-entry log holds 101 s of the
+one-voiced grid and 348 s of the course; with 64 voiced it would evict in 2 s,
+which is the tier rule's reason.
+
+### what was found
+
+* **Every island car was already silent**, and not by the tier rule:
+  `spawn_vehicle` gives the civilian cars `clip: None`, so VEH1a's `Play` named
+  `Uuid::nil`, which resolves to nothing. The stack plays engine-owned clips.
+* **Nothing in the workspace enables `inf-audio`'s `cpal` feature**: no build
+  of the editor or the player has ever opened an audio device. The captures
+  above are the first time any vehicle voice in this engine was rendered to
+  samples. Carried with its price.
+* **The first layer gains clipped**: with the listener in the seat they summed
+  past full scale under wheelspin (1 723 of 796 800 samples); re-set for
+  headroom and re-measured (30 samples on one channel).
+* **Three arms were green under their own mutation** (the crossfade graded
+  itself with the function under test; the kerb spike and the course's door
+  could not see a rising-edge guard); each now drives the planner where the
+  course cannot. All 17 mutations RED.
+
+### carried, by name
+
+1. **The per-sample granular synth** (the doc's `GranularEngineSynthesizer`
+   behind a `kira::sound::Sound` and a `SetTelemetry` command): priced at
+   ~1.5 days now the offline door exists; not built. See the report.
+2. **The device**: enabling `cpal` in the shipped player is a feature flag
+   that links ALSA on Linux CI; a Windows-only target feature is the smallest
+   shape.
+3. Continuous rolling-road noise per surface (the doc's "surface roll noise");
+   gravel patter without a strut spike.
+4. A `ClosingDoor` that times out with the door still open is reset by the
+   machine to `door_deg 0` and would slam; the Ring-0 planner cannot read the
+   joint.
+5. The demo's island drive wedged against traffic at the crossing twice: the
+   slide and kerb triggers never fired there (the gate course carries both).
+
+Report: `campaign-briefs/veh3e-implementer-report.md`.
