@@ -108,6 +108,9 @@ pub mod tuning;
 /// Island wave VEH1a: the one door that authors a car — geometry, wheels, a
 /// drawn body and the class it is tuned with, from one `VehicleDef`.
 pub mod vehicle;
+// VEH3e: the generated vehicle sound library, committed under
+// `samples/vehicle-audio/` and bound by both island recipes.
+pub mod vehicle_audio;
 pub mod weapon_audio;
 // Wave E: the drag-to-viewport payload contract, parsed here rather than in
 // `inf_viewport::host` so the Linux CI leg exercises it (the `render_assets`

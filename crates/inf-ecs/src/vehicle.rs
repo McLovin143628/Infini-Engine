@@ -4780,6 +4780,18 @@ pub trait Vehicle: Send + Sync + 'static {
     fn idle_rpm(&self) -> f64 {
         0.0
     }
+
+    /// **What this class's voice is a function of** (wave VEH3e), or `None`
+    /// for a class the layer stack does not voice -- a hull, a rotorcraft, a
+    /// car whose `engine_voice_kind` has no combustion grains -- which keeps
+    /// VEH1a's single pitched loop.
+    ///
+    /// Called ONCE per fixed step by the vehicle door, after the solve and
+    /// before the controls are cleared, so it reads the throttle this step was
+    /// solved with. See [`crate::vehicle_audio`].
+    fn voice(&self) -> Option<crate::vehicle_audio::VoiceTelemetry> {
+        None
+    }
 }
 
 // ── the engine loop (island wave VEH1a) ─────────────────────────────────────
@@ -7553,6 +7565,81 @@ impl Vehicle for RaycastVehicle {
 
     fn turbocharged(&self) -> bool {
         self.tuning.turbo_boost_max.is_finite() && self.tuning.turbo_boost_max > 0.0
+    }
+
+    /// **The voice telemetry** (wave VEH3e): the crank, the load, the boost,
+    /// the gearbox input shaft as the DRIVEN wheels imply it, and each axle's
+    /// worst normalised slip and deepest strut over its grounded wheels.
+    fn voice(&self) -> Option<crate::vehicle_audio::VoiceTelemetry> {
+        use crate::vehicle_audio::{AxleVoice, GrainFamily, VoiceTelemetry};
+        let t = &self.tuning;
+        GrainFamily::for_engine(t.cylinders, t.engine_voice_kind, t.firing_order_variant)?;
+        let split = if t.front_torque_split.is_finite() {
+            t.front_torque_split.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        // The driven wheels: the front axle carries `split` of the torque and
+        // the rear the rest, so an axle with no share is not in the mean.
+        let (mut omega, mut driven) = (0.0f64, 0usize);
+        for (mount, w) in self.rig.wheels.iter().zip(&self.wheels) {
+            let share = if mount.steered() { split } else { 1.0 - split };
+            if share > 0.0 {
+                omega += w.omega_rad_s.abs();
+                driven += 1;
+            }
+        }
+        let omega = if driven > 0 {
+            omega / driven as f64
+        } else {
+            0.0
+        };
+        let shaft_rpm = omega * t.drive_ratio(self.gear).abs() * 60.0 / std::f64::consts::TAU;
+        let long_peak = if t.tyre_long_peak_slip > 0.0 {
+            t.tyre_long_peak_slip
+        } else {
+            1.0
+        };
+        let lat_peak = if t.tyre_lat_peak_slip > 0.0 {
+            t.tyre_lat_peak_slip
+        } else {
+            1.0
+        };
+        let mut axles = [AxleVoice::default(); 2];
+        for (mount, w) in self.rig.wheels.iter().zip(&self.wheels) {
+            if w.contact.is_none() {
+                continue;
+            }
+            let a = &mut axles[usize::from(!mount.steered())];
+            let (sr, sl) = (w.slip_ratio / long_peak, w.slip_lat / lat_peak);
+            let slip = (sr * sr + sl * sl).sqrt();
+            let slip = if slip.is_finite() { slip } else { 0.0 };
+            if !a.grounded || slip > a.slip {
+                a.slip = slip;
+                a.surface = w.surface;
+            }
+            a.compression_m = a.compression_m.max(t.rest_length_m - w.length_m);
+            a.grounded = true;
+        }
+        let state = self.drivetrain_state();
+        Some(VoiceTelemetry {
+            rpm: self.rpm,
+            idle_rpm: t.idle_rpm,
+            redline_rpm: t.redline_rpm,
+            throttle: self.controls.throttle.abs().clamp(0.0, 1.0),
+            boost: self.boost,
+            turbocharged: self.turbocharged(),
+            fuel_cut: self.fuel_cut,
+            gear: self.gear,
+            shaft_rpm,
+            cylinders: t.cylinders,
+            voice_kind: t.engine_voice_kind,
+            firing_order: t.firing_order_variant,
+            occupied: self.controls.occupied,
+            quiet: state.is_quiet(t.idle_rpm),
+            speed_mps: 0.0,
+            axles,
+        })
     }
 
     fn solve(&mut self, chassis: ChassisState, dt: f64, out: &mut Vec<WheelForce>) {

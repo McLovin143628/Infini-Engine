@@ -6403,6 +6403,7 @@ fn drive_a_car(sim: &mut RuntimeSim) -> CarTrace {
                 forward_mps: 0.0,
                 revs: 0.0,
                 load: 0.0,
+                voice: None,
             });
         t.wheels.push(out.wheels_grounded);
         t.speed.push(out.forward_mps);

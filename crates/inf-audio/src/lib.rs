@@ -62,6 +62,7 @@ pub mod mixer;
 mod sound;
 pub mod spatial;
 pub mod synth;
+pub mod vehicle_synth;
 
 pub mod asset;
 

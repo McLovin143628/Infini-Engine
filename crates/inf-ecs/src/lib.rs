@@ -107,6 +107,9 @@ pub mod transform;
 // P29.7: the raycast vehicle model — the `movement` of vehicles, with the
 // fixed-step door in `inf_physics::d3::vehicle`.
 pub mod vehicle;
+// VEH3e: what a car sounds like -- the layer stack both hosts' audio fences
+// map onto the P12.3 queue.
+pub mod vehicle_audio;
 // I6: weapons and the health they spend. Both measured in JOULES — see the
 // module header for why a hit-point would put back the conversion table
 // `docs/memos/p22-strength.md` exists to refuse.

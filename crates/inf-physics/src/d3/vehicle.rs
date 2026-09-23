@@ -89,6 +89,14 @@ pub struct VehicleOutcome {
     /// pure function of sim state, and a report published at the moment the
     /// state was decided is the cheapest way to keep it one.
     pub load: f64,
+    /// **What this car's voice is a function of** (wave VEH3e) -- the class's
+    /// own [`Vehicle::voice`], published HERE for `load`'s reason: the layer
+    /// stack is a function of this step's decision, not of whatever the map
+    /// holds when the audio phase asks. `None` for a class the stack does not
+    /// voice (a hull, a rotorcraft), which keeps VEH1a's single loop.
+    ///
+    /// [`Vehicle::voice`]: inf_ecs::vehicle::Vehicle::voice
+    pub voice: Option<inf_ecs::vehicle_audio::VoiceTelemetry>,
 }
 
 /// **Advance every vehicle one fixed step.**
@@ -572,6 +580,13 @@ fn step_one(
 
     let forward_mps = state.linvel.dot(state.basis().0);
     let (revs, load) = bridge.vehicle_of(chassis)?.engine_state(forward_mps);
+    // The voice, beside the engine state and for its reason: after the solve,
+    // before the controls are cleared below. The forward speed is filled in
+    // here because the door has it and the class does not.
+    let voice = bridge.vehicle_of(chassis)?.voice().map(|mut v| {
+        v.speed_mps = forward_mps;
+        v
+    });
     // ── 5. **INPUT IS PER STEP** (wave VEH2c). Every commander — the movement
     //    door, traffic's controller, dispatch's — writes its `VehicleControls`
     //    BEFORE this phase runs, so clearing them after the solve means a
@@ -597,6 +612,7 @@ fn step_one(
         forward_mps,
         revs,
         load,
+        voice,
     })
 }
 

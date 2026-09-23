@@ -1,0 +1,6 @@
+schema_version = 1
+guid = "00000000-0000-0000-5645-483300000017"
+kind = "audio"
+content_hash = "65dc3c3ab52d6a13b97db05d46767ac3"
+dependencies = []
+tags = []

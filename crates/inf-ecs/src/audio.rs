@@ -121,6 +121,10 @@ pub fn engine_spawned_clips() -> Vec<Uuid> {
             out.push(crate::weapon::report_clip(class, clip));
         }
     }
+    // Wave VEH3e: twenty-eight vehicle clips -- the grains, the whine, the
+    // turbo, the squeals, the impulses and the door -- every one of them named
+    // by a fixed step and carried by no component.
+    out.extend(crate::vehicle_audio::vehicle_clips());
     out.sort();
     out.dedup();
     out
@@ -134,13 +138,16 @@ mod tests {
     /// **CARRIED 43'S DOOR** — every clip the engine plays without a level
     /// naming it, so a cook and a PIE payload can close over them.
     #[test]
-    fn the_engine_names_forty_clips_no_component_ever_references() {
+    fn the_engine_names_sixty_eight_clips_no_component_ever_references() {
         let clips = active_test_clips();
         assert_eq!(
             clips.len(),
-            40,
-            "thirty-six report clips, the casing, the venue loop, and wave WPN2d's blast plus its two melee surfaces"
+            68,
+            "thirty-six report clips, the casing, the venue loop, wave WPN2d's blast plus its two melee surfaces, and wave VEH3e's twenty-eight vehicle clips"
         );
+        for clip in crate::vehicle_audio::vehicle_clips() {
+            assert!(clips.contains(&clip), "a vehicle clip is missing");
+        }
         let uniq: std::collections::BTreeSet<Uuid> = clips.iter().copied().collect();
         assert_eq!(uniq.len(), clips.len(), "the list has a duplicate");
         // Sorted, so a pack's dependency closure is deterministic.

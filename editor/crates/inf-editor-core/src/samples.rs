@@ -10633,6 +10633,14 @@ pub fn weapon_audio_dir() -> PathBuf {
         .join(crate::weapon_audio::WEAPON_AUDIO_FOLDER)
 }
 
+/// The repo-root `samples/vehicle-audio/` directory — the vehicle sound
+/// library (wave VEH3e), beside [`weapon_audio_dir`] and for its reason.
+pub fn vehicle_audio_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../samples")
+        .join(crate::vehicle_audio::VEHICLE_AUDIO_FOLDER)
+}
+
 /// What the committed starter character is called -- the prefix on every one of
 /// its files, and the name a level that spawns it shows in the Outliner.
 pub const STARTER_CHARACTER_NAME: &str = "Starter";
@@ -11605,6 +11613,9 @@ mod tests {
             // there.
             crate::weapon_audio::write_weapon_audio_library(&weapon_audio_dir())
                 .expect("regenerate the gunshot library");
+            // …and the vehicle library (wave VEH3e), for the same reason.
+            crate::vehicle_audio::write_vehicle_audio_library(&vehicle_audio_dir())
+                .expect("regenerate the vehicle sound library");
             write_city().expect("regenerate the island city");
             write_gameplay().expect("regenerate the island gameplay fixture");
             crate::heist::write_heist().expect("regenerate the harbour heist mission");
@@ -12502,6 +12513,40 @@ mod tests {
             }
         }
 
+        // **The vehicle sound library (wave VEH3e)**, on the gunshot library's
+        // terms exactly: the file SET and the bytes, and each sidecar's GUID
+        // the one `inf_ecs::vehicle_audio::vehicle_clip` computes.
+        let vdir = vehicle_audio_dir();
+        if vdir.join("Vehicle_Whine.inf_audio").exists() {
+            let mut have: Vec<String> = std::fs::read_dir(&vdir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            have.sort();
+            assert_eq!(
+                have,
+                crate::vehicle_audio::vehicle_audio_files(),
+                "the committed vehicle library is not the file SET the generator writes"
+            );
+            for clip in crate::vehicle_audio::vehicle_audio_clips() {
+                let p = vdir.join(&clip.file);
+                let want = inf_asset::encode(&clip.asset).expect("the clip encodes");
+                assert_eq!(
+                    std::fs::read(&p).unwrap(),
+                    want,
+                    "committed {} drifted from the generator",
+                    p.display()
+                );
+                let side = inf_asset::AssetSidecar::load(&p)
+                    .unwrap_or_else(|e| panic!("{} has no sidecar: {e}", p.display()));
+                assert_eq!(side.guid.0, clip.guid, "{}'s committed GUID", clip.file);
+            }
+        } else {
+            eprintln!("SKIP: the vehicle sound library has not been blessed yet");
+        }
+
         // **The settlement zone library (wave I8a).** Every file, and the file
         // SET as well as the bytes — for the ground library's own reason: an
         // extra `.inf_pcg` here is one the asset scan promotes under a minted
@@ -12774,6 +12819,44 @@ mod tests {
     /// resolves to silence — and the command still goes out, so nothing at all
     /// says so. `crates/inf-island/src/build.rs`'s `write_content` is the only
     /// thing that ever copies these files out of the repository.
+    /// **Both island recipes name the whole vehicle sound library** (wave
+    /// VEH3e) -- `both_island_recipes_name_the_whole_gunshot_library`'s
+    /// argument: a clip not copied is a car layer that resolves to silence.
+    #[test]
+    fn both_island_recipes_name_the_whole_vehicle_library() {
+        let dir = vehicle_audio_dir();
+        if !dir.join("Vehicle_Whine.inf_audio").exists() {
+            eprintln!("SKIP: the vehicle sound library has not been blessed yet");
+            return;
+        }
+        let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("no {}: {e}", dir.display()))
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        on_disk.sort();
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../samples");
+        for recipe in ["island/island.toml", "island-fixture/island.toml"] {
+            let path = root.join(recipe);
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("no {}: {e}", path.display()));
+            let mut named: Vec<String> = text
+                .lines()
+                .filter_map(|l| {
+                    let l = l.trim().trim_start_matches('"').trim_end_matches(',');
+                    let l = l.trim_end_matches('"');
+                    l.strip_prefix("../vehicle-audio/").map(str::to_string)
+                })
+                .collect();
+            named.sort();
+            assert_eq!(
+                named, on_disk,
+                "{recipe}'s `[content]` list is not the vehicle sound library"
+            );
+        }
+    }
+
     #[test]
     fn both_island_recipes_name_the_whole_gunshot_library() {
         let dir = weapon_audio_dir();
