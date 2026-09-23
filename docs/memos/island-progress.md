@@ -40499,7 +40499,7 @@ Min of five warmed steps per phase; never a cold first step.
 
 ### the gate
 
-`runtime/inf-player/tests/veh3d_gate.rs` — **23 arms**. For each: what it
+`runtime/inf-player/tests/veh3d_gate.rs` — **24 arms** (the 24th, `a_press_on_a_frame_that_runs_no_step_still_boards`, is below). For each: what it
 READS, the mutation measured to red it, and whether P29.7's old 0.55 s warp
 (press E, be in the seat) would pass it.
 
@@ -40582,3 +40582,39 @@ first half, `this_wave_moved_no_schema`, and the two cost arms off release.
   handle, the door, the wheel through a lock, the pedals, a stopped exit and a
   bail — every beat is a hero.csv column (61 fields) and a HUD row, and
   `demo.ps1 -BoardingOnly` films it.
+
+### after the gate: what the demo found
+
+The wave's own demo (`demo.ps1 -BoardingOnly`, the real editor, Play in New
+Window, the island) found three more things, each fixed and armed:
+
+* **A stolen car nobody could get out of.** The carjacked driver and the
+  passenger it forced out stood at both doors for fourteen seconds, and every
+  exit candidate was refused as blocked. `clear_exit` lets every character's
+  capsule step aside (`boarding::people`); walls still refuse.
+* **A press on a frame that runs no step was lost** (`RuntimeSim::run_frame`
+  took its edges against the previous FRAME's keys; a frame that ran two steps
+  gave the press to both). Any display faster than the fixed rate drops presses.
+  Edges now wait for the next step and only a frame's first step sees them —
+  `a_press_on_a_frame_that_runs_no_step_still_boards` (the gate's 24th arm).
+* **The driver's readout box was one glyph tall** under five lines; the prompt
+  box is as tall as its lines now, and a one-line prompt is the rect it was.
+
+And one that is the loop's: a boarding's beats (a 0.1 s hold on the handle, a
+0.55 s seat warp) are shorter than a one-second screenshot at 4 Hz of log, so
+two full-speed sessions photographed the moment after three of them. The leg
+takes one beat per boarding now, and `-TimeScale` (`INF_PIE_TIME_SCALE`,
+preview only: the same fixed steps, fewer per wall second) slows the preview so
+a frame lands inside its beat. Eleven frames: approach, hand on the handle,
+the carjack pull-out, the door, the seat warp, seated with the door open, the
+rim at full lock, the throttle, the exit, the door closing, the bail-out roll.
+
+In the shipped player: the outer handle **0.0 mm** over 10 rows at weight 1,
+the rim **0.0 mm** over 86, the pedals **2.5 mm** worst over 148; the INNER
+pull chases a swinging handle (45.9 mm worst — carried 6).
+
+Carried besides the ten above: **11.** the `bail` flag is not folded (it rides
+`Idle`; the modes it produces are); **12.** the "[E] Pull out driver" prompt
+stays up while the carjack runs; **13.** the saloon's primitive body is opaque,
+so in the seated frames the hands on the rim are behind the bodywork and are
+read off the columns, not seen.
