@@ -2960,6 +2960,14 @@ fn every_trace_section_is_folded_in_its_frozen_order() {
         // and a half, and the two hosts then diverge over the following second
         // as one of them drags a panel along the road.
         "bodywork::damage_state_bytes",
+        // VEH3d, pinned in the SAME commit that folds it, and last. The
+        // boarding machine: who is walking up to which car, how far into which
+        // phase, which seat, and whether it is a carjack. Its absence would be
+        // invisible for the spring's reason at the scale of a whole
+        // choreography -- two hosts that disagreed about a phase agree about
+        // every transform for as long as the phase's clock is running, and then
+        // one of them is in the car and the other is standing in the road.
+        "boarding::boarding_state_bytes",
     ];
     let at: Vec<usize> = SECTIONS
         .iter()

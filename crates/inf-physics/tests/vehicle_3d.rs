@@ -403,9 +403,20 @@ fn a_wheel_less_hull_is_a_vehicle_and_its_thruster_is_consumed() {
     assert_eq!(rig.parts[0].kind, inf_ecs::vehicle::PartKind::Thruster);
     assert_eq!(rig.parts[0].guid, THRUSTER);
     assert_eq!(rig.parts[0].mount_local, Vec3d::new(0.0, -0.45, -1.9));
-    // …and the seat is still the collider's top face, so the interact door
-    // needs nothing new to find it.
-    assert_eq!(rig.seat_local, Vec3d::new(0.0, HALF.y, 0.0));
+    // …and the seat is still DERIVED from the collider, so the interact door
+    // needs nothing new to find it. Re-blessed with its cause (wave VEH3d): it
+    // was the collider's top face, `(0, HALF.y, 0)`, which put every driver on
+    // its own roof (CHAR1c carried 160); it is the driver's foot well INSIDE
+    // the hull now, below the top face and on the `+X` side.
+    let hull_collider = world
+        .entity_of(HULL)
+        .and_then(|e| world.world().get::<Collider3D>(e).copied())
+        .expect("the hull's collider");
+    assert_eq!(
+        rig.seat_local,
+        inf_ecs::vehicle::seat_local_of(&hull_collider)
+    );
+    assert!(rig.seat_local.y < HALF.y && rig.seat_local.x > 0.0);
 
     // (b) The thruster is CONSUMED, exactly as a wheel is: two bodies (the
     //     ground and the hull) and no body or collider of its own.
@@ -845,10 +856,22 @@ fn the_public_deriver_agrees_with_the_bridge() {
     let in_bridge = rig.bridge.vehicle_of(CHASSIS).unwrap().rig();
     assert_eq!(&by_hand.wheels, &in_bridge.wheels);
     assert_eq!(by_hand.seat_local, in_bridge.seat_local);
+    // Re-blessed with its cause (wave VEH3d): the seat was the chassis
+    // collider's top face and is the driver's foot well inside the cabin now —
+    // derived from the same collider, by the same one function.
+    let collider = rig
+        .world
+        .entity_of(CHASSIS)
+        .and_then(|e| rig.world.world().get::<Collider3D>(e).copied())
+        .expect("the chassis collider");
     assert_eq!(
         by_hand.seat_local,
-        Vec3d::new(0.0, HALF.y, 0.0),
-        "the seat is the top face of the chassis collider"
+        inf_ecs::vehicle::seat_local_of(&collider),
+        "the seat is derived from the chassis collider"
+    );
+    assert!(
+        by_hand.seat_local.y < HALF.y,
+        "the seat is inside the chassis, not on its top face"
     );
     // A guid that is not a chassis answers with a refusal rather than a rig.
     assert!(inf_ecs::vehicle::rig_of(&rig.world, GROUND).is_none());
@@ -1030,6 +1053,21 @@ impl Crew {
         }
     }
 
+    /// **Press E and wait for the wheel** — the whole boarding (wave VEH3d):
+    /// the walk to the door, the handle, the door on its hinge, the climb and
+    /// the settle. P29.7's arms pressed once and waited forty steps, which was
+    /// the warp; the warp is one phase of five now. Answers the steps it took.
+    fn board(&mut self) -> u32 {
+        self.step(&interact(), 1);
+        for n in 1..900 {
+            if self.driver().runtime.boarding.phase == inf_ecs::boarding::BoardPhase::Driving {
+                return n;
+            }
+            self.step(&Default::default(), 1);
+        }
+        panic!("the hero never reached the wheel after 15 s")
+    }
+
     fn driver(&self) -> inf_ecs::components::CharacterMovement {
         let e = self.rig.world.entity_of(HERO).expect("the hero exists");
         self.rig
@@ -1074,17 +1112,40 @@ fn forward() -> inf_ecs::movement::MovementIntent {
 /// character is exactly on the seat. An implementation that lerped over the
 /// whole duration would fail the first clause, which is the one that makes it a
 /// choreography.
+///
+/// **Re-blessed with its cause (wave VEH3d).** The press no longer starts the
+/// warp: it starts the BOARDING machine, and the warp is its `EnteringIK`
+/// phase — the same `seat_warp()` window and the same `warp_ease`, begun from
+/// the step-back point beside the open door rather than from where the press
+/// was made. So this arm presses, waits for `EnteringIK`, and asserts the
+/// window from there; the seat it lands on is the driver's foot well INSIDE the
+/// chassis (`seat_local`), not the collider's top face.
 #[test]
 fn the_enter_warp_is_a_window_and_lands_the_character_on_the_seat() {
     let mut crew = Crew::new();
     crew.step(&Default::default(), 60);
-    let standing = crew.driver_pos();
     crew.step(&interact(), 1);
+    assert_ne!(
+        crew.driver().runtime.boarding.phase,
+        inf_ecs::boarding::BoardPhase::Idle,
+        "the enter control takes"
+    );
+    for _ in 0..600 {
+        if crew.driver().runtime.seat.entering {
+            break;
+        }
+        crew.step(&Default::default(), 1);
+    }
+    let standing = crew.driver_pos();
     let cm = crew.driver();
     assert_eq!(
         cm.mode,
         inf_ecs::components::MovementMode::Driving,
-        "the enter control takes"
+        "the boarding reached its seat phase"
+    );
+    assert_eq!(
+        cm.runtime.boarding.phase,
+        inf_ecs::boarding::BoardPhase::EnteringIK
     );
     assert!(cm.runtime.seat.entering, "…and the warp is running");
     assert_eq!(cm.runtime.seat.vehicle, CHASSIS);
@@ -1111,8 +1172,17 @@ fn the_enter_warp_is_a_window_and_lands_the_character_on_the_seat() {
     // After it closes (0.45 s), the character is on the seat.
     crew.step(&Default::default(), 30);
     assert!(!crew.driver().runtime.seat.entering, "the warp finishes");
+    let seat_local = crew
+        .rig
+        .bridge
+        .vehicle_of(CHASSIS)
+        .expect("the car")
+        .rig()
+        .seat_local
+        .to_dvec3();
     let seat = crew.rig.chassis().translation.to_dvec3()
-        + DVec3::Y * (crew.driver().stand_half_height_m + HERO_RADIUS + HALF.y);
+        + crew.rig.chassis().quat() * seat_local
+        + DVec3::Y * (crew.driver().stand_half_height_m + HERO_RADIUS);
     let seated = crew.driver_pos();
     assert!(
         (seated - seat).length() < 0.05,
@@ -1223,8 +1293,8 @@ fn an_enter_press_made_in_the_air_does_not_fire_on_landing() {
 fn the_driver_drives_and_the_car_carries_the_driver() {
     let mut crew = Crew::new();
     crew.step(&Default::default(), 60);
-    crew.step(&interact(), 1);
-    crew.step(&Default::default(), 40);
+    // Boarded through the whole machine (wave VEH3d), not pressed-and-waited.
+    crew.board();
     let car_before = crew.rig.z();
     let driver_before = crew.driver_pos();
     crew.step(&forward(), 180);
@@ -1264,8 +1334,8 @@ fn the_driver_drives_and_the_car_carries_the_driver() {
 fn leaving_a_moving_vehicle_inherits_its_velocity() {
     let mut crew = Crew::new();
     crew.step(&Default::default(), 60);
-    crew.step(&interact(), 1);
-    crew.step(&Default::default(), 40);
+    // Boarded through the whole machine (wave VEH3d), not pressed-and-waited.
+    crew.board();
     crew.step(&forward(), 180);
     let body = crew.rig.bridge.body_of(CHASSIS).unwrap();
     let linvel = crew.rig.bridge.world().body_linvel(body).unwrap();
@@ -1303,9 +1373,23 @@ fn leaving_a_moving_vehicle_inherits_its_velocity() {
 fn leaving_a_parked_vehicle_is_a_stand() {
     let mut crew = Crew::new();
     crew.step(&Default::default(), 60);
+    crew.board();
+    crew.step(&Default::default(), 20);
     crew.step(&interact(), 1);
-    crew.step(&Default::default(), 60);
-    crew.step(&interact(), 1);
+    // **The exit is the reverse pipeline** (wave VEH3d, re-blessed with that
+    // cause): the door opens on its hinge and the body steps out through it,
+    // which is most of a second rather than one step.
+    assert_eq!(
+        crew.driver().runtime.boarding.phase,
+        inf_ecs::boarding::BoardPhase::Exiting,
+        "the exit control takes"
+    );
+    for _ in 0..120 {
+        if crew.driver().mode == inf_ecs::components::MovementMode::Grounded {
+            break;
+        }
+        crew.step(&Default::default(), 1);
+    }
     assert_eq!(
         crew.driver().mode,
         inf_ecs::components::MovementMode::Grounded
@@ -1410,6 +1494,13 @@ fn the_seat_and_an_authored_interactable_share_one_door() {
         inf_ecs::components::MovementMode::Driving,
         "a `Use` interactable put the character in the driving seat"
     );
+    // …nor started boarding it (wave VEH3d: the press begins a machine now,
+    // and a press the lamp won must not begin one either).
+    assert_eq!(
+        crew.driver().runtime.boarding.phase,
+        inf_ecs::boarding::BoardPhase::Idle,
+        "a `Use` interactable started a boarding"
+    );
 
     // The control: with the lamp DISABLED, the same press enters the car — so
     // the assertion above is about the verb and not about a broken press.
@@ -1422,8 +1513,10 @@ fn the_seat_and_an_authored_interactable_share_one_door() {
         .enabled = false;
     crew.rig.world.mark_dirty();
     crew.rig.world.propagate();
-    crew.step(&interact(), 1);
-    crew.step(&inf_ecs::movement::MovementIntent::default(), 4);
+    // With nothing nearer, the same press BOARDS the car — the whole machine
+    // since wave VEH3d, so the arm waits for the wheel rather than four steps.
+    let took = crew.board();
+    println!("  the press boarded the car in {took} steps");
     assert_eq!(
         crew.driver().mode,
         inf_ecs::components::MovementMode::Driving,

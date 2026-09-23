@@ -351,6 +351,7 @@ fn a_car_somebody_sits_in_is_let_go_of_and_never_taken_back() {
             time_s: 0.0,
             start: Vec3d::ZERO,
             start_yaw_deg: 0.0,
+            seat: 0,
         };
     }
     let stats = town.step(2);
@@ -688,7 +689,7 @@ fn the_hero_pulls_a_commuter_out_of_a_moving_car_and_drives_off_in_it() {
     );
 
     let mut resisted = 0;
-    let mut ejected = None;
+    let mut accepted = None;
     for _ in 0..12 {
         match inf_physics::d3::carjack::try_carjack(
             &mut town.world,
@@ -702,20 +703,51 @@ fn the_hero_pulls_a_commuter_out_of_a_moving_car_and_drives_off_in_it() {
                 resisted += 1;
                 town.step(1);
             }
-            Some(inf_physics::d3::carjack::Carjack::Ejected { victim, .. }) => {
-                ejected = Some(victim);
+            Some(inf_physics::d3::carjack::Carjack::Accepted { victim, .. }) => {
+                accepted = Some(victim);
                 break;
             }
             None => panic!("the door refused a car with a driver in it"),
         }
     }
-    let out = ejected.expect("twelve presses and the driver never let go");
+    let out = accepted.expect("twelve presses and the driver never let go");
     assert_eq!(out, victim);
     println!("  (the driver held on {resisted} time(s) before letting go)");
 
+    // **THE PULL IS THE VICTIM'S OWN REVERSE PIPELINE** (wave VEH3d, re-blessed
+    // with that cause): until VEH3d an `Ejected` answer meant the seat was
+    // already empty on the same step. It is now the go-ahead for the hero's
+    // boarding, and the pull happens at the open door. This arm pulls directly
+    // through the door the hero's door phase calls (`boarding::start_pull`) —
+    // the whole hero-side pipeline is `veh3d_gate`'s — and then steps the world
+    // until the victim's forced exit has put it down in the road.
+    let car = inf_physics::d3::boarding::car_frame(&town.world, &town.bridge, chassis, true)
+        .expect("the car's frame");
+    assert!(
+        inf_physics::d3::boarding::start_pull(&mut town.world, &mut town.bridge, victim, &car),
+        "nowhere clear to put the driver down on an open street"
+    );
+    let mut landed_mode = None;
+    for _ in 0..120 {
+        town.step(1);
+        let seated = town
+            .world
+            .entity_of(victim)
+            .and_then(|e| town.world.world().get::<CharacterMovement>(e))
+            .map(|cm| (cm.runtime.seat.is_seated(), cm.mode));
+        if let Some((false, mode)) = seated {
+            landed_mode = Some(mode);
+            break;
+        }
+    }
     // THE WORLD, not the report. The seat is free…
     assert!(inf_physics::d3::carjack::occupant_of(&town.world, chassis).is_none());
-    // …the victim is out of the car, staggering, with its collider back…
+    // …the victim came out of the car staggering, with its collider back…
+    assert_eq!(
+        landed_mode,
+        Some(MovementMode::FallControlled),
+        "the pull did not put the driver in the road within two seconds"
+    );
     let ve = town
         .world
         .entity_of(victim)
@@ -725,7 +757,6 @@ fn the_hero_pulls_a_commuter_out_of_a_moving_car_and_drives_off_in_it() {
         .world()
         .get::<CharacterMovement>(ve)
         .expect("with a movement model");
-    assert_eq!(cm.mode, MovementMode::FallControlled);
     assert!(!cm.runtime.seat.is_seated());
     // …standing at the driver's door rather than inside the car…
     let at = town
@@ -839,6 +870,7 @@ fn an_empty_car_is_not_a_carjack_and_neither_is_your_own() {
             time_s: 0.0,
             start: Vec3d::ZERO,
             start_yaw_deg: 0.0,
+            seat: 0,
         };
     }
     assert_eq!(
@@ -1115,6 +1147,7 @@ fn a_block_arriving_does_not_un_steal_the_car_the_player_is_in() {
             time_s: 0.0,
             start: Vec3d::ZERO,
             start_yaw_deg: 0.0,
+            seat: 0,
         };
     }
     town.step(2);
@@ -1191,6 +1224,7 @@ fn a_town_that_pages_out_and_back_keeps_its_guids_and_the_car_the_player_stole()
             time_s: 0.0,
             start: Vec3d::ZERO,
             start_yaw_deg: 0.0,
+            seat: 0,
         };
     }
     town.step(4);
@@ -1359,6 +1393,7 @@ fn a_stolen_car_answers_the_throttle_on_an_empty_street() {
             time_s: 1.0,
             start: Vec3d::from_dvec3(seat.0),
             start_yaw_deg: 0.0,
+            seat: 0,
         };
         cm.runtime.intent_move = inf_ecs::math::Vec2d::new(0.0, 1.0);
     }

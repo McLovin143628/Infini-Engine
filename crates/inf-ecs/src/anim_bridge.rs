@@ -167,6 +167,33 @@ pub struct FootGoal {
     /// **Roll about the character's forward axis**, degrees. See
     /// [`pitch_deg`](Self::pitch_deg).
     pub roll_deg: f64,
+    /// **Where the knee bends toward**, world metres — `None` for the standing
+    /// rule, a metre in front of the thigh (wave VEH3d).
+    ///
+    /// A standing foot's goal is under the hip, so "in front" is a plane the
+    /// knee can fold in. A SEATED foot's goal is in front of the hip — on a
+    /// pedal 0.66 m ahead of it — so "in front" is ON the hip-to-foot line, the
+    /// bend plane is degenerate, and the solve folds the knee whichever way
+    /// rounding hands it: measured on the first seated driver, both feet ended
+    /// **0.618 m above their pedals** with the legs locked straight out at the
+    /// windscreen. A seated body passes a pole ABOVE the knee instead.
+    pub pole: Option<Vec3d>,
+    /// **Solve this leg without the rig's joint limits** (wave VEH3d).
+    ///
+    /// `false` for every goal but a SEATED one, and the reason is a measured
+    /// defect this wave found and did not own: the knee hinge
+    /// `inf_anim::build_template` and `inf_anim::manny` emit is
+    /// `hinge_x(knee, -150, 0)`, and in `inf_anim::solve_chain`'s own frame
+    /// (identity bind, model forward `+Z`) an anatomical knee flex is a
+    /// POSITIVE rotation about `X` — the generator's own comment says *"a
+    /// positive rotation about local X takes a down-hanging bone toward -Z"*.
+    /// So the limit permits only hyperextension. Measured on the mannequin: a
+    /// standing foot goal 15 cm above the rest foot misses by **0.493 m**
+    /// (`clamped: 1`, the leg straightened forward), and a seated foot on a
+    /// pedal misses by **0.645 m**. A seated leg passes a pole ABOVE its knee,
+    /// which is the anatomical bend by construction, so it is solved unlimited;
+    /// the knee range itself is carried by name for the wave that owns the rig.
+    pub unlimited: bool,
 }
 
 /// How many points a [`TraversalArc`] is resampled onto.

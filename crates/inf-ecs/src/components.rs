@@ -2177,12 +2177,24 @@ pub struct SeatState {
     pub start: Vec3d,
     /// Its facing then, degrees.
     pub start_yaw_deg: f64,
+    /// **Which seat** (wave VEH3d — VEH2b carried 4, "one seat, no index"):
+    /// [`crate::boarding::SeatIndex::as_u8`]. `0` is the driver's, which is
+    /// what every seat written before this wave was, so `Default` keeps meaning
+    /// exactly what it did. Runtime state on a `#[serde(skip)]` block — no
+    /// schema moves.
+    pub seat: u8,
 }
 
 impl SeatState {
     /// Whether this character is in (or entering) a vehicle.
     pub fn is_seated(&self) -> bool {
         !self.vehicle.is_nil()
+    }
+
+    /// Whether this body is in the seat that DRIVES — the one seat whose
+    /// occupant's intent reaches the car.
+    pub fn is_driving(&self) -> bool {
+        self.is_seated() && crate::boarding::SeatIndex::from_u8(self.seat).drives()
     }
 }
 

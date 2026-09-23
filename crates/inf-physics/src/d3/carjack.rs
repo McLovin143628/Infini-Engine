@@ -29,6 +29,21 @@
 //!   [`RESIST_CHANCE`] — so a driver who does not want to be pulled out
 //!   sometimes is not, and the player presses again.
 //!
+//! # It is the BOARDING pipeline now (wave VEH3d)
+//!
+//! Until VEH3d a successful press ejected the occupant in one frame — a
+//! transform write to a computed door point — and warped the hero into the
+//! seat on the same step. It is now the enter pipeline with somebody in the
+//! way: [`try_carjack`] only decides whether they hold on; the press then
+//! BEGINS the hero's boarding (`super::boarding::begin` with `carjack = true`),
+//! the occupant is told it is being pulled out (`Jacked`, which stands its car
+//! on the brake), the hero walks to the door and opens it on its hinge, and
+//! the occupant is pulled out through the opening on its OWN reverse pipeline,
+//! forced (`super::boarding::start_pull`) — to a point that has passed the
+//! point-in-collider check (the VEH2b carried collide-check, closed). The
+//! reference is `frames/steal-car/0010`–`0035`: the yank at the door, the
+//! driver dragged out, the hero in.
+//!
 //! # What happens to the person
 //!
 //! They land on the road at the door, in [`MovementMode::FallControlled`] —
@@ -87,7 +102,8 @@ pub const FLEE_M: f64 = inf_ecs::crowd::FLEE_M;
 /// WPN1 with [`FLEE_M`].
 pub const FLEE_MPS: f64 = inf_ecs::crowd::FLEE_MPS;
 
-/// **Who is sitting in this car**, or `None`.
+/// **Who is at the WHEEL of this car**, or `None` — the driver's seat since
+/// wave VEH3d gave seats an index; a passenger is not who a carjack pulls out.
 ///
 /// Derived rather than stored, and it is the *inverse* of
 /// `movement::occupied_seats` — which is the shape `inf_ecs::interact`'s own
@@ -104,7 +120,7 @@ pub fn occupant_of(world: &EcsWorld, chassis: Uuid) -> Option<Uuid> {
         if world
             .world()
             .get::<CharacterMovement>(e)
-            .is_some_and(|cm| cm.runtime.seat.vehicle == chassis)
+            .is_some_and(|cm| cm.runtime.seat.vehicle == chassis && cm.runtime.seat.is_driving())
         {
             return Some(guid);
         }
@@ -142,7 +158,9 @@ pub fn occupants(world: &EcsWorld) -> std::collections::BTreeMap<Uuid, Uuid> {
             continue;
         };
         if let Some(cm) = world.world().get::<CharacterMovement>(e) {
-            if cm.runtime.seat.is_seated() {
+            // The DRIVER's seat (wave VEH3d) — a car with only a passenger in
+            // it has nobody at its wheel.
+            if cm.runtime.seat.is_driving() {
                 out.entry(cm.runtime.seat.vehicle).or_insert(guid);
             }
         }
@@ -259,15 +277,29 @@ pub fn candidates(
         let Some(victim) = seated.get(&chassis).copied() else {
             continue;
         };
-        if !is_ejectable(world, victim) {
-            continue;
-        }
-        if !at_the_door(bridge, chassis, feet) {
-            continue;
-        }
         let Some((seat, _, _)) = seat_pose(bridge, chassis) else {
             continue;
         };
+        // **AN OCCUPIED SEAT IS NEVER AN ENTER** (wave VEH3d, inherited from the
+        // VEH3b audit) — so a car whose driver cannot be pulled out (the
+        // player's own, a player-controlled one, or approached from the far
+        // side) is a REFUSAL BY NAME rather than no prompt at all: "[E]
+        // Occupied vehicle". Before this the prompt went blank and the press did
+        // nothing, which reads as a broken control.
+        if !is_ejectable(world, victim) || !at_the_door(bridge, chassis, feet) {
+            if victim_is_someone_else(world, victim) {
+                out.push(InteractCandidate {
+                    guid: chassis,
+                    verb: InteractVerb::Occupied,
+                    label: OCCUPIED_LABEL.to_string(),
+                    position: seat,
+                    range_m: ENTER_REACH_M,
+                    view_cone_deg: NO_VIEW_TEST_DEG,
+                    grip: None,
+                });
+            }
+            continue;
+        }
         out.push(InteractCandidate {
             guid: chassis,
             verb: InteractVerb::Carjack,
@@ -287,14 +319,30 @@ pub fn candidates(
     out
 }
 
+/// What a refusal-by-name candidate is called: `"[E] Occupied vehicle"`.
+pub const OCCUPIED_LABEL: &str = "vehicle";
+
+/// Whether an occupant is somebody other than a PLAYER — the one occupied car
+/// a prompt must offer nothing for is the player's own (you cannot be refused
+/// entry to the car you are sitting in), and the player is the one
+/// `player_controlled` body there is ([`is_ejectable`]'s own reading).
+fn victim_is_someone_else(world: &EcsWorld, victim: Uuid) -> bool {
+    world
+        .entity_of(victim)
+        .and_then(|e| world.world().get::<CharacterMovement>(e))
+        .is_some_and(|cm| !cm.player_controlled)
+}
+
 /// What one attempt did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Carjack {
-    /// The seat is free; the caller may enter it this step.
-    Ejected {
+    /// **They did not hold on**: the caller BEGINS the boarding with `carjack =
+    /// true`, and the pull happens at the door (wave VEH3d). Until VEH3d this
+    /// was `Ejected` and the seat was already empty when it was answered.
+    Accepted {
         /// The car.
         chassis: Uuid,
-        /// Who is now standing in the road.
+        /// Who is about to be pulled out of it.
         victim: Uuid,
     },
     /// They held on. Try again.
@@ -306,24 +354,31 @@ pub enum Carjack {
     },
 }
 
-/// **THE CARJACK DOOR** — the one place a person is taken out of a seat.
+/// **THE CARJACK DOOR** — whether a press at an occupied driver's door is a
+/// carjack at all, and whether the driver holds on.
 ///
 /// Returns `None` when there is nobody to pull out, which is the common case and
 /// costs one `vehicle_guids` walk. A refusal is a value all the way down: no
-/// occupant, a player-controlled one, the wrong side of the car and a lost
-/// resist draw all answer without failing anything.
+/// occupant, a player-controlled one and a lost resist draw all answer without
+/// failing anything.
 ///
-/// `overlays` is the interned overlay table the movement step already built for
-/// this step; it is threaded in rather than rebuilt for `try_mantle`'s reason
-/// (P29.4 A8) — a second walk over every character to serve one press.
+/// **It no longer pulls anybody out** (wave VEH3d). `Accepted` is the go-ahead
+/// for `super::boarding::begin`; the pull is `super::boarding::start_pull` at
+/// the door, the landing is the victim's own reverse pipeline, and
+/// [`finish_pull`] is where the street sees it and the victim runs. The resist
+/// draw is exactly VEH2b's — on the victim's own guid and this step.
+///
+/// `dt` and `overlays` are kept on the signature for the callers that already
+/// pass them; the pull that used them has moved.
 pub fn try_carjack(
     world: &mut EcsWorld,
     bridge: &mut PhysicsBridge3D,
     chassis: Uuid,
     actor: Uuid,
-    dt: f64,
-    overlays: &inf_ecs::movement::OverlayRegistry,
+    _dt: f64,
+    _overlays: &inf_ecs::movement::OverlayRegistry,
 ) -> Option<Carjack> {
+    let _ = bridge;
     let victim = occupant_of(world, chassis)?;
     if victim == actor || !is_ejectable(world, victim) {
         return None;
@@ -334,38 +389,28 @@ pub fn try_carjack(
     if inf_ecs::crowd::agent_unit(victim, tick, SALT_RESIST) < RESIST_CHANCE {
         return Some(Carjack::Resisted { chassis, victim });
     }
-    let at = door_point(world, bridge, chassis, victim)?;
-    // The mode is taken rather than requested: being pulled out of a car is a
-    // fact about your body and not a choice, which is the sentence
-    // `inf_ecs::movement::transition_is_legal`'s own `(Driving, FallControlled)`
-    // row was written for.
-    if !super::movement::eject_from_seat(
-        world,
-        bridge,
-        victim,
-        at,
-        MovementMode::FallControlled,
-        overlays,
-    ) {
-        return None;
-    }
-    // The car is nobody's business but the player's from here.
+    // The car is nobody's business but the player's from here: the traffic
+    // tier stops steering it on the step the driver lets go of it, not on the
+    // step it lands in the road.
     inf_ecs::traffic::mark_taken(world, chassis);
+    Some(Carjack::Accepted { chassis, victim })
+}
+
+/// **The pull has landed** — the victim is in the road at `at`, out of the
+/// seat on its own forced exit. The street sees it and the victim runs.
+///
+/// Called by the victim's seat step on the step its forced `Exiting` ends,
+/// which is after `finish_driving` has made it a pedestrian again.
+pub fn finish_pull(world: &mut EcsWorld, victim: Uuid, actor: Uuid, at: DVec3, dt: f64) {
     // **AND THE STREET SAW IT** (wave EMS3). Raised rather than recorded,
-    // because this runs in the `character move` phase and the question "who
-    // could see it" needs a collision world three phases later — see
-    // `inf_ecs::witness::raise_act`. At the DOOR the victim came out of, which
-    // is where a witness would say it happened rather than at the chassis
-    // origin, and it is the same point the ejection itself used.
-    //
-    // After `mark_taken`, so that when the witness pass asks what the actor was
-    // driving one step later the answer is already this car.
+    // because the question "who could see it" needs a collision world three
+    // phases later — see `inf_ecs::witness::raise_act`. At the point the
+    // victim came out to, which is where a witness would say it happened.
     inf_ecs::witness::raise_act(world, inf_ecs::witness::ActKind::Carjack, actor, at);
     // …and the person walks away. An ordinary crowd agent with a route, so it
     // tiers, poses and eventually goes Dormant like every other pedestrian —
     // rather than a statue in the road with a bespoke state machine.
     flee(world, victim, at, actor, dt);
-    Some(Carjack::Ejected { chassis, victim })
 }
 
 /// Give the victim somewhere to be: [`FLEE_M`] metres directly away from
@@ -404,8 +449,12 @@ fn flee(world: &mut EcsWorld, victim: Uuid, from: DVec3, actor: Uuid, dt: f64) {
 /// Which chassis a carjack candidate names, for a caller that wants to ask
 /// before it presses — the gate's own door.
 pub fn carjackable(world: &EcsWorld, bridge: &PhysicsBridge3D, feet: DVec3) -> BTreeSet<Uuid> {
+    // The CARJACK candidates only: since wave VEH3d the same walk also answers
+    // the refusal-by-name (`InteractVerb::Occupied`) for a car nobody can be
+    // pulled out of from here, and that is not a car that is carjackable.
     candidates(world, bridge, feet)
         .into_iter()
+        .filter(|c| c.verb == InteractVerb::Carjack)
         .map(|c| c.guid)
         .collect()
 }

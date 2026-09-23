@@ -975,20 +975,39 @@ fn the_vehicle_phase_asks_four_questions_a_car_and_costs_what_it_prints() {
     }
 }
 
-/// The seat the enter door aims at is the top of the chassis, on real ground —
+/// The seat the enter door aims at is derived from the chassis, on real ground —
 /// the P29.7 rule re-taken where the chassis is not axis-aligned.
+///
+/// **Re-blessed with its cause (wave VEH3d)**: the seat was the collider's TOP
+/// FACE — this arm asserted it sat 0.4–0.6 m from the chassis origin, the
+/// collider's half-height — and every driver stood on its own roof (CHAR1c
+/// carried 160). It is the driver's foot well INSIDE the cabin now, so what is
+/// asserted is that the seat, carried into the tilted chassis frame, is BELOW
+/// the top face in that frame and is exactly `seat_local` turned by the live
+/// rotation.
 #[test]
-fn the_seat_is_the_top_of_the_chassis_on_real_ground() {
+fn the_seat_is_inside_the_chassis_on_real_ground() {
     let mut rig = Rig::new(8.0, 8.0, 0.0);
     rig.step(60);
     let (seat, rot, _) =
         inf_physics::d3::vehicle::seat_pose(&rig.bridge, CHASSIS).expect("the car has a seat");
     let t = rig.chassis().translation.to_dvec3();
+    let local = rot.inverse() * (seat - t);
+    let seat_local = rig
+        .bridge
+        .vehicle_of(CHASSIS)
+        .expect("the car")
+        .rig()
+        .seat_local
+        .to_dvec3();
     assert!(
-        (seat - t).length() > 0.4 && (seat - t).length() < 0.6,
-        "the seat is {} m from the chassis origin; the collider's top face is \
-         {} m up",
-        (seat - t).length(),
+        (local - seat_local).length() < 1e-6,
+        "the seat in the chassis frame is {local:?}; the rig says {seat_local:?}"
+    );
+    assert!(
+        local.y < HALF.y - 0.3,
+        "the seat is {:.3} m up in the chassis frame and the collider's top face is {} m up, so a driver would be standing on the roof",
+        local.y,
         HALF.y
     );
     assert!(

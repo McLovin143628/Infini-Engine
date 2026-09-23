@@ -80,6 +80,13 @@ pub enum InteractVerb {
     /// drops a wanted level is a prompt that hides the mechanic. It is also what
     /// makes the dispatch a compile error rather than a silent decline.
     Change,
+    /// **This seat is taken, and nothing the player can do changes that**
+    /// (wave VEH3d): an occupied driver's seat that cannot be carjacked — the
+    /// far side of the car, a player-controlled occupant. The inherited VEH3b
+    /// finding was that an occupied seat must NEVER be entered; this is the
+    /// refusal half of that rule, BY NAME, so the prompt says why the press
+    /// does nothing rather than saying nothing.
+    Occupied,
 }
 
 impl InteractVerb {
@@ -112,7 +119,10 @@ impl InteractVerb {
     ///
     /// Pinned by `veh3a_gate::a_character_boards_from_as_far_as_the_reach_says`.
     pub fn reach_is_on_the_ground(self) -> bool {
-        matches!(self, InteractVerb::Enter | InteractVerb::Carjack)
+        matches!(
+            self,
+            InteractVerb::Enter | InteractVerb::Carjack | InteractVerb::Occupied
+        )
     }
 }
 
@@ -132,6 +142,9 @@ impl InteractVerb {
             // the prompt reads "[E] Change clothes" rather than naming the
             // cupboard, because what a player is choosing is the outfit.
             InteractVerb::Change => "Change",
+            // "[E] Occupied vehicle" — a statement, not an offer, because the
+            // press is a refusal.
+            InteractVerb::Occupied => "Occupied",
         }
     }
 }

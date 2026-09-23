@@ -1507,6 +1507,20 @@ impl RuntimeSim {
         // folds nothing and every trace committed before this wave stays
         // byte-identical.
         out.extend_from_slice(&inf_ecs::bodywork::damage_state_bytes(&self.world));
+        // VEH3d appends the BOARDING machine, after the bodywork and last of
+        // all: every body that is walking up to a car, opening its door, getting
+        // in, getting out or being pulled out of one — its phase, its seat, its
+        // phase clock, the hand weight and the stance it is walking to. It lives
+        // on `MovementRuntime`, which is `#[serde(skip)]`, for the same reason
+        // the drivetrain and the bodywork are resources: VEH3a's schema window is
+        // spent and a boarding is a session's fact.
+        //
+        // **The position is frozen** and `projector_mirror`'s `SECTIONS`
+        // allowlist grows its nineteenth row in the SAME commit. **EMPTY while
+        // nobody is boarding** -- a body walking about or sitting at the wheel is
+        // `BoardingState::is_quiet` -- so a level nobody boards folds nothing and
+        // every trace committed before this wave stays byte-identical.
+        out.extend_from_slice(&inf_ecs::boarding::boarding_state_bytes(&self.world));
         out
     }
 

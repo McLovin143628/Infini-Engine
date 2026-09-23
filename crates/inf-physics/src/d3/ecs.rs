@@ -2819,6 +2819,11 @@ impl PhysicsBridge3D {
             }
         }
         changed |= self.follow_seats(world);
+        // VEH3d: the hands and the feet of every boarding or seated body, AFTER
+        // the solver and after the seat follow — a hand on a door handle has to
+        // be where the solver left the door, and a hand on a rim where it left
+        // the chassis.
+        let _ = super::boarding::follow_boarding(self, world);
         if changed {
             world.mark_dirty();
         }
@@ -2862,12 +2867,36 @@ impl PhysicsBridge3D {
             };
             // Not during the enter warp: that placement is an interpolation from
             // where the character stood, and re-deriving it after the solve would
-            // make the choreography jump.
+            // make the choreography jump. Nor during the EXIT warp (wave VEH3d),
+            // for the same reason run backwards.
             if !cm.runtime.seat.is_seated() || cm.runtime.seat.entering {
                 continue;
             }
+            if cm.runtime.boarding.phase == inf_ecs::boarding::BoardPhase::Exiting
+                && cm.runtime.boarding.mark_s >= 0.0
+            {
+                continue;
+            }
+            let seat_idx = inf_ecs::boarding::SeatIndex::from_u8(cm.runtime.seat.seat);
             let seat_local = match self.vehicle_of(cm.runtime.seat.vehicle) {
-                Some(v) => v.rig().seat_local.to_dvec3(),
+                // The driver's seat is the rig's own; a passenger's is its own
+                // socket, off the same half-extents (wave VEH3d).
+                Some(v) if seat_idx.drives() => v.rig().seat_local.to_dvec3(),
+                Some(_) => match world
+                    .entity_of(cm.runtime.seat.vehicle)
+                    .and_then(|e| world.world().get::<Collider3D>(e).copied())
+                {
+                    Some(c) => {
+                        let half = inf_ecs::vehicle::chassis_half_extents(&c);
+                        let s = inf_ecs::boarding::sockets_of(half, c.offset, &[]);
+                        s.seat_floor(
+                            seat_idx,
+                            c.offset.y + inf_ecs::boarding::SEAT_FLOOR_FRAC_Y * half.y.abs(),
+                        )
+                        .to_dvec3()
+                    }
+                    None => continue,
+                },
                 None => continue,
             };
             let lift = cm.stand_half_height_m + seated_radius(world, entity);

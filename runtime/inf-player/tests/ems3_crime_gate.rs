@@ -255,6 +255,7 @@ fn getaway(world: &mut EcsWorld) {
             time_s: 9.0,
             start: Vec3d::from_dvec3(CRIME_AT),
             start_yaw_deg: 0.0,
+            seat: 0,
         };
     }
 }
@@ -322,6 +323,7 @@ fn take_the_wheel(world: &mut EcsWorld) {
             time_s: 9.0,
             start: Vec3d::from_dvec3(CRIME_AT),
             start_yaw_deg: 0.0,
+            seat: 0,
         };
     }
 }

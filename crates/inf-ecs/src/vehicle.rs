@@ -312,11 +312,7 @@ pub fn chassis_half_extents(c: &Collider3D) -> Vec3d {
     match c.shape_kind {
         ColliderShape3DKind::Box => c.half_extents,
         ColliderShape3DKind::Sphere => Vec3d::splat(c.radius),
-        ColliderShape3DKind::Capsule => Vec3d::new(
-            c.radius,
-            c.half_extents.y + c.radius,
-            c.radius,
-        ),
+        ColliderShape3DKind::Capsule => Vec3d::new(c.radius, c.half_extents.y + c.radius, c.radius),
     }
 }
 
@@ -326,7 +322,10 @@ pub fn chassis_half_extents(c: &Collider3D) -> Vec3d {
 /// `parts` is the family's own parts as the world holds them
 /// ([`crate::boarding::part_geoms`]); an empty slice is legal and gives the
 /// flank fallback for the two handles.
-pub fn sockets_for(c: &Collider3D, parts: &[crate::boarding::PartGeom]) -> crate::boarding::VehicleSockets {
+pub fn sockets_for(
+    c: &Collider3D,
+    parts: &[crate::boarding::PartGeom],
+) -> crate::boarding::VehicleSockets {
     crate::boarding::sockets_of(chassis_half_extents(c), c.offset, parts)
 }
 
@@ -10592,7 +10591,10 @@ mod tests {
             "the seat is at {:.3} and the roof at 0.5",
             seat.y
         );
-        assert!(seat.x > 0.0, "the driver is on the `+X` side, which is the exit's");
+        assert!(
+            seat.x > 0.0,
+            "the driver is on the `+X` side, which is the exit's"
+        );
         assert!(seat.z > 0.0, "a front seat is ahead of the chassis centre");
         // …and a static body is scenery, not a vehicle.
         assert_eq!(chassis_of(Some(&boxy), Some(&RigidBody3D::default())), None);

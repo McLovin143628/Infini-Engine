@@ -604,6 +604,8 @@ fn ensure_driver(
             time_s: 0.0,
             start: Vec3d::from_dvec3(at),
             start_yaw_deg: 0.0,
+            // The driver's seat (wave VEH3d gave seats an index).
+            seat: 0,
         };
     }
     super::vehicle::park_collider(bridge, driver, true);

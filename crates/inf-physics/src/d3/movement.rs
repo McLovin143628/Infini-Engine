@@ -840,7 +840,33 @@ fn step_one(
     if cm.mode == MovementMode::Ragdoll {
         cm.runtime.press_interact = false;
         cm.runtime.press_fly = false;
+        // **A body knocked over part-way to a car stops boarding it** (wave
+        // VEH3d). The ragdoll owns the collider now (it parked it the step it
+        // started), so only the machine, the door and the limb requests are let
+        // go of here; a victim it was pulling out keeps its seat.
+        if cm.runtime.boarding.phase.is_on_the_ground() && !cm.runtime.seat.is_seated() {
+            let b = cm.runtime.boarding;
+            if b.carjack && !b.other.is_nil() {
+                super::boarding::unjack(world, b.other);
+            }
+            if !b.door.is_nil() {
+                super::bodywork::set_part_open(world, bridge, b.vehicle, b.door, false);
+            }
+            cm.runtime.boarding = inf_ecs::boarding::BoardingState::default();
+            cm.runtime.pelvis_offset = Vec3d::ZERO;
+            inf_ecs::pose::set_hand_ik(world, guid, inf_ecs::pose::HandIk::default());
+        }
         return super::ragdoll_bridge::step_ragdoll(world, bridge, guid, cm, dt, overlays);
+    }
+
+    // ── 0c½. **A BOARDING owns the body on the ground** (wave VEH3d) — the
+    //    approach, the door and the close, for the mantle's reason: between the
+    //    press and the seat there is nothing for locomotion to integrate, and
+    //    the placement is a spline whose endpoint is exact by construction.
+    if cm.runtime.boarding.phase.is_on_the_ground() && !cm.runtime.seat.is_seated() {
+        cm.runtime.press_interact = false;
+        cm.runtime.press_fly = false;
+        return step_boarding_ground(world, bridge, guid, cm, position, radius, dt, overlays);
     }
 
     // ── 0d. **A VEHICLE owns it too** (P29.7), and for the third time the same
@@ -924,19 +950,33 @@ fn step_one(
             }
         }
         let entered = match hit.as_ref().map(|h| (h.verb, h.guid)) {
-            Some((inf_ecs::interact::InteractVerb::Enter, target)) => Some(target),
+            Some((inf_ecs::interact::InteractVerb::Enter, target)) => Some((target, false)),
             // VEH2b. **One press, one door, one warp**: the carjack makes the
             // seat free and then falls through to the ordinary enter below, so
             // the code that seats a hero after a carjack is the code that has
             // always seated a hero. A refusal — nobody in it, a resist, the
             // wrong side — is a value, and the press does nothing rather than
             // half-doing something.
+            //
+            // VEH3d. The carjack is now the SAME PIPELINE as the enter — the
+            // walk to the door, the hand on the handle, the door on its motor —
+            // with the occupant pulled out through the door it opens. The press
+            // only decides whether they hold on.
             Some((inf_ecs::interact::InteractVerb::Carjack, target)) => {
                 match super::carjack::try_carjack(world, bridge, target, guid, dt, overlays) {
-                    Some(super::carjack::Carjack::Ejected { chassis, .. }) => Some(chassis),
+                    Some(super::carjack::Carjack::Accepted { chassis, .. }) => {
+                        Some((chassis, true))
+                    }
                     // They held on. The press is spent; the player presses again.
                     Some(super::carjack::Carjack::Resisted { .. }) | None => None,
                 }
+            }
+            // VEH3d. **An occupied seat the player cannot pull anybody out of**
+            // — the wrong side of the car, a responder, another player. The
+            // prompt said so; the press is a refusal, counted.
+            Some((inf_ecs::interact::InteractVerb::Occupied, _)) => {
+                cm.runtime.refusals = cm.runtime.refusals.saturating_add(1);
+                None
             }
             Some((inf_ecs::interact::InteractVerb::Use, target)) => {
                 // A `Use` hit is a door if the world has one under that guid,
@@ -967,35 +1007,24 @@ fn step_one(
             ))
             | None => None,
         };
-        if let Some(vehicle) = entered {
-            let mut refusal = MovementRefusal::None;
-            let probe = ClearanceProbe {
-                centre: position,
-                radius,
-                is_capsule,
-                exclude: &exclude,
-            };
-            cm.mode = request(
-                &mut cm,
-                bridge,
-                &probe,
-                MovementMode::Driving,
-                true,
-                &mut refusal,
-            );
-            if cm.mode == MovementMode::Driving {
-                cm.runtime.seat = inf_ecs::components::SeatState {
-                    vehicle,
-                    entering: true,
-                    time_s: 0.0,
-                    start: Vec3d::from_dvec3(position),
-                    start_yaw_deg: cm.runtime.body_yaw_deg,
-                };
-                cm.runtime.time_in_mode_s = 0.0;
-                // Parked at the START of the choreography, not at the end: a
-                // capsule sliding into a seat with its collider live pushes the
-                // car away from itself.
-                super::vehicle::park_collider(bridge, guid, true);
+        if let Some((vehicle, carjack)) = entered {
+            // **THE BOARDING MACHINE** (wave VEH3d). What used to be a mode
+            // request and a warp is a machine now: `begin` parks the collider,
+            // lays the approach and, for a carjack, tells the occupant. The
+            // mode becomes `Driving` when the body reaches the seat, not when
+            // the button is pressed.
+            match super::boarding::begin(
+                world, bridge, guid, &mut cm, position, radius, vehicle, carjack,
+            ) {
+                super::boarding::Begin::Started => {
+                    cm.runtime.time_in_mode_s = 0.0;
+                    return step_boarding_ground(
+                        world, bridge, guid, cm, position, radius, dt, overlays,
+                    );
+                }
+                super::boarding::Begin::Occupied | super::boarding::Begin::NoCar => {
+                    cm.runtime.refusals = cm.runtime.refusals.saturating_add(1);
+                }
             }
         }
     }
@@ -1821,7 +1850,19 @@ fn step_one(
     if result.grounded {
         if !was_grounded || cm.mode.is_falling() {
             let impact = (-vertical_before).max(0.0);
-            let kind = model::classify_landing(&cm, impact, has_input);
+            let mut kind = model::classify_landing(&cm, impact, has_input);
+            // **A BAIL-OUT LANDS IN A ROLL** (wave VEH3d): a body thrown from a
+            // car doing more than walking pace lands at the car's speed
+            // sideways, which the vertical classifier calls soft — see
+            // `BoardingState::bail`. Consumed here, by the first landing.
+            if cm.runtime.boarding.bail {
+                cm.runtime.boarding.bail = false;
+                let v = cm.runtime.velocity;
+                let across = (v.x * v.x + v.z * v.z).sqrt();
+                if kind != LandingKind::Ragdoll && across > inf_ecs::boarding::EXIT_ROLL_MPS {
+                    kind = LandingKind::Roll;
+                }
+            }
             cm.runtime.land_impact_mps = impact;
             cm.runtime.landing = kind;
             cm.runtime.time_since_land_s = 0.0;
@@ -3343,6 +3384,9 @@ fn step_feet(
             // clamps them, because the limit is the ankle's and not the ground's.
             pitch_deg: g.pitch_deg,
             roll_deg: g.roll_deg,
+            // The standing rule: a metre in front of the thigh.
+            pole: None,
+            unlimited: false,
         });
     }
     // The pelvis drops to the lower foot, so the low leg does not straighten past
@@ -3393,7 +3437,9 @@ fn occupied_seats(world: &EcsWorld, except: uuid::Uuid) -> BTreeSet<uuid::Uuid> 
             continue;
         };
         if let Some(cm) = world.world().get::<CharacterMovement>(e) {
-            if cm.runtime.seat.is_seated() {
+            // The DRIVER's seat (wave VEH3d): a passenger in a car does not make
+            // its wheel taken.
+            if cm.runtime.seat.is_driving() {
                 out.insert(cm.runtime.seat.vehicle);
             }
         }
@@ -3442,6 +3488,7 @@ fn step_driving(
     radius: f64,
     overlays: &model::OverlayRegistry,
 ) -> Option<MoveOutcome> {
+    use inf_ecs::boarding::{self as board, BoardPhase, SeatIndex, VehicleSockets};
     let entity = world.entity_of(guid)?;
     let mut refusal = MovementRefusal::None;
     cm.runtime.time_in_mode_s += dt;
@@ -3457,11 +3504,22 @@ fn step_driving(
     cm.runtime.aim_yaw_rate_dps =
         (model::angle_delta_deg(cm.runtime.aim_yaw_deg, prev_aim) / dt).abs();
 
+    // **A seated body's capsule is parked, every step** (wave VEH3d). P29.7
+    // parks it once, at the press — and that was enough while the seat was the
+    // ROOF, because a capsule re-enabled by a later sync (a crowd tier change
+    // rebuilds an agent's collider) merely rested on the car's top face. The
+    // seat is INSIDE the chassis now, and a re-enabled capsule there is a body
+    // buried in a dynamic box: measured, a responding fire crew whose capsule
+    // came back mid-drive pinned its appliance 32.75 m short of the fire it was
+    // sent to. Idempotent, and one flag write.
+    super::vehicle::park_collider(bridge, guid, true);
     let vehicle = cm.runtime.seat.vehicle;
-    let Some((seat_world, rot, linvel)) = super::vehicle::seat_pose(bridge, vehicle) else {
+    let Some((driver_seat_world, rot, linvel)) = super::vehicle::seat_pose(bridge, vehicle) else {
         // The vehicle is gone — despawned, or a level that changed underneath a
         // running session. A refusal is a value: the character stands up where
-        // it is rather than the step failing.
+        // it is rather than the step failing, and whatever boarding it was in
+        // goes with the car.
+        cm.runtime.boarding = inf_ecs::boarding::BoardingState::default();
         return finish_driving(
             world,
             bridge,
@@ -3472,40 +3530,198 @@ fn step_driving(
             MovementMode::Grounded,
         );
     };
+    let seat_idx = SeatIndex::from_u8(cm.runtime.seat.seat);
+    let car = super::boarding::car_frame(world, bridge, vehicle, false);
+    // **The seat's own floor** (wave VEH3d). The driver's is `seat_local`, which
+    // is what `seat_pose` answers; a passenger's is its own socket, derived the
+    // same way from the same half-extents.
+    let seat_world = match car.as_ref() {
+        Some(c) if !seat_idx.drives() => c.world(c.sockets.seat_floor(seat_idx, c.floor_y())),
+        _ => driver_seat_world,
+    };
+    let mut b = cm.runtime.boarding;
 
     // ── the controls, through the trait. This is the whole of "input routes to
     //    the vehicle": a `VehicleControls` and nothing vehicle-shaped anywhere
     //    in the movement model.
+    //
+    //    **Only the driver's seat commands** (wave VEH3d): a passenger's intent
+    //    reaches nothing. And a body that is not yet (or no longer) at the wheel
+    //    — climbing in, settling, climbing out — holds the car on its handbrake
+    //    rather than steering it with whatever stick the player happens to be
+    //    holding; a VICTIM being pulled out stands on the brake.
     let forward_mps = linvel.dot(rot * DVec3::Z);
-    let controls = inf_ecs::vehicle::VehicleControls::from_intent(
-        cm.runtime.intent_move,
-        forward_mps,
-        cm.runtime.want_handbrake,
-        cm.runtime.intent_vertical,
-    );
-    if let Some(v) = bridge.vehicle_mut(vehicle) {
-        v.control(controls);
+    let at_the_wheel =
+        matches!(b.phase, BoardPhase::Idle | BoardPhase::Driving) && !cm.runtime.seat.entering;
+    let controls = if b.phase == BoardPhase::Jacked {
+        inf_ecs::vehicle::VehicleControls {
+            brake: 1.0,
+            ..inf_ecs::vehicle::VehicleControls::from_intent(
+                Vec2d::new(0.0, 0.0),
+                forward_mps,
+                false,
+                0.0,
+            )
+        }
+    } else if at_the_wheel {
+        inf_ecs::vehicle::VehicleControls::from_intent(
+            cm.runtime.intent_move,
+            forward_mps,
+            cm.runtime.want_handbrake,
+            cm.runtime.intent_vertical,
+        )
+    } else {
+        inf_ecs::vehicle::VehicleControls::from_intent(Vec2d::new(0.0, 0.0), forward_mps, true, 0.0)
+    };
+    // What the feet press — the controls the car was actually given.
+    b.throttle_in = controls.throttle.max(0.0);
+    b.brake_in = controls.brake.max(0.0);
+    if seat_idx.drives() {
+        if let Some(v) = bridge.vehicle_mut(vehicle) {
+            v.control(controls);
+        }
     }
 
     let (enter_time_s, window) = bridge.vehicle_of(vehicle)?.seat_warp();
-    let target = seat_world + DVec3::Y * (cm.stand_half_height_m + radius);
+    let lift = cm.stand_half_height_m + radius;
+    let target = seat_world + DVec3::Y * lift;
     let chassis_yaw = yaw_of(rot);
-    let position = if cm.runtime.seat.entering {
+    let side = VehicleSockets::side_sign(seat_idx);
+    // **The seated pelvis** (wave VEH3d): dropped from where a standing pose
+    // puts it onto this seat's own cushion, per body.
+    let full_drop = car
+        .as_ref()
+        .map(|c| {
+            let cushion = c.sockets.seat(seat_idx).y - c.floor_y();
+            board::seated_pelvis_drop_m(2.0 * lift, cushion)
+        })
+        .unwrap_or(0.0);
+    let mut drop_frac = 1.0f64;
+    let mut position = target;
+    cm.runtime.body_yaw_deg = chassis_yaw;
+    if cm.runtime.seat.entering {
+        // ── EnteringIK: P29.7's quintic window, UNCHANGED in length and ease
+        //    (`seat_warp()`, `warp_ease`). What changed is the path: from the
+        //    step-back point round the open door into the seat, rather than a
+        //    straight line through the B-pillar — and it is now one phase of a
+        //    machine rather than the whole of the choreography.
         let alpha = f64::from(window.alpha(cm.runtime.seat.time_s as f32));
         let eased = inf_anim::warp_ease(alpha);
         let start = cm.runtime.seat.start.to_dvec3();
+        position = match car.as_ref() {
+            Some(c) if b.phase == BoardPhase::EnteringIK => {
+                super::boarding::enter_path(start, target, c, side, eased)
+            }
+            // A seat entered without the machine — the legacy straight warp, for
+            // any caller that seats a body directly.
+            _ => start + (target - start) * eased,
+        };
         cm.runtime.body_yaw_deg = wrap_deg(
             cm.runtime.seat.start_yaw_deg
                 + model::angle_delta_deg(chassis_yaw, cm.runtime.seat.start_yaw_deg) * eased,
         );
+        drop_frac = eased;
+        if b.phase == BoardPhase::EnteringIK {
+            b.time_s += dt;
+        }
         if cm.runtime.seat.time_s >= enter_time_s {
             cm.runtime.seat.entering = false;
+            if b.phase == BoardPhase::EnteringIK {
+                // In: pull the door shut on the inner handle.
+                b.enter(BoardPhase::Seated, 0.0);
+                if !b.door.is_nil() {
+                    super::bodywork::set_part_open(world, bridge, vehicle, b.door, false);
+                }
+            }
         }
-        start + (target - start) * eased
     } else {
-        cm.runtime.body_yaw_deg = chassis_yaw;
-        target
-    };
+        match b.phase {
+            BoardPhase::Seated => {
+                b.time_s += dt;
+                b.door_deg = super::boarding::door_angle_deg(world, bridge, vehicle, b.door);
+                let shut = b.door.is_nil() || b.door_deg <= board::DOOR_SHUT_DEG;
+                if (shut && b.time_s >= board::SEATED_MIN_S) || b.time_s >= board::SEATED_MAX_S {
+                    b.enter(BoardPhase::Driving, 0.0);
+                }
+            }
+            BoardPhase::Driving => {
+                b.time_s += dt;
+            }
+            BoardPhase::Jacked => {
+                b.time_s += dt;
+                // Nobody came: the car is this driver's again.
+                if b.time_s >= board::JACKED_MAX_S {
+                    b = inf_ecs::boarding::BoardingState {
+                        throttle_in: b.throttle_in,
+                        brake_in: b.brake_in,
+                        ..Default::default()
+                    };
+                }
+            }
+            BoardPhase::Exiting => {
+                b.time_s += dt;
+                b.door_deg = super::boarding::door_angle_deg(world, bridge, vehicle, b.door);
+                if b.mark_s < 0.0 {
+                    // The door first: it opens on its motor, and the body
+                    // leaves once it is open enough to leave through.
+                    let open = b.door.is_nil() || b.door_deg >= board::DOOR_BOARD_DEG;
+                    if open || b.time_s >= board::EXIT_DOOR_MAX_S {
+                        b.mark_s = b.time_s;
+                    }
+                } else if let Some(c) = car.as_ref() {
+                    let a = ((b.time_s - b.mark_s) / board::EXIT_WARP_S).clamp(0.0, 1.0);
+                    let eased = inf_anim::warp_ease(a);
+                    let out_w = c.world(b.back_local);
+                    let out = DVec3::new(
+                        out_w.x,
+                        b.ground_y + super::boarding::PLACE_SKIN_M + lift,
+                        out_w.z,
+                    );
+                    position = super::boarding::exit_path(target, out, c, side, eased);
+                    // Out of the seat facing outward, the way a body steps out.
+                    let outward = c.dir(DVec3::new(side, 0.0, 0.0));
+                    let out_yaw = model::planar_yaw_deg(Vec2d::new(outward.x, outward.z));
+                    cm.runtime.body_yaw_deg = wrap_deg(
+                        chassis_yaw + model::angle_delta_deg(out_yaw, chassis_yaw) * eased,
+                    );
+                    drop_frac = 1.0 - eased;
+                    if a >= 1.0 {
+                        let forced = b.carjack;
+                        let by = b.other;
+                        let door = b.door;
+                        let mode = if forced {
+                            MovementMode::FallControlled
+                        } else {
+                            MovementMode::Grounded
+                        };
+                        if forced {
+                            // The victim's pipeline ends in the road: it is a
+                            // pedestrian now, and it runs.
+                            cm.runtime.boarding = inf_ecs::boarding::BoardingState::default();
+                        } else {
+                            // Out, and the door is pushed shut behind it.
+                            let mut next = b;
+                            next.enter(BoardPhase::ClosingDoor, 0.0);
+                            next.take_local = b.back_local;
+                            cm.runtime.boarding = next;
+                            if !door.is_nil() {
+                                super::bodywork::set_part_open(world, bridge, vehicle, door, false);
+                            }
+                        }
+                        cm.runtime.velocity = Vec3d::ZERO;
+                        let done =
+                            finish_driving(world, bridge, guid, cm, overlays, Some(out), mode);
+                        if forced {
+                            super::carjack::finish_pull(world, guid, by, out, dt);
+                        }
+                        return done;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    cm.runtime.pelvis_offset = Vec3d::new(0.0, full_drop * drop_frac.clamp(0.0, 1.0), 0.0);
     cm.runtime.velocity = Vec3d::from_dvec3(linvel);
     cm.runtime.target_yaw_deg = cm.runtime.body_yaw_deg;
     // Seated is supported: a driver is not falling, whatever the car is doing.
@@ -3515,47 +3731,106 @@ fn step_driving(
 
     // ── the exit. Not during the warp: a control that could interrupt its own
     //    choreography would leave the character half-way to a seat it is no
-    //    longer in.
-    let leaving = cm.runtime.press_interact && !cm.runtime.seat.entering;
+    //    longer in. Nor mid-exit, nor while being pulled out.
+    let can_leave = !cm.runtime.seat.entering
+        && matches!(
+            b.phase,
+            BoardPhase::Idle | BoardPhase::Driving | BoardPhase::Seated
+        );
+    let leaving = cm.runtime.press_interact && can_leave;
     clear_edges(&mut cm);
     if leaving {
-        let half_width = world
-            .entity_of(vehicle)
-            .and_then(|e| world.world().get::<Collider3D>(e).copied())
-            .map(|c| match c.shape_kind {
-                ColliderShape3DKind::Sphere => c.radius,
-                _ => c.half_extents.x,
-            })
-            .unwrap_or(1.0);
-        let out_pos =
-            target + (rot * DVec3::X) * (half_width + super::vehicle::EXIT_CLEARANCE_M + radius);
         // The handoff: a moving vehicle's exit inherits its velocity, and above
-        // walking pace that means the character is airborne rather than standing.
-        let moving = linvel.length() > 2.0;
+        // walking pace that means the character is airborne rather than standing
+        // — the ROLL, which CHAR1b.2's landing classifier plays as `land_roll`.
+        let moving = linvel.length() > board::EXIT_ROLL_MPS;
         let to = if moving {
             MovementMode::FallControlled
         } else {
             MovementMode::Grounded
         };
         let verdict = model::request_mode(cm.mode, to, true, true);
-        if verdict.refusal == MovementRefusal::None {
-            return finish_driving(
-                world,
-                bridge,
-                guid,
-                cm,
-                overlays,
-                Some(out_pos),
-                verdict.mode,
-            );
+        let full = super::boarding::car_frame(world, bridge, vehicle, true);
+        // **THE POINT-IN-COLLIDER CHECK** (wave VEH3d): the exit is placed at the
+        // first candidate whose capsule is clear of every collider in the world
+        // — the step-back point behind the door for a stand, the flank beside
+        // the seat for a roll, then the far side, then the ends. A car wedged
+        // on every side keeps its driver (a refusal, counted) rather than
+        // putting one inside a wall.
+        let placed = full.as_ref().and_then(|c| {
+            let door_geom = inf_ecs::boarding::front_door(&c.parts, side).copied();
+            let preferred = if moving {
+                inf_ecs::boarding::pull_out_point(&c.sockets, seat_idx, c.half, c.offset)
+            } else {
+                inf_ecs::boarding::stance_points(
+                    &c.sockets,
+                    seat_idx,
+                    c.half,
+                    c.offset,
+                    door_geom.as_ref(),
+                )
+                .1
+            };
+            let own = bridge.collider_of(guid);
+            super::boarding::clear_exit(bridge, c, preferred, cm.stand_half_height_m, radius, own)
+                .map(|(feet, _)| (feet, c.clone()))
+        });
+        match (verdict.refusal, placed) {
+            (MovementRefusal::None, Some((feet, c))) => {
+                let door = inf_ecs::boarding::door_for_seat(world, vehicle, seat_idx)
+                    .unwrap_or(uuid::Uuid::nil());
+                if moving {
+                    // Thrown clear: the door is flung open and the body leaves
+                    // with the car's velocity, in the air.
+                    if !door.is_nil() {
+                        super::bodywork::set_part_open(world, bridge, vehicle, door, true);
+                    }
+                    cm.runtime.boarding = inf_ecs::boarding::BoardingState {
+                        bail: true,
+                        ..Default::default()
+                    };
+                    cm.runtime.pelvis_offset = Vec3d::ZERO;
+                    return finish_driving(
+                        world,
+                        bridge,
+                        guid,
+                        cm,
+                        overlays,
+                        Some(feet + DVec3::Y * lift),
+                        verdict.mode,
+                    );
+                }
+                let mut next = inf_ecs::boarding::BoardingState {
+                    vehicle,
+                    seat: seat_idx.as_u8(),
+                    door,
+                    back_local: c.local(feet),
+                    ground_y: feet.y - super::boarding::PLACE_SKIN_M,
+                    stance_yaw_deg: chassis_yaw,
+                    throttle_in: 0.0,
+                    brake_in: 0.0,
+                    ..Default::default()
+                };
+                next.enter(BoardPhase::Exiting, 0.0);
+                b = next;
+                if !door.is_nil() {
+                    super::bodywork::set_part_open(world, bridge, vehicle, door, true);
+                }
+            }
+            (r, _) => {
+                // A refused exit keeps the character in the seat — the refusal
+                // is a value: the mode table said no, or there is nowhere clear
+                // to put a body down.
+                refusal = if r == MovementRefusal::None {
+                    MovementRefusal::NoOverheadClearance
+                } else {
+                    r
+                };
+                cm.runtime.refusals = cm.runtime.refusals.saturating_add(1);
+            }
         }
-        // A refused exit keeps the character in the seat — the refusal is a
-        // value and the door is the mode table, so a destination the table does
-        // not allow leaves the driver driving rather than half out of a car in a
-        // mode nobody sanctioned.
-        refusal = verdict.refusal;
-        cm.runtime.refusals = cm.runtime.refusals.saturating_add(1);
     }
+    cm.runtime.boarding = b;
 
     write_driver_back(world, entity, guid, bridge, &cm, position, overlays);
     Some(MoveOutcome {
@@ -3568,40 +3843,112 @@ fn step_driving(
     })
 }
 
-/// **Take somebody out of a seat they did not choose to leave** (wave VEH2b) —
-/// the carjack's half of the exit.
+/// **The boarding's ground phases** (wave VEH3d) — `Locked`, `Unlocking`,
+/// `OpeningDoor` and `ClosingDoor`, which own the body outright the way a
+/// mantle does: no locomotion integrates it, the capsule is parked (except
+/// after an exit, when the body is standing on its own feet again beside the
+/// door it is pushing shut), and the choreography writes the placement.
 ///
-/// [`finish_driving`] with the mode **taken rather than requested**, which is
-/// the difference between getting out of a car and being pulled out of one:
-/// `inf_ecs::movement::transition_is_legal`'s own comment says the table
-/// *"permits a driver to be pulled out of a seat by something that is a fact
-/// about its body rather than a choice"*, and this is that something.
-///
-/// It does everything the ordinary exit does — restores the collider, clears
-/// [`inf_ecs::components::SeatState`], places the body and republishes its
-/// animation parameters — so the seat is genuinely free afterwards and
-/// `occupied_seats` says so on the same step.
-///
-/// `false` when the guid has no body or is not in a seat, which are both things
-/// a caller can produce by pressing at the wrong moment.
-pub(crate) fn eject_from_seat(
+/// See `inf_physics::d3::boarding` for the machine; this is the write-back half,
+/// which is the seat step's, for the same reasons.
+#[allow(clippy::too_many_arguments)]
+fn step_boarding_ground(
     world: &mut EcsWorld,
     bridge: &mut PhysicsBridge3D,
     guid: uuid::Uuid,
-    at: DVec3,
-    mode: MovementMode,
+    mut cm: CharacterMovement,
+    position: DVec3,
+    radius: f64,
+    dt: f64,
     overlays: &model::OverlayRegistry,
-) -> bool {
-    let Some(e) = world.entity_of(guid) else {
-        return false;
+) -> Option<MoveOutcome> {
+    use super::boarding::GroundStep;
+    let entity = world.entity_of(guid)?;
+    cm.runtime.time_in_mode_s += dt;
+    let prev_aim = cm.runtime.aim_yaw_deg;
+    cm.runtime.aim_yaw_deg = wrap_deg(cm.runtime.aim_yaw_deg + cm.runtime.intent_look_yaw_dps * dt);
+    cm.runtime.aim_pitch_deg =
+        (cm.runtime.aim_pitch_deg + cm.runtime.intent_look_pitch_dps * dt).clamp(-89.0, 89.0);
+    cm.runtime.aim_yaw_rate_dps =
+        (model::angle_delta_deg(cm.runtime.aim_yaw_deg, prev_aim) / dt).abs();
+    clear_edges(&mut cm);
+    let mut refusal = MovementRefusal::None;
+    let step = super::boarding::step_ground(world, bridge, &mut cm, position, radius, dt);
+    let (at, yaw) = match step {
+        GroundStep::Stand { at, yaw_deg } => (at, yaw_deg),
+        GroundStep::IntoSeat { at, yaw_deg } => {
+            let verdict = model::request_mode(cm.mode, MovementMode::Driving, true, true);
+            let b = cm.runtime.boarding;
+            if verdict.refusal == MovementRefusal::None {
+                cm.mode = MovementMode::Driving;
+                cm.runtime.seat = inf_ecs::components::SeatState {
+                    vehicle: b.vehicle,
+                    entering: true,
+                    time_s: 0.0,
+                    start: Vec3d::from_dvec3(at),
+                    start_yaw_deg: yaw_deg,
+                    seat: b.seat,
+                };
+                cm.runtime.time_in_mode_s = 0.0;
+                let len = bridge
+                    .vehicle_of(b.vehicle)
+                    .map(|v| v.seat_warp().0)
+                    .unwrap_or(0.0);
+                cm.runtime
+                    .boarding
+                    .enter(inf_ecs::boarding::BoardPhase::EnteringIK, len);
+            } else {
+                refusal = verdict.refusal;
+                cm.runtime.refusals = cm.runtime.refusals.saturating_add(1);
+                super::boarding::release(world, bridge, guid, &mut cm);
+            }
+            (at, yaw_deg)
+        }
+        GroundStep::Refused { at } => {
+            let b = cm.runtime.boarding;
+            if b.carjack && !b.other.is_nil() {
+                super::boarding::unjack(world, b.other);
+            }
+            if !b.door.is_nil() {
+                super::bodywork::set_part_open(world, bridge, b.vehicle, b.door, false);
+            }
+            refusal = MovementRefusal::ConditionNotMet;
+            cm.runtime.refusals = cm.runtime.refusals.saturating_add(1);
+            super::boarding::release(world, bridge, guid, &mut cm);
+            (at, cm.runtime.body_yaw_deg)
+        }
+        GroundStep::Done { at } => {
+            super::boarding::release(world, bridge, guid, &mut cm);
+            (at, cm.runtime.body_yaw_deg)
+        }
     };
-    let Some(cm) = world.world().get::<CharacterMovement>(e).cloned() else {
-        return false;
+    // What the locomotion animation reads: the root motion this step, so the
+    // approach WALKS rather than slides.
+    let v = (at - position) / dt.max(1e-6);
+    cm.runtime.velocity = if cm.mode == MovementMode::Driving {
+        Vec3d::ZERO
+    } else {
+        Vec3d::from_dvec3(DVec3::new(v.x, 0.0, v.z))
     };
-    if !cm.runtime.seat.is_seated() {
-        return false;
-    }
-    finish_driving(world, bridge, guid, cm, overlays, Some(at), mode).is_some()
+    cm.runtime.body_yaw_deg = yaw;
+    cm.runtime.target_yaw_deg = yaw;
+    cm.runtime.grounded = true;
+    cm.runtime.ground_normal = Vec3d::new(0.0, 1.0, 0.0);
+    cm.runtime.pelvis_offset = Vec3d::new(
+        0.0,
+        super::boarding::ground_pelvis_drop(&cm.runtime.boarding),
+        0.0,
+    );
+    let mode = cm.mode;
+    write_driver_back(world, entity, guid, bridge, &cm, at, overlays);
+    Some(MoveOutcome {
+        guid,
+        mode,
+        refusal,
+        grounded: true,
+        landed: LandingKind::None,
+        cover_sweeps: 0,
+    })
 }
 
 /// Consume every edge a seated or flying character does not act on, so a press
@@ -3640,6 +3987,12 @@ fn finish_driving(
     let entity = world.entity_of(guid)?;
     super::vehicle::park_collider(bridge, guid, false);
     cm.runtime.seat = inf_ecs::components::SeatState::default();
+    // The seated body lets go (wave VEH3d): the pelvis comes back up off the
+    // cushion and the hands and feet leave the rim and the pedals. A `ClosingDoor`
+    // that follows asks for its own hand in the post-solve pass.
+    cm.runtime.pelvis_offset = Vec3d::ZERO;
+    inf_ecs::pose::set_hand_ik(world, guid, inf_ecs::pose::HandIk::default());
+    inf_ecs::anim_bridge::set_foot_ik(world, guid, [None, None]);
     cm.mode = mode;
     cm.runtime.time_in_mode_s = 0.0;
     let position = at.unwrap_or_else(|| {

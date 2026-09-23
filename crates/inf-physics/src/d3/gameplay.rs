@@ -1330,6 +1330,22 @@ fn step_hand_ik(world: &mut EcsWorld, dt: f64) -> (u32, u32) {
     let mut holds = 0u32;
     let mut grabs = 0u32;
     for guid in gunners(world) {
+        // **A body the boarding owns is the boarding's** (wave VEH3d). A hand on a
+        // door handle, two on a steering wheel: those are written by
+        // `super::boarding::follow_boarding` AFTER the solver, because the door
+        // and the chassis are moved by it — and this pass writing a request for
+        // the same body first would make two producers for one pair of hands,
+        // which is the race this function exists to prevent.
+        let boarded = world
+            .entity_of(guid)
+            .and_then(|e| world.world().get::<CharacterMovement>(e))
+            .is_some_and(|cm| {
+                cm.runtime.boarding.phase.owns_the_hands()
+                    || (cm.runtime.seat.is_seated() && !cm.runtime.seat.entering)
+            });
+        if boarded {
+            continue;
+        }
         let mut req = HandIk::default();
 
         // **The grab is read FIRST**, because it decides whether the off hand is

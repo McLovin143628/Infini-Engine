@@ -369,7 +369,13 @@ fn park_a_car(world: &mut EcsWorld, half_z: f64) {
     // Beside the character rather than in front of it: a six-metre car whose
     // seat is its own centre cannot be reached from its nose, and the reach is
     // measured to the seat.
-    t.translation = Vec3d::new(2.5, 0.75 + 0.35, 0.0);
+    //
+    // **On the character's `+X` side of the car since wave VEH3d**, re-blessed
+    // with the cause: the seat is the DRIVER's now, inside the cabin on the
+    // chassis's `+X` flank (0.84 m off the centreline of this 4 m-wide box),
+    // where it used to be the roof's centre. At `x = +2.5` the hero stood by
+    // the far flank and the seat moved out of the 3 m reach.
+    t.translation = Vec3d::new(-2.5, 0.75 + 0.35, 0.0);
     world.world_mut().entity_mut(e).insert((
         RigidBody3D {
             kind: BodyKind3D::Dynamic,
@@ -433,7 +439,11 @@ fn the_camera_excludes_the_vehicle_its_subject_is_driving() {
         interact: true,
         ..Default::default()
     });
-    for _ in 0..90 {
+    // **Boarding is a choreography now** (wave VEH3d, re-blessed with that
+    // cause): the walk to the door, the handle, the door on its hinge and the
+    // seat take two to three seconds where P29.7's warp took 0.55, so the
+    // fixture waits for the seat rather than for a fixed count.
+    for _ in 0..(90 + 300) {
         sim.step(&idle);
     }
     let cm = {
@@ -514,7 +524,9 @@ fn a_driven_car_gets_the_drive_camera_and_sits_back_by_its_own_length() {
             interact: true,
             ..Default::default()
         });
-        for _ in 0..120 {
+        // Boarding is a choreography now (wave VEH3d): two to three seconds
+        // where P29.7's warp took 0.55. Re-blessed with that cause.
+        for _ in 0..(120 + 300) {
             sim.step(&idle);
         }
         let mode = {
@@ -590,7 +602,8 @@ fn a_driven_car_gets_the_drive_camera_and_sits_back_by_its_own_length() {
 fn park_a_craft(world: &mut EcsWorld, half_z: f64, rotor: bool) {
     let e = world.spawn_with_guid(CAR, "Craft", None);
     let mut t = Transform::IDENTITY;
-    t.translation = Vec3d::new(2.5, 0.75 + 0.35, 0.0);
+    // The driver's side faces the hero — see `park_a_car` (wave VEH3d).
+    t.translation = Vec3d::new(-2.5, 0.75 + 0.35, 0.0);
     world.world_mut().entity_mut(e).insert((
         RigidBody3D {
             kind: BodyKind3D::Dynamic,
@@ -664,7 +677,9 @@ fn a_boat_and_a_helicopter_get_the_drive_camera_at_their_own_size() {
             interact: true,
             ..Default::default()
         });
-        for _ in 0..120 {
+        // Boarding is a choreography now (wave VEH3d): two to three seconds
+        // where P29.7's warp took 0.55. Re-blessed with that cause.
+        for _ in 0..(120 + 300) {
             sim.step(&idle);
         }
         let mode = {

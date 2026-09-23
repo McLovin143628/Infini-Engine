@@ -3071,11 +3071,24 @@ fn apply_foot_ik(
         // A metre in front of the thigh: far enough that the direction is the
         // content and the distance is not, and derived per side so a character
         // standing on a rotated platform still bends its knees forward.
-        let pole = globals.as_ref().and_then(|g| {
-            let t = g.get(thigh as usize)?.to_scale_rotation_translation().2;
-            Some(t + glam::Vec3::Z)
-        });
-        if inf_anim::solve_chain(skeleton, pose, &chain, target, pole, &rig.limits).is_ok() {
+        // A goal that names its own pole (a SEATED foot, wave VEH3d) is obeyed;
+        // see `FootGoal::pole` for the measurement that made it necessary.
+        let pole = match goal.pole {
+            Some(p) => {
+                let m = to_model.transform_point3(p.to_dvec3());
+                let v = glam::Vec3::new(m.x as f32, m.y as f32, m.z as f32);
+                v.is_finite().then_some(v)
+            }
+            None => globals.as_ref().and_then(|g| {
+                let t = g.get(thigh as usize)?.to_scale_rotation_translation().2;
+                Some(t + glam::Vec3::Z)
+            }),
+        };
+        // A goal that asks to be solved UNLIMITED (a seated leg, wave VEH3d) is
+        // obeyed; see `FootGoal::unlimited` for the knee-range defect that made
+        // it necessary.
+        let limits: &[inf_anim::JointLimit] = if goal.unlimited { &[] } else { &rig.limits };
+        if inf_anim::solve_chain(skeleton, pose, &chain, target, pole, limits).is_ok() {
             wrote = true;
             if goal.weight < 1.0 {
                 for (j, rot) in before {

@@ -22,6 +22,11 @@ pub mod audio;
 // joules a round spends and the fire at the end of it. Rides the vehicle phase's
 // own MIRROR fence.
 pub mod bodywork;
+// VEH3d: BOARDING, the half with a world in it -- the live door handle, the
+// ground under a stance node, the point-in-collider check an exit and a pull-out
+// must pass, and the post-solve hand and foot requests. The arithmetic is
+// `inf_ecs::boarding`.
+pub mod boarding;
 pub mod camera;
 pub mod carjack;
 // COV1: the cover probe -- the second reader of the mantle's own two sweeps.
