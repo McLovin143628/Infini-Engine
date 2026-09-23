@@ -2431,6 +2431,44 @@ mod tests {
         Vec3d::new(x, y, z)
     }
 
+    /// **A release blends back over the holder's OWN length** (VEH3d audit).
+    /// The rule was already written down ("blends back over the *last
+    /// winner's* length") and the director forgot the length the step the
+    /// arrival settled, so every release took `DEFAULT_RELEASE_BLEND_S`. A
+    /// 1.2 s claim held past its arrival, then dropped: the hand-back must take
+    /// 1.2 s — measured as the steps to cover 90 % of the way home.
+    ///
+    /// **The mutation** (run in the audit): `holder_len_s` never set — the
+    /// release takes 0.5 s and the step count reds.
+    #[test]
+    fn a_release_blends_over_the_holders_own_length() {
+        let dt = 1.0 / 60.0;
+        let home = CameraPose::default();
+        let away = CameraPose {
+            position: v(10.0, 0.0, 0.0),
+            ..CameraPose::default()
+        };
+        let mut d = CameraDirector::default();
+        d.resolve(home, dt);
+        for _ in 0..180 {
+            d.request(CameraRequest::blended(CameraLayer::Override, 7, away, 1.2));
+            d.resolve(home, dt);
+        }
+        let mut steps = 0usize;
+        loop {
+            steps += 1;
+            let p = d.resolve(home, dt);
+            if p.position.x <= 1.0 || steps > 600 {
+                break;
+            }
+        }
+        let seconds = steps as f64 * dt;
+        assert!(
+            (seconds - 1.2 * 0.8).abs() < 0.15,
+            "the release took {seconds:.3} s to cover 90 % of the way home, not the holder's 1.2 s blend"
+        );
+    }
+
     /// **The headline, measured.** Three speeds mean three different answers, in
     /// the CAMERA's frame and not the world's — so the same motion produces the
     /// same lag whichever way the camera is pointing.
