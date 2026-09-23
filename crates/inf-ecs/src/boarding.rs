@@ -1120,10 +1120,11 @@ pub const JACKED_MAX_S: f64 = 4.0;
 /// so that the exit pipeline, the carjack and the gate all read one constant.
 /// Above it the body leaves in [`crate::components::MovementMode::FallControlled`]
 /// — which is the mode CHAR1b.2's **roll** clip is reached through, and the
-/// reason the arc brief calls a moving exit *"the roll"*: the landing
-/// classifier turns a controlled fall that arrives fast into
-/// [`crate::components::LandingKind::Rolling`] and the machine plays
-/// `land_roll`.
+/// reason the arc brief calls a moving exit *"the roll"*: the first grounded
+/// step after such a landing is a [`crate::components::MovementMode::Roll`]
+/// (taken through the roll key's own request — see
+/// [`BoardingState::bail`]), the machine plays `land_roll`, and the roll comes
+/// up standing.
 pub const EXIT_ROLL_MPS: f64 = 2.0;
 
 /// **The successor** of an enter phase, or `None` at the end of the sequence.
@@ -1268,16 +1269,19 @@ pub struct BoardingState {
     pub throttle_in: f64,
     /// The brake, `[0, 1]` — what the left foot presses.
     pub brake_in: f64,
-    /// **This body bailed out of a moving car** and has not landed yet — the
-    /// next landing is a ROLL whatever its vertical speed (wave VEH3d).
+    /// **This body bailed out of a moving car** and has not finished coming
+    /// down from it — the first grounded step after a landing faster than
+    /// [`EXIT_ROLL_MPS`] across is a ROLL whatever its vertical speed, and the
+    /// roll comes up STANDING (wave VEH3d).
     ///
     /// The landing classifier keys on the VERTICAL impact (`land_hard_mps`,
     /// 7 m/s), and a body thrown out of a car door lands at the car's speed
     /// sideways and a metre's fall downward — a soft landing by that rule, so
     /// CHAR1b.2's `land_roll` would never play for the one case the arc brief
     /// names it for. The flag is the exit's own record: set by the moving
-    /// exit, consumed by the first landing, and quiet in the trace (it rides an
-    /// `Idle` phase; the mode it produces is folded everywhere a mode is).
+    /// exit, cleared by a slow landing or by the stand the roll ends in, and
+    /// NOT folded (it rides an `Idle` phase; what it produces — the modes — is
+    /// folded everywhere a mode is, and both hosts derive it identically).
     pub bail: bool,
 }
 

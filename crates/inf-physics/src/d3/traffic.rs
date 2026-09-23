@@ -620,7 +620,7 @@ fn ensure_driver(
 }
 
 /// **Seat a driver and a passenger in a parked car** (wave VEH3d) — the
-/// traffic tier's own two doors, [`ensure_driver`] and [`ensure_passenger`],
+/// traffic tier's own two doors, `ensure_driver` and `ensure_passenger`,
 /// for a car the tier is not steering, and the car marked TAKEN so it never
 /// will: the people in it are the car's, not the commute's.
 ///
