@@ -2518,6 +2518,293 @@ fn the_preview_doors_hold_a_beat_and_see_through_the_car_and_touch_no_step() {
     );
 }
 
+/// **A `Near` car that is driving has somebody in it, and the body is SEEN in
+/// the seat** (VEH3d audit, priority d' — the implementer's carried 4, "Near-tier
+/// traffic carries nobody", was a dropped deliverable).
+///
+/// A town at half past eight on the SHIPPED player's own sim, with the
+/// mannequin as the level's body: every `Near` car that is driving seats a
+/// drawn rider (`crowd::spawn_rider`) in its driver's seat, and one in the
+/// passenger's where `traffic::carries_passenger` draws it. Read on the POSED
+/// joints: the rider's pelvis joint on the seat's cushion, its head joint under
+/// the car's roof, in the car's own frame.
+///
+/// **The mutations** (run in the audit): the pelvis pin deleted from the pose
+/// step — the bench posture leaves the pelvis a chair's height off the
+/// cushion; the riders never seated (`seat_riders` answering 0) — no occupied
+/// `Near` car.
+#[test]
+fn a_near_car_that_is_driving_draws_its_riders_in_their_seats() {
+    use inf_ecs::components::{PcgVolume, ResidentSlot, SlotRole, StreamingSource, TimeOfDay};
+    use inf_player::runtime_sim::{RuntimeInput, RuntimeSim};
+    const PITCH: f64 = 100.0;
+    const STREET: f64 = 20.0;
+    const IDLE: inf_anim::ClipRef = [0xd3; 16];
+    let mut world = EcsWorld::new();
+    let half = (PITCH - STREET) * 0.5;
+    for row in 0..3i32 {
+        for col in 0..3i32 {
+            let c = glam::DVec2::new(f64::from(col) * PITCH, f64::from(row) * PITCH);
+            let guid = Uuid::from_u64_pair(0x51, (row as u64) << 32 | col as u64);
+            let e = world.spawn_with_guid(guid, "block", None);
+            let mut v = PcgVolume {
+                extent: Vec2d::new(half, half),
+                ..Default::default()
+            };
+            v.residents = vec![ResidentSlot {
+                role: SlotRole::Home,
+                at: DVec3::new(c.x, 0.0, c.y),
+                room: 0,
+                building: 0,
+                floor: 0,
+                index: 0,
+                node: 0,
+                posture: inf_ecs::components::SlotPosture::Stand,
+                shift: inf_ecs::components::SlotShift::Day,
+                face: DVec3::ZERO,
+            }];
+            world
+                .world_mut()
+                .entity_mut(e)
+                .insert((Transform::from_translation(DVec3::new(c.x, 0.0, c.y)), v));
+        }
+    }
+    let g = world.spawn_with_guid(GROUND, "Ground", None);
+    world.world_mut().entity_mut(g).insert((
+        Transform::from_translation(DVec3::new(100.0, -0.5, 100.0)),
+        RigidBody3D {
+            kind: BodyKind3D::Static,
+            ..Default::default()
+        },
+        Collider3D {
+            shape_kind: ColliderShape3DKind::Box,
+            half_extents: Vec3d::new(400.0, 0.5, 400.0),
+            ..Default::default()
+        },
+    ));
+    // The band's anchor, and the level's one body (the archetype every
+    // resident, driver and rider wears).
+    let h = world.spawn_with_guid(HERO, "Anchor", None);
+    world.world_mut().entity_mut(h).insert((
+        Transform::from_translation(DVec3::new(50.0, 0.0, 50.0)),
+        StreamingSource { radius_m: 512.0 },
+    ));
+    let b = world.spawn_with_guid(RIDER, "Body", None);
+    world.world_mut().entity_mut(b).insert((
+        Transform::from_translation(DVec3::new(-500.0, 0.0, -500.0)),
+        inf_ecs::components::AnimStateMachine {
+            sm: Some(SM_GUID),
+            ..Default::default()
+        },
+        inf_ecs::components::SkeletalMesh {
+            mesh: None,
+            skeleton: Some(SKEL_GUID),
+        },
+    ));
+    let sky = world.spawn_with_guid(WALL, "Sky", None);
+    world.world_mut().entity_mut(sky).insert(TimeOfDay {
+        seconds: 8.5 * 3600.0,
+        rate: 0.0,
+        ..Default::default()
+    });
+    world.propagate();
+    let mut sim = RuntimeSim::new(world, Vec::new(), glam::DVec2::new(0.0, -9.81), 60.0);
+    let skeleton = inf_anim::build_template(
+        inf_anim::BodyPlan::Biped,
+        &inf_anim::BodyParams {
+            height_m: 1.8,
+            ..Default::default()
+        },
+    )
+    .expect("the mannequin builds");
+    sim.set_skeletons([(SKEL_GUID, skeleton)].into_iter().collect());
+    sim.set_state_machines(
+        [(
+            SM_GUID,
+            inf_anim::StateMachine {
+                states: vec![inf_anim::SmState::clip("idle", IDLE)],
+                entry: 0,
+                ..Default::default()
+            },
+        )]
+        .into_iter()
+        .collect(),
+    );
+    sim.set_pose_clips(
+        [(
+            Uuid::from_bytes(IDLE),
+            inf_anim::AnimClip::new("idle", Vec::new()),
+        )]
+        .into_iter()
+        .collect(),
+    );
+    let mut cars: std::collections::BTreeSet<Uuid> = std::collections::BTreeSet::new();
+    let mut passengers = 0usize;
+    let mut measured = 0usize;
+    let mut worst_pelvis = 0.0f64;
+    let mut worst_head_under_roof = f64::INFINITY;
+    let mut most = 0usize;
+    for _ in 0..600 {
+        sim.step_once(RuntimeInput::default());
+        most = most.max(sim.traffic_stats().near_riders);
+        let Some(riders) = sim
+            .world()
+            .world()
+            .get_resource::<inf_ecs::traffic::SeatedRidersRes>()
+            .cloned()
+        else {
+            continue;
+        };
+        for (rider, (chassis, seat)) in riders.riders {
+            let w = sim.world();
+            let (Some(ce), Some(_re)) = (w.entity_of(chassis), w.entity_of(rider)) else {
+                continue;
+            };
+            let (Some(t), Some(col)) = (
+                w.world().get::<Transform>(ce).copied(),
+                w.world().get::<Collider3D>(ce).copied(),
+            ) else {
+                continue;
+            };
+            let half = inf_ecs::vehicle::chassis_half_extents(&col);
+            let rot = glam::DQuat::from_rotation_y(t.rotation.y.to_radians());
+            let sockets = board::sockets_of(half, col.offset, &[]);
+            let cushion =
+                t.translation.to_dvec3() + rot * sockets.seat(SeatIndex::from_u8(seat)).to_dvec3();
+            let roof = t.translation.y + col.offset.y + half.y;
+            let (Some(pelvis), Some(head)) = (
+                sim.posed_joint(
+                    rider,
+                    inf_anim::BoneRoleKind::Pelvis,
+                    inf_anim::BoneSide::Center,
+                ),
+                sim.posed_joint(
+                    rider,
+                    inf_anim::BoneRoleKind::Head,
+                    inf_anim::BoneSide::Center,
+                ),
+            ) else {
+                continue;
+            };
+            measured += 1;
+            cars.insert(chassis);
+            passengers += usize::from(seat == SeatIndex::Passenger.as_u8());
+            worst_pelvis = worst_pelvis.max((pelvis - cushion).length());
+            worst_head_under_roof = worst_head_under_roof.min(roof - head.y);
+        }
+    }
+    println!(
+        "=== Near riders ===\n  {} occupied Near cars drew a posed body ({measured} rider-steps, {passengers} of them passengers); at most {most} riders at once\n  the pelvis joint at worst {:.2} mm off its cushion; the head at least {:.3} m under the roof",
+        cars.len(),
+        worst_pelvis * 1000.0,
+        worst_head_under_roof
+    );
+    assert!(
+        cars.len() >= 3,
+        "only {} Near cars drew a body in a seat",
+        cars.len()
+    );
+    assert!(passengers > 0, "no Near car drew its passenger");
+    assert!(
+        worst_pelvis <= 0.03,
+        "a rider's pelvis joint was {:.2} mm off its cushion",
+        worst_pelvis * 1000.0
+    );
+    assert!(
+        worst_head_under_roof > 0.0,
+        "a rider's head is {:.3} m through its car's roof",
+        -worst_head_under_roof
+    );
+}
+
+/// **What the `Near` riders cost** (VEH3d audit, priority d': "budget it") —
+/// `step_pose_evaluation` over 32 drawn riders (the mannequin, the `Near`
+/// LOD: the machine, the posture, the pin, no hand or foot pass) against the
+/// same world with none. Min of five warmed rounds; asserted in a RELEASE
+/// build off CI only (`NEAR_RIDERS_BUDGET_MS`), reported everywhere.
+#[test]
+fn thirty_two_near_riders_cost_what_they_cost() {
+    const IDLE: inf_anim::ClipRef = [0xd3; 16];
+    const RIDERS: u32 = 32;
+    const NEAR_RIDERS_BUDGET_MS: f64 = 0.5;
+    let skeleton = inf_anim::build_template(
+        inf_anim::BodyPlan::Biped,
+        &inf_anim::BodyParams {
+            height_m: 1.8,
+            ..Default::default()
+        },
+    )
+    .expect("the mannequin builds");
+    let machine = inf_anim::StateMachine {
+        states: vec![inf_anim::SmState::clip("idle", IDLE)],
+        entry: 0,
+        ..Default::default()
+    };
+    let clips: std::collections::BTreeMap<inf_anim::ClipRef, inf_anim::AnimClip> =
+        [(IDLE, inf_anim::AnimClip::new("idle", Vec::new()))]
+            .into_iter()
+            .collect();
+    let archetype = inf_ecs::crowd::CrowdArchetype::humanoid(None, Some(SKEL_GUID), Some(SM_GUID));
+    let build = |n: u32| -> EcsWorld {
+        let mut world = EcsWorld::new();
+        let mut res = inf_ecs::traffic::SeatedRidersRes::default();
+        for i in 0..n {
+            let g = Uuid::from_u128(0x7D_0000 + u128::from(i));
+            inf_ecs::crowd::spawn_rider(
+                &mut world,
+                g,
+                &archetype,
+                DVec3::new(f64::from(i) * 4.0, 0.5, 0.0),
+                0.0,
+            );
+            res.riders.insert(g, (Uuid::from_u128(1), 0));
+        }
+        if n > 0 {
+            world.world_mut().insert_resource(res);
+        }
+        world.propagate();
+        world
+    };
+    let time = |world: &mut EcsWorld| -> f64 {
+        let machines = |g: Uuid| (g == SM_GUID).then_some(&machine);
+        let skels = |g: Uuid| (g == SKEL_GUID).then_some(&skeleton);
+        let clip = |c: inf_anim::ClipRef| clips.get(&c);
+        let vars = |_: Uuid| std::collections::BTreeMap::new();
+        for _ in 0..10 {
+            inf_ecs::pose::step_pose_evaluation(world, DT, &machines, &skels, &clip, &vars);
+        }
+        (0..5)
+            .map(|_| {
+                let t0 = std::time::Instant::now();
+                inf_ecs::pose::step_pose_evaluation(world, DT, &machines, &skels, &clip, &vars);
+                t0.elapsed().as_secs_f64() * 1000.0
+            })
+            .fold(f64::INFINITY, f64::min)
+    };
+    let mut empty = build(0);
+    let mut full = build(RIDERS);
+    let control = time(&mut empty);
+    let riders = time(&mut full);
+    let posed = full
+        .world()
+        .get_resource::<inf_ecs::pose::PoseStoreRes>()
+        .map(|r| r.0.len())
+        .unwrap_or(0);
+    println!(
+        "=== {RIDERS} Near riders ===\n  the pose step {riders:.4} ms against {control:.4} ms with none: {:.4} ms, {:.2} us a rider ({posed} posed)",
+        riders - control,
+        (riders - control) * 1000.0 / f64::from(RIDERS)
+    );
+    assert_eq!(posed, RIDERS as usize, "not every rider was posed");
+    if clock_may_assert() {
+        assert!(
+            riders - control <= NEAR_RIDERS_BUDGET_MS,
+            "{RIDERS} Near riders cost {:.4} ms of pose step, over the {NEAR_RIDERS_BUDGET_MS} ms budget",
+            riders - control
+        );
+    }
+}
+
 /// **A press of E is seen by exactly one step, whatever the frame rate** —
 /// `RuntimeSim::run_frame`, the shipped window's own door. A frame that runs
 /// no fixed step (a display faster than 60 Hz, or the demo's slow motion)

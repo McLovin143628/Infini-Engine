@@ -171,6 +171,12 @@ pub fn step_traffic(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64)
     //    built the first time a car actually asks what it is standing on, and
     //    not at all on a settled street where every car already knows.
     let mut look_through: Option<std::collections::BTreeSet<super::ColliderId3D>> = None;
+    // ── the `Near` tier's drawn riders (VEH3d audit): who sits where this step.
+    //    Rebuilt every step and compared against last step's, so a car that
+    //    stops, is promoted, is taken or leaves the band loses its riders with
+    //    no per-transition bookkeeping to forget.
+    let mut riders: std::collections::BTreeMap<Uuid, (Uuid, u8)> =
+        std::collections::BTreeMap::new();
 
     for (guid, rec) in pop.records.iter_mut() {
         let guid = *guid;
@@ -383,8 +389,48 @@ pub fn step_traffic(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64)
                         t.rotation = Vec3d::new(0.0, yaw, 0.0);
                     }
                 }
+                // **A `Near` car that is DRIVING has somebody in it** (VEH3d
+                // audit, carried 4): a drawn rider in the driver's seat, and
+                // one in the passenger's where `carries_passenger` draws one
+                // — the same draw the `Full` tier makes, so a car keeps its
+                // passenger across the rung.
+                if tier == CrowdTier::Near && driving && want == RigDetail::Body {
+                    stats.near_riders += seat_riders(world, &mut riders, guid, &archetype, at, yaw);
+                }
             }
         }
+    }
+
+    // Riders whose car no longer seats them leave — their clothes with them.
+    let gone: Vec<Uuid> = world
+        .world()
+        .get_resource::<traffic::SeatedRidersRes>()
+        .map(|r| {
+            r.riders
+                .keys()
+                .filter(|g| !riders.contains_key(g))
+                .copied()
+                .collect()
+        })
+        .unwrap_or_default();
+    for g in gone {
+        if let Some(e) = world.entity_of(g) {
+            world.despawn(e);
+        }
+    }
+    if riders.is_empty() {
+        if world
+            .world()
+            .contains_resource::<traffic::SeatedRidersRes>()
+        {
+            world
+                .world_mut()
+                .remove_resource::<traffic::SeatedRidersRes>();
+        }
+    } else {
+        world
+            .world_mut()
+            .insert_resource(traffic::SeatedRidersRes { riders });
     }
 
     pop.steps += 1;
@@ -397,6 +443,46 @@ pub fn step_traffic(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64)
         world.mark_dirty();
     }
     stats
+}
+
+/// **Seat the drawn riders of one `Near` car** (VEH3d audit): build them if
+/// they are not there, and put each on its seat's CUSHION — the socket the
+/// boarding seats a real driver on — in the car's frame at `at` / `yaw`.
+/// Answers how many it seated.
+fn seat_riders(
+    world: &mut EcsWorld,
+    riders: &mut std::collections::BTreeMap<Uuid, (Uuid, u8)>,
+    chassis: Uuid,
+    archetype: &inf_ecs::crowd::CrowdArchetype,
+    at: DVec3,
+    yaw: f64,
+) -> usize {
+    let Some(collider) = world
+        .entity_of(chassis)
+        .and_then(|e| world.world().get::<Collider3D>(e).copied())
+    else {
+        return 0;
+    };
+    let half = inf_ecs::vehicle::chassis_half_extents(&collider);
+    let sockets = inf_ecs::boarding::sockets_of(half, collider.offset, &[]);
+    let rot = glam::DQuat::from_rotation_y(yaw.to_radians());
+    let mut seats = vec![inf_ecs::boarding::SeatIndex::Driver];
+    if traffic::carries_passenger(chassis) {
+        seats.push(inf_ecs::boarding::SeatIndex::Passenger);
+    }
+    let mut n = 0usize;
+    for seat in seats {
+        let g = traffic::rider_guid(chassis, seat);
+        let cushion = at + rot * sockets.seat(seat).to_dvec3();
+        let e = inf_ecs::crowd::spawn_rider(world, g, archetype, cushion, yaw);
+        if let Some(mut t) = world.world_mut().get_mut::<Transform>(e) {
+            t.translation = Vec3d::from_dvec3(cushion);
+            t.rotation = Vec3d::new(0.0, yaw, 0.0);
+        }
+        riders.insert(g, (chassis, seat.as_u8()));
+        n += 1;
+    }
+    n
 }
 
 /// Everything a traffic car has to not drive into: every solid body in the

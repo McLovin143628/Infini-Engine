@@ -935,6 +935,36 @@ pub fn model_offset_world(world: &EcsWorld, entity: Entity) -> glam::DVec3 {
     m * glam::DVec3::new(0.0, -drop, 0.0)
 }
 
+/// **Move a whole pose so its pelvis joint lands on the model origin** (VEH3d
+/// audit) — a drawn traffic rider's seat. The root joints (those with no
+/// parent) are translated by the pelvis's model-space position, negated, so
+/// every joint moves together and nothing about the posture changes. A rig
+/// with no pelvis role is left alone.
+fn pin_pelvis_to_origin(asset: &inf_anim::SkeletonAsset, pose: &mut Pose) {
+    let Some(pelvis) = asset
+        .role_index()
+        .first(inf_anim::BoneRoleKind::Pelvis, inf_anim::BoneSide::Center)
+    else {
+        return;
+    };
+    let globals = inf_anim::global_transforms(&asset.skeleton, pose);
+    let Some(p) = globals.get(pelvis as usize).map(|m| m.w_axis.truncate()) else {
+        return;
+    };
+    if !p.is_finite() {
+        return;
+    }
+    for (j, joint) in asset.skeleton.joints().iter().enumerate() {
+        if joint.parent.is_none() {
+            if let Some(l) = pose.locals.get_mut(j) {
+                l.translation[0] -= p.x;
+                l.translation[1] -= p.y;
+                l.translation[2] -= p.z;
+            }
+        }
+    }
+}
+
 /// How many entities the sim posed this step (`0` on a world that has never
 /// posed one).
 pub fn posed_count(world: &EcsWorld) -> usize {
@@ -1206,6 +1236,13 @@ pub fn step_pose_evaluation<'c>(
         .world()
         .get_resource::<HandIkRes>()
         .map(|r| r.hands.clone())
+        .unwrap_or_default();
+    // The drawn `Near` riders (VEH3d audit), lifted out for the same reason.
+    // Empty — one resource probe — on every level with no `Near` car moving.
+    let riders: std::collections::BTreeSet<Uuid> = world
+        .world()
+        .get_resource::<crate::traffic::SeatedRidersRes>()
+        .map(|r| r.riders.keys().copied().collect())
         .unwrap_or_default();
     let mut hand_reports: BTreeMap<Uuid, HandIkReport> = BTreeMap::new();
     let mut posed: BTreeMap<Uuid, EvaluatedPose> = BTreeMap::new();
@@ -1705,6 +1742,17 @@ pub fn step_pose_evaluation<'c>(
                         // is one `Option` on a value the query already read.
                         if let Some((p, t)) = posture {
                             inf_anim::apply_posture(asset, &mut pose, p, t);
+                        }
+                        // ── VEH3d audit: a drawn RIDER's pelvis ON its cushion ──
+                        //
+                        // A `Near` traffic car's rider has its feet offset zero,
+                        // so its model origin IS its transform, which the
+                        // traffic step puts on the seat's cushion. The bench
+                        // posture drops a pelvis to a chair's height, not a
+                        // car's; this moves the whole pose so the posed pelvis
+                        // lands on the origin, wherever the posture left it.
+                        if riders.contains(&guid) {
+                            pin_pelvis_to_origin(asset, &mut pose);
                         }
                         // ── P29.5: the pelvis IK offset, APPLIED ──
                         //

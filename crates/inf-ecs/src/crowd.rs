@@ -2749,6 +2749,64 @@ pub fn spawn_body(world: &mut EcsWorld, guid: Uuid, a: &CrowdArchetype, at: DVec
     e
 }
 
+/// **Build a SEATED RIDER for a `Near` traffic car** (VEH3d audit, closing the
+/// implementer's carried 4: "Near-tier traffic carries nobody").
+///
+/// A person drawn in a seat of a car that is only a `Body` rig — moved by the
+/// traffic clock, with no `RaycastVehicle` for a driver to sit in — so it is
+/// **not** a [`spawn_body`] driver: no capsule, no controller, no
+/// `CharacterMovement`, nothing the movement step, the bridge or the seat step
+/// can see. It is the archetype's mesh, skeleton and machine with a
+/// [`CrowdAgent`] verdict of [`CrowdTier::Near`] — so
+/// [`crate::pose::step_pose_evaluation`] poses it at the tier's own LOD (the
+/// machine and nothing past the `Near` stop: no hand pass, no foot pass) — in
+/// the [`Sit`](crate::components::SlotPosture::Sit) posture the society's bench
+/// sitters wear, with its feet offset ZERO so its model origin IS its
+/// transform, which the traffic step puts on the seat's cushion; the pose step
+/// then pins the posed pelvis onto that origin
+/// ([`crate::traffic::SeatedRidersRes`]). Dressed as a `Near` resident is.
+///
+/// Never persisted, never in the population: it lives exactly as long as its car
+/// is `Near` and driving, and `despawn` takes its clothes with it.
+pub fn spawn_rider(
+    world: &mut EcsWorld,
+    guid: Uuid,
+    a: &CrowdArchetype,
+    at: DVec3,
+    yaw_deg: f64,
+) -> Entity {
+    if let Some(e) = world.entity_of(guid) {
+        return e;
+    }
+    let e = world.spawn_with_guid(guid, "Rider", None);
+    world.world_mut().entity_mut(e).insert((
+        Transform {
+            translation: Vec3d::new(at.x, at.y, at.z),
+            rotation: Vec3d::new(0.0, yaw_deg, 0.0),
+            ..Transform::IDENTITY
+        },
+        SkeletalMesh {
+            mesh: a.mesh,
+            skeleton: a.skeleton,
+        },
+        AnimStateMachine {
+            sm: a.sm,
+            ..AnimStateMachine::default()
+        },
+        CrowdAgent {
+            tier: CrowdTier::Near,
+            guid,
+            feet_offset_m: 0.0,
+            blocked: false,
+            posture: crate::components::SlotPosture::Sit,
+            face: DVec3::ZERO,
+            posture_t: 0.0,
+        },
+    ));
+    set_tier_wearables(world, guid, CrowdTier::Near, a);
+    e
+}
+
 /// **How many fixed steps the crowd has run** — the `t_s` half of a
 /// [`CrowdClock`], for a caller that has to phase a route onto NOW.
 ///

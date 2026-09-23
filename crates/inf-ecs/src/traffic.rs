@@ -1792,6 +1792,38 @@ pub fn passenger_guid(chassis: Uuid) -> Uuid {
 /// Salts [`passenger_guid`] and the draw [`carries_passenger`] makes.
 pub const PASSENGER_SALT: u64 = 0x5041_5353_454e_0001;
 
+/// **A `Near` traffic car's seated rider**, as a guid derived from the car's
+/// and the seat's (VEH3d audit) — [`driver_guid`]'s rule with its own salt, and
+/// a different guid from the `Full` tier's driver and passenger, so a car that
+/// is promoted builds its real driver rather than finding a drawn one in the
+/// way.
+pub fn rider_guid(chassis: Uuid, seat: crate::boarding::SeatIndex) -> Uuid {
+    let (hi, lo) = chassis.as_u64_pair();
+    let salt = RIDER_SALT ^ u64::from(seat.as_u8());
+    Uuid::from_u64_pair(mix64(hi ^ salt), mix64(lo ^ mix64(salt)))
+}
+
+/// Salts [`rider_guid`].
+pub const RIDER_SALT: u64 = 0x5249_4445_5200_0001;
+
+/// **Which drawn riders sit where** (VEH3d audit) — rider guid to its car and
+/// its seat's CUSHION in the car's frame, for the pose step's pelvis pin.
+/// Runtime only, like [`crate::pose::HandIkRes`]: rebuilt by the traffic step,
+/// never saved, and absent on a level with no `Near` traffic moving.
+#[derive(bevy_ecs::prelude::Resource, Default, Debug, Clone, PartialEq)]
+pub struct SeatedRidersRes {
+    /// Rider guid to `(chassis, seat)`.
+    pub riders: std::collections::BTreeMap<Uuid, (Uuid, u8)>,
+}
+
+/// Whether `guid` is a drawn rider — the question the pose step asks.
+pub fn is_rider(world: &EcsWorld, guid: Uuid) -> bool {
+    world
+        .world()
+        .get_resource::<SeatedRidersRes>()
+        .is_some_and(|r| r.riders.contains_key(&guid))
+}
+
 /// **How many traffic cars carry a front-seat passenger**, as a share.
 ///
 /// A quarter: a commuting street is mostly single-occupancy, and a quarter is
@@ -1853,6 +1885,11 @@ pub struct TrafficStats {
     /// count of the people a level POSES is `drivers + passengers` more than
     /// its society.
     pub passengers: usize,
+    /// **How many seated RIDERS the `Near` tier drew** this step (VEH3d audit):
+    /// a driver in every `Near` car that is driving, and a passenger in the
+    /// ones [`carries_passenger`] draws. Bodies with no capsule, posed at the
+    /// `Near` LOD — see `inf_ecs::crowd::spawn_rider`.
+    pub near_riders: usize,
     /// How many the traffic has let go of — see [`TrafficRecord::taken`].
     pub taken: usize,
     /// How many measured the ground under themselves this step.
