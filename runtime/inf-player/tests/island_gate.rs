@@ -6610,15 +6610,13 @@ fn pie_equals_shipping_when_the_car_drives_the_circuit() {
     assert_eq!(
         a.grain_plays,
         [1, 1, 1],
-        "the engine's three grains were started {:?} times -- an engine is started ONCE \
-         and then addressed, or its clips restart sixty times a second",
+        "the engine's three grains were started {:?} times -- an engine is started ONCE and then addressed, or its clips restart sixty times a second",
         a.grain_plays
     );
     assert_eq!(a.bare, 0, "a command addressed the car's bare chassis key");
     assert!(
         a.audio.1 > steps / 2,
-        "the stack re-pitched its voices on {} of {steps} driving steps -- the \
-         revs never moved the grains",
+        "the stack re-pitched its voices on {} of {steps} driving steps -- the revs never moved the grains",
         a.audio.1
     );
     assert_eq!(

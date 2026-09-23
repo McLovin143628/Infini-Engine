@@ -218,23 +218,19 @@ fn both_audio_steps_drive_the_engine_loop_the_same_way() {
     for (needle, why) in [
         (
             "voices.plan(world,&voiced,dt)",
-            "the layer stack is ONE Ring-0 planner both hosts call with the same \
-             outcomes and the same fixed step",
+            "the layer stack is ONE Ring-0 planner both hosts call with the same outcomes and the same fixed step",
         ),
         (
             "o.voice.map(|v|(o.chassis,v))",
-            "the planner reads the voice the vehicle door PUBLISHED this step, \
-             never the model's state when the audio phase asks",
+            "the planner reads the voice the vehicle door PUBLISHED this step, never the model's state when the audio phase asks",
         ),
         (
             "inf_ecs::vehicle_audio::VoiceCue::Stop{source}=>{cmds.push(AudioCommand::Stop{source});",
-            "an engine switched off and a car despawned stop their salted voices \
-             here, because nothing else knows those keys",
+            "an engine switched off and a car despawned stop their salted voices here, because nothing else knows those keys",
         ),
         (
             "vehicles.iter().filter(|o|o.voice.is_none())",
-            "VEH1a's single loop is kept for exactly the classes the stack does \
-             not voice, so a car is never voiced twice",
+            "VEH1a's single loop is kept for exactly the classes the stack does not voice, so a car is never voiced twice",
         ),
     ] {
         let n: String = needle.chars().filter(|c| !c.is_whitespace()).collect();

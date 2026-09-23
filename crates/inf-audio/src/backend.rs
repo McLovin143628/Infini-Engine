@@ -181,9 +181,10 @@ impl Backend {
     /// voice is unknown.
     #[allow(unused_variables)]
     pub(crate) fn set_params(&mut self, id: VoiceId, gain: f64, panning: f64, rate: f64) {
+        // An offline backend has no device inner (`offline` starts from
+        // `disabled`), so at most one of these two acts.
         if let Some(o) = self.offline.as_mut() {
             o.set_params(id, gain, panning, rate);
-            return;
         }
         #[cfg(feature = "cpal")]
         if let Some(inner) = self.inner.as_mut() {
@@ -194,9 +195,10 @@ impl Backend {
     /// Pause a voice. No-op when disabled.
     #[allow(unused_variables)]
     pub(crate) fn pause(&mut self, id: VoiceId) {
+        // An offline backend has no device inner (`offline` starts from
+        // `disabled`), so at most one of these two acts.
         if let Some(o) = self.offline.as_mut() {
             o.pause(id);
-            return;
         }
         #[cfg(feature = "cpal")]
         if let Some(inner) = self.inner.as_mut() {
@@ -207,9 +209,10 @@ impl Backend {
     /// Resume a paused voice. No-op when disabled.
     #[allow(unused_variables)]
     pub(crate) fn resume(&mut self, id: VoiceId) {
+        // An offline backend has no device inner (`offline` starts from
+        // `disabled`), so at most one of these two acts.
         if let Some(o) = self.offline.as_mut() {
             o.resume(id);
-            return;
         }
         #[cfg(feature = "cpal")]
         if let Some(inner) = self.inner.as_mut() {
