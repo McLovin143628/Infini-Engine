@@ -721,9 +721,14 @@ pub const ADS_BLEND_REST: f64 = 1.0e-9;
 
 /// **The camera rig value an ADS time is spent through** — the name
 /// `crate::camera::set_camera_rig_value` takes.
-pub const ADS_BLEND_RIG_KEY: &str = "state_blend_speed";
+///
+/// `aim_blend_speed` since wave VEH3d closed WPN2b's carried 219: it was
+/// `state_blend_speed`, the ONE speed every settings blend runs at, so a
+/// weapon's ADS time sped up an armed character's gait changes and crouches
+/// as well as its aim.
+pub const ADS_BLEND_RIG_KEY: &str = "aim_blend_speed";
 
-/// **The `state_blend_speed` that spends exactly `ads_s` reaching the aim
+/// **The `aim_blend_speed` that spends exactly `ads_s` reaching the aim
 /// block**, given the fixed step `dt`.
 ///
 /// `crate::camera::interp_to` moves a fraction `a = speed * dt` of the remaining
@@ -893,7 +898,7 @@ pub struct WeaponFeel {
     pub look_lag_x: f64,
     /// See [`look_lag_x`](Self::look_lag_x).
     pub look_lag_y: f64,
-    /// The `state_blend_speed` this character's camera rig carried before the
+    /// The `aim_blend_speed` this character's camera rig carried before the
     /// ADS took it, so putting the weapon away gives back exactly what was
     /// there. `NaN` means "not taken".
     pub blend_speed_prior: f64,

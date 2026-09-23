@@ -1780,6 +1780,13 @@ export const sim = {
     typePath?: string,
   ): Promise<boolean> =>
     invoke<boolean>("sim_tune", { kind, guid, name, value, keep, typePath: typePath ?? null }),
+  /**
+   * **Save the running camera table beside the level** (wave VEH3d) — the
+   * level-side write half. Writes `camera.toml` in the open level's folder,
+   * naming only the numbers that differ from the ALS table; the shipped player
+   * and Simulate both read it back. Resolves to the path written.
+   */
+  saveCamera: (): Promise<string> => invoke<string>("sim_save_camera"),
   /** Exit Simulate, restoring the pre-play world. */
   stop: (): Promise<void> => invoke("sim_stop"),
   /** Whether a Simulate session is currently running (mount-time sync). */

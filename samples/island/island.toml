@@ -49,6 +49,12 @@ content = [
   # beside the level by the same door.
   "VancouverIslandAuthor.inf_act",
   "VancouverIslandAuthor.inf_act.toml",
+  # The LEVEL's CAMERA TABLE (wave VEH3d, CHAR1c carried 159) -- the file the
+  # shipped player and Simulate both read beside the level. It names only the
+  # numbers that differ from the ALS table, which today is none, and it is
+  # here so an author has a file to edit (or the editor's "Save camera to
+  # level" door has one to overwrite) rather than a table compiled in.
+  "camera.toml",
   # The STARTER CHARACTER (SK1c) -- the island's hero IS it, so the level's
   # `SkeletalMesh`, `AnimStateMachine` and `ActorClass` name these GUIDs and a
   # project built without them boots a hero with no rig. They live with the

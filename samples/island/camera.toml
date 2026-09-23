@@ -1,0 +1,6 @@
+# The camera table for the level beside this file (P29.6's `camera.toml`).
+#
+# Written by the editor's "Save camera to level" door (wave VEH3d) and read
+# by both the shipped player and the editor's Simulate. It names only the
+# numbers that differ from the ported ALS table; every key it does not name is
+# that table's. Edit it by hand, or tune a running session and save again.

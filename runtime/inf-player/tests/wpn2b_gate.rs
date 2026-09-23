@@ -872,12 +872,12 @@ fn the_camera_has_no_per_shot_input() {
     for banned in ["recoil", "kick", "weapon"] {
         assert!(
             !TOML.to_ascii_lowercase().contains(banned),
-            "`camera.toml` authors `{banned}` - the aim block is the only thing a weapon may reach, and it reaches it through `state_blend_speed`"
+            "`camera.toml` authors `{banned}` - the aim block is the only thing a weapon may reach, and it reaches it through `aim_blend_speed`"
         );
     }
     // …and the thing it DOES have is the door this wave writes through, so the
     // arm cannot pass because the file stopped being the camera.
-    assert!(code.contains("state_blend_speed"));
+    assert!(code.contains("aim_blend_speed"));
     assert!(code.contains("pub fn set_camera_rig_value"));
     assert!(TOML.contains("[aiming"));
 }
@@ -1253,7 +1253,7 @@ fn the_sway_and_the_breath_read_the_same_clock() {
 /// **The aim arrives in the weapon's own `ads_time_ms`, to within one frame** —
 /// measured on the CAMERA's field of view, which is what a player sees.
 ///
-/// The rig's `state_blend_speed` is solved from the weapon's own number and the
+/// The rig's `aim_blend_speed` is solved from the weapon's own number and the
 /// camera's own `interp_to`; this walks the real camera from the hip block's
 /// field to the aim block's 55 degrees and counts frames.
 ///
@@ -2642,28 +2642,25 @@ fn the_hero_log_and_its_readme_agree() {
 // THE FOUR BOUNDS WAVE WPN2b STATED AND DID NOT MEASURE (the audit's numbers)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// **What one `state_blend_speed` costs every OTHER settings blend** — carried
-/// 219, measured.
+/// **The weapon's ADS time reaches the AIM and nothing else** — carried 219,
+/// CLOSED by wave VEH3d.
 ///
-/// `blend_speed_for_ads` writes the weapon's own ADS time into the rig's ONE
+/// Wave WPN2b wrote the weapon's ADS time into the rig's ONE
 /// `state_blend_speed`, and `CameraSettings::interp` takes one speed for the
-/// whole struct. So an armed character's camera settles faster on EVERY settings
-/// blend — a gait change, a crouch, a mode change — and not only on the aim. The
-/// wave stated that and left it unpriced.
+/// whole struct, so an armed character's gait change, crouch and mode change all
+/// settled faster too — **2.65x**, the WPN2b audit's number, and this arm used
+/// to assert exactly that as a measured bound. The rig carries an
+/// `aim_blend_speed` of its own now (`CameraTuning::aim_blend_speed`, zero
+/// schema: the camera table has no slot in the scene record), the settings
+/// blend runs at it only while the rotation mode is `Aiming`, and the weapon
+/// writes it through `feel::ADS_BLEND_RIG_KEY`.
 ///
-/// **The price is read off the rig and converted, not timed on a running hero.**
-/// Two earlier cuts of this arm timed a gait change in the world and both
-/// measured the wrong thing: `cam.pose.position.length()` is the camera's WORLD
-/// position and moved 17.5262 m in both runs, which is the hero running down the
-/// street; and the field of view does not move on a gait change at all
-/// (0.0000 deg), because the tuning's gait blocks differ in the ARM. What is
-/// left after those two is a boom whose settle is dominated by the character's
-/// own acceleration — 378 frames unarmed against 405 armed, which says nothing
-/// about a blend speed.
+/// **Re-blessed with that cause**, and read the same way it was: off the rig,
+/// converted to frames-to-98 %, because a blend speed is exact and a timed
+/// world is not (this arm's own history of two wrong instruments).
 ///
-/// The blend speed itself is exact: `interp_to` moves `a = speed * dt` of the
-/// remaining distance a step, so a blend is 98 % home after
-/// `ln(0.02) / ln(1 - a)` steps, whatever it is blending.
+/// **The mutation**: `ADS_BLEND_RIG_KEY` back to `"state_blend_speed"` reds the
+/// "a gait change is untouched" assertion by the 2.65x it used to measure.
 #[test]
 fn one_blend_speed_makes_every_settings_blend_the_weapons() {
     let mut r = Range::new(defs_with(&[("rifle", test_rifle())]));
@@ -2676,50 +2673,48 @@ fn one_blend_speed_makes_every_settings_blend_the_weapons() {
     for _ in 0..10 {
         r.step();
     }
-    let armed = inf_ecs::camera::camera_rig_value(&r.world, HERO, feel::ADS_BLEND_RIG_KEY)
-        .expect("an armed character's rig carries the weapon's blend speed");
+    let armed_aim = inf_ecs::camera::camera_rig_value(&r.world, HERO, feel::ADS_BLEND_RIG_KEY)
+        .expect("an armed character's rig carries the weapon's aim blend speed");
+    let armed_state = inf_ecs::camera::camera_rig_value(&r.world, HERO, "state_blend_speed");
     let default = inf_ecs::camera::CameraTuning::default().state_blend_speed;
-    // Frames to 98 % of ANY settings blend, at each speed.
     let frames = |speed: f64| -> f64 {
         let a = (speed * DT).clamp(1.0e-9, 1.0 - 1.0e-9);
         (0.02_f64).ln() / (1.0 - a).ln()
     };
-    println!("=== carried 219: the rig's ONE `state_blend_speed` ===");
+    println!("=== carried 219, closed: the aim's own blend speed ===");
     println!(
-        "  {:<28}{default:.4}  ({:.1} frames to 98 % of any settings blend)",
-        "unarmed (the rig default)",
+        "  {:<34}{default:.4}  ({:.1} frames to 98 % of a settings blend)",
+        "the rig default (both speeds)",
         frames(default)
     );
     println!(
-        "  {:<28}{armed:.4}  ({:.1} frames)",
-        "carrying a 240 ms rifle",
-        frames(armed)
+        "  {:<34}{armed_aim:.4}  ({:.1} frames)",
+        "aim_blend_speed, carrying a rifle",
+        frames(armed_aim)
     );
     println!(
-        "  so an armed character's gait change, crouch and mode change all settle {:.2}x faster",
-        frames(default) / frames(armed)
+        "  {:<34}{armed_state:?}  (a gait change, a crouch, a mode change)",
+        "state_blend_speed, carrying a rifle"
     );
+    assert_eq!(ADS_KEY_IS_THE_AIMS, feel::ADS_BLEND_RIG_KEY);
     assert_eq!(
         unarmed, None,
-        "an unarmed character's rig already carries a `state_blend_speed`, so the comparison below is not about a weapon"
+        "an unarmed character's rig already carries an aim blend speed, so the comparison below is not about a weapon"
     );
     assert!(
-        armed > default,
-        "an armed character's blend speed is {armed:.4} against the rig default {default:.4} - the weapon's ADS time is not reaching the rig"
+        armed_aim > default,
+        "an armed character's aim blend speed is {armed_aim:.4} against the rig default {default:.4} - the weapon's ADS time is not reaching the rig"
     );
-    // The wave's sentence, as a number: it is FASTER, and by how much.
     assert!(
-        frames(armed) < frames(default) * 0.7,
-        "an armed character's settings blends take {:.1} frames against {:.1} - the effect the wave carried is not there and 219 wants rewriting",
-        frames(armed),
+        frames(armed_aim) < frames(default) * 0.7 && frames(armed_aim) > 3.0,
+        "the aim settles in {:.1} frames against the default {:.1} - either the ADS time does not reach it or it has become a snap",
+        frames(armed_aim),
         frames(default)
     );
-    // …and it is BOUNDED: a settings blend that arrives in one step is a snap,
-    // which would be a worse defect than the one carried.
+    // THE CLOSE: every OTHER settings blend is the rig's own, untouched.
     assert!(
-        frames(armed) > 3.0,
-        "an armed character's settings blends arrive in {:.1} frames - the weapon's ADS time has turned every camera change into a snap",
-        frames(armed)
+        armed_state.is_none() || armed_state == Some(default),
+        "an armed character's state_blend_speed is {armed_state:?} - the weapon still speeds up its gait changes, which is carried 219"
     );
     // And the weapon really is what is doing it: putting it away gives the rig
     // back exactly what was there.
@@ -2728,12 +2723,16 @@ fn one_blend_speed_makes_every_settings_blend_the_weapons() {
         r.step();
     }
     let after = inf_ecs::camera::camera_rig_value(&r.world, HERO, feel::ADS_BLEND_RIG_KEY);
-    println!("  {:<28}{after:?}", "after putting it away");
+    println!("  {:<34}{after:?}", "after putting it away");
     assert!(
         after.is_none() || after == Some(default),
         "disarming left the rig at {after:?} - a weapon has edited this character's camera for the rest of the session"
     );
 }
+
+/// The rig key the ADS time is spent through, spelled here so the arm above
+/// fails by NAME if it moves back onto the one every blend shares.
+const ADS_KEY_IS_THE_AIMS: &str = "aim_blend_speed";
 
 /// **The bloom decays while a SECOND weapon is held** — carried 222, measured.
 ///

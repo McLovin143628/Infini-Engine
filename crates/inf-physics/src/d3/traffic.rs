@@ -344,6 +344,12 @@ pub fn step_traffic(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64)
                 if driving {
                     let driver = ensure_driver(world, bridge, guid, &archetype, at);
                     stats.drivers += usize::from(driver);
+                    // **AN NPC RIDES** (wave VEH3d): a quarter of the driven
+                    // fleet carries a front-seat passenger, drawn from the car's
+                    // own guid, built beside the driver and taken away with it.
+                    if driver && traffic::carries_passenger(guid) {
+                        ensure_passenger(world, bridge, guid, &archetype, at);
+                    }
                     if obstacles.is_none() {
                         obstacles = Some(obstacles_of(world));
                     }
@@ -612,9 +618,51 @@ fn ensure_driver(
     true
 }
 
-/// Take the driver out with the car, when the car itself goes.
+/// **Put a passenger in the front seat** (wave VEH3d) — [`ensure_driver`]'s
+/// shape for `SeatIndex::Passenger`, so a body in that seat is drawn wherever a
+/// driver is (the `Full` tier: a `Near` car is a body with nobody in it, driver
+/// included). A passenger whose seat is empty because something took it out
+/// does not grow back, for the carjack clause's reason.
+fn ensure_passenger(
+    world: &mut EcsWorld,
+    bridge: &mut PhysicsBridge3D,
+    chassis: Uuid,
+    archetype: &inf_ecs::crowd::CrowdArchetype,
+    at: DVec3,
+) -> bool {
+    let rider = traffic::passenger_guid(chassis);
+    if let Some(e) = world.entity_of(rider) {
+        return world
+            .world()
+            .get::<CharacterMovement>(e)
+            .is_some_and(|cm| cm.runtime.seat.vehicle == chassis);
+    }
+    let e = inf_ecs::crowd::spawn_body(world, rider, archetype, at);
+    if let Some(mut cm) = world.world_mut().get_mut::<CharacterMovement>(e) {
+        cm.mode = MovementMode::Driving;
+        cm.runtime.seat = SeatState {
+            vehicle: chassis,
+            entering: false,
+            time_s: 0.0,
+            start: Vec3d::from_dvec3(at),
+            start_yaw_deg: 0.0,
+            seat: inf_ecs::boarding::SeatIndex::Passenger.as_u8(),
+        };
+    }
+    super::vehicle::park_collider(bridge, rider, true);
+    true
+}
+
+/// Take the driver out with the car, when the car itself goes — and its
+/// passenger with it (wave VEH3d).
 fn despawn_driver(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, chassis: Uuid) {
-    let driver = traffic::driver_guid(chassis);
+    despawn_seated(world, bridge, chassis, traffic::passenger_guid(chassis));
+    despawn_seated(world, bridge, chassis, traffic::driver_guid(chassis));
+}
+
+/// Take one seated body out of the world with its car — unless it is no longer
+/// IN that car.
+fn despawn_seated(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, chassis: Uuid, driver: Uuid) {
     let Some(e) = world.entity_of(driver) else {
         return;
     };

@@ -117,7 +117,23 @@ pub fn step_locomotion_camera(
     // The character's own origin — the SAME arithmetic the pose publisher uses,
     // so the camera's pivot and the character's feet cannot disagree.
     let drop = inf_ecs::movement::feet_offset_m(&cm, collider.as_ref());
-    let feet = centre - DVec3::Y * drop;
+    let mut feet = centre - DVec3::Y * drop;
+    // **THE DRIVE CAMERA HANGS OFF THE ROOF, WHERE IT ALWAYS DID** (wave VEH3d).
+    //
+    // The pivot is "the subject's feet plus a ratio of its height", and until
+    // this wave a seated subject's feet were on the chassis collider's TOP FACE
+    // — the seat was the roof (CHAR1c carried 160). The seat is the driver's
+    // foot well inside the cabin now, 1.1 m lower on the saloon, and a pivot
+    // that followed it would put the drive camera's boom through the bonnet
+    // line. So a seated subject's pivot is taken from the point its feet used
+    // to be — the top face over the collider's centre, read off the live
+    // chassis pose — and the drive block the VEH2a waves tuned frames the car
+    // exactly as it did; `veh3d_gate` pins it at zero difference.
+    if cm.mode == inf_ecs::components::MovementMode::Driving && cm.runtime.seat.is_seated() {
+        if let Some(roof) = seated_roof(world, bridge, cm.runtime.seat.vehicle) {
+            feet = roof;
+        }
+    }
     // Standing height, not the worn one: a crouch must lower the camera by the
     // crouch *offset block*, not by re-deriving the pivot every step, or the view
     // would drop and rise with a slide the way a head-mounted camera does.
@@ -456,7 +472,109 @@ pub fn step_locomotion_camera(
         cam.cover_hold = None;
     }
 
+    // ── the boarding camera (wave VEH3d) ──
+    //
+    // A claim on the director's `Override` layer for as long as the subject is
+    // walking up to a car, opening its door, getting in, getting out or
+    // shutting it — the arc brief's addendum #2, verbatim: *a boarding camera
+    // is an `Override` claim per step, never a second camera*. It frames the
+    // door from behind the body's shoulder, and the step the machine reaches
+    // `Driving` it stops being pushed, so the director blends from it to the
+    // drive block — which is the blended vehicle-entry the CHAR1c director was
+    // built for.
+    if let Some(pose) = boarding_camera_pose(cam, &cm, feet, bridge, &exclude) {
+        cam.director
+            .request(inf_ecs::camera::CameraRequest::blended(
+                inf_ecs::camera::CameraLayer::Override,
+                inf_ecs::camera::CAMERA_TAG_BOARDING,
+                pose,
+                BOARDING_CAMERA_BLEND_S,
+            ));
+    }
+
     Some(cam.direct(dt))
+}
+
+/// How long the boarding camera takes to arrive, and to leave, seconds.
+pub const BOARDING_CAMERA_BLEND_S: f64 = 0.45;
+
+/// How far behind the boarding body the camera sits, metres.
+pub const BOARDING_CAMERA_BACK_M: f64 = 2.6;
+
+/// How far above the body's feet it sits, metres.
+pub const BOARDING_CAMERA_UP_M: f64 = 1.9;
+
+/// How far down it looks, degrees.
+pub const BOARDING_CAMERA_PITCH_DEG: f64 = -18.0;
+
+/// **Where the camera goes while its subject boards a car** (wave VEH3d) —
+/// behind the body and above it, looking along the body's own facing (which,
+/// from the end of the approach on, is locked to the flank's inward normal:
+/// the camera looks AT the door the hand is on).
+///
+/// `None` when the subject is not boarding. Swept like the rig's own boom, so
+/// a car parked against a wall does not put the camera inside the wall; a
+/// pivot that is itself inside something answers `None` and the director keeps
+/// whatever it had.
+fn boarding_camera_pose(
+    cam: &LocomotionCamera,
+    cm: &CharacterMovement,
+    feet: DVec3,
+    bridge: &mut PhysicsBridge3D,
+    exclude: &std::collections::BTreeSet<ColliderId3D>,
+) -> Option<CameraPose> {
+    use inf_ecs::boarding::BoardPhase;
+    let phase = cm.runtime.boarding.phase;
+    if matches!(
+        phase,
+        BoardPhase::Idle | BoardPhase::Driving | BoardPhase::Jacked
+    ) {
+        return None;
+    }
+    let yaw = cm.runtime.body_yaw_deg;
+    let (_, _, forward) = inf_ecs::camera::basis(yaw, BOARDING_CAMERA_PITCH_DEG);
+    let pivot = feet + DVec3::Y * BOARDING_CAMERA_UP_M;
+    let want = pivot - forward * BOARDING_CAMERA_BACK_M;
+    let delta = want - pivot;
+    let reach = delta.length();
+    if reach <= 1e-6 {
+        return None;
+    }
+    let radius = cam.tuning.collision_radius_m.max(1e-3);
+    let hit = bridge.world_mut().cast_shape_where(
+        &ColliderShape3D::Sphere { radius },
+        pivot,
+        DQuat::IDENTITY,
+        delta / reach,
+        reach,
+        exclude,
+        CastTargets::All,
+    );
+    let free = match hit {
+        Some(h) if h.started_penetrating => return None,
+        Some(h) => h.toi.min(reach),
+        None => reach,
+    };
+    Some(CameraPose {
+        position: Vec3d::from_dvec3(pivot + (delta / reach) * free),
+        yaw_deg: yaw,
+        pitch_deg: BOARDING_CAMERA_PITCH_DEG,
+        fov_deg: cam.pose.fov_deg,
+    })
+}
+
+/// **The point a seated subject's pivot hangs off** — the chassis collider's
+/// top face over its centre, in the world. See the call site.
+fn seated_roof(world: &EcsWorld, bridge: &PhysicsBridge3D, chassis: Uuid) -> Option<DVec3> {
+    let body = bridge.body_of(chassis)?;
+    let w = bridge.world();
+    let (pos, rot) = (w.body_translation(body)?, w.body_rotation(body)?);
+    let c = world
+        .entity_of(chassis)
+        .and_then(|e| world.world().get::<Collider3D>(e).copied())?;
+    let half = inf_ecs::vehicle::chassis_half_extents(&c);
+    let local = DVec3::new(c.offset.x, c.offset.y + half.y.abs(), c.offset.z);
+    Some(pos + rot * local)
 }
 
 /// How long the cover camera takes to arrive, and to leave, seconds.

@@ -596,6 +596,18 @@ pub fn start_pull(
         return false;
     };
     let by = cm.runtime.boarding.other;
+    // **A passenger bails out as well** (wave VEH3d): a front-seat rider in a
+    // car that is being carjacked leaves through its own door, on its own
+    // reverse pipeline, forced — GTA's reference picture, and the honest one: a
+    // stranger does not stay in the seat beside the person who pulled the
+    // driver out. Best-effort: a rider with nowhere clear to go stays put.
+    if seat.drives() {
+        if let Some(rider) = occupant_in(world, car.chassis, SeatIndex::Passenger) {
+            if rider != victim {
+                force_out(world, bridge, rider, car, by);
+            }
+        }
+    }
     let door = board::door_for_seat(world, car.chassis, seat).unwrap_or(Uuid::nil());
     if let Some(mut cm) = world.world_mut().get_mut::<CharacterMovement>(e) {
         let mut b = BoardingState {
@@ -612,6 +624,55 @@ pub fn start_pull(
         // FORCED: the door is already open (the hero opened it), so the warp
         // starts now rather than after a door phase of its own.
         b.mark_s = 0.0;
+        cm.runtime.boarding = b;
+    }
+    true
+}
+
+/// Start a seated body's FORCED exit to the first clear point beside its own
+/// seat — [`start_pull`]'s arithmetic for a body nobody is standing at the
+/// door of.
+fn force_out(
+    world: &mut EcsWorld,
+    bridge: &mut PhysicsBridge3D,
+    who: Uuid,
+    car: &CarFrame,
+    by: Uuid,
+) -> bool {
+    let Some(e) = world.entity_of(who) else {
+        return false;
+    };
+    let Some(cm) = world.world().get::<CharacterMovement>(e).cloned() else {
+        return false;
+    };
+    let radius = world
+        .world()
+        .get::<Collider3D>(e)
+        .map(|c| c.radius)
+        .unwrap_or(0.3);
+    let seat = SeatIndex::from_u8(cm.runtime.seat.seat);
+    let preferred = board::pull_out_point(&car.sockets, seat, car.half, car.offset);
+    let own = bridge.collider_of(who);
+    let Some((feet, _)) = clear_exit(bridge, car, preferred, cm.stand_half_height_m, radius, own)
+    else {
+        return false;
+    };
+    let door = board::door_for_seat(world, car.chassis, seat).unwrap_or(Uuid::nil());
+    if !door.is_nil() {
+        super::bodywork::set_part_open(world, bridge, car.chassis, door, true);
+    }
+    if let Some(mut cm) = world.world_mut().get_mut::<CharacterMovement>(e) {
+        let mut b = BoardingState {
+            vehicle: car.chassis,
+            seat: seat.as_u8(),
+            door,
+            back_local: car.local(feet),
+            ground_y: feet.y - PLACE_SKIN_M,
+            carjack: true,
+            other: by,
+            ..Default::default()
+        };
+        b.enter(BoardPhase::Exiting, 0.0);
         cm.runtime.boarding = b;
     }
     true

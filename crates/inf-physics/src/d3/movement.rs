@@ -359,8 +359,10 @@ fn step_weapon_feel(world: &mut EcsWorld, guid: uuid::Uuid, dt: f64) {
     // **THE ADS TIME REACHES THE CAMERA** (wave WPN2b, clause 5) through the
     // rig's by-name door, which is the route CHAR1c's addendum names: the aim
     // block's 2.0 m boom and 55 deg field are already reached by
-    // `CameraTuning::state_blend_speed`, and this is what makes that speed the
-    // WEAPON's rather than the engine's default six.
+    // `CameraTuning::aim_blend_speed` (the aim's OWN speed since wave VEH3d
+    // closed carried 219 — it was the one `state_blend_speed` every settings
+    // blend runs at), and this is what makes that speed the WEAPON's rather
+    // than the engine's default six.
     //
     // Written when it differs and never otherwise, so it is one comparison a
     // step for an armed character and nothing at all for anybody else; the value
@@ -409,7 +411,7 @@ fn step_weapon_feel(world: &mut EcsWorld, guid: uuid::Uuid, dt: f64) {
             {
                 if !f.blend_speed_prior.is_finite() {
                     f.blend_speed_prior =
-                        now.unwrap_or(inf_ecs::camera::CameraTuning::default().state_blend_speed);
+                        now.unwrap_or(inf_ecs::camera::CameraTuning::default().aim_blend_speed);
                 }
             }
             inf_ecs::camera::set_camera_rig_value(

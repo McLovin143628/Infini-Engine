@@ -471,6 +471,23 @@ pub struct CameraTuning {
     pub collision_radius_m: f64,
     /// How fast a settings change blends, 1/s. ALS spends a whole AnimBP on this.
     pub state_blend_speed: f64,
+    /// **How fast a blend INTO the aiming block runs**, 1/s (wave VEH3d —
+    /// WPN2b carried 219, closed).
+    ///
+    /// Wave WPN2b spent a weapon's ADS time through the rig's ONE
+    /// `state_blend_speed`, and `CameraSettings::interp` takes one speed for
+    /// the whole struct — so an armed character's gait change, crouch and mode
+    /// change all settled 2.65x faster, not only its aim (the WPN2b audit's
+    /// number). This is the aim's own speed: the settings blend runs at it while
+    /// the rotation mode is `Aiming` and at `state_blend_speed` otherwise, and
+    /// the weapon writes this one (`inf_ecs::feel::ADS_BLEND_RIG_KEY`).
+    ///
+    /// VEH3a's price for it: **zero** — `CameraTuning` has no slot in the scene
+    /// record (`RuntimeEntityGen` carries no camera), so a new field costs a
+    /// `names()` entry and a `camera.toml` key. The default is
+    /// `state_blend_speed`'s own six, so an unarmed camera blends into the aim
+    /// exactly as it did.
+    pub aim_blend_speed: f64,
     /// How fast the first-person weight moves, 1/s.
     pub view_blend_speed: f64,
     /// How far behind the character the camera may end up when the sweep is
@@ -542,6 +559,7 @@ impl Default for CameraTuning {
             pivot_height_ratio: 0.80,
             collision_radius_m: 0.15,
             state_blend_speed: 6.0,
+            aim_blend_speed: 6.0,
             view_blend_speed: 8.0,
             min_arm_fraction: 0.05,
             collision: CameraCollision::default(),
@@ -618,6 +636,10 @@ impl CameraTuning {
             }
             "state_blend_speed" => {
                 self.state_blend_speed = value;
+                return true;
+            }
+            "aim_blend_speed" => {
+                self.aim_blend_speed = value;
                 return true;
             }
             "view_blend_speed" => {
@@ -810,6 +832,7 @@ impl CameraTuning {
             "pivot_height_ratio" => return Some(self.pivot_height_ratio),
             "collision_radius_m" => return Some(self.collision_radius_m),
             "state_blend_speed" => return Some(self.state_blend_speed),
+            "aim_blend_speed" => return Some(self.aim_blend_speed),
             "view_blend_speed" => return Some(self.view_blend_speed),
             "min_arm_fraction" => return Some(self.min_arm_fraction),
             "drive.arm_per_length_m" => return Some(self.driving.arm_per_length_m),
@@ -871,6 +894,7 @@ impl CameraTuning {
             "pivot_height_ratio",
             "collision_radius_m",
             "state_blend_speed",
+            "aim_blend_speed",
             "view_blend_speed",
             "min_arm_fraction",
             "drive.arm_per_length_m",
@@ -995,6 +1019,93 @@ impl CameraTuning {
     pub fn to_toml(&self) -> Result<String, String> {
         toml::to_string_pretty(self).map_err(|e| e.to_string())
     }
+
+    /// **Only what differs from the ALS table**, as deterministic TOML — the
+    /// level-side WRITE half (wave VEH3d, CHAR1c carried 159).
+    ///
+    /// [`from_toml`](Self::from_toml) is a MERGE onto the default, so a file
+    /// that names only the numbers an author changed reads back as exactly this
+    /// table, and it stays a file a reviewer can read: saving a session in
+    /// which one boom was lengthened writes one key, not 196. An unchanged table
+    /// writes nothing but the tables' headers' absence — an empty document, which
+    /// reads back as the default.
+    pub fn to_toml_changed(&self) -> Result<String, String> {
+        let mine = toml::Value::try_from(self).map_err(|e| e.to_string())?;
+        let base = toml::Value::try_from(Self::default()).map_err(|e| e.to_string())?;
+        let diff = diff_tables(&mine, &base).unwrap_or(toml::Value::Table(Default::default()));
+        toml::to_string_pretty(&diff).map_err(|e| e.to_string())
+    }
+}
+
+/// `mine` less everything it shares with `base`, table by table — `None` when
+/// the two are equal. The inverse of [`merge_tables`]: merging the answer back
+/// onto `base` gives `mine`, which `to_toml_changed`'s round-trip arm holds.
+fn diff_tables(mine: &toml::Value, base: &toml::Value) -> Option<toml::Value> {
+    match (mine, base) {
+        (toml::Value::Table(m), toml::Value::Table(b)) => {
+            let mut out = toml::map::Map::new();
+            for (k, v) in m {
+                match b.get(k) {
+                    Some(bv) => {
+                        if let Some(d) = diff_tables(v, bv) {
+                            out.insert(k.clone(), d);
+                        }
+                    }
+                    None => {
+                        out.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+            (!out.is_empty()).then_some(toml::Value::Table(out))
+        }
+        (m, b) => (m != b).then(|| m.clone()),
+    }
+}
+
+/// **Where a level's camera table lives**: `camera.toml` in the level's own
+/// folder — the file `inf_player::input::load_camera_beside` has read since
+/// P29.6.
+pub fn camera_path_beside(level: &std::path::Path) -> std::path::PathBuf {
+    level.with_file_name("camera.toml")
+}
+
+/// **Read the camera table beside a level**: `Ok(None)` when there is no file,
+/// a named refusal for one that does not parse.
+pub fn read_camera_beside(level: &std::path::Path) -> Result<Option<CameraTuning>, String> {
+    let path = camera_path_beside(level);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => CameraTuning::from_toml(&text)
+            .map(Some)
+            .map_err(|e| format!("{}: {e}", path.display())),
+        Err(_) => Ok(None),
+    }
+}
+
+/// The comment a written camera table opens with.
+pub const CAMERA_TOML_HEADER: &str = concat!(
+    "# The camera table for the level beside this file (P29.6's `camera.toml`).\n",
+    "#\n",
+    "# Written by the editor's \"Save camera to level\" door (wave VEH3d) and read\n",
+    "# by both the shipped player and the editor's Simulate. It names only the\n",
+    "# numbers that differ from the ported ALS table; every key it does not name is\n",
+    "# that table's. Edit it by hand, or tune a running session and save again.\n",
+);
+
+/// **Write a camera table beside a level** — the WRITE half the level-side
+/// table never had (wave VEH3d, CHAR1c carried 159). Returns the path written.
+///
+/// [`CameraTuning::to_toml_changed`] under [`CAMERA_TOML_HEADER`], so the file
+/// is the author's changes and nothing else, and it reads back through
+/// [`read_camera_beside`] as exactly `tuning`.
+pub fn write_camera_beside(
+    level: &std::path::Path,
+    tuning: &CameraTuning,
+) -> Result<std::path::PathBuf, String> {
+    let path = camera_path_beside(level);
+    let body = tuning.to_toml_changed()?;
+    let text = format!("{CAMERA_TOML_HEADER}{body}");
+    std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(path)
 }
 
 /// Overlay `patch` onto `base` in place: a key present in both, with a **table**
@@ -1138,6 +1249,12 @@ pub const CAMERA_TAG_RAGDOLL: u64 = 1;
 /// (2). That is the right answer — the body has stopped being in cover — and it
 /// is a consequence of the numbers rather than of a branch.
 pub const CAMERA_TAG_COVER: u64 = 2;
+
+/// The tag wave VEH3d's boarding camera raises its claim under — the
+/// `Override` layer, below the ragdoll (a body shot while opening a car door
+/// has stopped boarding it) and below the cover camera by tag, though the two
+/// cannot both hold: a body in cover is not boarding.
+pub const CAMERA_TAG_BOARDING: u64 = 3;
 
 /// **The priority-blended camera stack** (wave CHAR1c).
 ///
@@ -1489,9 +1606,14 @@ impl LocomotionCamera {
             self.yaw_deg = aim_yaw;
             self.pitch_deg = input.aim_pitch_deg;
         } else {
-            self.settings = self
-                .settings
-                .interp(target, self.tuning.state_blend_speed, dt);
+            // The aim's own speed while aiming, the state speed for everything
+            // else — carried 219's fix (see `CameraTuning::aim_blend_speed`).
+            let speed = if input.rotation_mode == RotationMode::Aiming {
+                self.tuning.aim_blend_speed
+            } else {
+                self.tuning.state_blend_speed
+            };
+            self.settings = self.settings.interp(target, speed, dt);
             self.fp_weight = interp_to(self.fp_weight, fp_target, self.tuning.view_blend_speed, dt)
                 .clamp(0.0, 1.0);
             // Rotation lag: one speed chasing the aim, on the SHORT way round —

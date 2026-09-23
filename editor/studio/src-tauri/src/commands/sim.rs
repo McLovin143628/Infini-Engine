@@ -306,6 +306,26 @@ pub async fn sim_start(
             session.set_audio_mixer(mixer);
         }
     }
+    // **THE LEVEL'S CAMERA TABLE, read the way the shipped player reads it**
+    // (wave VEH3d, CHAR1c carried 159). `inf_player::input::load_camera_beside`
+    // has read `camera.toml` beside the level since P29.6 and Simulate never
+    // did, so a table an author saved changed the shipped camera and not the
+    // preview. One reader (`inf_ecs::camera::read_camera_beside`) now serves
+    // both, and the write half (`sim_save_camera`) writes what it reads. A table
+    // that will not parse is logged and the ALS defaults stand — a camera is
+    // not a reason to refuse to simulate.
+    let level = scene
+        .current_level_path
+        .lock()
+        .map_err(|_| "scene path lock poisoned")?
+        .clone();
+    if let Some(level) = level {
+        match inf_ecs::camera::read_camera_beside(&level) {
+            Ok(Some(t)) => session.camera_mut().tuning = t,
+            Ok(None) => {}
+            Err(e) => tracing::warn!("simulate: bad camera table {e}; using the ALS table"),
+        }
+    }
     doc.bump_version_for_runtime();
     drop(doc);
 
@@ -320,6 +340,48 @@ pub async fn sim_start(
     }
     let _ = app.emit("sim://state", true);
     Ok(())
+}
+
+/// **Save the running session's camera table beside the level** — the
+/// level-side WRITE half (wave VEH3d, CHAR1c carried 159).
+///
+/// Writes `camera.toml` in the open level's folder through
+/// `inf_ecs::camera::write_camera_beside`, which names only the numbers that
+/// differ from the ALS table and is read back by the shipped player
+/// (`load_camera_beside`) and by Simulate (`sim_start`) through the one reader.
+/// The table saved is the one the camera is RUNNING — the subject's own
+/// `CameraRig` when it carries one (a tune lands there first, since CHAR1c),
+/// the session's table otherwise — so what the author was just looking at is
+/// what the file says.
+///
+/// Refuses by name with no session running or no level on disk to save beside:
+/// an unsaved level has no folder, and a camera table written somewhere else
+/// would be a file nothing reads. Answers the path written.
+#[tauri::command]
+pub async fn sim_save_camera(
+    scene: State<'_, SceneState>,
+    sim: State<'_, SimState>,
+) -> Result<String, String> {
+    let level = scene
+        .current_level_path
+        .lock()
+        .map_err(|_| "scene path lock poisoned")?
+        .clone()
+        .ok_or("save the level first: a camera table lives beside the level file")?;
+    let inner = sim.inner.lock().map_err(|_| "sim lock poisoned")?;
+    let session = inner
+        .session
+        .as_ref()
+        .ok_or("start Simulate first: the table saved is the one the running camera uses")?;
+    let doc = scene.doc.lock().map_err(|_| "scene lock poisoned")?;
+    let tuning = inf_ecs::movement::camera_subject(doc.world())
+        .and_then(|s| inf_ecs::camera::camera_rig(doc.world(), s))
+        .map(|rig| rig.tuning)
+        .unwrap_or(session.camera().tuning);
+    drop(doc);
+    let path = inf_ecs::camera::write_camera_beside(&level, &tuning)?;
+    tracing::info!("simulate: wrote the camera table to {}", path.display());
+    Ok(path.display().to_string())
 }
 
 /// Advance Simulate by one frame with the currently-held **physical keys**

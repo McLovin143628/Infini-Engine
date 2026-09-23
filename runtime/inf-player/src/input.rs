@@ -82,22 +82,23 @@ pub fn load_map_beside(level_path: &Path) -> InputMap {
 /// property of the type); reading a path is a host's job, and the neighbour it
 /// claims to mirror was always here.
 pub fn load_camera_beside(level_path: &Path) -> inf_ecs::camera::CameraTuning {
-    let path = level_path.with_file_name("camera.toml");
-    match std::fs::read_to_string(&path) {
-        Ok(text) => match inf_ecs::camera::CameraTuning::from_toml(&text) {
-            Ok(t) => {
-                tracing::info!("inf-player: loaded camera table from {}", path.display());
-                t
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "inf-player: bad camera table {}: {e}; using defaults",
-                    path.display()
-                );
-                inf_ecs::camera::CameraTuning::default()
-            }
-        },
-        Err(_) => inf_ecs::camera::CameraTuning::default(),
+    // **One reader** (wave VEH3d): the file, the path rule and the parse are
+    // `inf_ecs::camera::read_camera_beside`, which the editor's Simulate and the
+    // write half (`write_camera_beside`) share — so the table the editor saves
+    // is the table this loads, by construction.
+    match inf_ecs::camera::read_camera_beside(level_path) {
+        Ok(Some(t)) => {
+            tracing::info!(
+                "inf-player: loaded camera table from {}",
+                inf_ecs::camera::camera_path_beside(level_path).display()
+            );
+            t
+        }
+        Ok(None) => inf_ecs::camera::CameraTuning::default(),
+        Err(e) => {
+            tracing::warn!("inf-player: bad camera table {e}; using defaults");
+            inf_ecs::camera::CameraTuning::default()
+        }
     }
 }
 

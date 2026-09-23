@@ -90,6 +90,10 @@ const CAMERA_TUNABLES: { cfield: string; label: string; step: number }[] = [
   { cfield: "run.fov_deg", label: "FOV (deg)", step: 1 },
   { cfield: "collision_radius_m", label: "Sweep radius (m)", step: 0.05 },
   { cfield: "pivot_height_ratio", label: "Pivot height", step: 0.05 },
+  // Wave VEH3d (WPN2b carried 219): the aim's OWN blend speed, which the
+  // weapon's ADS time writes; every other settings blend keeps
+  // `state_blend_speed`.
+  { cfield: "aim_blend_speed", label: "Aim blend (1/s)", step: 0.5 },
   // ── wave CHAR1c: the collision policy ──
   //
   // The whisker fan, the boom's return, the pitch ceiling and the fade band.
@@ -244,6 +248,20 @@ export function LiveTuning({ params }: { params: SmParamDto[] }) {
       ))}
 
       <div className="sm-insp__subtitle">Camera</div>
+      {/* Wave VEH3d: the level-side WRITE half (CHAR1c carried 159) -- the
+          running table goes to `camera.toml` beside the level, which the
+          shipped player and Simulate both read back. */}
+      <button
+        className="bp-btn bp-btn--sm"
+        onClick={() =>
+          void simIpc
+            .saveCamera()
+            .then((path) => setStatus(`camera table saved to ${path}`))
+            .catch((e: unknown) => setStatus(String(e)))
+        }
+      >
+        Save camera to level
+      </button>
       {CAMERA_TUNABLES.map((t) => (
         <label className="sm-insp__row" key={t.cfield}>
           <span>{t.label}</span>

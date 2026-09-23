@@ -1779,6 +1779,33 @@ pub fn driver_guid(chassis: Uuid) -> Uuid {
 /// Salts [`driver_guid`].
 pub const DRIVER_SALT: u64 = 0x4452_4956_4552_0001;
 
+/// **A traffic car's front-seat passenger**, as a guid derived from the car's
+/// (wave VEH3d) — [`driver_guid`]'s rule with its own salt.
+pub fn passenger_guid(chassis: Uuid) -> Uuid {
+    let (hi, lo) = chassis.as_u64_pair();
+    Uuid::from_u64_pair(
+        mix64(hi ^ PASSENGER_SALT),
+        mix64(lo ^ mix64(PASSENGER_SALT)),
+    )
+}
+
+/// Salts [`passenger_guid`] and the draw [`carries_passenger`] makes.
+pub const PASSENGER_SALT: u64 = 0x5041_5353_454e_0001;
+
+/// **How many traffic cars carry a front-seat passenger**, as a share.
+///
+/// A quarter: a commuting street is mostly single-occupancy, and a quarter is
+/// enough that a player who looks will see people riding without every car
+/// being a family outing. Drawn once per car from its own guid, so a car that
+/// has a passenger always has the same one, in both hosts.
+pub const PASSENGER_SHARE: f64 = 0.25;
+
+/// **Whether this traffic car carries a passenger** — a pure function of its
+/// guid (wave VEH3d: "the hero drives, an NPC rides").
+pub fn carries_passenger(chassis: Uuid) -> bool {
+    crate::crowd::agent_unit(chassis, 0, PASSENGER_SALT) < PASSENGER_SHARE
+}
+
 /// **The traffic population** — every car a level has, whether or not it
 /// currently has a body.
 #[derive(bevy_ecs::prelude::Resource, Debug, Clone, Default, PartialEq)]

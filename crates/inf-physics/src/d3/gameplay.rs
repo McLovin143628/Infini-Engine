@@ -1628,7 +1628,7 @@ fn shot_posture(world: &EcsWorld, entity: inf_ecs::Entity) -> (ShotStance, f64, 
 /// install beside `WeaponState`.
 ///
 /// It is its own function and not a `remove::<WeaponFeel>()` at the call site
-/// because there is a second thing owed: the camera rig's `state_blend_speed`,
+/// because there is a second thing owed: the camera rig's `aim_blend_speed`,
 /// which the ADS blend borrowed and which has to go back exactly as it was
 /// (`WeaponFeel::blend_speed_prior`). One door, so a weapon put away can never
 /// leave a character's camera settling at a rifle's rate for the rest of the

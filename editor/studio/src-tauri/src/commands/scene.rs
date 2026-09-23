@@ -40,7 +40,7 @@ pub struct SceneState {
     /// The `.inf_lvl` path the level was last opened from / saved to (`None` for
     /// an untitled or freshly-`New`ed scene). A Save-with-explicit-path records
     /// it; a plain Save (no path) writes here when set, else the quicksave.
-    current_level_path: Mutex<Option<PathBuf>>,
+    pub(crate) current_level_path: Mutex<Option<PathBuf>>,
 }
 
 impl Default for SceneState {
