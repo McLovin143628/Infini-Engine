@@ -286,6 +286,10 @@ pub struct RuntimeSim {
     /// See [`set_sim_paused`](Self::set_sim_paused) for why it is here and not
     /// on the host.
     sim_paused: bool,
+    /// **Edges that arrived on a frame that ran no step** (wave VEH3d) — held
+    /// for the next frame that does, `(pressed, released)`. See
+    /// [`run_frame`](Self::run_frame).
+    frame_edges: (BTreeSet<String>, BTreeSet<String>),
     /// Wave 3 event dispatchers (MIRROR of `SimSession::bindings`): `(source
     /// entity, event name) → {listener entity → handler custom-event name}`.
     bindings: BTreeMap<(i64, String), BTreeMap<i64, String>>,
@@ -583,6 +587,7 @@ impl RuntimeSim {
             holds: inf_input::HoldClock::new(),
             press_threshold_s: inf_ecs::movement::DEFAULT_PRESS_THRESHOLD_S,
             sim_paused: false,
+            frame_edges: (BTreeSet::new(), BTreeSet::new()),
             bindings: BTreeMap::new(),
             dispatch_queue: VecDeque::new(),
             drained_overlaps: Vec::new(),
@@ -1225,6 +1230,17 @@ impl RuntimeSim {
     /// Returns how many fixed steps ran.
     pub fn run_frame(&mut self, frame_dt: f64, input: RuntimeInput) -> u32 {
         self.set_input(input);
+        // **A press is seen by exactly ONE step** (wave VEH3d). The edges are
+        // the difference against the previous FRAME's keys, so a frame that ran
+        // no step (a display faster than the fixed rate, or the demo's slow
+        // motion) threw its press away, and a frame that ran two gave the same
+        // press to both. Measured with the preview at 0.3x: seven taps of E
+        // before a boarding began, and a stopped car nobody could get out of.
+        // Edges now wait for the next step, and only the first step of a frame
+        // sees them.
+        let (p, r) = std::mem::take(&mut self.frame_edges);
+        self.just_pressed.extend(p);
+        self.just_released.extend(r);
         // **A paused sim accumulates nothing** (I5), rather than accumulating
         // and then declining to spend it: an accumulator that filled while a
         // menu was open would empty itself in one burst the moment it closed,
@@ -1238,7 +1254,17 @@ impl RuntimeSim {
             return 0;
         }
         let n = self.stepper.accumulate(frame_dt);
-        for _ in 0..n {
+        if n == 0 {
+            self.frame_edges = (
+                std::mem::take(&mut self.just_pressed),
+                std::mem::take(&mut self.just_released),
+            );
+        }
+        for i in 0..n {
+            if i > 0 {
+                self.just_pressed.clear();
+                self.just_released.clear();
+            }
             self.fixed_step();
         }
         n

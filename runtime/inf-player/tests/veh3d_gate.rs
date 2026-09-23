@@ -1999,6 +1999,62 @@ fn pie_equals_shipping_on_a_board_drive_exit_course() {
     }
 }
 
+/// **A press of E is seen by exactly one step, whatever the frame rate** —
+/// `RuntimeSim::run_frame`, the shipped window's own door. A frame that runs
+/// no fixed step (a display faster than 60 Hz, or the demo's slow motion)
+/// used to drop the press it carried: the edge was the difference against the
+/// previous FRAME's keys and nobody stepped to see it. Found by this wave's own
+/// demo at 0.3x — seven taps of E before a boarding began.
+///
+/// **The mutation**: the carry deleted (`frame_edges` never filled) — the
+/// press on the zero-step frame is lost and no boarding begins.
+#[test]
+fn a_press_on_a_frame_that_runs_no_step_still_boards() {
+    use inf_player::runtime_sim::{RuntimeInput, RuntimeSim};
+    let def = catalogue_def("sedan");
+    let mut world = EcsWorld::new();
+    ground(&mut world);
+    car(
+        &mut world,
+        CHASSIS,
+        DVec3::new(0.0, inf_ecs::vehicle::resting_origin_y(&def, 0.0) + 0.15, 0.0),
+        0.0,
+        &def,
+    );
+    stand(&mut world, HERO, "Hero", HERO_AT, 0.0, true);
+    world.propagate();
+    let mut sim = RuntimeSim::new(world, Vec::new(), glam::DVec2::new(0.0, -9.81), 60.0);
+    for _ in 0..60 {
+        sim.step_once(RuntimeInput::default());
+    }
+    let phase = |sim: &RuntimeSim| {
+        let e = sim.world().entity_of(HERO).unwrap();
+        sim.world().world().get::<CharacterMovement>(e).unwrap().runtime.boarding.phase
+    };
+    assert_eq!(phase(&sim), BoardPhase::Idle);
+    // The press lands on a frame too short to run a step, and is let go on the
+    // next frame, which runs one.
+    let before = sim.steps();
+    let ran = sim.run_frame(0.001, RuntimeInput::default().press(inf_ecs::movement::actions::INTERACT));
+    assert_eq!(ran, 0, "the first frame was meant to run no step");
+    assert_eq!(sim.steps(), before);
+    let ran = sim.run_frame(1.0 / 60.0, RuntimeInput::default());
+    let mut steps = u32::from(ran > 0);
+    while phase(&sim) == BoardPhase::Idle && steps < 3 {
+        sim.run_frame(1.0 / 60.0, RuntimeInput::default());
+        steps += 1;
+    }
+    println!(
+        "=== a tap on a zero-step frame ===\n  the next frame ran {ran} step(s); the hero is `{}`",
+        phase(&sim).name()
+    );
+    assert_ne!(
+        phase(&sim),
+        BoardPhase::Idle,
+        "a press on a frame that ran no step never reached the simulation"
+    );
+}
+
 // ── (h) COST ────────────────────────────────────────────────────────────────
 
 /// Whether a clock assert may run here: a RELEASE build, off CI — the house
