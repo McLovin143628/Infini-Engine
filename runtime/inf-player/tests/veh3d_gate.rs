@@ -1710,7 +1710,11 @@ fn the_boarding_section_is_empty_until_somebody_boards() {
 /// **THE EDITOR'S PREVIEW AND THE SHIPPED PLAYER BOARD, DRIVE AND LEAVE THE
 /// SAME CAR** — `SimSession` and `RuntimeSim` driven through their own front
 /// doors, the E press and the throttle through the INPUT door on both, and
-/// `boarding_state_bytes` plus the hero's own transform compared step by step.
+/// `boarding_state_bytes` plus the hero's own transform compared step by step
+/// — twice: an empty car, and the same car with its own driver at the wheel,
+/// which the same press CARJACKS (the victim's transform and phase are on the
+/// row too, so a pull-out that landed the driver somewhere else in one host
+/// is a divergence).
 ///
 /// **Anti-vacuity**: two recordings of nothing are equal too, so the shipped
 /// trace has to have folded boarding bytes for the whole choreography, the
@@ -1792,20 +1796,57 @@ fn pie_equals_shipping_on_a_board_drive_exit_course() {
             cm,
         )
     }
+    /// The car's own driver, for the CARJACK course: seated at the wheel
+    /// before either host steps, exactly as a traffic driver is.
+    fn victim_bits() -> (
+        Transform,
+        RigidBody3D,
+        Collider3D,
+        CharacterController3D,
+        CharacterMovement,
+    ) {
+        let (mut t, body, col, ctl, mut cm) = hero_bits();
+        cm.player_controlled = false;
+        cm.mode = MovementMode::Driving;
+        cm.runtime.seat = inf_ecs::components::SeatState {
+            vehicle: CHASSIS,
+            entering: false,
+            time_s: 0.0,
+            start: Vec3d::new(-12.0, 0.0, -12.0),
+            start_yaw_deg: 0.0,
+            seat: SeatIndex::Driver.as_u8(),
+        };
+        t.translation = Vec3d::new(0.0, t.translation.y, 0.0);
+        (t, body, col, ctl, cm)
+    }
     let def = catalogue_def("sedan");
     let at = DVec3::new(0.0, inf_ecs::vehicle::resting_origin_y(&def, 0.0) + 0.15, 0.0);
 
-    type Row = (Vec<u8>, [u64; 3], u8);
+    type Row = (Vec<u8>, [u64; 3], u8, [u64; 3], u8);
     let hero_row = |world: &EcsWorld| -> Row {
         let e = world.entity_of(HERO).expect("the hero");
         let t = world.world().get::<Transform>(e).expect("placed").translation;
         let cm = world.world().get::<CharacterMovement>(e).expect("a mover");
+        let (vt, vp) = world
+            .entity_of(VICTIM)
+            .map(|v| {
+                let t = world.world().get::<Transform>(v).expect("placed").translation;
+                let cm = world.world().get::<CharacterMovement>(v).expect("a mover");
+                (
+                    [t.x.to_bits(), t.y.to_bits(), t.z.to_bits()],
+                    cm.runtime.boarding.phase.as_u8(),
+                )
+            })
+            .unwrap_or(([0; 3], 0));
         (
             board::boarding_state_bytes(world),
             [t.x.to_bits(), t.y.to_bits(), t.z.to_bits()],
             cm.runtime.boarding.phase.as_u8(),
+            vt,
+            vp,
         )
     };
+    let run = |jack: bool| -> (Vec<Row>, Vec<Row>) {
 
     let shipped: Vec<Row> = {
         let mut world = EcsWorld::new();
@@ -1814,6 +1855,10 @@ fn pie_equals_shipping_on_a_board_drive_exit_course() {
         car(&mut world, CHASSIS, at, 0.0, &def);
         let h = world.spawn_with_guid(HERO, "Hero", None);
         world.world_mut().entity_mut(h).insert(hero_bits());
+        if jack {
+            let v = world.spawn_with_guid(VICTIM, "Driver", None);
+            world.world_mut().entity_mut(v).insert(victim_bits());
+        }
         world.propagate();
         let mut sim = RuntimeSim::new(world, Vec::new(), glam::DVec2::new(0.0, -9.81), HZ);
         (0..STEPS)
@@ -1856,6 +1901,10 @@ fn pie_equals_shipping_on_a_board_drive_exit_course() {
         );
         let h = doc.create_with_guid(HERO, SpawnKind::Empty, "Hero", None);
         doc.world_mut().world_mut().entity_mut(h).insert(hero_bits());
+        if jack {
+            let v = doc.create_with_guid(VICTIM, SpawnKind::Empty, "Driver", None);
+            doc.world_mut().world_mut().entity_mut(v).insert(victim_bits());
+        }
         doc.world_mut().propagate();
         let mut session =
             SimSession::enter(&mut doc, Vec::new(), glam::DVec2::new(0.0, -9.81), HZ);
@@ -1877,7 +1926,12 @@ fn pie_equals_shipping_on_a_board_drive_exit_course() {
         session.exit(&mut doc);
         out
     };
+    (shipped, preview)
+    };
 
+    for jack in [false, true] {
+    let (shipped, preview) = run(jack);
+    let what = if jack { "carjack" } else { "board" };
     let loud = shipped.iter().filter(|r| !r.0.is_empty()).count();
     let phases: std::collections::BTreeSet<u8> = shipped.iter().map(|r| r.2).collect();
     println!(
@@ -1901,9 +1955,10 @@ fn pie_equals_shipping_on_a_board_drive_exit_course() {
     assert!(loud > 120, "only {loud} steps folded boarding bytes");
     if let Some(i) = (0..shipped.len()).find(|i| shipped[*i] != preview[*i]) {
         panic!(
-            "PIE and shipping diverged at step {i}: shipped phase {} at {:?}, preview phase {} at {:?}",
+            "PIE and shipping diverged on the {what} course at step {i}: shipped phase {} at {:?}, preview phase {} at {:?}",
             shipped[i].2, shipped[i].1, preview[i].2, preview[i].1
         );
+    }
     }
 }
 

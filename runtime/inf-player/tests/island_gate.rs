@@ -7414,6 +7414,18 @@ fn rush_hour(sim: &mut RuntimeSim, centre: glam::DVec3) -> RushRun {
             r.tier == inf_ecs::crowd::CrowdTier::Full
                 && inf_physics::d3::carjack::occupant_of(sim.world(), *g).is_some()
         })
+        // …and on DRY ground (wave VEH3d, re-blessed with that cause): a steal
+        // is a choreography begun from the ground now, and the most isolated
+        // driven car on this fixture was measured wading a lake — the hero put
+        // at its door was `SwimUnder` for all twenty-four presses, which a
+        // one-frame eject never cared about. A car whose own position is under
+        // a water surface is not a car a person stands beside.
+        .filter(|(g, _)| {
+            let at = chassis_at(sim, *g);
+            sim.bridge3d()
+                .water_surface_at(glam::DVec2::new(at.x, at.z))
+                .is_none_or(|h| h < at.y - 1.0)
+        })
         .filter_map(|(g, _)| {
             let mine = seats.iter().find(|(h, _)| *h == g)?.1;
             let nearest = seats

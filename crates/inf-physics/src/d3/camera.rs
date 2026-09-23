@@ -118,6 +118,11 @@ pub fn step_locomotion_camera(
     // so the camera's pivot and the character's feet cannot disagree.
     let drop = inf_ecs::movement::feet_offset_m(&cm, collider.as_ref());
     let mut feet = centre - DVec3::Y * drop;
+    // The BODY's own feet, kept before the roof rule below: the boarding camera
+    // frames the body, and `EnteringIK` is `Driving` with a seat — reading the
+    // roof there moved the claim's pivot 2.57 m in one step, a cut the CHAR1c
+    // gate's vehicle-entry arm caught.
+    let body_feet = feet;
     // **THE DRIVE CAMERA HANGS OFF THE ROOF, WHERE IT ALWAYS DID** (wave VEH3d).
     //
     // The pivot is "the subject's feet plus a ratio of its height", and until
@@ -482,7 +487,7 @@ pub fn step_locomotion_camera(
     // `Driving` it stops being pushed, so the director blends from it to the
     // drive block — which is the blended vehicle-entry the CHAR1c director was
     // built for.
-    if let Some(pose) = boarding_camera_pose(cam, &cm, feet, bridge, &exclude) {
+    if let Some(pose) = boarding_camera_pose(cam, &cm, body_feet, bridge, &exclude) {
         cam.director
             .request(inf_ecs::camera::CameraRequest::blended(
                 inf_ecs::camera::CameraLayer::Override,
