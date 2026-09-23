@@ -954,8 +954,12 @@ fn the_hands_follow_the_rim_through_a_full_lock() {
         "a hand was {:.2} mm off its rim grip — the hands are not following the wheel",
         worst * 1000.0
     );
+    // The hands RIDE the rim `RIM_RIDE_DEG` either way and the rim slides
+    // through them past it (push-pull), so a hand's travel is the chord of a
+    // 100-degree arc of a 0.19 m rim: measured 0.150 / 0.165 m, and 0.073 m
+    // with the rim frozen (`vehicle_steer` answering zero).
     assert!(
-        far[0] > 0.15 && far[1] > 0.15,
+        far[0] > 0.11 && far[1] > 0.11,
         "the hands travelled {:.3} / {:.3} m through a full lock — the rim is not turning under them",
         far[0],
         far[1]
@@ -1256,8 +1260,8 @@ fn the_carjack_plays_the_same_pipeline() {
         "the carjacker did not walk the enter pipeline"
     );
     assert_eq!(
-        &victim_order[..2],
-        &[BoardPhase::Jacked, BoardPhase::Exiting],
+        victim_order.iter().take(2).copied().collect::<Vec<_>>(),
+        vec![BoardPhase::Jacked, BoardPhase::Exiting],
         "the driver was not pulled out on its own reverse pipeline: {victim_order:?}"
     );
     // The pull started while the hero was at the open door.
@@ -1391,8 +1395,12 @@ fn the_victim_is_never_put_down_inside_a_wall() {
 /// phase trace, the hinge and the capsule's own clearance where it stands.
 /// With a wall against the driver's flank the body leaves by the other side.
 ///
-/// **The mutation**: `capsule_clear` answering `true` — the walled exit
-/// lands the body in the wall and the clearance assertion reds.
+/// **The mutation**: `clear_exit`'s two locks deleted (the capsule-clear test
+/// AND the path sweep from inside the car) — the walled exit lands the body in
+/// the wall and the clearance assertion reds. `capsule_clear` answering `true`
+/// ALONE survives, measured: a point inside a wall is a point the path sweep
+/// ends inside, so the sweep refuses every candidate the capsule test would —
+/// two locks on one door, and the arm is armed against losing both.
 #[test]
 fn the_exit_is_the_reverse_and_never_lands_in_geometry() {
     for walled in [false, true] {
@@ -1720,9 +1728,11 @@ fn the_boarding_section_is_empty_until_somebody_boards() {
 /// trace has to have folded boarding bytes for the whole choreography, the
 /// hero has to have reached the wheel, driven, and got out.
 ///
-/// **The mutation**: the nineteenth fold deleted from `RuntimeSim::state_bytes`
-/// is `projector_mirror`'s; here, the anti-vacuity half reds if either host's
-/// boarding stopped running (the hero never reaches the wheel).
+/// **The mutations**: the nineteenth fold made `let _ =` in
+/// `RuntimeSim::state_bytes` — the tail check reds on the first boarding step
+/// (`projector_mirror`'s order pin is a SUBSTRING search and passes it,
+/// measured); `begin` answering `NoCar` — the anti-vacuity half reds (the
+/// hero never reaches the wheel).
 #[test]
 fn pie_equals_shipping_on_a_board_drive_exit_course() {
     use inf_editor_core::scene::SceneDoc;
@@ -1881,6 +1891,16 @@ fn pie_equals_shipping_on_a_board_drive_exit_course() {
                     input = input.axis_at(MOVE_Y, y);
                 }
                 sim.step_once(input);
+                // The nineteenth section is the TAIL of the shipped trace: a
+                // fold turned into `let _ =` keeps the name `projector_mirror`
+                // searches for, and is read here instead.
+                let folded = board::boarding_state_bytes(sim.world());
+                if !folded.is_empty() {
+                    assert!(
+                        sim.state_bytes().ends_with(&folded),
+                        "step {i}: the shipped trace does not END with the boarding section"
+                    );
+                }
                 hero_row(sim.world())
             })
             .collect()

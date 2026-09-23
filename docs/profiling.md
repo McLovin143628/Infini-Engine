@@ -82,6 +82,8 @@ be lowered, never raised.** A regression must be fixed, not accommodated.
 | **The `society` phase on a SETTLED level** (one entity walk that folds nothing) | `SOCIETY_STEP_BUDGET_MS` | 0.5 ms | `inf-player` · `tests/crowd_sweep.rs` |
 | **The `vehicle` phase alone** (four casts a WHEEL since VEH3a — sixteen rays a car — over `VEHICLE_BUDGET_CARS` = 64 cars) | `VEHICLE_STEP_BUDGET_MS` | 0.5 ms | `inf-player` · `tests/island_gate.rs` (the island's own fleet) and `tests/veh3a_gate.rs` (64 cars) |
 | **The `traffic` phase alone** (a settlement's whole car population: the carriageway, the band, the tier per record, the steering) | `TRAFFIC_STEP_BUDGET_MS` | 1.0 ms | `inf-player` · `tests/island_gate.rs` |
+| **One boarding** (the whole fixed step with a body boarding, over the same step with it standing; worst phase, min of five warmed steps) | `inf_physics::d3::boarding::BOARDING_STEP_BUDGET_MS` | 0.25 ms | `inf-player` · `tests/veh3d_gate.rs` (`a_boarding_costs_what_it_costs`) |
+| **The seated posture pass** (hands on the rim, feet on the pedals) over `VEHICLE_BUDGET_CARS` = 64 seated drivers | `inf_physics::d3::boarding::SEATED_POSTURE_BUDGET_MS` | 0.5 ms | `inf-player` · `tests/veh3d_gate.rs` (`sixty_four_seated_drivers_cost_what_they_cost`) |
 | Terrain page bytes resident (peak over the flythrough) | `TERRAIN_RESIDENT_BYTES_CEILING` | 16 MiB | `inf-player` · `tests/phase16_gate.rs` |
 | Partition cell bytes resident (peak) | `CELL_RESIDENT_BYTES_CEILING` | 256 KiB | `inf-player` · `tests/phase16_gate.rs` |
 | Partition cells active at once (peak) | `CELL_RESIDENT_CEILING` | 8 | `inf-player` · `tests/phase16_gate.rs` |
