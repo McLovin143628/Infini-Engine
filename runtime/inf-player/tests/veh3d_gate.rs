@@ -1852,7 +1852,7 @@ fn pie_equals_shipping_on_a_board_drive_exit_course() {
     fn course(step: u32, jack: bool) -> (bool, f32, bool) {
         match step {
             60 => (true, 0.0, false),
-            61..=120 if jack && step % 4 == 0 => (true, 0.0, false),
+            61..=120 if jack && step.is_multiple_of(4) => (true, 0.0, false),
             400..=520 => (false, 1.0, false),
             521..=700 => (false, 0.0, true),
             720 => (true, 0.0, false),
