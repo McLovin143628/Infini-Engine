@@ -94,6 +94,13 @@ param(
     # Play in 6 s and the hero moved 17.5 m. The failure looks like a broken Play
     # button and is a stopwatch.
     [int]$EditorSettleS = 90,
+    # **THE BOARDING LEG ON ITS OWN** (wave VEH3d). Runs `Invoke-Veh3dLeg`
+    # straight after the player is up and skips every other leg, so a boarding
+    # session can place the hero at a car with `-SpawnAt` and press E inside its
+    # own window -- the VEH3c report's run-2 finding (a leg that must board has to
+    # reach a car before earlier legs walk it away). The full run still runs the
+    # leg too, as section 6z4.
+    [switch]$BoardingOnly,
     # Place the second committed body beside the pawn before the editor frame,
     # in the DOCUMENT only. See tools/demo/place.mjs for why it is not saved.
     [bool]$PlaceFemale = $true,
@@ -799,6 +806,213 @@ function Restore-PlayerFocus([string]$why) {
 Say ("foreground after the click:  " + [InfInput]::Foreground())
 Say ("cursor while the game has the window: " + [InfInput]::CursorState())
 
+# **STAND UP** (the CHAR1c audit's fix to the instrument, defined here since
+# wave VEH3d so the boarding leg can use it before the legs that used to own it
+# -- see section 5c for the measurement that made it necessary).
+function Stand-Up([string]$why) {
+    Say "STAND UP ($why)"
+    for ($k = 0; $k -lt 4; $k++) {
+        $standing = @(Wait-ForHero -Csv $heroCsv -What "a standing hero ($why)" -TimeoutS 1.5 `
+            -Predicate { param($c) ($c[5] -eq "Grounded") -and ($c[11] -notmatch "^(crouch|prone|slide)") })[-1]
+        if ($standing) { return $true }
+        [InfInput]::Down(0x2E); Start-Sleep -Milliseconds 80; [InfInput]::Up(0x2E)   # scancode: C
+        Start-Sleep -Milliseconds 500
+    }
+    # **AND SAY WHAT THE HERO ACTUALLY IS** (VEH3b audit). `C` is the stance key,
+    # so four taps of it answer crouch, prone and slide and nothing else. A hero
+    # left in `Ragdoll` by a drop whose get-up never came is not a stance
+    # problem, and every leg after it runs against a body on the floor -- the
+    # boarding hunt included, which then reports "NO CAR reached in thirty-six
+    # taps of E" and blames the hunt. Measured: one audit session logged **607
+    # Ragdoll rows** and a `get-up NEVER FIRED`, and its VEH3a and VEH3b legs
+    # took none of their nine frames.
+    $mode = "?"
+    $state = "?"
+    $rowsNow = @(Get-Content $heroCsv -ErrorAction Ignore | Where-Object { $_ -match "^[0-9]" })
+    if ($rowsNow.Count -gt 0) {
+        $cNow = $rowsNow[-1].Split(",")
+        if ($cNow.Count -gt 11) { $mode = $cNow[5]; $state = $cNow[11] }
+    }
+    # **A FALL THAT IS NOT FALLING IS A WEDGE** (VEH3b audit). The same session
+    # that ragdolled spent the TEN MINUTES before it in `FallControlled` with its
+    # position frozen to the digit -- 2 140 rows at (-1765.4930, 16.9137,
+    # 2143.5534), y moving 11 cm in ten minutes, `fall` then `fall_fast` -- after
+    # walking into something that lifted it 0.47 m off a `Grounded` run. Then it
+    # ragdolled and never got up. A loop that kept tapping keys at it for the
+    # rest of the session is a loop that could not see any of that.
+    $frozen = $false
+    if ($rowsNow.Count -ge 8) {
+        $tail = @($rowsNow[($rowsNow.Count - 8)..($rowsNow.Count - 1)] | ForEach-Object {
+                $q = $_ -split ","
+                "{0},{1},{2}" -f $q[2], $q[3], $q[4]
+            })
+        $frozen = (@($tail | Select-Object -Unique).Count -eq 1)
+    }
+    if ($mode -eq "Ragdoll") {
+        Say "STILL NOT STANDING ($why): the hero is RAGDOLLED (state '$state') and C is the stance key -- no input in this loop gets a body up, the engine's own get-up does, and it has not come. Every leg after this one is running against a body on the floor."
+    }
+    elseif ($frozen -and $mode -match "^Fall") {
+        Say "STILL NOT STANDING ($why): the hero is WEDGED -- mode '$mode', state '$state', and its position has not changed over the last eight samples. It is falling and not moving, which is geometry holding it; no key in this loop frees it and every leg after this one is aimed at a character that cannot walk."
+    }
+    elseif ($frozen) {
+        Say "STILL NOT STANDING ($why): mode '$mode', state '$state', and the position has not changed over the last eight samples -- the hero is stuck, not mid-animation"
+    }
+    else {
+        Say "STILL NOT STANDING after four taps of C ($why): mode '$mode', state '$state' -- the frames below are of whatever stance the world is in"
+    }
+    return $false
+}
+
+# ── 6z4. WAVE VEH3d — BOARDING, AND WHAT ITS SEVEN COLUMNS SEE ───────────────
+#
+# Every frame TRIGGERED on `hero.csv`'s seven new columns rather than slept for.
+# Zero-based, at the TAIL so every index above keeps its meaning:
+#
+#   54  board      the machine's phase; a trailing `!` is a CARJACK
+#   55  seat       driver / passenger / rear / -
+#   56  hand_m     the hand's residual on a door handle, -1 unless HOLDING it
+#   57  hinge_deg  the door's hinge, read off its joint
+#   58  wheel_m    the hands' residual on the rim while driving, -1 otherwise
+#   59  pedal_m    the worst foot's residual on its pedal, -1 unless seated
+#   60  rim_deg    the steering wheel's own angle, 450 at full lock
+#
+# The leg is a FUNCTION so `-BoardingOnly` can run it on its own, straight after
+# the player is up, without the two thousand lines of earlier legs that decide
+# where the hero is standing by the time a full session reaches it (the VEH3c
+# report's run-2 finding: a boarding leg must place the hero at a car INSIDE its
+# own window). With `-TuneVehicle "occupy=1"` the car nearest the hero gets an
+# NPC driver and passenger first, so the first press is a CARJACK.
+function Invoke-Veh3dLeg {
+    Restore-PlayerFocus "before the boarding leg"
+    Stand-Up "before the boarding leg" | Out-Null
+    $isRow = { param($c) $c.Count -gt 60 }
+    # **THE HERO'S MODE AT THE PRESS** (inherited from the VEH3b audit: 743 of
+    # 4 169 rows of a demo's boarding window were a RAGDOLLED hero, and the hunt
+    # blamed itself). Counted and said before anything is pressed.
+    $rowsNow = @(Get-Content $heroCsv -ErrorAction Ignore | Where-Object { $_ -match "^[0-9]" })
+    $modeNow = if ($rowsNow.Count -gt 0) { $rowsNow[-1].Split(",")[5] } else { "?" }
+    Say "VEH3d: the hero is '$modeNow' at the boarding press"
+    if ($TuneVehicle -match "occupy=1") {
+        # The directive fires on the tuner's own cadence; wait for its line.
+        $seated = $false
+        for ($w = 0; $w -lt 60 -and -not $seated; $w++) {
+            $seated = [bool](Get-Content $heroCsv -ErrorAction Ignore | Where-Object { $_ -match "occupy seated" })
+            if (-not $seated) { Start-Sleep -Milliseconds 500 }
+        }
+        Say ("VEH3d: the occupy directive " + $(if ($seated) { "seated a driver and a passenger" } else { "NEVER FIRED -- the first press is an ordinary enter" }))
+    }
+    $began = $false
+    for ($k = 0; $k -lt 30 -and -not $began; $k++) {
+        [InfInput]::Down(0x12); Start-Sleep -Milliseconds 70; [InfInput]::Up(0x12)   # E
+        $began = @(Wait-ForHero -Csv $heroCsv -What "the boarding begins" -TimeoutS 1.0 `
+            -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^(locked|unlocking|opening)") })[-1]
+        if (-not $began -and $k -ge 3) {
+            if (($k % 3) -eq 0) {
+                for ($i = 0; $i -lt 14; $i++) { [InfInput]::Look(15, 0); Start-Sleep -Milliseconds 16 }
+            }
+            [InfInput]::Down(0x11); Start-Sleep -Milliseconds 300; [InfInput]::Up(0x11)   # W
+        }
+    }
+    if (-not $began) {
+        Say "VEH3d: NO BOARDING began in thirty taps of E -- none of the boarding frames is in this session (the hero was '$modeNow' at the first press)"
+        return
+    }
+    $jack = [bool](@(Get-Content $heroCsv -ErrorAction Ignore | Where-Object { $_ -match "^[0-9]" })[-1].Split(",")[54] -match "!$")
+    Say ("VEH3d: the boarding began" + $(if ($jack) { " -- and it is a CARJACK" } else { "" }))
+    Wait-ForHero -Csv $heroCsv -What "the approach (unlocking)" -TimeoutS 3.0 `
+        -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^unlocking") } `
+        -Out (Join-Path $OutDir "107-veh3d-approach.png") | Out-Null
+    Wait-ForHero -Csv $heroCsv -What "the hand on the outer handle (held, door shut)" -TimeoutS 4.0 `
+        -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^opening") -and ([double]$c[56] -ge 0.0) -and ([double]$c[56] -le 0.02) -and ([double]$c[57] -lt 2.0) } `
+        -Out (Join-Path $OutDir "108-veh3d-hand-on-handle.png") | Out-Null
+    Wait-ForHero -Csv $heroCsv -What "the door opening on its hinge" -TimeoutS 4.0 `
+        -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^opening") -and ([double]$c[57] -gt 25.0) } `
+        -Out (Join-Path $OutDir "109-veh3d-door-opening.png") | Out-Null
+    if ($jack) {
+        Wait-ForHero -Csv $heroCsv -What "the pull-out (the door wide, the driver coming out)" -TimeoutS 4.0 `
+            -Predicate { param($c) (& $isRow $c) -and ($c[54] -eq "opening!") -and ([double]$c[57] -gt 50.0) } `
+            -Out (Join-Path $OutDir "116-veh3d-carjack-pullout.png") | Out-Null
+    }
+    Wait-ForHero -Csv $heroCsv -What "entering (the seat warp)" -TimeoutS 5.0 `
+        -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^entering") } `
+        -Out (Join-Path $OutDir "110-veh3d-entering.png") | Out-Null
+    Wait-ForHero -Csv $heroCsv -What "seated, feet on the pedals, the door still open" -TimeoutS 4.0 `
+        -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^seated") -and ([double]$c[59] -ge 0.0) -and ([double]$c[59] -le 0.02) -and ([double]$c[57] -gt 15.0) } `
+        -Out (Join-Path $OutDir "111-veh3d-seated-feet.png") | Out-Null
+    $atWheel = @(Wait-ForHero -Csv $heroCsv -What "at the wheel" -TimeoutS 5.0 `
+        -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^driving") })[-1]
+    if (-not $atWheel) {
+        Say "VEH3d: the hero never reached the wheel -- the driving frames are not in this session"
+        return
+    }
+    # (b) THE HANDS THROUGH A FULL LOCK.
+    [InfInput]::Down(0x20)   # D
+    Wait-ForHero -Csv $heroCsv -What "the rim at full lock, hands on it" -TimeoutS 6.0 `
+        -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^driving") -and ([math]::Abs([double]$c[60]) -gt 400.0) -and ([double]$c[58] -ge 0.0) -and ([double]$c[58] -le 0.02) } `
+        -Out (Join-Path $OutDir "112-veh3d-hands-on-wheel-lock.png") | Out-Null
+    [InfInput]::Up(0x20)
+    Start-Sleep -Milliseconds 900
+    # (c) THE THROTTLE FOOT.
+    [InfInput]::Down(0x11)   # W
+    Wait-ForHero -Csv $heroCsv -What "driving on the throttle, feet on the pedals" -TimeoutS 6.0 `
+        -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^driving") -and ([double]$c[6] -gt 1.5) -and ([double]$c[59] -ge 0.0) -and ([double]$c[59] -le 0.02) } `
+        -Out (Join-Path $OutDir "113-veh3d-throttle.png") | Out-Null
+    [InfInput]::Up(0x11)
+    # Stop, then get out: the reverse pipeline.
+    [InfInput]::Down(0x1F)   # S, the brake
+    Wait-ForHero -Csv $heroCsv -What "stopped" -TimeoutS 8.0 `
+        -Predicate { param($c) (& $isRow $c) -and ([double]$c[6] -lt 0.4) } | Out-Null
+    [InfInput]::Up(0x1F)
+    Start-Sleep -Milliseconds 500
+    [InfInput]::Down(0x12); Start-Sleep -Milliseconds 70; [InfInput]::Up(0x12)   # E
+    Wait-ForHero -Csv $heroCsv -What "getting out (the door open, the body leaving the seat)" -TimeoutS 4.0 `
+        -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^exiting") -and ([double]$c[57] -gt 40.0) } `
+        -Out (Join-Path $OutDir "114-veh3d-exit.png") | Out-Null
+    Wait-ForHero -Csv $heroCsv -What "out, the door closing" -TimeoutS 4.0 `
+        -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^closing") } `
+        -Out (Join-Path $OutDir "115-veh3d-closing.png") | Out-Null
+    Wait-ForHero -Csv $heroCsv -What "standing clear of the car" -TimeoutS 4.0 `
+        -Predicate { param($c) (& $isRow $c) -and ($c[54] -eq "-") -and ($c[5] -eq "Grounded") } | Out-Null
+    # (d) IN AGAIN -- an ordinary enter now the car is the hero's -- and the BAIL.
+    Start-Sleep -Milliseconds 600
+    [InfInput]::Down(0x12); Start-Sleep -Milliseconds 70; [InfInput]::Up(0x12)   # E
+    $again = @(Wait-ForHero -Csv $heroCsv -What "back at the wheel" -TimeoutS 10.0 `
+        -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^driving") })[-1]
+    if ($again) {
+        [InfInput]::Down(0x11)   # W
+        $fast = @(Wait-ForHero -Csv $heroCsv -What "fast enough to bail" -TimeoutS 10.0 `
+            -Predicate { param($c) (& $isRow $c) -and ([double]$c[6] -gt 6.0) })[-1]
+        if ($fast) {
+            [InfInput]::Down(0x12); Start-Sleep -Milliseconds 70; [InfInput]::Up(0x12)   # E
+            Wait-ForHero -Csv $heroCsv -What "the bail-out roll" -TimeoutS 3.0 `
+                -Predicate { param($c) (& $isRow $c) -and ($c[5] -eq "Roll") } `
+                -Out (Join-Path $OutDir "117-veh3d-bail-roll.png") | Out-Null
+        } else {
+            Say "VEH3d: the car never passed 6 m/s -- the bail frame is not in this session"
+        }
+        [InfInput]::Up(0x11)
+    } else {
+        Say "VEH3d: the second boarding never reached the wheel -- the bail frame is not in this session"
+    }
+    # WHAT THE COLUMNS SAID, whatever fired: the phases the session actually
+    # walked, and the worst residuals each held.
+    $all = @(Get-Content $heroCsv -ErrorAction Ignore | Where-Object { $_ -match "^[0-9]" } |
+        Where-Object { ($_ -split ",").Count -gt 60 })
+    $phases = @($all | ForEach-Object { ($_ -split ",")[54] } | Select-Object -Unique)
+    Say ("VEH3d PHASES WALKED: " + ($phases -join " "))
+    $hands = @($all | ForEach-Object { [double](($_ -split ",")[56]) } | Where-Object { $_ -ge 0 })
+    $wheels = @($all | ForEach-Object { [double](($_ -split ",")[58]) } | Where-Object { $_ -ge 0 })
+    $pedals = @($all | ForEach-Object { [double](($_ -split ",")[59]) } | Where-Object { $_ -ge 0 })
+    $fmt = { param($xs) if ($xs.Count -gt 0) { "{0} rows, worst {1:N4} m" -f $xs.Count, ($xs | Measure-Object -Maximum).Maximum } else { "no rows" } }
+    Say ("VEH3d RESIDUALS: hand on a handle " + (& $fmt $hands) + "; hands on the rim " + (& $fmt $wheels) + "; feet on the pedals " + (& $fmt $pedals))
+}
+
+if ($BoardingOnly) {
+    Say "BOARDING ONLY (-BoardingOnly): the boarding leg, and nothing else"
+    Invoke-Veh3dLeg
+}
+if (-not $BoardingOnly) {
+
 # ── 5a. THE ISLAND'S OWN SIDEARM, with no environment variable ───────────────
 #
 #    Carried 204, closed by the WPN2a audit. The island's level Blueprint
@@ -1381,60 +1595,6 @@ Start-Sleep -Milliseconds 1400
 # crouch block's 2.5 m arm, the stairwell placement landed in `Prone`, and the
 # clipped-boom, near-fade, steered-boom and vehicle triggers all missed. A stance
 # the loop did not intend is an instrument reading the wrong thing.
-function Stand-Up([string]$why) {
-    Say "STAND UP ($why)"
-    for ($k = 0; $k -lt 4; $k++) {
-        $standing = @(Wait-ForHero -Csv $heroCsv -What "a standing hero ($why)" -TimeoutS 1.5 `
-            -Predicate { param($c) ($c[5] -eq "Grounded") -and ($c[11] -notmatch "^(crouch|prone|slide)") })[-1]
-        if ($standing) { return $true }
-        [InfInput]::Down(0x2E); Start-Sleep -Milliseconds 80; [InfInput]::Up(0x2E)   # scancode: C
-        Start-Sleep -Milliseconds 500
-    }
-    # **AND SAY WHAT THE HERO ACTUALLY IS** (VEH3b audit). `C` is the stance key,
-    # so four taps of it answer crouch, prone and slide and nothing else. A hero
-    # left in `Ragdoll` by a drop whose get-up never came is not a stance
-    # problem, and every leg after it runs against a body on the floor -- the
-    # boarding hunt included, which then reports "NO CAR reached in thirty-six
-    # taps of E" and blames the hunt. Measured: one audit session logged **607
-    # Ragdoll rows** and a `get-up NEVER FIRED`, and its VEH3a and VEH3b legs
-    # took none of their nine frames.
-    $mode = "?"
-    $state = "?"
-    $rowsNow = @(Get-Content $heroCsv -ErrorAction Ignore | Where-Object { $_ -match "^[0-9]" })
-    if ($rowsNow.Count -gt 0) {
-        $cNow = $rowsNow[-1].Split(",")
-        if ($cNow.Count -gt 11) { $mode = $cNow[5]; $state = $cNow[11] }
-    }
-    # **A FALL THAT IS NOT FALLING IS A WEDGE** (VEH3b audit). The same session
-    # that ragdolled spent the TEN MINUTES before it in `FallControlled` with its
-    # position frozen to the digit -- 2 140 rows at (-1765.4930, 16.9137,
-    # 2143.5534), y moving 11 cm in ten minutes, `fall` then `fall_fast` -- after
-    # walking into something that lifted it 0.47 m off a `Grounded` run. Then it
-    # ragdolled and never got up. A loop that kept tapping keys at it for the
-    # rest of the session is a loop that could not see any of that.
-    $frozen = $false
-    if ($rowsNow.Count -ge 8) {
-        $tail = @($rowsNow[($rowsNow.Count - 8)..($rowsNow.Count - 1)] | ForEach-Object {
-                $q = $_ -split ","
-                "{0},{1},{2}" -f $q[2], $q[3], $q[4]
-            })
-        $frozen = (@($tail | Select-Object -Unique).Count -eq 1)
-    }
-    if ($mode -eq "Ragdoll") {
-        Say "STILL NOT STANDING ($why): the hero is RAGDOLLED (state '$state') and C is the stance key -- no input in this loop gets a body up, the engine's own get-up does, and it has not come. Every leg after this one is running against a body on the floor."
-    }
-    elseif ($frozen -and $mode -match "^Fall") {
-        Say "STILL NOT STANDING ($why): the hero is WEDGED -- mode '$mode', state '$state', and its position has not changed over the last eight samples. It is falling and not moving, which is geometry holding it; no key in this loop frees it and every leg after this one is aimed at a character that cannot walk."
-    }
-    elseif ($frozen) {
-        Say "STILL NOT STANDING ($why): mode '$mode', state '$state', and the position has not changed over the last eight samples -- the hero is stuck, not mid-animation"
-    }
-    else {
-        Say "STILL NOT STANDING after four taps of C ($why): mode '$mode', state '$state' -- the frames below are of whatever stance the world is in"
-    }
-    return $false
-}
-
 Restore-PlayerFocus "before the vehicle"
 Stand-Up "before the camera leg" | Out-Null
 Say "CAMERA: E while walking — hunting for a car, then the drive camera blends in"
@@ -2514,6 +2674,8 @@ else {
     }
 }
 
+}   # -not $BoardingOnly (sections 5 .. 5e)
+
 # ── 6. what the hero did, in metres ──────────────────────────────────────────
 if (Test-Path $heroCsv) {
     $rows = Get-Content $heroCsv | Where-Object { $_ -match "^[0-9]" }
@@ -2560,6 +2722,7 @@ if (Test-Path $heroCsv) {
 Say ("windows now: " + ((Get-Process | Where-Object { $_.MainWindowTitle -ne "" -and ($_.ProcessName -like "inf*") } |
     ForEach-Object { "$($_.ProcessName)[$($_.Id)] '$($_.MainWindowTitle)'" }) -join " | "))
 
+if (-not $BoardingOnly) {
 # ── 6z. WAVE VEH3a — THE TYRES, AND WHAT THE GROUND UNDER THEM IS ────────────
 #
 # Four frames, every one TRIGGERED on `hero.csv`'s eight new columns rather than
@@ -3089,6 +3252,10 @@ if (-not $veh_driving) {
         Say "VEH3c ROW: no driving row was ever written"
     }
 }
+
+# ── 6z4. WAVE VEH3d — the boarding leg, in a full run ────────────────────────
+Invoke-Veh3dLeg
+}   # -not $BoardingOnly (sections 6z .. 6z4)
 
 # ── 7. close ─────────────────────────────────────────────────────────────────
 if ($KeepOpen) {

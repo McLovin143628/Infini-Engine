@@ -693,6 +693,20 @@ impl PlayerApp {
         Some(text)
     }
 
+    /// **The boarding row** (wave VEH3d) — the machine's phase, the seat, the
+    /// hand's residual on the door and the hinge, for the camera subject; or
+    /// `None` while nobody is boarding. The FORMATTING is
+    /// `inf_ecs::boarding::boarding_readout`, in Ring 0, for `drive_readout`'s
+    /// reason: this function cannot be tested and that one can.
+    fn boarding_row(sim: &RuntimeSim) -> Option<String> {
+        let world = sim.world();
+        let entity = world.entity_of(inf_ecs::movement::camera_subject(world)?)?;
+        let cm = world
+            .world()
+            .get::<inf_ecs::components::CharacterMovement>(entity)?;
+        inf_ecs::boarding::boarding_readout(&cm.runtime.boarding)
+    }
+
     /// **The shooter's readout** (wave WPN1) — the magazine and the reserve for
     /// whoever has a weapon loaded, or `None`.
     ///
@@ -1211,8 +1225,18 @@ impl PlayerApp {
         // engine (`step_driving` parks the collider and `clear_edges` eats the
         // attack), and two readouts stacked in one place would be a HUD that
         // draws over itself on the one frame both are true.
-        if let Some(text) = Self::drive_readout(&mut self.sim) {
+        // VEH3d: the BOARDING row joins them — under the driver's instruments
+        // while the hero is at a wheel, and in the same slot on its own while
+        // the hero is walking up to a car or getting out of one (a body
+        // boarding a car is not pointing a rifle either; the slot's own rule).
+        if let Some(mut text) = Self::drive_readout(&mut self.sim) {
+            if let Some(row) = Self::boarding_row(&self.sim) {
+                text.push('\n');
+                text.push_str(&row);
+            }
             self.ui.readout(&text);
+        } else if let Some(row) = Self::boarding_row(&self.sim) {
+            self.ui.readout(&row);
         } else if let Some(text) = Self::ammo_readout(&self.sim) {
             self.ui.readout(&text);
         }

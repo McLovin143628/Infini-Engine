@@ -187,7 +187,12 @@ impl Rig {
         let car = Uuid::from_u128(0x1C00_0100);
         let e = self.world.spawn_with_guid(car, "Car", None);
         let mut t = Transform::IDENTITY;
-        t.translation = Vec3d::new(2.5, 0.75 + 0.35, 0.0);
+        // **On the hero's `-X` side since wave VEH3d** — the car's DRIVER's
+        // (`+X`) flank faces the hero. Re-blessed with the cause: the seat is
+        // the driver's foot well inside the cabin now, 0.84 m off this 4 m-wide
+        // box's centreline on its `+X` flank, and from the far flank it is out
+        // of the 3 m reach.
+        t.translation = Vec3d::new(-2.5, 0.75 + 0.35, 0.0);
         self.world.world_mut().entity_mut(e).insert((
             RigidBody3D {
                 kind: BodyKind3D::Dynamic,
@@ -1193,7 +1198,12 @@ fn entering_a_vehicle_blends_and_does_not_cut() {
         ..Default::default()
     });
     let mut fovs = Vec::new();
-    for _ in 0..240 {
+    // **Boarding is a choreography now** (wave VEH3d, re-blessed with that
+    // cause): the walk to the door, the handle, the door on its hinge and the
+    // settle take two to three seconds where P29.7's warp took 0.55, and the
+    // whole of it is on the camera's `Override` claim before the drive block
+    // takes over — so the change-over is watched for nine seconds, not four.
+    for _ in 0..540 {
         rig.step(&idle);
         let p = rig.cam.pose.position.to_dvec3();
         worst = worst.max((p - prev).length());
@@ -2361,17 +2371,18 @@ fn the_camera_never_ends_inside_the_islands_geometry_on_a_hostile_route() {
 /// against the chassis collider's top face. Below it is a person in a car; above
 /// it is a person on one.
 ///
-/// **`#[ignore]`, and that is the honest shape for it.** It fails today: three of
-/// the island's four drivers sit at `-0.000 m` and `-0.001 m` of their own roof.
-/// The cause is `step_driving`'s
-/// `seat_world + Y * (stand_half_height_m + radius)` over a rig whose
-/// `seat_local` is at the chassis's roof height, so the capsule's FEET land on
-/// the roof, and moving either number moves the drive camera pivot and every
-/// VEH gate's measurements, which is a vehicle wave's change and not a camera
-/// audit's. It is not asserted as a rule (a test that writes a defect down as a
-/// rule makes the defect load-bearing, this wave's own law), and it is not
-/// deleted; run it with `--ignored` and it names the number.
-#[ignore = "MEASURES A LIVE DEFECT: an island driver's feet sit on its own car's roof (audit CHAR1c, carried)"]
+/// **UN-IGNORED BY WAVE VEH3d, which closed it (CHAR1c carried 160).** It was
+/// `#[ignore]`d as a measurement of a live defect: three of the island's four
+/// drivers sat at `-0.000 m` and `-0.001 m` of their own roof, because
+/// `step_driving` puts the capsule at `seat_world + Y * (stand_half_height_m +
+/// radius)` over a rig whose `seat_local` WAS the chassis's top face. The seat
+/// is the driver's foot well inside the cabin now
+/// (`inf_ecs::vehicle::seat_local_of`, derived from the same collider), the
+/// drive camera's pivot was moved to the roof explicitly so the drive block
+/// still frames the car, and every VEH gate that read the seat was re-blessed
+/// with that cause. `veh3d_gate::the_seat_is_inside_the_cabin_on_every_family`
+/// reads the same fact on the JOINTS; this reads it on the island's own
+/// drivers.
 #[test]
 fn an_island_driver_is_seated_inside_its_car_and_not_on_top_of_it() {
     use inf_player::runtime_sim::RuntimeInput;

@@ -846,6 +846,38 @@ impl RuntimeSim {
         took
     }
 
+    /// **Put a driver and a passenger in the parked car nearest `near`**
+    /// (wave VEH3d) — the preview door `INF_PIE_TUNE_VEHICLE`'s `occupy`
+    /// directive reaches, so a demo loop can photograph a CARJACK without
+    /// waiting on a traffic car to stop at the right kerb.
+    ///
+    /// Only a car that is STANDING (under 0.5 m/s), within `reach_m`, with
+    /// nobody at its wheel; the nearest by its driver's seat, ties to the
+    /// lower guid. Answers the chassis it seated, or `None`. **The game has no
+    /// key for this and this is not one** — `open_vehicle_doors`' own sentence.
+    pub fn occupy_nearest_car(&mut self, near: DVec3, reach_m: f64) -> Option<Uuid> {
+        let occupied = inf_physics::d3::carjack::occupied_chassis(&self.world);
+        let mut best: Option<(f64, Uuid)> = None;
+        for g in self.bridge3d.vehicle_guids() {
+            if occupied.contains(&g) {
+                continue;
+            }
+            let Some((seat, _, v)) = inf_physics::d3::vehicle::seat_pose(&self.bridge3d, g) else {
+                continue;
+            };
+            let d = (seat - near).length();
+            if v.length() > 0.5 || d > reach_m {
+                continue;
+            }
+            if best.is_none_or(|(bd, bg)| d < bd || (d == bd && g < bg)) {
+                best = Some((d, g));
+            }
+        }
+        let (_, chassis) = best?;
+        inf_physics::d3::traffic::occupy(&mut self.world, &mut self.bridge3d, chassis)
+            .then_some(chassis)
+    }
+
     /// **The most recent fixed step's traffic counters** (VEH2b) — cars per
     /// tier, how many are on a leg of their day, how many carry an NPC driver,
     /// how many the traffic has let go of, and how many commuter routes are

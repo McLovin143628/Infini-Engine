@@ -2590,10 +2590,15 @@ fn the_hero_log_and_its_readme_agree() {
     // flat tyre and a burning car are four different things that all read the
     // same in `speed`, and a frame of any of them has to be triggered on a
     // column that can see it.
+    // **Sixty-one since wave VEH3d**, which appended the seven boarding columns on
+    // the same argument: walking up to a car, opening its door and sitting in
+    // it are three things that all read `Grounded` or `Driving` in the mode
+    // column, and a frame of a hand on a handle has to be triggered on a
+    // column that can see it.
     let n = width(&armed);
-    assert_eq!(n, 54, "the row is {n} fields and this arm's word is 54");
+    assert_eq!(n, 61, "the row is {n} fields and this arm's word is 61");
     assert!(
-        README.contains("FIFTY-FOUR") || README.contains("fifty-four"),
+        README.contains("SIXTY-ONE") || README.contains("sixty-one"),
         "`tools/demo/README.md` does not say how many columns hero.csv has"
     );
     for col in [
@@ -2630,6 +2635,14 @@ fn the_hero_log_and_its_readme_agree() {
         "flats",
         "panes_broken",
         "parts_shed",
+        // Wave VEH3d's seven.
+        "board",
+        "seat",
+        "hand_m",
+        "hinge_deg",
+        "wheel_m",
+        "pedal_m",
+        "rim_deg",
     ] {
         assert!(
             README.contains(col),

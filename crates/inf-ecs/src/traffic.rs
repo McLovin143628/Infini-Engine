@@ -1847,6 +1847,12 @@ pub struct TrafficStats {
     pub rephased: usize,
     /// How many carry an NPC driver right now.
     pub drivers: usize,
+    /// How many carry an NPC PASSENGER right now (wave VEH3d) — a quarter of
+    /// the driven fleet, drawn by [`carries_passenger`]. A passenger is a person
+    /// the crowd population has never heard of, exactly as a driver is, so a
+    /// count of the people a level POSES is `drivers + passengers` more than
+    /// its society.
+    pub passengers: usize,
     /// How many the traffic has let go of — see [`TrafficRecord::taken`].
     pub taken: usize,
     /// How many measured the ground under themselves this step.

@@ -3513,8 +3513,14 @@ fn step_driving(
     // seat is INSIDE the chassis now, and a re-enabled capsule there is a body
     // buried in a dynamic box: measured, a responding fire crew whose capsule
     // came back mid-drive pinned its appliance 32.75 m short of the fire it was
-    // sent to. Idempotent, and one flag write.
-    super::vehicle::park_collider(bridge, guid, true);
+    // sent to. Only when it is LIVE: a parked collider is left alone, because
+    // every enable write marks the collider for the query tree's refit and a
+    // seat step that re-parked every driver every step would refit them all.
+    if let Some(c) = bridge.collider_of(guid) {
+        if bridge.world().collider_enabled(c) == Some(true) {
+            super::vehicle::park_collider(bridge, guid, true);
+        }
+    }
     let vehicle = cm.runtime.seat.vehicle;
     let Some((driver_seat_world, rot, linvel)) = super::vehicle::seat_pose(bridge, vehicle) else {
         // The vehicle is gone — despawned, or a level that changed underneath a
@@ -3733,12 +3739,13 @@ fn step_driving(
 
     // ── the exit. Not during the warp: a control that could interrupt its own
     //    choreography would leave the character half-way to a seat it is no
-    //    longer in. Nor mid-exit, nor while being pulled out.
+    //    longer in. Nor mid-exit, nor while being pulled out — and not while
+    //    SETTLING (wave VEH3d): the same key that boarded is the key that
+    //    leaves, so a second press made while the door was still being pulled
+    //    shut turned round in the seat and climbed straight back out. The
+    //    machine owns the body until it reaches the wheel.
     let can_leave = !cm.runtime.seat.entering
-        && matches!(
-            b.phase,
-            BoardPhase::Idle | BoardPhase::Driving | BoardPhase::Seated
-        );
+        && matches!(b.phase, BoardPhase::Idle | BoardPhase::Driving);
     let leaving = cm.runtime.press_interact && can_leave;
     clear_edges(&mut cm);
     if leaving {

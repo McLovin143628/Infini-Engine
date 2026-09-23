@@ -1471,10 +1471,27 @@ mod tests {
 
             let rig = inf_ecs::vehicle::rig_of(doc.world(), chassis)
                 .unwrap_or_else(|| panic!("{id}: the spawned craft is not a rig"));
+            // **Re-blessed with its cause (wave VEH3d)**: the seat was the
+            // chassis collider's TOP FACE, `(0, half.y, 0)`, which put every
+            // driver on its own roof (CHAR1c carried 160). It is the driver's
+            // foot well inside the cabin now, derived from the same collider by
+            // `inf_ecs::vehicle::seat_local_of` — asserted equal to that, and
+            // under the roof by the cabin's own depth.
+            let collider = doc
+                .world()
+                .entity_of(chassis)
+                .and_then(|e| doc.world().world().get::<inf_ecs::components::Collider3D>(e).copied())
+                .unwrap_or_else(|| panic!("{id}: the chassis has no collider"));
             assert_eq!(
                 rig.seat_local,
-                Vec3d::new(0.0, def.half_extents.y, 0.0),
-                "{id}: the seat is the top face of the chassis collider"
+                inf_ecs::vehicle::seat_local_of(&collider),
+                "{id}: the seat is derived from the chassis collider"
+            );
+            assert!(
+                rig.seat_local.y < def.half_extents.y - 0.3,
+                "{id}: the seat is at {:.3} and the roof at {:.3} — a driver would stand on it",
+                rig.seat_local.y,
+                def.half_extents.y
             );
             // **A wheeled family is four wheels and no mounts; a mounted one is
             // the mirror image** (wave VEH2c). Asserted over EVERY row of the

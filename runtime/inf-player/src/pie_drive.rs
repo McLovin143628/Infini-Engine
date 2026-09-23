@@ -565,6 +565,18 @@ const TUNE_PERIOD_S: f64 = 20.0;
 /// rather than either tuner.
 const DOORS_OPEN_NAME: &str = "doors_open";
 
+/// **The second directive** (wave VEH3d): `occupy=1` seats an NPC driver and
+/// passenger in the standing car nearest the hero (within
+/// [`OCCUPY_REACH_M`]), once, through
+/// [`RuntimeSim::occupy_nearest_car`](crate::runtime_sim::RuntimeSim::occupy_nearest_car)
+/// — so the demo loop can walk up to an occupied car and CARJACK it. Filtered
+/// out of the pairs for `doors_open`'s reason.
+const OCCUPY_NAME: &str = "occupy";
+
+/// How far from the hero the car [`OCCUPY_NAME`] seats people in may be,
+/// metres.
+const OCCUPY_REACH_M: f64 = 25.0;
+
 /// How long a preview waits before applying [`SPAWN_AT_ENV`], seconds.
 ///
 /// The island streams; a hero teleported on frame zero arrives before the
@@ -592,6 +604,8 @@ pub struct SpawnOverride {
     /// been installed **at least once**.
     tune: Vec<(String, f64)>,
     tune_done: bool,
+    /// Whether the `occupy` directive has seated anybody yet (wave VEH3d).
+    occupied: bool,
     /// **When the tuning is next re-applied**, seconds on this door's own clock
     /// (VEH3c audit).
     ///
@@ -945,10 +959,39 @@ impl SpawnOverride {
                 .iter()
                 .find(|(n, _)| n == DOORS_OPEN_NAME)
                 .map(|(_, v)| *v != 0.0);
+            let occupy = pairs
+                .iter()
+                .any(|(n, v)| n == OCCUPY_NAME && *v != 0.0);
             let pairs: Vec<(String, f64)> = pairs
                 .into_iter()
-                .filter(|(n, _)| n != DOORS_OPEN_NAME)
+                .filter(|(n, _)| n != DOORS_OPEN_NAME && n != OCCUPY_NAME)
                 .collect();
+            // **`occupy` is the second directive** (wave VEH3d): seat an NPC
+            // driver and passenger in the standing car nearest the hero, ONCE.
+            // Before the tunables, because a car seated here is a car the
+            // tuner should find the same as any other.
+            if occupy && !self.occupied {
+                let near = inf_ecs::movement::camera_subject(sim.world())
+                    .and_then(|h| sim.world().entity_of(h))
+                    .and_then(|e| {
+                        sim.world()
+                            .world()
+                            .get::<inf_ecs::components::Transform>(e)
+                            .map(|t| t.translation.to_dvec3())
+                    });
+                if let Some(near) = near {
+                    if let Some(chassis) = sim.occupy_nearest_car(near, OCCUPY_REACH_M) {
+                        self.occupied = true;
+                        if !said.is_empty() {
+                            said.push_str("; ");
+                        }
+                        said.push_str(&format!(
+                            "{TUNE_VEHICLE_ENV} occupy seated a driver and a passenger in {chassis} at t={:.1}s",
+                            self.accum
+                        ));
+                    }
+                }
+            }
             let w = sim.world_mut();
             // Every chassis in the level, through the RECOGNISER rather than a
             // component query: a vehicle is a rig with wheels, and that is the
@@ -1513,9 +1556,95 @@ impl HeroLog {
                 None => (0.0, 0.0, 0, 0, 0),
             }
         };
+        // **THE BOARDING COLUMNS** (wave VEH3d), APPENDED for the reason every
+        // block before them was: a frame of a hand on a door handle, a door on
+        // its hinge, hands on a rim through a lock or feet on the pedals cannot
+        // be triggered on a position column, and "walking up to a car",
+        // "opening its door" and "sitting in it" are three things that all read
+        // `Grounded` or `Driving` in the mode column.
+        //
+        // * `board` — the machine's phase (`-` when nobody is boarding and
+        //   nobody is at a wheel; `driving` at the wheel), with a `!` on the
+        //   end while it is a CARJACK;
+        // * `seat` — which seat (`driver`, `passenger`, `rear`, or `-`);
+        // * `hand_m` — the hand residual on a DOOR (outer handle, inner pull),
+        //   metres, off the hand pass's own report, while a hand is HOLDING
+        //   one at full weight; `-1` otherwise, so a trigger can tell "on the
+        //   handle" from "nowhere near it";
+        // * `hinge_deg` — the door's hinge angle, read off VEH3c's joint;
+        // * `wheel_m` — the hand residual on the RIM while driving at full
+        //   weight, `-1` otherwise;
+        // * `pedal_m` — the worst foot residual on its pedal (or floor) goal
+        //   while seated, `-1` otherwise;
+        // * `rim_deg` — how far the steering wheel has turned, degrees of RIM
+        //   (450 at full lock), the angle the hands' grips turn by.
+        //
+        // All seven read `-` / `-1` / `0` for a session in which nobody boards,
+        // which is every session before this wave.
+        let (board_phase, board_seat, hand_m, hinge_deg, wheel_m, pedal_m, rim_deg) = guid
+            .and_then(|g| sim.world().entity_of(g))
+            .and_then(|e| {
+                sim.world()
+                    .world()
+                    .get::<inf_ecs::components::CharacterMovement>(e)
+                    .map(|cm| (cm.runtime.boarding, cm.runtime.seat))
+            })
+            .map(|(b, seat)| {
+                use inf_ecs::boarding::BoardPhase;
+                let holding = b.hand_weight >= 0.999;
+                let phase = if b.phase == BoardPhase::Idle && seat.is_seated() {
+                    BoardPhase::Driving
+                } else {
+                    b.phase
+                };
+                let seat_name = if phase == BoardPhase::Idle {
+                    "-"
+                } else {
+                    inf_ecs::boarding::SeatIndex::from_u8(if seat.is_seated() {
+                        seat.seat
+                    } else {
+                        b.seat
+                    })
+                    .name()
+                };
+                let on_door = matches!(
+                    phase,
+                    BoardPhase::OpeningDoor
+                        | BoardPhase::Seated
+                        | BoardPhase::Exiting
+                        | BoardPhase::ClosingDoor
+                );
+                let rim = if seat.is_driving() {
+                    inf_physics::d3::boarding::vehicle_steer(sim.world(), sim.bridge3d(), seat.vehicle)
+                } else {
+                    0.0
+                };
+                (
+                    if b.carjack && phase != BoardPhase::Idle {
+                        format!("{}!", phase.name())
+                    } else {
+                        phase.name().to_string()
+                    },
+                    seat_name,
+                    if on_door && holding { b.hand_err_m } else { -1.0 },
+                    b.door_deg,
+                    if phase == BoardPhase::Driving && holding {
+                        b.hand_err_m
+                    } else {
+                        -1.0
+                    },
+                    if matches!(phase, BoardPhase::Driving | BoardPhase::Seated) {
+                        b.foot_err_m
+                    } else {
+                        -1.0
+                    },
+                    rim,
+                )
+            })
+            .unwrap_or(("-".to_string(), "-", -1.0, 0.0, -1.0, -1.0, 0.0));
         let line = match &probe.hero {
             Some(h) => format!(
-                "{:.3},{},{:.4},{:.4},{:.4},{},{:.4},{:.4},{:.2},{:.2},{:.2},{},{},{:.4},{:.4},{:.2},{},{},{},{:.3},{},{:.3},{},{:.3},{:.4},{:.4},{:.4},{},{},{},{},{},{},{},{},{},{:.1},{:.1},{:.1},{:.1},{:.1},{},{:.4},{:.4},{:.3},{:.0},{:.3},{:.3},{},{:.1},{:.1},{},{},{}\n",
+                "{:.3},{},{:.4},{:.4},{:.4},{},{:.4},{:.4},{:.2},{:.2},{:.2},{},{},{:.4},{:.4},{:.2},{},{},{},{:.3},{},{:.3},{},{:.3},{:.4},{:.4},{:.4},{},{},{},{},{},{},{},{},{},{:.1},{:.1},{:.1},{:.1},{:.1},{},{:.4},{:.4},{:.3},{:.0},{:.3},{:.3},{},{:.1},{:.1},{},{},{},{},{},{:.4},{:.1},{:.4},{:.4},{:.1}\n",
                 sim.steps() as f64 / 60.0,
                 probe.frame,
                 h.position[0],
@@ -1580,7 +1709,14 @@ impl HeroLog {
                 engine_scale,
                 flats,
                 panes_broken,
-                parts_shed
+                parts_shed,
+                board_phase,
+                board_seat,
+                hand_m,
+                hinge_deg,
+                wheel_m,
+                pedal_m,
+                rim_deg
             ),
             // **`no-hero` NAMES THE MODE COLUMN** (WPN2b audit, carried 224).
             //
@@ -1594,11 +1730,11 @@ impl HeroLog {
             // wave FIX1 and harmless only because no predicate happened to
             // match either spelling.
             //
-            // The row is 54 fields wide since wave VEH3c — 49 at VEH3b plus
-            // the five bodywork columns — which the gate asserts against the
+            // The row is 61 fields wide since wave VEH3d — 54 at VEH3c plus
+            // the seven boarding columns — which the gate asserts against the
             // armed branch above it and against the demo README.
             None => format!(
-                "{:.3},{},,,,no-hero,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,\n",
+                "{:.3},{},,,,no-hero,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,\n",
                 sim.steps() as f64 / 60.0,
                 probe.frame
             ),

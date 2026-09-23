@@ -792,7 +792,13 @@ fn pie_equals_shipping_on_an_island_drive() {
         // has never heard of it, and this arm caught exactly that: 333 posed
         // against a ceiling of 330, three drivers. The ceiling is the number of
         // people the level has, and the drivers are people.
-        posed_ceilings.push(1 + sim.society_stats().agents + sim.traffic_stats().drivers);
+        // …and since wave VEH3d the passengers a quarter of those cars carry,
+        // for the drivers' reason exactly (re-blessed with that cause).
+        posed_ceilings.push(
+            1 + sim.society_stats().agents
+                + sim.traffic_stats().drivers
+                + sim.traffic_stats().passengers,
+        );
         assert!(
             bytes.len() >= POSED_BYTES,
             "{who} published {} bytes of pose, less than one 161-bone character's \
@@ -1208,14 +1214,19 @@ fn pie_equals_shipping_with_a_crowd_across_tier_transitions() {
     // (wave VEH2b): a driver is a person the crowd population has never heard
     // of, and it poses because it is `Full` — which it is exactly while its car
     // is.
+    // …and their PASSENGERS (wave VEH3d, re-blessed with that cause): a quarter
+    // of the driven fleet carries one, a person the crowd has never heard of
+    // for exactly the driver's reason, posing exactly while its car is `Full`.
     let drivers = ship.traffic_stats().drivers;
+    let passengers = ship.traffic_stats().passengers;
     let hero_and_posing = 1
         + drivers
+        + passengers
         + stats.at(inf_ecs::crowd::CrowdTier::Full)
         + stats.at(inf_ecs::crowd::CrowdTier::Near);
     assert_eq!(
         posed_agents, hero_and_posing,
-        "{posed_agents} characters were posed against {hero_and_posing} the ladder admits (the hero, {drivers} traffic driver(s), plus {} Full and {} Near of {CROWD_N} agents) - the pose door is not reading the tier",
+        "{posed_agents} characters were posed against {hero_and_posing} the ladder admits (the hero, {drivers} traffic driver(s) and {passengers} passenger(s), plus {} Full and {} Near of {CROWD_N} agents) - the pose door is not reading the tier",
         stats.at(inf_ecs::crowd::CrowdTier::Full),
         stats.at(inf_ecs::crowd::CrowdTier::Near),
     );
@@ -6257,24 +6268,50 @@ fn drive_a_car(sim: &mut RuntimeSim) -> CarTrace {
     //    `just_pressed` is the difference against the previous tick's held set,
     //    so a press has to be a RELEASED step followed by a HELD one — pressing
     //    on every step of a loop is one edge and then nothing.
+    //
+    //    Re-blessed with cause (wave VEH3d): the press BEGINS a boarding now —
+    //    walk to the flank, take the handle, open the door on its motor, step
+    //    in, shut it — and `Driving` is where the choreography ENDS, a couple of
+    //    seconds later, not the step after the press. So the press is made once
+    //    and the car is waited for (bounded at 900 steps = 15 s); a second press
+    //    mid-boarding is ignored by the machine and would prove nothing.
     let mut entered = false;
+    let at_wheel = |sim: &RuntimeSim| {
+        sim.world()
+            .world()
+            .get::<inf_ecs::components::CharacterMovement>(hero)
+            .is_some_and(|m| {
+                m.mode == inf_ecs::components::MovementMode::Driving
+                    && m.runtime.boarding.phase == inf_ecs::boarding::BoardPhase::Driving
+            })
+    };
+    let boarding = |sim: &RuntimeSim| {
+        sim.world()
+            .world()
+            .get::<inf_ecs::components::CharacterMovement>(hero)
+            .is_some_and(|m| m.runtime.boarding.phase != inf_ecs::boarding::BoardPhase::Idle)
+    };
     for _ in 0..8 {
         sim.step_once(
             inf_player::runtime_sim::RuntimeInput::default()
                 .press(inf_ecs::movement::actions::INTERACT),
         );
         pre_steps += 1;
-        entered = sim
-            .world()
-            .world()
-            .get::<inf_ecs::components::CharacterMovement>(hero)
-            .is_some_and(|m| m.mode == inf_ecs::components::MovementMode::Driving);
-        if entered {
+        if boarding(sim) || at_wheel(sim) {
             break;
         }
         sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
         pre_steps += 1;
     }
+    for _ in 0..900 {
+        entered = at_wheel(sim);
+        if entered || !boarding(sim) {
+            break;
+        }
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+        pre_steps += 1;
+    }
+    entered = entered || at_wheel(sim);
     if !entered {
         // Say WHY, in the units the door decides in — a gate that reports
         // "false" about a resolver with three refusals has named none of them.
@@ -7401,7 +7438,20 @@ fn rush_hour(sim: &mut RuntimeSim, centre: glam::DVec3) -> RushRun {
     // from.
     let (seat, rot, _) =
         inf_physics::d3::vehicle::seat_pose(sim.bridge3d(), chassis).expect("a seat");
-    let beside = seat + (rot * glam::DVec3::X) * 1.7 - glam::DVec3::Y * 0.2;
+    // **The placement is the old one's HEIGHT** (wave VEH3d, re-blessed with
+    // that cause): it was the seat less 0.2 m, and the seat was the chassis's
+    // TOP FACE; the seat is the driver's foot well inside the cabin now, and the
+    // same arithmetic would put the hero's capsule half into the road. So the
+    // height is the top face's, read off the chassis, and the lateral step is
+    // still from the (now driver-side) seat.
+    let top_y = sim
+        .world()
+        .entity_of(chassis)
+        .and_then(|e| sim.world().world().get::<inf_ecs::components::Collider3D>(e).copied())
+        .map(|c| chassis_at(sim, chassis).y + c.half_extents.y)
+        .unwrap_or(seat.y);
+    let beside =
+        glam::DVec3::new(seat.x, top_y - 0.2, seat.z) + (rot * glam::DVec3::X) * 1.7;
     for _ in 0..24 {
         set_hero(sim, hero, beside);
         sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
@@ -7409,7 +7459,9 @@ fn rush_hour(sim: &mut RuntimeSim, centre: glam::DVec3) -> RushRun {
     }
     // Press E, release, press again — `just_pressed` is an edge, and the
     // carjack's resist draw is a function of the step, so a real player presses
-    // more than once.
+    // more than once. **Until the boarding BEGINS** (wave VEH3d): the press is
+    // no longer the eject — it starts the pipeline, and a press made while it
+    // runs is ignored by it.
     for _ in 0..24 {
         sim.step_once(
             inf_player::runtime_sim::RuntimeInput::default()
@@ -7417,6 +7469,25 @@ fn rush_hour(sim: &mut RuntimeSim, centre: glam::DVec3) -> RushRun {
         );
         run.jack_digests.push(digest(&sim.state_bytes()));
         run.presses += 1;
+        let began = sim
+            .world()
+            .world()
+            .get::<inf_ecs::components::CharacterMovement>(hero)
+            .is_some_and(|m| m.runtime.boarding.phase != inf_ecs::boarding::BoardPhase::Idle);
+        if began {
+            break;
+        }
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+        run.jack_digests.push(digest(&sim.state_bytes()));
+    }
+    // **THE PIPELINE** (wave VEH3d, re-blessed with that cause — VEH2b's steal
+    // was one press, a one-frame eject and a warp). The hero walks to the door,
+    // takes the handle and opens it; the driver is pulled out through it on its
+    // own forced exit; the hero climbs in and settles. The steal's digests are
+    // taken over every step of that, which is why the trace grew.
+    for _ in 0..900 {
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+        run.jack_digests.push(digest(&sim.state_bytes()));
         if inf_physics::d3::carjack::occupant_of(sim.world(), chassis) != Some(victim) {
             run.jacked = true;
         }
@@ -7427,12 +7498,11 @@ fn rush_hour(sim: &mut RuntimeSim, centre: glam::DVec3) -> RushRun {
             .is_some_and(|m| {
                 m.mode == inf_ecs::components::MovementMode::Driving
                     && m.runtime.seat.vehicle == chassis
+                    && m.runtime.boarding.phase == inf_ecs::boarding::BoardPhase::Driving
             });
         if run.seated {
             break;
         }
-        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
-        run.jack_digests.push(digest(&sim.state_bytes()));
     }
     let took = chassis_at(sim, chassis);
     // ...and drive it away. The throttle held, through the shipped input door,

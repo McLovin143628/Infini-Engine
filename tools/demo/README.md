@@ -49,8 +49,9 @@ hero.csv          t,frame,x,y,z,mode,speed,camera_clip,aim_yaw,head_yaw,head_pit
                   class,attach,lock,engaged,incoming,heat,on_scene,responder_m,
                   tyre_temp_fl,tyre_temp_fr,tyre_temp_rl,tyre_temp_rr,surface,
                   slip_ratio,slip_lat,mu,rpm,clutch,boost,cut,
-                  car_health,engine_scale,flats,panes_broken,parts_shed
-                  — FIFTY-FOUR columns, four rows a second, and NO header line:
+                  car_health,engine_scale,flats,panes_broken,parts_shed,
+                  board,seat,hand_m,hinge_deg,wheel_m,pedal_m,rim_deg
+                  — SIXTY-ONE columns, four rows a second, and NO header line:
                   every consumer filters on `^[0-9]`, and the `#` lines are the
                   driver's own notes. Columns are only ever APPENDED, so every
                   index a script already reads keeps its meaning: 14-17 are wave
@@ -73,6 +74,21 @@ hero.csv          t,frame,x,y,z,mode,speed,camera_clip,aim_yaw,head_yaw,head_pit
                   driving, which is the same convention the eight tyre columns
                   before them use, and the five a shed bumper, a shattered
                   window, a flat and a burning car have to be triggered on),
+                  55-61 are VEH3d's (the boarding machine's phase — `-`,
+                  `locked`, `unlocking`, `opening`, `entering`, `seated`,
+                  `driving`, `exiting`, `closing`, `jacked`, with a `!` on the
+                  end during a CARJACK; the seat — `driver`, `passenger`,
+                  `rear` or `-`; the hand's residual on a DOOR handle in metres
+                  while it HOLDS it at full weight, `-1` otherwise; the door's
+                  hinge angle in degrees, read off its joint; the hands'
+                  residual on the RIM while driving, `-1` otherwise; the worst
+                  foot's residual on its pedal while seated, `-1` otherwise;
+                  and the rim's own angle in degrees — 450 at full lock — the
+                  seven a hand on a handle, a door on its hinge, hands on a
+                  wheel through a lock and feet on the pedals have to be
+                  triggered on, because walking up to a car, opening it and
+                  sitting in it all read `Grounded` or `Driving` in the mode
+                  column),
                   24-27 are WPN2b's (the
                   hold-point spring in millimetres, the aim's own recoil offset
                   in degrees, the whole cone the next round would leave through,
@@ -136,7 +152,10 @@ hero.csv          t,frame,x,y,z,mode,speed,camera_clip,aim_yaw,head_yaw,head_pit
                   `$c[33]`, `heat` is `$c[34]`, `on_scene` is `$c[35]`,
                   `responder_m` is `$c[36]`, `car_health` is `$c[49]`,
                   `engine_scale` is `$c[50]`, `flats` is `$c[51]`,
-                  `panes_broken` is `$c[52]` and `parts_shed` is `$c[53]`.
+                  `panes_broken` is `$c[52]`, `parts_shed` is `$c[53]`,
+                  `board` is `$c[54]`, `seat` is `$c[55]`, `hand_m` is
+                  `$c[56]`, `hinge_deg` is `$c[57]`, `wheel_m` is `$c[58]`,
+                  `pedal_m` is `$c[59]` and `rim_deg` is `$c[60]`.
 demo.log          every step the driver took, with timings
 ```
 

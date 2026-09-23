@@ -54,6 +54,20 @@ use inf_ecs::world::EcsWorld;
 use super::ecs::PhysicsBridge3D;
 use super::{CastTargets, ColliderId3D, ColliderShape3D};
 
+/// **What one boarding body may add to a fixed step**, milliseconds, over the
+/// same step with that body standing still — the whole step (movement,
+/// vehicles, gameplay, the solver, the write-back with its hands and feet, and
+/// the pose's IK), worst phase, RELEASE build, off CI. The population is ONE
+/// boarding body: a player boards one car at a time. Measured and reported in
+/// `veh3d_gate::a_boarding_costs_what_it_costs`; see `docs/profiling.md`.
+pub const BOARDING_STEP_BUDGET_MS: f64 = 0.25;
+
+/// **What the post-solve hands-and-feet pass may cost at SIXTY-FOUR seated
+/// drivers**, milliseconds, RELEASE, off CI — the population
+/// `VEHICLE_STEP_BUDGET_MS` is named at. Measured and reported in
+/// `veh3d_gate::sixty_four_seated_drivers_cost_what_they_cost`.
+pub const SEATED_POSTURE_BUDGET_MS: f64 = 0.5;
+
 /// **One car, as the boarding sees it this step** — the live pose off the
 /// solver and the geometry off the level.
 #[derive(Clone, Debug)]
@@ -315,21 +329,96 @@ pub fn clear_exit(
     if let Some(c) = own {
         clear_ex.insert(c);
     }
+    // The ground a body may be put down on is the car's OWN ground: not a wall
+    // top the probe happened to land on (a slab against the flank is ground
+    // at two metres to a ray cast from above it), and not a drop.
+    let car_bottom = car.pos.y + car.offset.y - car.half.y.abs();
     for (i, cand) in board::exit_candidates(preferred_local, car.half, car.offset)
         .iter()
         .enumerate()
     {
         let mut at = car.world(*cand);
         at.y = car.pos.y;
-        let Some(ground) = ground_under(bridge, at, &ground_ex) else {
-            continue;
+        // **No ground at all is WATER (or a drop), and that is an exit** — a
+        // boat's occupant steps over the side and swims, which is what P29.7's
+        // exit always did. The body is put down level with the car's own
+        // underside and falls from there; ground that IS there but at a wall's
+        // height is refused.
+        let ground = match ground_under(bridge, at, &ground_ex) {
+            Some(g) => {
+                if g > car_bottom + EXIT_STEP_UP_M || g < car_bottom - EXIT_STEP_DOWN_M {
+                    continue;
+                }
+                g
+            }
+            None => car_bottom,
         };
         let feet = DVec3::new(at.x, ground + PLACE_SKIN_M, at.z);
-        if capsule_clear(bridge, feet, half_height, radius, &clear_ex) {
-            return Some((feet, i));
+        if !capsule_clear(bridge, feet, half_height, radius, &clear_ex) {
+            continue;
         }
+        // **AND THE WAY THERE** — a point beyond a wall is a point a body would
+        // have to pass through the wall to reach. The body's own capsule is
+        // swept from inside the car (the car's own colliders excluded) out to
+        // the point; anything in between refuses the candidate.
+        let side = if cand.x - car.offset.x >= 0.0 { 1.0 } else { -1.0 };
+        let inside = Vec3d::new(
+            car.offset.x + side * 0.4 * car.half.x.abs(),
+            0.0,
+            cand.z.clamp(
+                car.offset.z - car.half.z.abs(),
+                car.offset.z + car.half.z.abs(),
+            ),
+        );
+        let from_w = car.world(inside);
+        let from = DVec3::new(from_w.x, feet.y, from_w.z);
+        if path_blocked(bridge, from, feet, half_height, radius, &ground_ex) {
+            continue;
+        }
+        return Some((feet, i));
     }
     None
+}
+
+/// How far ABOVE the car's own underside a body may be put down, metres — a
+/// kerb, not a wall top.
+pub const EXIT_STEP_UP_M: f64 = 0.5;
+
+/// How far BELOW it, metres — a gutter, not a drop.
+pub const EXIT_STEP_DOWN_M: f64 = 1.5;
+
+/// Whether a standing capsule swept from `from` to `to` (feet points) meets
+/// anything solid on the way, the car's own colliders and the body's excluded.
+fn path_blocked(
+    bridge: &mut PhysicsBridge3D,
+    from: DVec3,
+    to: DVec3,
+    half_height: f64,
+    radius: f64,
+    exclude: &BTreeSet<ColliderId3D>,
+) -> bool {
+    let d = to - from;
+    let len = d.length();
+    if len <= 1e-6 {
+        return false;
+    }
+    let r = (radius - CLEAR_SHRINK_M).max(0.05);
+    let centre = from + DVec3::Y * (half_height + radius + CLEAR_SHRINK_M);
+    bridge
+        .world_mut()
+        .cast_shape_where(
+            &ColliderShape3D::Capsule {
+                half_height: half_height.max(0.0),
+                radius: r,
+            },
+            centre,
+            DQuat::IDENTITY,
+            d / len,
+            len,
+            exclude,
+            CastTargets::AllSolid,
+        )
+        .is_some()
 }
 
 /// **Who is in one seat of one car**, or `None` — the inverse of
@@ -428,12 +517,22 @@ pub fn begin(
     if let Some(c) = bridge.collider_of(guid) {
         exclude.insert(c);
     }
+    let lift = cm.stand_half_height_m + radius;
     let mut take_w = car.world(take);
     take_w.y = car.pos.y;
-    let Some(ground_y) = ground_under(bridge, take_w, &exclude) else {
-        return Begin::NoCar;
+    // **A stance over no ground is not walked to** — a boat at a jetty, a
+    // helicopter's far side over a drop. The body boards from where it stands,
+    // which is exactly P29.7's warp: the approach becomes a turn in place and
+    // the door phase has nothing to open.
+    let (take, back, ground_y) = match ground_under(bridge, take_w, &exclude) {
+        Some(g) => (take, back, g),
+        None => {
+            let here = car.local(position);
+            let stay = Vec3d::new(here.x, 0.0, here.z);
+            take_w = car.world(stay);
+            (stay, stay, position.y - lift - PLACE_SKIN_M)
+        }
     };
-    let lift = cm.stand_half_height_m + radius;
     let end = DVec3::new(take_w.x, ground_y + PLACE_SKIN_M + lift, take_w.z);
     // The facing to arrive at: the flank's INWARD normal — the body faces the
     // car, the doc's "lock character facing vector to vehicle side normal".
@@ -472,7 +571,13 @@ pub fn begin(
         let shoulder = end + toward * (SHOULDER_HALF_SPAN_FRAC * standing);
         DVec3::new(handle.x - shoulder.x, 0.0, handle.z - shoulder.z).length()
     };
-    let dip = board::reach_dip_m(standing, ground_y, handle.y, plan);
+    // No door, no handle: a car whose door is in the road (or that never had
+    // one) is boarded through the opening and nobody bends to reach nothing.
+    let dip = if door.is_nil() {
+        0.0
+    } else {
+        board::reach_dip_m(standing, ground_y, handle.y, plan)
+    };
 
     let mut b = BoardingState {
         vehicle: chassis,
@@ -906,7 +1011,7 @@ fn has_rig(world: &EcsWorld, e: inf_ecs::Entity) -> bool {
 /// gate read a measurement of the solve and not a restatement of the goal.
 pub fn follow_boarding(bridge: &mut PhysicsBridge3D, world: &mut EcsWorld) -> BoardingReport {
     let mut report = BoardingReport::default();
-    if bridge.vehicle_guids().is_empty() {
+    if bridge.vehicle_count() == 0 {
         return report;
     }
     for guid in model::movement_targets(world) {
@@ -1001,7 +1106,11 @@ pub fn follow_boarding(bridge: &mut PhysicsBridge3D, world: &mut EcsWorld) -> Bo
         } else {
             b.phase
         };
-        let ramp = if b.phase == BoardPhase::Idle {
+        // The hands arrive on a ramp at the start of a phase that puts them
+        // somewhere new — and do NOT at the start of `Exiting`, which begins
+        // with the hands already on the rim and the pull (a ramp there dropped
+        // both hands off the wheel for a fifth of a second on the press).
+        let ramp = if matches!(b.phase, BoardPhase::Idle | BoardPhase::Exiting) {
             1.0
         } else {
             board::phase_hand_weight(phase, b.time_s)
@@ -1094,7 +1203,13 @@ pub fn follow_boarding(bridge: &mut PhysicsBridge3D, world: &mut EcsWorld) -> Bo
                         let side = nearest_hand(h);
                         let shut = b.door_deg <= board::DOOR_SHUT_DEG;
                         let warping = phase == BoardPhase::Exiting && b.mark_s >= 0.0;
-                        if !shut && !warping {
+                        // Seated: pulling it SHUT, so only while it is open.
+                        // Exiting: pushing it OPEN, from the press to the warp.
+                        let pulling = match phase {
+                            BoardPhase::Seated => !shut,
+                            _ => !warping,
+                        };
+                        if pulling {
                             hands[side] = Some((h, ramp * reach_w(side, h)));
                             hand_side = side as u8;
                             if side == 1 {
@@ -1285,8 +1400,9 @@ fn dt_eps() -> f64 {
 pub const ANKLE_ABOVE_GROUND_M: f64 = 0.08;
 
 /// **The rack angle, as the rim shows it** — the mean steer of the wheels that
-/// steer, turned into rim degrees by the chassis's own `max_steer_deg`.
-fn vehicle_steer(world: &EcsWorld, bridge: &PhysicsBridge3D, chassis: Uuid) -> f64 {
+/// steer, turned into rim degrees by the chassis's own `max_steer_deg`. The
+/// number `hero.csv`'s `rim_deg` carries and the hands' grips turn by.
+pub fn vehicle_steer(world: &EcsWorld, bridge: &PhysicsBridge3D, chassis: Uuid) -> f64 {
     let Some(v) = bridge.vehicle_of(chassis) else {
         return 0.0;
     };

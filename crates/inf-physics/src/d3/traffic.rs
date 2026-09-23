@@ -348,7 +348,8 @@ pub fn step_traffic(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64)
                     // fleet carries a front-seat passenger, drawn from the car's
                     // own guid, built beside the driver and taken away with it.
                     if driver && traffic::carries_passenger(guid) {
-                        ensure_passenger(world, bridge, guid, &archetype, at);
+                        stats.passengers +=
+                            usize::from(ensure_passenger(world, bridge, guid, &archetype, at));
                     }
                     if obstacles.is_none() {
                         obstacles = Some(obstacles_of(world));
@@ -616,6 +617,30 @@ fn ensure_driver(
     }
     super::vehicle::park_collider(bridge, driver, true);
     true
+}
+
+/// **Seat a driver and a passenger in a parked car** (wave VEH3d) — the
+/// traffic tier's own two doors, [`ensure_driver`] and [`ensure_passenger`],
+/// for a car the tier is not steering, and the car marked TAKEN so it never
+/// will: the people in it are the car's, not the commute's.
+///
+/// The preview door `INF_PIE_TUNE_VEHICLE`'s `occupy` directive reaches this,
+/// so a demo loop can walk up to an occupied car and carjack it without
+/// waiting for a traffic car to stop at the right kerb. Nothing in the shipped
+/// game calls it. Answers whether both seats hold somebody afterwards.
+pub fn occupy(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, chassis: Uuid) -> bool {
+    let Some(at) = world
+        .entity_of(chassis)
+        .and_then(|e| world.world().get::<Transform>(e))
+        .map(|t| t.translation.to_dvec3())
+    else {
+        return false;
+    };
+    let archetype = inf_ecs::society::level_archetype(world);
+    let driver = ensure_driver(world, bridge, chassis, &archetype, at);
+    let rider = ensure_passenger(world, bridge, chassis, &archetype, at);
+    traffic::mark_taken(world, chassis);
+    driver && rider
 }
 
 /// **Put a passenger in the front seat** (wave VEH3d) — [`ensure_driver`]'s
