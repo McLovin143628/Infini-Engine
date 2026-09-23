@@ -1725,7 +1725,11 @@ fn drive_grid(sim: &mut inf_player::runtime_sim::RuntimeSim, step: u32) {
         {
             v.control(VehicleControls {
                 throttle: 0.6,
-                steer: if (step / 45) % 2 == 0 { 0.15 } else { -0.15 },
+                steer: if (step / 45).is_multiple_of(2) {
+                    0.15
+                } else {
+                    -0.15
+                },
                 occupied: true,
                 ..Default::default()
             });
