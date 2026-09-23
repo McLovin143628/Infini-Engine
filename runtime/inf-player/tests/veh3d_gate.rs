@@ -1738,9 +1738,15 @@ fn pie_equals_shipping_on_a_board_drive_exit_course() {
     /// The course, as (interact edge, move_y, handbrake held) per step: board,
     /// drive two seconds, HANDBRAKE to a stop (a press at speed would be the
     /// bail-out, which `a_moving_exit_is_a_roll` owns), get out on foot.
-    fn course(step: u32) -> (bool, f32, bool) {
+    ///
+    /// The CARJACK course presses every fourth step for a second from step
+    /// 60, because the victim's resist draw is a function of the step and a
+    /// player presses until the door gives; a press made while the machine
+    /// runs is ignored by it, and the drive starts long after the last one.
+    fn course(step: u32, jack: bool) -> (bool, f32, bool) {
         match step {
             60 => (true, 0.0, false),
+            61..=120 if jack && step % 4 == 0 => (true, 0.0, false),
             400..=520 => (false, 1.0, false),
             521..=700 => (false, 0.0, true),
             720 => (true, 0.0, false),
@@ -1863,7 +1869,7 @@ fn pie_equals_shipping_on_a_board_drive_exit_course() {
         let mut sim = RuntimeSim::new(world, Vec::new(), glam::DVec2::new(0.0, -9.81), HZ);
         (0..STEPS)
             .map(|i| {
-                let (press, y, brake) = course(i);
+                let (press, y, brake) = course(i, jack);
                 let mut input = RuntimeInput::default();
                 if press {
                     input = input.press(INTERACT);
@@ -1910,7 +1916,7 @@ fn pie_equals_shipping_on_a_board_drive_exit_course() {
             SimSession::enter(&mut doc, Vec::new(), glam::DVec2::new(0.0, -9.81), HZ);
         let out = (0..STEPS)
             .map(|i| {
-                let (press, y, brake) = course(i);
+                let (press, y, brake) = course(i, jack);
                 let mut down: Vec<&str> = if press { vec![INTERACT] } else { Vec::new() };
                 if brake {
                     down.push(HANDBRAKE);
@@ -1934,9 +1940,20 @@ fn pie_equals_shipping_on_a_board_drive_exit_course() {
     let what = if jack { "carjack" } else { "board" };
     let loud = shipped.iter().filter(|r| !r.0.is_empty()).count();
     let phases: std::collections::BTreeSet<u8> = shipped.iter().map(|r| r.2).collect();
+    let victim: std::collections::BTreeSet<u8> = shipped.iter().map(|r| r.4).collect();
     println!(
-        "=== PIE == shipping on a board / drive / exit course ===\n  {STEPS} steps; {loud} folded boarding bytes; phases seen {phases:?}"
+        "=== PIE == shipping on a {what} / drive / exit course ===\n  {STEPS} steps; {loud} folded boarding bytes; phases seen {phases:?}; the driver's {victim:?}"
     );
+    if jack {
+        assert!(
+            victim.contains(&BoardPhase::Jacked.as_u8()),
+            "the carjack course never pulled the driver out — it compares a boarding"
+        );
+        assert!(
+            shipped.iter().any(|r| r.0.len() >= 2 * board::BOARDING_TRACE_BYTES),
+            "the carjack never folded two rows at once (the hero and the victim)"
+        );
+    }
     for p in [
         BoardPhase::Unlocking,
         BoardPhase::OpeningDoor,
