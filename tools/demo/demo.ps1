@@ -101,6 +101,13 @@ param(
     # reach a car before earlier legs walk it away). The full run still runs the
     # leg too, as section 6z4.
     [switch]$BoardingOnly,
+    # **THE AUDIO LEG ON ITS OWN** (wave VEH3e). Runs `Invoke-Veh3eLeg` straight
+    # after the player is up and skips every other leg, `-BoardingOnly`'s shape.
+    [switch]$AudioOnly,
+    # **WRITE THE SESSION'S AUDIO TO A WAV** (wave VEH3e), `INF_RENDER_AUDIO`:
+    # the player's mixer renders to this file (through the same kira mixer the
+    # device path uses) instead of to a device. Empty is off.
+    [string]$RenderAudio = "",
     # **SLOW MOTION FOR THE PREVIEW** (wave VEH3d), `INF_PIE_TIME_SCALE`: a
     # factor in [0.05, 1] on the wall time the player feeds its fixed step.
     # The steps are the same steps, just fewer per wall second. A boarding's
@@ -514,6 +521,8 @@ if ($BoardHold -ne "") { $env:INF_PIE_BOARD_HOLD = $BoardHold; Say "board hold: 
 else { Remove-Item env:INF_PIE_BOARD_HOLD -ErrorAction Ignore }
 if ($Cutaway -gt 0.0 -and $Cutaway -lt 1.0) { $env:INF_PIE_CUTAWAY = "$Cutaway"; Say "cutaway: the seated car drawn at alpha $Cutaway" }
 else { Remove-Item env:INF_PIE_CUTAWAY -ErrorAction Ignore }
+if ($RenderAudio -ne "") { $env:INF_RENDER_AUDIO = $RenderAudio; Say "render audio: the session's mix is written to $RenderAudio" }
+else { Remove-Item env:INF_RENDER_AUDIO -ErrorAction Ignore }
 if ($TimeScale -lt 1.0) { $env:INF_PIE_TIME_SCALE = "$TimeScale"; Say "time scale: $TimeScale (the preview's fixed steps per wall second)" }
 else { Remove-Item env:INF_PIE_TIME_SCALE -ErrorAction Ignore }
 # The boarding leg's stretch: its timeouts and its key presses, by 1/scale.
@@ -1084,11 +1093,103 @@ function Invoke-Veh3dLeg {
     Say ("VEH3d RESIDUALS: hand on a handle " + (& $fmt $hands) + "; hands on the rim " + (& $fmt $wheels) + "; feet on the pedals " + (& $fmt $pedals))
 }
 
+
+# ── 6z5. WAVE VEH3e — THE CAR'S VOICE, AND WHAT ITS ELEVEN COLUMNS SEE ───────
+#
+# Every frame TRIGGERED on `hero.csv`'s eleven new columns rather than slept for.
+# Zero-based, at the TAIL so every index above keeps its meaning:
+#
+#   61  gear           the gear engaged
+#   62  load           what the grains are crossfaded by (0 under a fuel cut)
+#   63  slip_front     the front axle's worst NORMALISED slip (1 = the peak)
+#   64  slip_rear      the rear's
+#   65  voice_surface  sealed / loose / soft -- the rear squeal's clip
+#   66  grain_pitch    the loudest grain's playback rate, off the AUDIO ENGINE
+#   67  whine_pitch    the whine's playback rate, off the audio engine
+#   68  squeal_front   the front squeal's volume, off the audio engine
+#   69  squeal_rear    the rear's
+#   70  voice_cmds     commands the car's keys queued a step since the last row
+#   71  thumps         surface impulses PLAYED since the last row
+#
+# The leg is a FUNCTION so `-AudioOnly` runs it on its own, straight after the
+# player is up: board the nearest car, idle, a full-throttle launch through the
+# gears (the burnout at the line, the shifts), lift, a handbrake slide, and get
+# out -- with `-RenderAudio` the whole session is written to a WAV through the
+# offline mixer.
+function Invoke-Veh3eLeg {
+    Restore-PlayerFocus "before the audio leg"
+    Stand-Up "before the audio leg" | Out-Null
+    $isRow = { param($c) $c.Count -gt 71 }
+    $began = $false
+    for ($k = 0; $k -lt 30 -and -not $began; $k++) {
+        [InfInput]::Down(0x12); Start-Sleep -Milliseconds 70; [InfInput]::Up(0x12)   # E
+        $began = @(Wait-ForHero -Csv $heroCsv -What "the boarding begins" -TimeoutS 1.0 `
+            -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^(locked|unlocking|opening)") })[-1]
+        if (-not $began -and $k -ge 3) {
+            if (($k % 3) -eq 0) {
+                for ($i = 0; $i -lt 14; $i++) { [InfInput]::Look(15, 0); Start-Sleep -Milliseconds 16 }
+            }
+            [InfInput]::Down(0x11); Start-Sleep -Milliseconds 300; [InfInput]::Up(0x11)   # W
+        }
+    }
+    if (-not $began) {
+        Say "VEH3e: NO BOARDING began in thirty taps of E -- none of the audio frames is in this session"
+        return
+    }
+    $atWheel = @(Wait-ForHero -Csv $heroCsv -What "at the wheel, the engine started" -TimeoutS 8.0 `
+        -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^driving") -and ([double]$c[66] -gt 0.0) })[-1]
+    if (-not $atWheel) {
+        Say "VEH3e: the hero never reached a running engine -- the audio frames are not in this session"
+        return
+    }
+    Wait-ForHero -Csv $heroCsv -What "idling (the grain at an idle's playback rate)" -TimeoutS 4.0 `
+        -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^driving") -and ([double]$c[6] -lt 0.3) -and ([double]$c[66] -gt 0.0) -and ([double]$c[66] -lt 0.6) } `
+        -Out (Join-Path $OutDir "120-veh3e-idle.png") | Out-Null
+    Start-Sleep -Milliseconds 800
+    # THE LAUNCH: the burnout at the line, then the shifts.
+    [InfInput]::Down(0x11)   # W
+    Wait-ForHero -Csv $heroCsv -What "the burnout (rear slip past the peak, below 5 m/s, the squeal loud)" -TimeoutS 4.0 `
+        -Predicate { param($c) (& $isRow $c) -and ([double]$c[64] -gt 1.5) -and ([double]$c[6] -lt 5.0) -and ([double]$c[69] -gt 0.2) } `
+        -Out (Join-Path $OutDir "121-veh3e-burnout.png") | Out-Null
+    Wait-ForHero -Csv $heroCsv -What "the first upshift (gear 2, the whine stepped down)" -TimeoutS 10.0 `
+        -Predicate { param($c) (& $isRow $c) -and ([int]$c[61] -ge 2) -and ([double]$c[67] -gt 0.0) } `
+        -Out (Join-Path $OutDir "122-veh3e-shift.png") | Out-Null
+    Wait-ForHero -Csv $heroCsv -What "a kerb or a landing (a surface impulse played)" -TimeoutS 6.0 `
+        -Predicate { param($c) (& $isRow $c) -and ([int]$c[71] -gt 0) -and ([double]$c[6] -gt 3.0) } `
+        -Out (Join-Path $OutDir "123-veh3e-thump.png") | Out-Null
+    [InfInput]::Up(0x11)
+    # THE SLIDE: a handbrake turn at speed.
+    [InfInput]::Down(0x20); [InfInput]::Down(0x39)   # D + space
+    Wait-ForHero -Csv $heroCsv -What "the handbrake slide (the squeal loud above 8 m/s)" -TimeoutS 4.0 `
+        -Predicate { param($c) (& $isRow $c) -and ([double]$c[69] -gt 0.3) -and ([double]$c[6] -gt 8.0) } `
+        -Out (Join-Path $OutDir "124-veh3e-slide.png") | Out-Null
+    [InfInput]::Up(0x20)
+    Wait-ForHero -Csv $heroCsv -What "stopped" -TimeoutS 8.0 `
+        -Predicate { param($c) (& $isRow $c) -and ([double]$c[6] -lt 0.4) } | Out-Null
+    [InfInput]::Up(0x39)
+    Start-Sleep -Milliseconds 500
+    [InfInput]::Down(0x12); Start-Sleep -Milliseconds 70; [InfInput]::Up(0x12)   # E
+    Wait-ForHero -Csv $heroCsv -What "out, the door closing" -TimeoutS 8.0 `
+        -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^closing") } `
+        -Out (Join-Path $OutDir "125-veh3e-closing.png") | Out-Null
+    $all = @(Get-Content $heroCsv -ErrorAction Ignore | Where-Object { $_ -match "^[0-9]" } |
+        Where-Object { ($_ -split ",").Count -gt 71 })
+    $gears = @($all | ForEach-Object { ($_ -split ",")[61] } | Select-Object -Unique)
+    $surf = @($all | ForEach-Object { ($_ -split ",")[65] } | Select-Object -Unique)
+    $thumps = ($all | ForEach-Object { [int](($_ -split ",")[71]) } | Measure-Object -Sum).Sum
+    $cmds = @($all | ForEach-Object { [double](($_ -split ",")[70]) } | Where-Object { $_ -gt 0 })
+    Say ("VEH3e COLUMNS: gears " + ($gears -join " ") + "; surfaces " + ($surf -join " ") + "; thumps $thumps; voice_cmds per step, mean " + $(if ($cmds.Count -gt 0) { "{0:N2}" -f (($cmds | Measure-Object -Average).Average) } else { "-" }))
+}
+
 if ($BoardingOnly) {
     Say "BOARDING ONLY (-BoardingOnly): the boarding leg, and nothing else"
     Invoke-Veh3dLeg
 }
-if (-not $BoardingOnly) {
+if ($AudioOnly) {
+    Say "AUDIO ONLY (-AudioOnly): the audio leg, and nothing else"
+    Invoke-Veh3eLeg
+}
+if (-not $BoardingOnly -and -not $AudioOnly) {
 
 # ── 5a. THE ISLAND'S OWN SIDEARM, with no environment variable ───────────────
 #
@@ -2751,7 +2852,7 @@ else {
     }
 }
 
-}   # -not $BoardingOnly (sections 5 .. 5e)
+}   # -not $BoardingOnly -and -not $AudioOnly (sections 5 .. 5e)
 
 # ── 6. what the hero did, in metres ──────────────────────────────────────────
 if (Test-Path $heroCsv) {
@@ -2799,7 +2900,7 @@ if (Test-Path $heroCsv) {
 Say ("windows now: " + ((Get-Process | Where-Object { $_.MainWindowTitle -ne "" -and ($_.ProcessName -like "inf*") } |
     ForEach-Object { "$($_.ProcessName)[$($_.Id)] '$($_.MainWindowTitle)'" }) -join " | "))
 
-if (-not $BoardingOnly) {
+if (-not $BoardingOnly -and -not $AudioOnly) {
 # ── 6z. WAVE VEH3a — THE TYRES, AND WHAT THE GROUND UNDER THEM IS ────────────
 #
 # Four frames, every one TRIGGERED on `hero.csv`'s eight new columns rather than
@@ -3332,7 +3433,9 @@ if (-not $veh_driving) {
 
 # ── 6z4. WAVE VEH3d — the boarding leg, in a full run ────────────────────────
 Invoke-Veh3dLeg
-}   # -not $BoardingOnly (sections 6z .. 6z4)
+# ── 6z5. WAVE VEH3e — the audio leg, in a full run ───────────────────────────
+Invoke-Veh3eLeg
+}   # -not $BoardingOnly -and -not $AudioOnly (sections 6z .. 6z5)
 
 # ── 7. close ─────────────────────────────────────────────────────────────────
 if ($KeepOpen) {

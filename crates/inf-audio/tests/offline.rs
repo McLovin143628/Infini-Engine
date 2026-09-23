@@ -2,7 +2,6 @@
 //! kira's own mixer, clocked by the caller, and what it renders is measured —
 //! the device path, Ring-0, with no device.
 
-use glam::DVec3;
 use uuid::Uuid;
 
 use inf_audio::{AudioCommand, AudioEngine, PlayCommand, SoundData};
@@ -106,8 +105,6 @@ fn a_grain_at_a_pitch_fires_at_its_revs() {
     let mut play = PlayCommand::new(9, Uuid::from_u128(2), "sfx");
     play.looping = true;
     play.pitch = 4_800.0 / 2_400.0;
-    play.position = None;
-    let _ = DVec3::ZERO;
     let x = render(&mut engine, &[AudioCommand::Play(play)], &data, 60);
     let rect: Vec<f64> = x[x.len() / 2..].iter().map(|v| v.abs()).collect();
     let mean = rect.iter().sum::<f64>() / rect.len() as f64;

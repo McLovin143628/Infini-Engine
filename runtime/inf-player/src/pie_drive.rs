@@ -1691,8 +1691,10 @@ impl HeroLog {
         // what the AUDIO ENGINE HOLDS — the loudest grain's pitch, the whine's
         // pitch, the two squeals' volumes, read back off its voices with
         // `voice_params` — and how many commands the car's keys queued a step
-        // since the last row, read off the stream. None of the five is what the
-        // planner meant to send.
+        // since the last row, read off the stream — and `thumps`, the surface
+        // impulses (a kerb, a landing) the stream PLAYED since the last row,
+        // which is what a frame of a kerb is triggered on. None of these is
+        // what the planner meant to send.
         let queued = sim.audio_commands_queued();
         let fresh = queued.saturating_sub(self.audio_seen) as usize;
         let stepped = sim.steps().saturating_sub(self.steps_seen).max(1);
@@ -1724,6 +1726,7 @@ impl HeroLog {
             v_sq_f,
             v_sq_r,
             v_cmds,
+            v_thumps,
         ) = match voice {
             Some((car, t)) => {
                 use inf_ecs::vehicle_audio::{entity_key, voice_key, SurfaceVoice, VoiceLayer};
@@ -1748,6 +1751,14 @@ impl HeroLog {
                     .iter()
                     .filter(|c| c.source().is_some_and(|s| keys.contains(&s)))
                     .count();
+                let impulses = [
+                    voice_key(key, VoiceLayer::ImpulseFront),
+                    voice_key(key, VoiceLayer::ImpulseRear),
+                ];
+                let thumps = tail
+                        .iter()
+                        .filter(|c| matches!(c, inf_audio::AudioCommand::Play(p) if impulses.contains(&p.source)))
+                        .count();
                 (
                     t.gear,
                     t.load(),
@@ -1759,13 +1770,14 @@ impl HeroLog {
                     params(VoiceLayer::SquealFront).map(|x| x.0).unwrap_or(0.0),
                     params(VoiceLayer::SquealRear).map(|x| x.0).unwrap_or(0.0),
                     n as f64 / stepped as f64,
+                    thumps,
                 )
             }
-            None => (0, 0.0, 0.0, 0.0, "-", 0.0, 0.0, 0.0, 0.0, 0.0),
+            None => (0, 0.0, 0.0, 0.0, "-", 0.0, 0.0, 0.0, 0.0, 0.0, 0),
         };
         let line = match &probe.hero {
             Some(h) => format!(
-                "{:.3},{},{:.4},{:.4},{:.4},{},{:.4},{:.4},{:.2},{:.2},{:.2},{},{},{:.4},{:.4},{:.2},{},{},{},{:.3},{},{:.3},{},{:.3},{:.4},{:.4},{:.4},{},{},{},{},{},{},{},{},{},{:.1},{:.1},{:.1},{:.1},{:.1},{},{:.4},{:.4},{:.3},{:.0},{:.3},{:.3},{},{:.1},{:.1},{},{},{},{},{},{:.4},{:.1},{:.4},{:.4},{:.1},{},{:.2},{:.3},{:.3},{},{:.3},{:.3},{:.3},{:.3},{:.2}\n",
+                "{:.3},{},{:.4},{:.4},{:.4},{},{:.4},{:.4},{:.2},{:.2},{:.2},{},{},{:.4},{:.4},{:.2},{},{},{},{:.3},{},{:.3},{},{:.3},{:.4},{:.4},{:.4},{},{},{},{},{},{},{},{},{},{:.1},{:.1},{:.1},{:.1},{:.1},{},{:.4},{:.4},{:.3},{:.0},{:.3},{:.3},{},{:.1},{:.1},{},{},{},{},{},{:.4},{:.1},{:.4},{:.4},{:.1},{},{:.2},{:.3},{:.3},{},{:.3},{:.3},{:.3},{:.3},{:.2},{}\n",
                 sim.steps() as f64 / 60.0,
                 probe.frame,
                 h.position[0],
@@ -1847,7 +1859,8 @@ impl HeroLog {
                 v_whine,
                 v_sq_f,
                 v_sq_r,
-                v_cmds
+                v_cmds,
+                v_thumps
             ),
             // **`no-hero` NAMES THE MODE COLUMN** (WPN2b audit, carried 224).
             //
@@ -1861,11 +1874,11 @@ impl HeroLog {
             // wave FIX1 and harmless only because no predicate happened to
             // match either spelling.
             //
-            // The row is 71 fields wide since wave VEH3e — 61 at VEH3d plus
-            // the ten audio columns — which the gate asserts against the
+            // The row is 72 fields wide since wave VEH3e — 61 at VEH3d plus
+            // the eleven audio columns — which the gate asserts against the
             // armed branch above it and against the demo README.
             None => format!(
-                "{:.3},{},,,,no-hero,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,\n",
+                "{:.3},{},,,,no-hero,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,\n",
                 sim.steps() as f64 / 60.0,
                 probe.frame
             ),
