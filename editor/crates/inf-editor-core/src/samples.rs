@@ -11616,6 +11616,13 @@ mod tests {
             // …and the vehicle library (wave VEH3e), for the same reason.
             crate::vehicle_audio::write_vehicle_audio_library(&vehicle_audio_dir())
                 .expect("regenerate the vehicle sound library");
+            // …and the hero bodies (wave VEH3f), for the same reason: five
+            // island rows name these eighteen mesh GUIDs, and both recipes copy
+            // the files.
+            crate::vehicle_bodies::write_vehicle_bodies(
+                &crate::vehicle_bodies::vehicle_bodies_dir(),
+            )
+            .expect("regenerate the hero bodies");
             write_city().expect("regenerate the island city");
             write_gameplay().expect("regenerate the island gameplay fixture");
             crate::heist::write_heist().expect("regenerate the harbour heist mission");
@@ -12545,6 +12552,40 @@ mod tests {
             }
         } else {
             eprintln!("SKIP: the vehicle sound library has not been blessed yet");
+        }
+
+        // **The hero bodies (wave VEH3f)**, on the vehicle library's terms: the
+        // file SET, the bytes, and each sidecar's GUID the Ring-0 rule computes
+        // (`inf_ecs::vehicle::hero_part_mesh_guid`).
+        let hdir = crate::vehicle_bodies::vehicle_bodies_dir();
+        if hdir.join("Sedan_lower.inf_mesh").exists() {
+            let mut have: Vec<String> = std::fs::read_dir(&hdir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            have.sort();
+            assert_eq!(
+                have,
+                crate::vehicle_bodies::hero_files(),
+                "the committed hero bodies are not the file SET the generator writes"
+            );
+            for m in crate::vehicle_bodies::hero_meshes() {
+                let p = hdir.join(&m.file);
+                let want = inf_asset::encode(&m.asset).expect("the mesh encodes");
+                assert_eq!(
+                    std::fs::read(&p).unwrap(),
+                    want,
+                    "committed {} drifted from the generator",
+                    p.display()
+                );
+                let side = inf_asset::AssetSidecar::load(&p)
+                    .unwrap_or_else(|e| panic!("{} has no sidecar: {e}", p.display()));
+                assert_eq!(side.guid.0, m.guid, "{}'s committed GUID", m.file);
+            }
+        } else {
+            eprintln!("SKIP: the hero bodies have not been blessed yet");
         }
 
         // **The settlement zone library (wave I8a).** Every file, and the file

@@ -1075,6 +1075,10 @@ pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
     // over its own contact, which is `island_gate::every_parked_island_vehicle_
     // rests_on_its_wheels_and_drives`' whole subject.
     let mut civilian_spots: Vec<DVec3> = Vec::new();
+    // **Every authored vehicle's spot and half-length** (wave VEH3f) -- the
+    // register the roster's lots test their clearance against, across the
+    // whole island rather than per settlement.
+    let mut authored_spots: Vec<(DVec3, f64)> = Vec::new();
     for (n, plan) in plans.iter().enumerate() {
         // **The whole fleet reaches the island** (island wave VEH2a). A city
         // parks the two road cars, a town the working vehicles and the wagon,
@@ -1108,6 +1112,7 @@ pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
             v.z,
         );
         civilian_spots.push(civilian_at);
+        authored_spots.push((civilian_at, def.half_extents.z));
         crate::vehicle::spawn_vehicle(
             &mut doc,
             guid,
@@ -1232,6 +1237,7 @@ pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
                     at = spot(step);
                 }
                 parked.push(at);
+                authored_spots.push((at, def.half_extents.z));
                 let guid = derived(
                     name,
                     &format!("island.ems.{}.{}.{}.{k}.{id}", b.site, b.col, b.row),
@@ -1260,6 +1266,114 @@ pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
                         engine_voice: false,
                     },
                 );
+            }
+        }
+    }
+
+    // ── THE ROSTER ON THE ISLAND (wave VEH3f) ────────────────────────────────
+    //
+    // Traffic draws the roster by class weight (`inf_ecs::traffic::catalogue_
+    // row`); what it never draws -- plant, freight and anything articulated --
+    // is PLACED here, at the venues those classes belong to: a construction
+    // site on Eastgate's road and a freight yard on Harbour City's. Both on the
+    // committed ROUTE VERTICES (the only committed ground height this generator
+    // may read -- `inf_terrain::` is banned here), walked forward from the
+    // settlement's nearest vertex past the civilian car and the emergency
+    // aprons, one vehicle per vertex that clears the last by its own length,
+    // and every spot tested against every authored vehicle already parked
+    // (`authored_spots`). Parked, not idling: `engine_voice` off, the EMS
+    // fleet's reason.
+    let roster = inf_ecs::roster::roster();
+    for (site, lot) in ROSTER_LOTS {
+        let Some(plan) = plans.iter().find(|p| p.name == *site) else {
+            continue;
+        };
+        let walk = route_walk(&design.routes, plan.centre, ROSTER_LOT_SKIP_M);
+        let mut cursor = 0usize;
+        let mut last_d = f64::NEG_INFINITY;
+        let mut last_half = 0.0f64;
+        for (k, row) in lot.iter().enumerate() {
+            let (tractor_id, trailer_id) = match row.split_once('+') {
+                Some((a, b)) => (a, Some(b)),
+                None => (*row, None),
+            };
+            let Some(def) = roster.get(tractor_id).copied() else {
+                continue;
+            };
+            let trailer = trailer_id.and_then(|t| roster.get(t).copied());
+            // The whole rig's half-length, tail included.
+            let half =
+                def.half_extents.z + trailer.map(|t| t.half_extents.z * 2.0 - 1.0).unwrap_or(0.0);
+            let mut placed = None;
+            while cursor < walk.len() {
+                let (v, dir, d) = walk[cursor];
+                cursor += 1;
+                if d - last_d < last_half + half + ROSTER_LOT_GAP_M {
+                    continue;
+                }
+                let perp = glam::DVec2::new(-dir.y, dir.x);
+                let apron = perp * ROSTER_LOT_APRON_M;
+                let at = DVec3::new(
+                    v.x + apron.x,
+                    inf_ecs::vehicle::resting_origin_y(&def, v.y) + CAR_LIFT_M,
+                    v.z + apron.y,
+                );
+                if authored_spots
+                    .iter()
+                    .all(|(p, r)| (*p - at).length() >= r + half + ROSTER_LOT_GAP_M)
+                {
+                    placed = Some((at, dir, d));
+                    break;
+                }
+            }
+            let Some((at, dir, d)) = placed else {
+                break;
+            };
+            last_d = d;
+            last_half = half;
+            authored_spots.push((at, half));
+            let yaw_deg = inf_math::patan2_64(dir.x, dir.y).to_degrees();
+            let guid = derived(name, &format!("island.roster.{site}.{k}.{tractor_id}"));
+            let label = inf_ecs::roster::roster_label(tractor_id).unwrap_or(tractor_id);
+            crate::vehicle::spawn_vehicle(
+                &mut doc,
+                guid,
+                &def,
+                crate::vehicle::VehicleSpawn {
+                    name: label,
+                    at,
+                    yaw_deg,
+                    paint: car_paint(k + 7),
+                    clip: None,
+                    livery: None,
+                    engine_voice: false,
+                },
+            );
+            // **The articulated rig** -- the trailer on the tractor's fifth
+            // wheel, hitched by the SPHERICAL `Joint3D` the scene has carried
+            // since v6 (`inf_ecs::vehicle::hitch_joint`).
+            if let (Some(t), Some(tid)) = (trailer, trailer_id) {
+                if let (Some(tat), Some(joint)) = (
+                    inf_ecs::vehicle::hitched_trailer_at(at, yaw_deg, &def, &t),
+                    inf_ecs::vehicle::hitch_joint(guid, &def, &t),
+                ) {
+                    let tguid = derived(name, &format!("island.roster.{site}.{k}.{tid}"));
+                    crate::vehicle::spawn_vehicle(
+                        &mut doc,
+                        tguid,
+                        &t,
+                        crate::vehicle::VehicleSpawn {
+                            name: inf_ecs::roster::roster_label(tid).unwrap_or(tid),
+                            at: tat,
+                            yaw_deg,
+                            paint: inf_ecs::math::Color::new(0.82, 0.83, 0.85, 1.0),
+                            clip: None,
+                            livery: None,
+                            engine_voice: false,
+                        },
+                    );
+                    insert!(doc, tguid, joint);
+                }
             }
         }
     }
@@ -1746,6 +1860,91 @@ pub const HARBOUR_CITY: &str = "Harbour City";
 /// resting on a slipway. Far enough to be honest, close enough to swim to.
 pub const HARBOUR_OFFSHORE_M: f64 = 70.0;
 
+/// **The roster's lots on the island** (wave VEH3f): the settlement each lot is
+/// on and the rows parked there, in order along the road. `"a+b"` is an
+/// ARTICULATED rig -- tractor `a` with trailer `b` hitched at its fifth wheel.
+/// The construction rows are the six the UE bridge carries art for
+/// (`inf_ecs::roster::art_of`), so the island is where the imported machines
+/// stand when a machine has them, and their families' primitives when not.
+pub const ROSTER_LOTS: &[(&str, &[&str])] = &[
+    (
+        "Eastgate",
+        &[
+            "hvy_cutter",
+            "hvy_dozer",
+            "hvy_dump_truck",
+            "hvy_mixer",
+            "hvy_forklift",
+            "hvy_flatbed",
+        ],
+    ),
+    (
+        "Harbour City",
+        &[
+            "mtl_packer+jobuilt_box_trailer",
+            "jobuilt_hauler+mtl_tanker_trailer",
+        ],
+    ),
+];
+
+/// How far along the road from a settlement's nearest route vertex a lot
+/// starts, metres -- past the civilian car and the emergency aprons, which run
+/// to six 11 m pitches.
+pub const ROSTER_LOT_SKIP_M: f64 = 90.0;
+
+/// The gap a lot keeps between two of its vehicles, and between any of them and
+/// an authored vehicle already parked, metres.
+pub const ROSTER_LOT_GAP_M: f64 = 4.0;
+
+/// How far off the route's centreline a lot parks, metres -- the verge.
+pub const ROSTER_LOT_APRON_M: f64 = 7.0;
+
+/// **The route vertices after `centre`**, walked forward along the route whose
+/// vertex is nearest to it, each with its travel direction and its distance
+/// along the walk -- `(vertex, direction, metres)`, from `skip_m` on. The
+/// route's own committed vertices only: the one ground height this generator
+/// may read.
+pub fn route_walk(
+    routes: &[inf_island::Route],
+    centre: glam::DVec2,
+    skip_m: f64,
+) -> Vec<(DVec3, glam::DVec2, f64)> {
+    let mut best: Option<(f64, usize, usize)> = None;
+    for (ri, r) in routes.iter().enumerate() {
+        for (i, v) in r.points.iter().enumerate() {
+            let d = (glam::DVec2::new(v.x, v.z) - centre).length_squared();
+            if best.is_none_or(|(bd, _, _)| d < bd) {
+                best = Some((d, ri, i));
+            }
+        }
+    }
+    let Some((_, ri, i0)) = best else {
+        return Vec::new();
+    };
+    let pts = &routes[ri].points;
+    // Walk toward the longer end, so a settlement near a route's end still has
+    // road ahead of it.
+    let forward = pts.len() - i0 >= i0 + 1;
+    let order: Vec<usize> = if forward {
+        (i0..pts.len()).collect()
+    } else {
+        (0..=i0).rev().collect()
+    };
+    let mut out = Vec::new();
+    let mut d = 0.0;
+    for w in order.windows(2) {
+        let (a, b) = (pts[w[0]], pts[w[1]]);
+        let step = glam::DVec2::new(b.x - a.x, b.z - a.z);
+        let len = step.length();
+        d += len;
+        if d < skip_m || len <= 1e-9 {
+            continue;
+        }
+        out.push((b, step / len, d));
+    }
+    out
+}
+
 /// Which of the station apron's slots the helipad takes.
 ///
 /// `station_fleet(PoliceStation)` parks three vehicles at slots 1, 2 and 3, so
@@ -2127,6 +2326,11 @@ mod tests {
             // parked on the circuit is placed from the design and not from a
             // tile. It opens nothing.
             "nearest_route_vertex",
+            // The route RECORD itself (wave VEH3f): `route_walk` walks the same
+            // committed vertices `nearest_route_vertex` searches, forward along
+            // the road, so a roster lot parks each vehicle on a vertex whose
+            // committed height it is. It reads the design's `points` and no tile.
+            "Route",
             "layers",      // …its writer (wave ROAD1b; see `StreetSpan` above)
             "read_design", // the one door onto the committed layers
             "road_mesh_guid",

@@ -223,6 +223,9 @@ pub const ISLAND_VEHICLES_TOML: &str = "\
 label = \"Saloon\"
 
 [sedan.vehicle]
+# **The hero body** (wave VEH3f): this row wears DCC-built panels, one
+# committed `.inf_mesh` per panel under `samples/vehicle-bodies/`.
+body_mesh = \"56454833-4845-524f-8000-000000000001\"
 body = \"sedan\"
 half_width_m = 0.92
 half_height_m = 0.62
@@ -265,6 +268,9 @@ stability_control = 0.4
 label = \"Pickup\"
 
 [truck.vehicle]
+# **The hero body** (wave VEH3f): this row wears DCC-built panels, one
+# committed `.inf_mesh` per panel under `samples/vehicle-bodies/`.
+body_mesh = \"56454833-4845-524f-8000-000000000004\"
 body = \"truck\"
 half_width_m = 1.02
 half_height_m = 0.82
@@ -326,6 +332,9 @@ stability_control = 0.6
 label = \"Coupe\"
 
 [sports.vehicle]
+# **The hero body** (wave VEH3f): this row wears DCC-built panels, one
+# committed `.inf_mesh` per panel under `samples/vehicle-bodies/`.
+body_mesh = \"56454833-4845-524f-8000-000000000002\"
 body = \"sports\"
 drivetrain = \"rwd\"
 half_width_m = 0.94
@@ -417,6 +426,9 @@ stability_control = 0.25
 label = \"Wagon\"
 
 [suv.vehicle]
+# **The hero body** (wave VEH3f): this row wears DCC-built panels, one
+# committed `.inf_mesh` per panel under `samples/vehicle-bodies/`.
+body_mesh = \"56454833-4845-524f-8000-000000000003\"
 body = \"suv\"
 drivetrain = \"awd\"
 half_width_m = 1.02
@@ -564,6 +576,9 @@ stability_control = 0.7
 label = \"Patrol Cruiser\"
 
 [cruiser.vehicle]
+# **The hero body** (wave VEH3f): this row wears DCC-built panels, one
+# committed `.inf_mesh` per panel under `samples/vehicle-bodies/`.
+body_mesh = \"56454833-4845-524f-8000-000000000005\"
 body = \"sedan\"
 drivetrain = \"rwd\"
 # A saloon with the police package: wider track, bigger brakes, stiffer springs

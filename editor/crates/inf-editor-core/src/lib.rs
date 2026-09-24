@@ -105,9 +105,11 @@ pub mod thumbnail;
 pub mod tuning;
 // WPN2c: the generated gunshot library, committed under
 // `samples/weapon-audio/` and bound by both island recipes.
+pub mod vehicle;
 /// Island wave VEH1a: the one door that authors a car — geometry, wheels, a
 /// drawn body and the class it is tuned with, from one `VehicleDef`.
-pub mod vehicle;
+// VEH3f: the hero bodies -- DCC-built per-panel meshes, committed samples.
+pub mod vehicle_bodies;
 // VEH3e: the generated vehicle sound library, committed under
 // `samples/vehicle-audio/` and bound by both island recipes.
 pub mod vehicle_audio;

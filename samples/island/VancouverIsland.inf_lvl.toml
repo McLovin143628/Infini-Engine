@@ -1,8 +1,8 @@
 schema_version = 28
 guid = "0bb4ea2d-2c7a-3945-7b91-80a72ad78143"
 title = "Vancouver Island"
-entity_count = 772
-content_hash = "a35669a0efedb2bd"
+entity_count = 1016
+content_hash = "be7e33f5a4f1399a"
 dependencies = [
     "00000000-0000-0000-0000-00005c1000a0",
     "00000000-0000-0000-0000-00005c1000a1",
@@ -22,20 +22,35 @@ dependencies = [
     "0de98d67-8765-0fbb-dd3c-75425e96f0f7",
     "0e982054-7c78-d1d3-9340-e6890efb1cca",
     "1afaaf91-82c4-25b0-f255-f75111e7fe89",
+    "20a399eb-4fbc-49bb-8bce-0e49a4876bd9",
     "2f1bed68-23f0-f1cc-eebf-a1df325c922a",
+    "3a1b4f6c-3818-4e1e-93a3-8eefdec2ff87",
+    "403e98de-d838-49f5-96bc-fec8323d41b4",
+    "41eb1840-f9cf-471f-b8ac-fec8323d41b4",
+    "46081b24-8225-4646-aaec-e777ee9e5133",
     "46d3340e-cdb9-6886-ccb5-eb2e41ec2820",
     "4a168c2a-9569-1f47-daed-840ed197a2ad",
     "4c490c61-12c5-98dd-3287-2dc692fc02cb",
+    "52cf233d-783c-44b2-aaec-e777ee9e5133",
+    "5f3ce370-18fc-4028-93a3-8eefdec2ff87",
     "60dfa86c-f956-8450-851f-d3bdce6e629f",
     "642e8e19-b76d-8348-6c7b-c0023cb2b978",
     "65b8ede7-098b-f9b7-5b8f-089d6b111ef4",
     "66d43ae7-f5db-6db3-f5ed-4267af1948dd",
+    "6945732f-ac0d-411a-aaec-e777ee9e5133",
+    "6aa19c11-7243-49bb-8bce-0e49a4876bd9",
     "72c77ebc-da0f-c90f-367f-fd8bb041c317",
+    "80a6d361-c70c-47b0-93a3-8eefdec2ff87",
     "826ad69a-6fcf-6332-242b-f8e86883ba4f",
     "95f16f75-2297-9fa7-642c-83f2d558ec73",
+    "9d1a2433-7858-419a-93ec-fec8323d41b4",
+    "9e22280c-c081-49bb-8bce-0e49a4876bd9",
     "9f43cea8-e684-25a3-fb07-15a03738d46e",
     "a2080917-9429-e9a3-b6fc-645173725896",
+    "b3f9fb68-32e4-4164-93a3-8eefdec2ff87",
     "bbb9b175-c841-91e4-9583-26ae7273c6aa",
+    "ccaaaf20-8f30-4fec-aaec-e777ee9e5133",
+    "cfa2beae-446a-49bb-8bce-0e49a4876bd9",
     "ead55bfe-d69c-8f70-2fb9-7ccac8199d84",
     "fd82c026-c5f9-6697-d895-ed32f75fa483",
 ]
