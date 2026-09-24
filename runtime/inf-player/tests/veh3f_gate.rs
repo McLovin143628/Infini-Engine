@@ -34,7 +34,8 @@
 //! | `the_construction_rows_draw_their_art_or_their_fallback` | the recipe's `art_body`, the committed fallback at its GUID, the LOCAL art at the same GUID when this machine has it, and a drive of each art row | a row's `art` removed; a fallback file deleted | 7 machines | **fails** |
 //! | `nothing_from_unreal_is_committed` | `git ls-files` | a `.uasset` or an `MI_` material committed | every tracked path | passes -- nothing was ever committed |
 //! | `traffic_draws_the_roster_by_class_weight` | 20 000 identities through `catalogue_row_id`, each class's share of the parked and circuit draws against its weight | the kerb draw given the circuit weights | 20 000 draws, every weighted class | **fails** -- no classes to weigh |
-//! | `the_island_census_by_class_and_no_two_cars_in_one_place` | the CI island, cooked and booted as the player boots it, after 10 island minutes (1 in dev/CI): traffic records and resident chassis by class; every resident chassis box against every other (SAT) where BOTH are parked (kerb or authored), hitched pairs excepted; moving contacts printed | `authored_footprints` answering empty; the kerb draw given the circuit weights | records, classes, pairs | **fails** -- one silhouette set, no classes |
+//! | `the_island_census_by_class_and_no_two_cars_in_one_place` | the CI island, cooked and booted as the player boots it, after 10 island minutes (1 in dev/CI): traffic records and resident chassis by class; every resident chassis box against every other (SAT) where BOTH are parked (kerb or authored), hitched pairs excepted; moving contacts printed | `authored_footprints` answering empty; the kerb draw given the circuit weights | records, classes, pairs -- VACUOUS against its mutations (stated in the arm) | **fails** -- one silhouette set, no classes |
+//! | `the_real_islands_kerbs_step_around_its_fleets` | the LOCAL island (skips on CI): every parked chassis box against every other after 10 s | **none found** -- VACUOUS against the exclusion guards (stated in the arm) | 35 parked chassis, 23 kerb cars | passes |
 //! | `pie_equals_shipping_on_three_classes_and_the_trailer` | every vehicle chassis pose, step by step, in `SimSession` and `RuntimeSim` -- four `vehicle.spawn`s and a hitched rig under one set of controls | either host's `vehicle.spawn` arm deleted | 600 steps, 6 vehicles | **fails** -- no `vehicle.spawn` |
 //! | `the_catalogue_loads_in_microseconds` | `merge_toml` of the roster, min of five | n/a -- a COST arm | 155 rows | n/a |
 //! | `sixty_four_mixed_class_cars_cost_what_they_print` | the vehicle phase's clock at 64 mixed-class cars against 64 of one row | n/a -- a COST arm | 64 cars | n/a |
@@ -1372,9 +1373,13 @@ fn hitched_pairs(sim: &RuntimeSim) -> BTreeSet<(Uuid, Uuid)> {
 /// sea, plant, freight or trailer is ever a traffic car; no bus, cargo or
 /// utility truck is PARKED at a kerb.
 ///
-/// **Mutation → red**: the kerb draw given the circuit weights (a bus parks);
-/// `authored_footprints` answering empty with `PARK_CLEAR_M` negative (cars
-/// meet).
+/// **VACUOUS against its mutations, measured and said.** The CI island holds
+/// eleven traffic cars and one authored one: the kerb draw given the circuit
+/// weights without its civilian filter, `authored_footprints` answering empty,
+/// `PARK_CLEAR_M` at -3 and the lattice's self-exclusion removed all leave it
+/// green (its eleven cars are circuit and commute days, and no two slots are
+/// close). It asserts the WORLD's state; the class weights are
+/// `traffic_draws_the_roster_by_class_weight`'s, which each of those reds.
 #[test]
 fn the_island_census_by_class_and_no_two_cars_in_one_place() {
     let tmp = tempfile::tempdir().expect("a temp dir");
@@ -1561,6 +1566,131 @@ fn the_island_census_by_class_and_no_two_cars_in_one_place() {
         "cars overlap on the island: {overlapping:?}"
     );
 }
+/// The island project this machine builds locally, or `None` -- the island is
+/// licensed content that never enters this repository (char1a3's rule).
+fn real_island_content() -> Option<std::path::PathBuf> {
+    let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../island-build/project/Content");
+    (p.join("VancouverIsland.inf_lvl").is_file()).then_some(p)
+}
+
+/// The real island, booted the way `char1c_gate` boots it.
+fn real_island_sim(content: &std::path::Path) -> RuntimeSim {
+    let source = inf_player::level::DevDirLevelSource::new(content.join("VancouverIsland.inf_lvl"));
+    let terrains = inf_player::level::terrain_paths_by_guid_from_dir(content);
+    let pcg_terrains = terrains.clone();
+    let (skeletons, clips, machines) = inf_player::level::load_anim_assets_from_dir(content);
+    let builder = inf_player::level::InfSceneWorldBuilder::with_defaults(
+        inf_player::level::load_actor_classes_from_dir(content),
+    )
+    .with_pcgs(inf_player::level::load_pcg_payloads_by_guid_from_dir(
+        content,
+    ))
+    .with_biome_sets(inf_player::level::load_biome_sets_by_guid_from_dir(content))
+    .with_anim_assets(skeletons, clips, machines)
+    .with_audio(inf_player::level::load_audio_assets_from_dir(content))
+    .with_terrain_resolver(std::sync::Arc::new(move |g| {
+        inf_player::level::terrain_source_from_file(pcg_terrains.get(&g)?).ok()
+    }));
+    let mut built = inf_player::level::load(&source, &builder).expect("the island builds");
+    let partition = built.take_partition();
+    let pcg = built.pcg_context();
+    let mut sim = inf_player::sim_from_built(built);
+    inf_player::attach_cell_streaming(&mut sim, &partition, pcg);
+    inf_player::attach_terrain_streaming(&mut sim, &inf_player::TerrainContent::Dir(terrains));
+    sim
+}
+
+/// **THE REAL ISLAND'S KERBS STEP AROUND ITS FLEETS** -- the lattice claim on
+/// the level that has the fleets: the construction lot at Eastgate, the
+/// tractor-trailers at Harbour City, the EMS stations and the settlement cars,
+/// every one an authored vehicle beside a road whose kerbs the traffic lattice
+/// parks. Ten seconds of the island (the lattice is derived on the first
+/// steps); every parked chassis box against every other.
+///
+/// **VACUOUS against the lattice's own guards, measured and said.** With
+/// `authored_footprints` answering empty, `PARK_CLEAR_M` at -3 and the
+/// lattice's self-exclusion removed, this arm and the census above both stay
+/// green: on today's island the resident Harbour City kerbs are 31.9 m from the
+/// nearest authored vehicle and never two to a space, so the exclusion that
+/// fixed the VEH3b audit's overlap does not bind here. What this arm asserts
+/// is the committed level's state -- no two parked vehicles share a space --
+/// and it prints the fleet's addresses for the demo loop. SKIPS with a printed
+/// reason when the island is not on this machine.
+#[test]
+fn the_real_islands_kerbs_step_around_its_fleets() {
+    let Some(content) = real_island_content() else {
+        eprintln!("SKIP: no island project at ../island-build/project -- local-only content");
+        return;
+    };
+    let mut sim = real_island_sim(&content);
+    for _ in 0..600 {
+        sim.step_once(Default::default());
+    }
+    let hitched = hitched_pairs(&sim);
+    let moving = |g: Uuid| {
+        inf_ecs::traffic::traffic_of(sim.world()).is_some_and(|t| t.records.contains_key(&g))
+            && inf_ecs::traffic::day_of(g) != inf_ecs::traffic::TrafficDay::Parked
+    };
+    let traffic: BTreeSet<Uuid> = inf_ecs::traffic::traffic_of(sim.world())
+        .map(|t| t.records.keys().copied().collect())
+        .unwrap_or_default();
+    let boxes: Vec<ChassisBox> = chassis_boxes(&sim)
+        .into_iter()
+        .filter(|b| !moving(b.0))
+        .collect();
+    // The fleet's addresses, for the demo loop's placements.
+    {
+        let w = sim.world();
+        if let Some(h) = inf_ecs::movement::camera_subject(w)
+            .and_then(|g| w.entity_of(g))
+            .and_then(|e| w.world().get::<Transform>(e))
+        {
+            println!("  the hero stands at {:.1}", h.translation.to_dvec3());
+        }
+        for b in boxes.iter().filter(|b| !traffic.contains(&b.0)) {
+            let name = w.entity_of(b.0).and_then(|e| w.name_of(e)).unwrap_or("?");
+            println!("  authored `{name}` at {:.1}", b.1);
+        }
+    }
+    let (mut near_fleet, mut overlapping) = (0usize, Vec::new());
+    let mut closest = f64::MAX;
+    for i in 0..boxes.len() {
+        for j in i + 1..boxes.len() {
+            let (a, b) = (&boxes[i], &boxes[j]);
+            let key = (a.0.min(b.0), a.0.max(b.0));
+            if hitched.contains(&key) {
+                continue;
+            }
+            // A kerb car beside an authored one: the pairs the exclusion is for.
+            let mixed = traffic.contains(&a.0) != traffic.contains(&b.0);
+            if mixed {
+                closest = closest.min((a.1 - b.1).length());
+                if (a.1 - b.1).length() < 15.0 {
+                    near_fleet += 1;
+                }
+            }
+            if (a.1 - b.1).length() <= a.3.length() + b.3.length() && boxes_overlap(a, b) {
+                overlapping.push(key);
+            }
+        }
+    }
+    println!(
+        "THE REAL ISLAND: {} parked chassis ({} of them kerb cars); {near_fleet} kerb-car/authored pairs within 15 m (the closest {closest:.1} m); overlapping pairs {overlapping:?}",
+        boxes.len(),
+        boxes.iter().filter(|b| traffic.contains(&b.0)).count()
+    );
+    assert!(
+        boxes.len() > 20 && boxes.iter().filter(|b| traffic.contains(&b.0)).count() > 10,
+        "only {} parked chassis were resident",
+        boxes.len()
+    );
+    assert!(
+        overlapping.is_empty(),
+        "parked vehicles share their space on the island: {overlapping:?}"
+    );
+}
+
 // ── 6. PIE == SHIPPING ──────────────────────────────────────────────────────
 
 /// The Blueprint that defines one row at `BeginPlay` and spawns a hypercar, a
