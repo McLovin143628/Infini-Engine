@@ -388,6 +388,55 @@ pub fn vehicle_defs(world: &crate::world::EcsWorld) -> Option<&VehicleDefs> {
     world.world().get_resource::<VehicleDefsRes>().map(|r| &r.0)
 }
 
+/// **A defined vehicle's guid** -- a pure function of its row id and where it
+/// was put, `item::authored_pickup_guid`'s rule, so two hosts running one graph
+/// put the same entity in the same place and a spawn keyed on a counter cannot
+/// depend on how many times the graph ran.
+pub fn defined_vehicle_guid(id: &str, at: glam::DVec3) -> uuid::Uuid {
+    let mut x: u128 = 0x5645_4833_4644_4546_494e_4544_5645_4843;
+    for b in id.as_bytes() {
+        x = x.rotate_left(9) ^ (*b as u128).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    }
+    for v in [at.x, at.y, at.z] {
+        x = x.rotate_left(21) ^ (v.to_bits() as u128).wrapping_mul(0xff51_afd7_ed55_8ccd);
+    }
+    uuid::Builder::from_random_bytes(x.to_be_bytes()).into_uuid()
+}
+
+/// **Spawn a catalogue row into a world** -- the `vehicle.spawn` node's door
+/// (wave VEH3f). The row is looked up in the world's own catalogue first (what
+/// `vehicle.define` merged) and then in the committed roster, so a level may
+/// spawn a lore car by id without defining anything. `at` is the chassis origin;
+/// `None` for an id neither knows. The car is a whole rig (wheels, parts,
+/// class, an engine voice) and is the physics bridge's on its next sync.
+pub fn spawn_defined(
+    world: &mut crate::world::EcsWorld,
+    id: &str,
+    at: glam::DVec3,
+    yaw_deg: f64,
+) -> Option<uuid::Uuid> {
+    let def = vehicle_defs(world)
+        .and_then(|d| d.get(id).copied())
+        .or_else(|| roster().get(id).copied())?;
+    let guid = defined_vehicle_guid(id, at);
+    let name = roster_label(id).unwrap_or(id).to_string();
+    crate::vehicle::spawn_rig(
+        world,
+        guid,
+        &def,
+        &crate::vehicle::RigSpawn {
+            name,
+            at,
+            yaw_deg,
+            paint: crate::traffic::car_paint(guid),
+            clip: None,
+            engine_voice: true,
+            livery: None,
+        },
+    );
+    Some(guid)
+}
+
 /// **Which construction-pack body a roster row draws when its art is on this
 /// machine** (wave VEH3f) -- the machine key the UE bridge imports under
 /// `Content/UE/Vehicles/<key>` and the per-body TOML sidecar names. `None` for

@@ -3918,6 +3918,34 @@ impl Host for RuntimeHost<'_> {
             // catalogue, an unknown id or an entity that is not there is a thing
             // an author fixes by typing, not a reason to take the whole handler
             // down with it (the P21.4 law).
+            // ── the `vehicle.*` kit (wave VEH3f) ─────────────────────────────
+            //
+            // `item.define`'s shape one system over, identical in both hosts:
+            // the catalogue merges into the world's `VehicleDefsRes`, and a
+            // spawn looks there first and then in the committed roster.
+            (Some("vehicle"), Some("define")) => {
+                let text = arg_str(args, 0);
+                let taken = match inf_ecs::roster::vehicle_defs_mut(self.world).merge_toml(&text) {
+                    Ok(n) => n as i64,
+                    Err(e) => {
+                        self.logs.push(format!("vehicle::define: {e}"));
+                        0
+                    }
+                };
+                Ok(Value::Int(taken))
+            }
+            (Some("vehicle"), Some("spawn")) => {
+                let id = arg_str(args, 0);
+                let at = glam::DVec3::new(arg_f64(args, 1), arg_f64(args, 2), arg_f64(args, 3));
+                let spawned =
+                    inf_ecs::roster::spawn_defined(self.world, &id, at, arg_f64(args, 4)).is_some();
+                if !spawned {
+                    self.logs.push(format!(
+                        "vehicle::spawn: `{id}` is not in the catalogue or the roster"
+                    ));
+                }
+                Ok(Value::Bool(spawned))
+            }
             (Some("item"), Some("define")) => {
                 let text = arg_str(args, 0);
                 let taken = match inf_ecs::item::item_defs_mut(self.world).merge_toml(&text) {

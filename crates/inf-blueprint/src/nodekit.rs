@@ -1615,6 +1615,45 @@ fn gameplay_nodes() -> Vec<NodeDef> {
                 exec_out(EXEC_THEN),
                 PortDef::new("count", PortType::Int),
             ]),
+        // **The vehicle catalogue** (wave VEH3f) -- `item.define`'s shape one
+        // system over: the roster rides the class's own bytes into every host,
+        // which is the runtime-loadable route VEH3a ruled (no asset kind, no
+        // scene field).
+        NodeDef::new("vehicle.define", "Define Vehicles", "vehicle")
+            .described(concat!(
+                "Add vehicle definitions to the session's catalogue, as name-keyed TOML. ",
+                "Each table is one vehicle id with a `[<id>.vehicle]` sub-table of geometry ",
+                "and tuning keys; `class = \"coupe\"` applies that roster class's defaults ",
+                "first. Reports how many definitions were taken; a malformed document ",
+                "takes NONE and logs why."
+            ))
+            .with_inputs(vec![
+                exec_in(),
+                PortDef::new("toml", PortType::Str).required(),
+            ])
+            .with_outputs(vec![
+                exec_out(EXEC_THEN),
+                PortDef::new("count", PortType::Int),
+            ]),
+        NodeDef::new("vehicle.spawn", "Spawn Vehicle", "vehicle")
+            .described(concat!(
+                "Put a drivable vehicle into the world: a row the session's catalogue ",
+                "defines (Define Vehicles), or any row of the built-in roster by its lore id. ",
+                "The chassis origin goes at x, y, z facing yaw degrees. Reports whether it ",
+                "spawned; an unknown id spawns nothing and says so."
+            ))
+            .with_inputs(vec![
+                exec_in(),
+                PortDef::new("id", PortType::Str).required(),
+                PortDef::new("x", PortType::Float),
+                PortDef::new("y", PortType::Float),
+                PortDef::new("z", PortType::Float),
+                PortDef::new("yaw", PortType::Float),
+            ])
+            .with_outputs(vec![
+                exec_out(EXEC_THEN),
+                PortDef::new("spawned", PortType::Bool),
+            ]),
         NodeDef::new("item.spawn_pickup", "Spawn Pickup", "item")
             .described(
                 "Put an item on the ground as an entity the interact key can pick up. \

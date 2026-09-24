@@ -101,6 +101,8 @@ pub const STR_PORTS: &[(&str, &str, StrRole)] = &[
     ("item.give", "id", StrRole::Id),
     ("item.spawn_pickup", "id", StrRole::Id),
     ("sky.set_weather", "preset", StrRole::Id),
+    ("vehicle.define", "toml", StrRole::Table),
+    ("vehicle.spawn", "id", StrRole::Id),
 ];
 
 /// One asset a program names, with the place it named it.

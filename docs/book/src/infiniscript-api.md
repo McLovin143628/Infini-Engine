@@ -4,7 +4,7 @@
 
 Every verb an InfiniScript can call, generated from the engine's own verb registry — the same table the Blueprint palette is built from and the same one the parser resolves a call against. If it is not here, a script cannot say it.
 
-The surface is **135 registered nodes across 27 namespaces**. Not all of them are *callable*: the arithmetic and comparison operators, the control-flow palette, the literals, the events and the two member-variable nodes are all written as syntax instead, and the last section lists each with the spelling that replaces it.
+The surface is **137 registered nodes across 28 namespaces**. Not all of them are *callable*: the arithmetic and comparison operators, the control-flow palette, the literals, the events and the two member-variable nodes are all written as syntax instead, and the last section lists each with the spelling that replaces it.
 
 **How to read a row.** `door.use(x: float, y: float, z: float)` takes three arguments in that order. A name in `[square brackets]` is optional and defaults to zero, false or the empty string. A verb marked *statement* runs for its effect and is written on a line of its own; a verb marked *value* answers something and can go inside an expression. A verb that is both can be used either way — write it as a statement to ignore what it answers.
 
@@ -140,6 +140,13 @@ The surface is **135 registered nodes across 27 namespaces**. Not all of them ar
 | `item.give(entity: int, id: string, [count: int])` | statement, value | `left`: int | Put items straight into an actor's inventory, creating one if it has none. Reports how many did NOT fit — 0 means all of them did. |
 | `item.equip(entity: int, id: string)` | statement, value | `ok`: bool | Equip an item the actor is already carrying, and give it a full magazine if it is a weapon. False when the actor does not have one. |
 | `item.count(entity: int, id: string)` | value | `count`: int | How many of an item the actor is carrying, across every slot. |
+
+## `vehicle.*`
+
+| call | kind | answers | what it does |
+|---|---|---|---|
+| `vehicle.define(toml: string)` | statement, value | `count`: int | Add vehicle definitions to the session's catalogue, as name-keyed TOML. Each table is one vehicle id with a `[<id>.vehicle]` sub-table of geometry and tuning keys; `class = "coupe"` applies that roster class's defaults first. Reports how many definitions were taken; a malformed document takes NONE and logs why. |
+| `vehicle.spawn(id: string, [x: float], [y: float], [z: float], [yaw: float])` | statement, value | `spawned`: bool | Put a drivable vehicle into the world: a row the session's catalogue defines (Define Vehicles), or any row of the built-in roster by its lore id. The chassis origin goes at x, y, z facing yaw degrees. Reports whether it spawned; an unknown id spawns nothing and says so. |
 
 ## `door.*`
 

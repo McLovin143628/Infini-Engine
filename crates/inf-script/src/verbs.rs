@@ -430,7 +430,10 @@ mod tests {
             (verbs, namespaces),
             // 132/26 → 135/27 at wave CHAR1c: the `camera.*` kit's three nodes
             // (`set_rig`, `get_rig`, `shot`) in one new namespace.
-            (135, 27),
+            // 135/27 → 137/28 at wave VEH3f: `vehicle.define` and
+            // `vehicle.spawn`, the roster's runtime-loadable route, in one new
+            // namespace.
+            (137, 28),
             "the verb surface moved; the spec's table, the memo and the \
              generated API manual all quote these two numbers"
         );

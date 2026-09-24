@@ -832,8 +832,9 @@ every carried item of the arc in one routed list.
 The arc set out to answer one question the owner asked: **can a designer build a
 game in this engine without waiting for a compiler?** Four waves built the
 language, the cook, the hot-reload path, the editor and the verb surface —
-**135 registered nodes, of which 97 are callable verbs** (132 and 94 before wave
-CHAR1c's `camera.*` three); the other 38 are the
+**137 registered nodes, of which 99 are callable verbs** (132 and 94 before wave
+CHAR1c's `camera.*` three; 135 and 97 before wave VEH3f's `vehicle.define` and
+`vehicle.spawn`); the other 38 are the
 29 written-as-syntax refusals and the 9 `event.*` headers, which is the
 accounting the SCRIPT2a audit closed and the shorthand "132 verbs" quietly
 re-opens. This section is what the fifth wave measured, on a real mission rather
@@ -1290,9 +1291,10 @@ are `+`, `<`, `and` here), `logic.not` and `math.neg`, the `flow.*` palette
 (control flow is syntax), `event.*` (an event is a handler's header), `lit.*`
 (write the value), and `var.get`/`var.set` (write the name).
 
-The surface is **135 verbs across 27 namespaces**, pinned by `inf_script::verbs`'
+The surface is **137 verbs across 28 namespaces**, pinned by `inf_script::verbs`'
 own census arm. (It was 132 across 26 until wave CHAR1c added the `camera.*`
-kit's three.)
+kit's three, and 135 across 27 until wave VEH3f added `vehicle.define` and
+`vehicle.spawn` -- the roster's runtime-loadable route.)
 
 That arm's message names this sentence, and the SCRIPT2a audit found the promise
 was worth less than it read: the wave moved the census to 132/26, the arm's
