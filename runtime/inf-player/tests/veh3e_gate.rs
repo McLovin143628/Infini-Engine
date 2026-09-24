@@ -31,6 +31,7 @@
 //! | `a_parked_car_is_silent_until_somebody_gets_in` | the car keys before boarding, at entry, after exit | `running()` answering true | steps silent, Plays at entry, Stops at exit | **fails** — a Play on the first step it is seen |
 //! | `the_door_slams_on_the_shut_step_and_the_motor_rows_are_silent` | the door keys on a RIGGED shipped host against `door_deg` and `handle_weight` | the handle gate dropped; the shut edge dropped | slam rows, hand rows, motor rows | **fails** — no door sound at all |
 //! | `a_door_held_open_through_the_close_does_not_slam` (audit) | the slam key on a shipped exit whose door is held open through `ClosingDoor`, against a control that shuts; the joint's angle off the damage row | the end-step hinge read reverted to the machine's reset `door_deg` | one timed-out close, one shut close | **passes** (no door sound at all) -- the false slam was VEH3e's own |
+//! | `the_course_render_does_not_clip` (audit) | the WAV BYTES of the shipped course rendered through the render-to-file door, with the master track and without it | the limiter taken off the master track | the control's peak within 1 dB of full scale | n/a -- a property of the mix, not the stream |
 //! | `a_bail_out_lands_with_a_thud` | the thud key on a moving exit | the thud branch deleted | one bail | **fails** |
 //! | `pie_equals_shipping_on_the_audio_course` | both hosts' per-step command slices | the planner called with `dt * 2.0` in one host | every kind of cue seen | passes — it compares, it does not judge |
 //! | `the_audio_log_holds_the_drive_and_the_count_is_stated` | `dropped_audio_commands`, the per-step counts | `AUDIO_LOG_CAPACITY` cut to 4096 | the whole course | passes (3 a step) |
@@ -1747,6 +1748,109 @@ fn a_bail_out_lands_with_a_thud() {
     println!("thuds {thuds:?}, roll starts {rolls:?}");
     assert!(!rolls.is_empty(), "the moving exit never rolled");
     assert_eq!(thuds, rolls[..1].to_vec());
+}
+
+/// Every 16-bit sample of a stereo WAV's first `data` chunk, read HERE — to
+/// the end of the file, not to the header's size (a capture patches its sizes
+/// every 60 steps, and the bytes after the last patch are still the drive).
+fn wav_samples(bytes: &[u8]) -> Vec<i16> {
+    let at = bytes
+        .windows(4)
+        .position(|w| w == b"data")
+        .expect("a data chunk");
+    bytes[at + 8..]
+        .chunks_exact(2)
+        .map(|c| i16::from_le_bytes([c[0], c[1]]))
+        .collect()
+}
+
+/// The shipped course rendered through the render-to-file door into `path`:
+/// `limited` is the shipped master track, `!limited` the measurement control.
+fn render_course(path: &Path, limited: bool) -> Vec<i16> {
+    // The car's emitter at 2.4: a roster row's `AudioSource.volume` scales its
+    // whole stack, and a loud row is exactly the case a ceiling exists for.
+    // (At the default 1.0 this host's course peaks at 0.82 and never needs one.)
+    let mut world = shipped_world(&course_def());
+    let car = world.entity_of(CHASSIS).expect("the car");
+    world
+        .world_mut()
+        .get_mut::<AudioSource>(car)
+        .expect("a voiced car")
+        .volume = 2.4;
+    let mut sim = inf_player::runtime_sim::RuntimeSim::new(
+        world,
+        Vec::new(),
+        glam::DVec2::new(0.0, -9.81),
+        HZ,
+    );
+    // The 28 COMMITTED clips, decoded from their `.inf_audio` payloads --
+    // what a cooked pack resolves them to.
+    let dir = inf_editor_core::samples::vehicle_audio_dir();
+    let mut clips = BTreeMap::new();
+    for (i, name) in va::VEHICLE_CLIP_NAMES.iter().enumerate() {
+        let bytes = std::fs::read(dir.join(format!("Vehicle_{name}.inf_audio"))).expect("a clip");
+        let asset: inf_audio::AudioAsset = inf_asset::decode(&bytes).expect("an audio payload");
+        clips.insert(va::vehicle_clip(i as u8), asset);
+    }
+    sim.set_audio_clips(clips);
+    if limited {
+        sim.capture_audio_to(path, 48_000).expect("a capture");
+    } else {
+        sim.capture_audio_unlimited_to(path, 48_000)
+            .expect("a capture");
+    }
+    let mut host = Shipped(sim);
+    let steps = run(&mut host, course, DRIVE_STEPS);
+    assert!(steps.len() > 900);
+    drop(host);
+    wav_samples(&std::fs::read(path).expect("the capture"))
+}
+
+/// **THE COURSE'S BYTES DO NOT CLIP** (VEH3e audit, carried 6 — the mix had no
+/// limiter). The shipped course (the burnout, the pull, the kerb, the slide,
+/// the doors) rendered through the render-to-file door twice — through the
+/// shipped master track and through the same mixer with NO limiter — and the
+/// WAV BYTES counted: samples at 16-bit full scale, and the peak.
+///
+/// The car's emitter is authored at volume 2.4 (a roster row's knob): at 1.0
+/// this host's course peaks at 0.82 and a ceiling has nothing to hold.
+///
+/// **Anti-vacuity**: the control must CLIP (the course is loud enough for the
+/// ceiling to have work), and the limited render must carry the drive (its
+/// RMS within 1 dB of the control's).
+///
+/// **Mutation → red**: the limiter taken off the master track
+/// (`master_track` ignoring `limit`).
+#[test]
+fn the_course_render_does_not_clip() {
+    let tmp = tempfile::tempdir().expect("a temp dir");
+    let raw = render_course(&tmp.path().join("raw.wav"), false);
+    let lim = render_course(&tmp.path().join("limited.wav"), true);
+    let clipped = |x: &[i16]| x.iter().filter(|v| **v >= 32_767 || **v <= -32_767).count();
+    let peak =
+        |x: &[i16]| x.iter().map(|v| i32::from(*v).abs()).max().unwrap_or(0) as f64 / 32_767.0;
+    let rms = |x: &[i16]| {
+        (x.iter().map(|v| f64::from(*v).powi(2)).sum::<f64>() / x.len().max(1) as f64).sqrt()
+            / 32_767.0
+    };
+    let ceiling = f64::from(inf_audio::limiter::CEILING);
+    println!(
+        "THE COURSE RENDER ({} samples): NO LIMITER peak {:.4} clipped {} rms {:.4}; SHIPPED peak {:.4} clipped {} rms {:.4} (ceiling {ceiling})",
+        raw.len(),
+        peak(&raw),
+        clipped(&raw),
+        rms(&raw),
+        peak(&lim),
+        clipped(&lim),
+        rms(&lim)
+    );
+    assert!(
+        clipped(&raw) > 0,
+        "the control never clipped: nothing for a ceiling to hold"
+    );
+    assert!(rms(&lim) > rms(&raw) * 0.89, "the limiter ate the drive");
+    assert_eq!(clipped(&lim), 0, "the shipped mix clipped");
+    assert!(peak(&lim) < ceiling + 1.0 / 32_767.0, "over the ceiling");
 }
 
 // ── 10. BOTH HOSTS ──────────────────────────────────────────────────────────
