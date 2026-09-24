@@ -1960,6 +1960,20 @@ fn derive_parked(world: &mut EcsWorld, stamp: u64) {
         .unwrap_or_default();
     let mut records: BTreeMap<Uuid, TrafficRecord> = BTreeMap::new();
     let mut pending: BTreeMap<Uuid, DVec3> = BTreeMap::new();
+    // **Where the AUTHORED vehicles stand** (wave VEH3f -- the VEH3b audit's
+    // traffic-parked overlap). The kerb lattice is derived from the streets and
+    // knows nothing of the island's own fleet, so an authored car parked by its
+    // settlement's route vertex and a traffic car parked at a kerb slot beside
+    // it could be the same place: measured by that audit, one on 1 of 4 wheels,
+    // 0.026 m of clearance, on top of the other. A slot whose car would come
+    // within `PARK_CLEAR_M` of an authored chassis is simply not occupied.
+    let authored = authored_footprints(world, &kept);
+    // …and where the lattice's OWN cars stand, as it places them: two kerb
+    // slots close together (a narrow street's two kerbs, a junction's corner)
+    // are two cars in one space, which is the other half of that audit's
+    // finding. The FIRST slot in the lattice's own order keeps its car, so the
+    // answer is a pure function of the streets.
+    let mut lattice: Vec<(DVec2, f64)> = Vec::new();
     // How many cars already HAVE a day -- see `MAX_COMMUTERS`.
     let mut with_a_day = 0usize;
     // A car the player has touched is kept whatever the geometry did: it is not
@@ -1979,6 +1993,18 @@ fn derive_parked(world: &mut EcsWorld, stamp: u64) {
             continue;
         }
         let def = catalogue_row(guid);
+        let reach = (def.half_extents.x * def.half_extents.x
+            + def.half_extents.z * def.half_extents.z)
+            .sqrt();
+        let here = DVec2::new(p.x, p.z);
+        if authored
+            .iter()
+            .chain(lattice.iter())
+            .any(|(c, r)| (here - *c).length() < r + reach + PARK_CLEAR_M)
+        {
+            continue;
+        }
+        lattice.push((here, reach));
         // The record's own space is LIFTED to the car's ride height; the route
         // planner is handed the slot as it is on the ground (see `drive_path`).
         let at = DVec3::new(p.x, crate::vehicle::resting_origin_y(&def, p.y), p.z);
@@ -2041,6 +2067,46 @@ fn derive_parked(world: &mut EcsWorld, stamp: u64) {
         stamp,
         hand_installed: false,
     });
+}
+
+/// **The clearance a traffic car keeps to an authored one**, metres, circle to
+/// circle (wave VEH3f).
+pub const PARK_CLEAR_M: f64 = 0.75;
+
+/// **Every authored vehicle's footprint** -- its chassis centre on the ground
+/// plane and the radius of the circle round its collider's plan (wave VEH3f).
+///
+/// Authored means a chassis with a `VehicleClass` that is not one of the
+/// traffic's own records. `O(entities)`, and run only when the lattice is
+/// re-derived (a block stamp moved), never per step.
+pub fn authored_footprints(
+    world: &EcsWorld,
+    traffic: &BTreeMap<Uuid, TrafficRecord>,
+) -> Vec<(DVec2, f64)> {
+    let mut out = Vec::new();
+    for e in world.world().iter_entities() {
+        if e.get::<crate::components::VehicleClass>().is_none() {
+            continue;
+        }
+        let Some(g) = e.get::<crate::components::Guid>() else {
+            continue;
+        };
+        if traffic.contains_key(&g.0) {
+            continue;
+        }
+        let (Some(t), Some(c)) = (
+            e.get::<crate::components::Transform>(),
+            e.get::<crate::components::Collider3D>(),
+        ) else {
+            continue;
+        };
+        let h = c.half_extents;
+        out.push((
+            DVec2::new(t.translation.x, t.translation.z),
+            (h.x * h.x + h.z * h.z).sqrt(),
+        ));
+    }
+    out
 }
 
 /// Plan up to [`TRAFFIC_PLANS_PER_STEP`] commuter routes.
