@@ -224,7 +224,9 @@ struct Feel {
     brake_m: f64,
     /// Mean deceleration over that stop, g.
     brake_g: f64,
-    /// Peak lateral acceleration in a ramp steer, g.
+    /// Peak lateral acceleration in a ramp steer while the car still grips
+    /// (sideslip under ten degrees), g -- the chassis's acceleration along its
+    /// right axis, NOT `v x yaw rate` (see [`measure`]).
     lat_g: f64,
 }
 
@@ -280,11 +282,23 @@ fn measure(def: &VehicleDef) -> Feel {
     // **The RAMP STEER** (the standard handling test): a fresh car brought to
     // 60 % of its sprint target (capped at 15 m/s), then the wheel wound from
     // straight to full lock over four seconds with the throttle HOLDING that
-    // speed. The lateral acceleration is `v x yaw rate`, smoothed over a quarter
-    // second, and the answer is its PEAK -- the most the tyres gave before the
-    // car ploughed or spun. (A skidpad at full lock measures a front axle
+    // speed. The lateral acceleration is the chassis's own acceleration (its
+    // rapier velocity differenced step to step) along its horizontal RIGHT
+    // axis, smoothed over a quarter second, counted only while the body's
+    // sideslip is under ten degrees -- the most the tyres gave while the car
+    // was still GRIPPING. (A skidpad at full lock measures a front axle
     // scrubbing at forty degrees, which is a deceleration, not a grip -- the
     // first cut read 0.03 g off a saloon doing exactly that.)
+    //
+    // **Audit (VEH3f): the wave's column was `v x yaw rate`, and past the
+    // limit that is a SPIN, not a grip.** `v r` equals the lateral
+    // acceleration only in a steady turn; in the ramp's last second a car that
+    // lets go rotates faster than its path curves, and the column read that
+    // rotation: an SUV "cornering" 1.53 g, a jeep 1.31 g, a sedan 1.66 g on a
+    // mu-0.9 slab. Measured side by side on every row, the honest number is
+    // SUV 0.79-0.85, jeep 0.66-0.69, sedan 0.89-1.01 (a steady 12 m/s circle
+    // agrees: the Dubsta holds 0.61-0.76 g, the Zentorno 1.08). The bands
+    // below were re-derived on this number.
     let mut sim = flat_sim(def);
     for _ in 0..120 {
         drive(&mut sim, CAR, VehicleControls::default());
@@ -299,6 +313,7 @@ fn measure(def: &VehicleDef) -> Feel {
     let ramp = (4.0 * HZ) as usize;
     let mut window: std::collections::VecDeque<f64> = std::collections::VecDeque::new();
     let mut peak = 0.0f64;
+    let mut prev = velocity(&sim, CAR);
     for i in 0..ramp {
         let s = ground_speed(&sim, CAR);
         drive(
@@ -311,7 +326,20 @@ fn measure(def: &VehicleDef) -> Feel {
                 ..Default::default()
             },
         );
-        window.push_back(ground_speed(&sim, CAR) * yaw_rate(&sim, CAR).abs());
+        let v = velocity(&sim, CAR);
+        let accel = (v - prev) / DT;
+        prev = v;
+        let q = rotation(&sim, CAR);
+        let right = q * DVec3::X;
+        let right = DVec3::new(right.x, 0.0, right.z).normalize_or_zero();
+        let fwd = q * DVec3::Z;
+        let fwd = DVec3::new(fwd.x, 0.0, fwd.z).normalize_or_zero();
+        let slip_deg = inf_math::patan2_64(v.dot(right).abs(), v.dot(fwd).abs()).to_degrees();
+        window.push_back(if slip_deg < 10.0 {
+            accel.dot(right).abs()
+        } else {
+            0.0
+        });
         if window.len() > (HZ / 4.0) as usize {
             window.pop_front();
         }
@@ -361,29 +389,53 @@ type Band = (f64, f64);
 ///
 /// **Re-blessed once, with cause** (the gate's first full run): the bands were
 /// drafted off the exploratory sweep, which predates the per-row centre of
-/// gravity (`cog_height_m`). Lowering the heavy classes' CoG to a truck's moved
-/// their load transfer, and with it the stop and the lateral peak: freight
-/// stops 0.72-0.75 g and corners 0.72-0.73 g, military stops 0.68-0.69 g and
-/// corners to 0.79 g, the VW camper stops 0.85 g, and the yard tractor (single
-/// short ratio) sprints to its 32 km/h limiter in 8.2 s. Each bound moved to
-/// clear its class's measured spread; nothing else moved.
+/// gravity (`cog_height_m`), and fourteen numbers fell outside them.
+///
+/// **Audit (VEH3f): each widened bound re-measured against its stated cause**
+/// (the row driven again with `cog_height_m` put back to the class default,
+/// -0.25 m):
+///
+/// * **freight** stop and lateral -- the cause HOLDS: the Hauler, Phantom and
+///   Pounder stop 0.63-0.65 g and corner 0.56-0.58 g on the box CoG, 0.72-0.73
+///   and 0.73 on their own (less load thrown off the rear axle and the inside
+///   wheels). The Packer's 0.74 -> 0.75 g is its ART box (the freight
+///   tractor's measured extents), not its CoG. Stop ceiling 0.71 -> 0.78.
+/// * **military** stop -- the stated cause is FALSE: the Nightshark and the
+///   Squaddie stop 0.66 g on the box CoG and 0.69 on their own, so the drafted
+///   0.72 floor failed either way. It was drafted too high for rows whose
+///   `brake_force_n` is a road truck's (0.69 g on 6-7 t is a heavy truck's
+///   honest stop). Floor 0.72 -> 0.65; the cause corrected here.
+/// * **van** stop -- the stated cause is FALSE: the Surfer stops 0.84 g on the
+///   box CoG and 0.85 on its own; the drafted 0.86 floor was a car's. 0.86 ->
+///   0.82.
+/// * **freight** sprint -- the yard tractor's single short ratio (8.17 s to its
+///   32 km/h limiter; 8.52 s on the box CoG): gearing, as the first re-bless
+///   said. 9.5 -> 7.5.
+///
+/// **The lateral column was not a lateral acceleration** (see [`measure`]):
+/// every lateral bound below is re-derived on the chassis's acceleration along
+/// its right axis while it grips -- coupe 1.09-1.22 g, sedan 0.89-1.01, SUV
+/// 0.79-0.85, truck 0.75-0.85, jeep 0.66-0.69, van 0.67-0.78, bus 0.59-0.72 --
+/// and the class ORDER is asserted beside them. Construction's lateral floor is
+/// 0: plant is timed at walking pace, where no lateral g is honest; that bound
+/// is vacuous by design and named in the audit's list.
 fn band(c: RosterClass) -> (Band, Band, Band) {
     match c {
-        RosterClass::Coupe => ((2.2, 6.6), (1.0, 1.2), (1.1, 2.1)),
-        RosterClass::Sedan => ((2.6, 10.8), (0.97, 1.12), (1.15, 1.8)),
-        RosterClass::Suv => ((2.9, 10.2), (0.9, 1.02), (1.2, 1.7)),
-        RosterClass::Truck => ((2.9, 15.2), (0.85, 1.04), (0.8, 1.4)),
-        RosterClass::Jeep => ((6.0, 9.6), (0.88, 0.96), (1.2, 1.45)),
-        RosterClass::Hummer => ((4.5, 34.5), (0.78, 0.92), (0.65, 1.2)),
-        RosterClass::Emergency => ((4.5, 25.0), (0.75, 1.03), (0.65, 1.45)),
-        RosterClass::Military => ((7.0, 21.5), (0.65, 0.86), (0.2, 0.83)),
+        RosterClass::Coupe => ((2.2, 6.6), (1.0, 1.2), (1.0, 1.3)),
+        RosterClass::Sedan => ((2.6, 10.8), (0.97, 1.12), (0.82, 1.08)),
+        RosterClass::Suv => ((2.9, 10.2), (0.9, 1.02), (0.72, 0.92)),
+        RosterClass::Truck => ((2.9, 15.2), (0.85, 1.04), (0.68, 0.92)),
+        RosterClass::Jeep => ((6.0, 9.6), (0.88, 0.96), (0.58, 0.8)),
+        RosterClass::Hummer => ((4.5, 34.5), (0.78, 0.92), (0.6, 0.82)),
+        RosterClass::Emergency => ((4.5, 25.0), (0.75, 1.03), (0.75, 1.0)),
+        RosterClass::Military => ((7.0, 21.5), (0.65, 0.86), (0.15, 0.78)),
         RosterClass::Construction => ((0.5, 60.0), (0.3, 0.7), (0.0, 0.6)),
-        RosterClass::Utility => ((7.0, 32.0), (0.75, 0.84), (0.28, 0.9)),
-        RosterClass::Freight => ((7.5, 19.0), (0.6, 0.78), (0.25, 0.77)),
-        RosterClass::Cargo => ((22.0, 32.5), (0.73, 0.79), (0.55, 0.76)),
-        RosterClass::Bus => ((15.0, 30.5), (0.61, 0.68), (0.5, 0.9)),
-        RosterClass::Service => ((3.9, 9.5), (0.99, 1.04), (1.2, 1.56)),
-        RosterClass::Van => ((8.5, 15.0), (0.82, 0.96), (0.85, 1.2)),
+        RosterClass::Utility => ((7.0, 32.0), (0.75, 0.84), (0.28, 0.85)),
+        RosterClass::Freight => ((7.5, 19.0), (0.6, 0.78), (0.22, 0.8)),
+        RosterClass::Cargo => ((22.0, 32.5), (0.73, 0.79), (0.55, 0.78)),
+        RosterClass::Bus => ((15.0, 30.5), (0.61, 0.68), (0.5, 0.8)),
+        RosterClass::Service => ((3.9, 9.5), (0.99, 1.04), (0.78, 0.98)),
+        RosterClass::Van => ((8.5, 15.0), (0.82, 0.96), (0.6, 0.85)),
         _ => (
             (0.0, f64::INFINITY),
             (0.0, f64::INFINITY),
@@ -615,6 +667,28 @@ fn every_class_drives_inside_its_feel_band() {
         table.len()
     );
     assert_eq!(per_class.len(), 15, "fifteen road classes were driven");
+    // **The class ORDER** (audit): a coupe out-corners a sedan, a sedan an SUV,
+    // an SUV a jeep -- by the median of each class's measured lateral peak. The
+    // wave's `v x yaw rate` column had the SUVs at 1.40 and the sedans at 1.41.
+    let median_lat = |c: RosterClass| {
+        let mut v: Vec<f64> = per_class[&c].iter().map(|x| x.2).collect();
+        v.sort_by(f64::total_cmp);
+        v[v.len() / 2]
+    };
+    let medians: Vec<f64> = [
+        RosterClass::Coupe,
+        RosterClass::Sedan,
+        RosterClass::Suv,
+        RosterClass::Jeep,
+    ]
+    .iter()
+    .map(|c| median_lat(*c))
+    .collect();
+    println!("THE LATERAL ORDER (median g): coupe > sedan > suv > jeep = {medians:.2?}");
+    assert!(
+        medians.windows(2).all(|w| w[0] > w[1] + 0.03),
+        "the classes do not corner in their order: {medians:.2?}"
+    );
     assert!(
         bad.is_empty(),
         "rows outside their class band:\n{}",
@@ -635,8 +709,8 @@ fn the_sports_row_is_under_four_seconds_by_gearing_with_its_spring_kept() {
         .expect("the island's sports row");
     let f = measure(&def);
     println!(
-        "THE SPORTS ROW: 0-100 in {:.2} s (was 4.32), static {:.3} of travel, first gear {}",
-        f.sprint_s, f.static_frac, def.class.gear_1_ratio
+        "THE SPORTS ROW: 0-100 in {:.2} s (was 4.32), static {:.3} of travel, first gear {}; stop {:.1} m at {:.2} g, lateral {:.2} g",
+        f.sprint_s, f.static_frac, def.class.gear_1_ratio, f.brake_m, f.brake_g, f.lat_g
     );
     assert!(f.sprint_s < 4.0, "0-100 in {:.2} s", f.sprint_s);
     assert!(
