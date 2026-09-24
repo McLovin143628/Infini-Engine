@@ -2454,6 +2454,240 @@ impl Lineup {
     }
 }
 
+/// **The demo loop's ROSTER GALLERY** (VEH3f audit, priority a'),
+/// `INF_PIE_GALLERY` = `ahead:M/side@start/dwell[;entry,...]`: in a PREVIEW
+/// session, from `start` seconds of sim time, ONE vehicle at a time is put
+/// `M` metres ahead of the camera subject along the camera's heading and
+/// `side` metres to its right, on the terrain there, turned a three-quarter
+/// view to the lens -- the previous one taken away -- and held `dwell`
+/// seconds, each with a note in the hero log the demo loop photographs on.
+///
+/// * an entry is a roster row id (spawned through `roster::spawn_defined`,
+///   the `vehicle.spawn` door) or `hero:<Set>` (`Sedan`, `Coupe`, `Suv`,
+///   `Pickup`, `Cruiser`): the level's own authored car that wears that DCC
+///   hero set, MOVED there through [`RuntimeSim::place_vehicle`] (the island
+///   row's own proportions -- nothing is re-derived for the frame);
+/// * with no list: the shortest row of each of the eighteen classes, then the
+///   five hero sets.
+///
+/// It exists because the implementer's eighteen-class line was 98 m wide and
+/// partly behind the street's buildings, and no frame showed a hero body
+/// alone. One car at a time, close, labelled by the log.
+pub const GALLERY_ENV: &str = "INF_PIE_GALLERY";
+
+/// See [`GALLERY_ENV`].
+#[derive(Debug, Default, Clone)]
+pub struct Gallery {
+    ahead_m: f64,
+    side_m: f64,
+    start_s: f64,
+    dwell_s: f64,
+    entries: Vec<String>,
+    next: usize,
+    /// The roster car on show, to take away before the next one.
+    shown: Option<(uuid::Uuid, inf_ecs::vehicle::VehicleDef)>,
+    armed: bool,
+}
+
+impl Gallery {
+    /// Read [`GALLERY_ENV`]; inert when absent, a refusal on stderr when
+    /// malformed.
+    pub fn from_env() -> Self {
+        let Ok(raw) = std::env::var(GALLERY_ENV) else {
+            return Self::default();
+        };
+        let (head, list) = match raw.split_once(';') {
+            Some((a, r)) => (a.to_string(), Some(r.to_string())),
+            None => (raw.clone(), None),
+        };
+        let parsed = (|| {
+            let rest = head.trim().strip_prefix("ahead:")?;
+            let (place, time) = rest.split_once('@')?;
+            let (m, side) = match place.split_once('/') {
+                Some((m, s)) => (m.trim().parse::<f64>().ok()?, s.trim().parse::<f64>().ok()?),
+                None => (place.trim().parse::<f64>().ok()?, 0.0),
+            };
+            let (start, dwell) = time.split_once('/')?;
+            let (start, dwell) = (
+                start.trim().parse::<f64>().ok()?,
+                dwell.trim().parse::<f64>().ok()?,
+            );
+            [m, side, start, dwell]
+                .iter()
+                .all(|x| x.is_finite())
+                .then_some((m, side, start.max(0.0), dwell.max(0.5)))
+        })();
+        let Some((ahead_m, side_m, start_s, dwell_s)) = parsed else {
+            eprintln!(
+                "inf-player: {GALLERY_ENV} `{raw}` is not `ahead:M/side@start/dwell[;entry,...]`"
+            );
+            return Self::default();
+        };
+        let entries: Vec<String> = match list {
+            Some(l) => l
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            None => {
+                use inf_ecs::roster::{self, RosterClass};
+                let mut v: Vec<String> = RosterClass::ALL
+                    .into_iter()
+                    .filter(|c| *c != RosterClass::Trailer)
+                    .filter_map(|class| {
+                        roster::rows_of(class)
+                            .into_iter()
+                            .filter_map(|id| roster::roster().get(id).map(|d| (id, *d)))
+                            .min_by(|a, b| {
+                                a.1.half_extents
+                                    .z
+                                    .total_cmp(&b.1.half_extents.z)
+                                    .then(a.0.cmp(b.0))
+                            })
+                            .map(|(id, _)| id.to_string())
+                    })
+                    .collect();
+                v.extend(
+                    inf_ecs::vehicle::HERO_SETS
+                        .iter()
+                        .map(|(name, _)| format!("hero:{name}")),
+                );
+                v
+            }
+        };
+        Self {
+            ahead_m,
+            side_m,
+            start_s,
+            dwell_s,
+            entries,
+            next: 0,
+            shown: None,
+            armed: true,
+        }
+    }
+
+    /// Show the next vehicle once its time has come. Answers a log line when
+    /// it does.
+    pub fn tick(&mut self, sim: &mut RuntimeSim) -> Option<String> {
+        use inf_ecs::roster;
+        if !self.armed || self.next >= self.entries.len() {
+            return None;
+        }
+        let due = self.start_s + self.next as f64 * self.dwell_s;
+        if (sim.steps() as f64) / 60.0 < due {
+            return None;
+        }
+        let i = self.next;
+        self.next += 1;
+        if let Some((g, def)) = self.shown.take() {
+            inf_ecs::vehicle::despawn_rig(sim.world_mut(), g, &def);
+        }
+        let world = sim.world();
+        let hero = inf_ecs::movement::camera_subject(world)?;
+        let t = *world
+            .world()
+            .get::<inf_ecs::components::Transform>(world.entity_of(hero)?)?;
+        let view = sim.camera().pose.yaw_deg;
+        let h = view.to_radians();
+        let fwd = glam::DVec3::new(inf_math::psin64(h), 0.0, inf_math::pcos64(h));
+        let right = glam::DVec3::new(inf_math::pcos64(h), 0.0, -inf_math::psin64(h));
+        let mut p = t.translation.to_dvec3() + fwd * self.ahead_m + right * self.side_m;
+        let ground = {
+            let g = sim.terrain_height_at(p.x, p.z);
+            if g.is_finite() {
+                g
+            } else {
+                p.y
+            }
+        };
+        // Facing the lens, turned 35 degrees: the three-quarter front.
+        let yaw = view + 180.0 - 35.0;
+        let entry = self.entries[i].clone();
+        let n = self.entries.len();
+        if let Some(set) = entry.strip_prefix("hero:") {
+            let base = inf_ecs::vehicle::HERO_SETS
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(set))
+                .map(|(_, b)| uuid::Uuid::from_u128(*b));
+            let Some(base) = base else {
+                return Some(format!(
+                    "{GALLERY_ENV} {}/{n} hero={set} UNKNOWN SET",
+                    i + 1
+                ));
+            };
+            let lower = inf_ecs::vehicle::hero_part_mesh_guid(base, "lower");
+            let w = sim.world();
+            let car = w.world().iter_entities().find_map(|e| {
+                let m = e.get::<inf_ecs::components::MeshRef>()?;
+                if m.asset != Some(lower) {
+                    return None;
+                }
+                let parent = w.parent_of(e.id())?;
+                w.guid_of(parent)
+            });
+            let Some(car) = car else {
+                return Some(format!(
+                    "{GALLERY_ENV} {}/{n} hero={set} NOT RESIDENT (no car wears it within the streamed cells)",
+                    i + 1
+                ));
+            };
+            let half = w
+                .entity_of(car)
+                .and_then(|e| w.world().get::<inf_ecs::components::Collider3D>(e))
+                .map(|c| c.half_extents.to_dvec3())
+                .unwrap_or(glam::DVec3::splat(1.0));
+            let name = w
+                .entity_of(car)
+                .and_then(|e| w.name_of(e))
+                .unwrap_or("?")
+                .to_string();
+            p.y = ground + half.y + 0.45;
+            let placed = sim.place_vehicle(car, p, glam::DQuat::from_rotation_y(yaw.to_radians()));
+            return Some(format!(
+                "{GALLERY_ENV} {}/{n} class=hero row={set} label={name} body=dcc-hero-panels half={:.2},{:.2},{:.2} at {:.1},{:.1},{:.1} {}",
+                i + 1,
+                half.x,
+                half.y,
+                half.z,
+                p.x,
+                p.y,
+                p.z,
+                if placed { "placed" } else { "REFUSED" }
+            ));
+        }
+        let Some(def) = roster::roster().get(&entry).copied() else {
+            return Some(format!(
+                "{GALLERY_ENV} {}/{n} row={entry} UNKNOWN ROW",
+                i + 1
+            ));
+        };
+        p.y = inf_ecs::vehicle::resting_origin_y(&def, ground) + 0.05;
+        let guid = roster::spawn_defined(sim.world_mut(), &entry, p, yaw)?;
+        sim.world_mut().propagate();
+        self.shown = Some((guid, def));
+        let body = if def.art.is_some() {
+            "art".to_string()
+        } else if def.body_mesh.is_some() {
+            "dcc-hero-panels".to_string()
+        } else {
+            format!("{:?}", def.body).to_lowercase()
+        };
+        Some(format!(
+            "{GALLERY_ENV} {}/{n} class={} row={entry} label={} body={body} half={:.2},{:.2},{:.2} at {:.1},{:.1},{:.1}",
+            i + 1,
+            def.roster_class.map(|c| c.name()).unwrap_or("-"),
+            roster::roster_label(&entry).unwrap_or(&entry),
+            def.half_extents.x,
+            def.half_extents.y,
+            def.half_extents.z,
+            p.x,
+            p.y,
+            p.z
+        ))
+    }
+}
+
 /// **The demo loop's HOLD on an AUDIO beat** (VEH3e audit), `INF_PIE_AUDIO_HOLD`
 /// = `seconds`: a PREVIEW session freezes its fixed steps for `seconds` of wall
 /// time the first time, per boarding, the camera subject's car reaches each of

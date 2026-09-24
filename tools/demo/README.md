@@ -30,6 +30,8 @@ Useful switches:
 | `-Port <n>` | the WebView2 debug port (default 9222) |
 | `-Lineup <where>@<s>[;row,...]` | (wave VEH3f) `INF_PIE_LINEUP`: spawn a line of roster rows at `s` seconds -- `x,y,z/yaw`, or `ahead:M` metres in front of the hero across its heading, each car on the terrain; one row of each of the eighteen classes unless rows are named |
 | `-RosterOnly` | (wave VEH3f) the roster leg alone: wait for the line-up's note, photograph it straight on and turned left and right (`130`-`132-veh3f-line-*.png`) |
+| `-Gallery ahead:M/side@start/dwell[;entry,...]` | (VEH3f audit) `INF_PIE_GALLERY`: ONE vehicle at a time in front of the camera, a three-quarter view -- the shortest row of each of the eighteen classes, then the five DCC hero sets (`hero:Sedan` .. `hero:Cruiser`, the level's own cars moved there), unless entries are named |
+| `-GalleryOnly` | (VEH3f audit) the gallery leg alone: one frame per gallery note (`2NN-veh3f-gallery-*.png`) and `299-veh3f-gallery-contact-sheet.png`, labelled from the notes by `contact_sheet.py` |
 | `-PlayMode window` | **the default since the CHAR1b.2 audit** — drive "Play in New Window" instead of the embedded viewport. Needs the CDP path, because a menu item has no coordinate to fall back to; `-PlayMode embedded` is the other way and is what the roadmap calls the preview |
 
 ## What it produces

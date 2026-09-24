@@ -79,13 +79,15 @@ impl HeroSet {
 
     /// The base guid a catalogue row's `body_mesh` names.
     pub fn base(self) -> Uuid {
-        Uuid::from_u128(match self {
-            HeroSet::Sedan => 0x5645_4833_4845_524f_8000_0000_0000_0001,
-            HeroSet::Coupe => 0x5645_4833_4845_524f_8000_0000_0000_0002,
-            HeroSet::Suv => 0x5645_4833_4845_524f_8000_0000_0000_0003,
-            HeroSet::Pickup => 0x5645_4833_4845_524f_8000_0000_0000_0004,
-            HeroSet::Cruiser => 0x5645_4833_4845_524f_8000_0000_0000_0005,
-        })
+        let i = match self {
+            HeroSet::Sedan => 0,
+            HeroSet::Coupe => 1,
+            HeroSet::Suv => 2,
+            HeroSet::Pickup => 3,
+            HeroSet::Cruiser => 4,
+        };
+        debug_assert_eq!(inf_ecs::vehicle::HERO_SETS[i].0, self.name());
+        Uuid::from_u128(inf_ecs::vehicle::HERO_SETS[i].1)
     }
 
     /// The file prefix.
@@ -725,7 +727,11 @@ mod tests {
             ];
             let mut report = Vec::new();
             let mut panel_side = 0.0;
-            for (label, ax) in [("side", (2usize, 1usize)), ("top", (0, 2)), ("front", (0, 1))] {
+            for (label, ax) in [
+                ("side", (2usize, 1usize)),
+                ("top", (0, 2)),
+                ("front", (0, 1)),
+            ] {
                 let (l, nn) = ([lo[ax.0], lo[ax.1]], [n[ax.0], n[ax.1]]);
                 let d_panel = diff(
                     &raster(&boxes_hero, ax, l, nn, cell),

@@ -214,6 +214,9 @@ pub struct PlayerApp {
     /// The roster line-up (wave VEH3f), inert unless `INF_PIE_LINEUP` is set,
     /// consulted only in a PREVIEW session.
     lineup: crate::pie_drive::Lineup,
+    /// The roster gallery (VEH3f audit), inert unless `INF_PIE_GALLERY` is
+    /// set, consulted only in a PREVIEW session.
+    gallery: crate::pie_drive::Gallery,
     /// **The demo loop's see-through car** (VEH3d audit) — inert unless
     /// `INF_PIE_CUTAWAY` is set, consulted only in a PREVIEW session. See
     /// [`crate::pie_drive::Cutaway`].
@@ -365,6 +368,7 @@ impl PlayerApp {
             audio_hold: crate::pie_drive::AudioHold::from_env(),
             car_placement: crate::pie_drive::CarPlacement::from_env(),
             lineup: crate::pie_drive::Lineup::from_env(),
+            gallery: crate::pie_drive::Gallery::from_env(),
             cutaway: crate::pie_drive::Cutaway::from_env(),
             time_scale: crate::pie_drive::time_scale_from_env(),
             vmeshes,
@@ -1279,6 +1283,9 @@ impl PlayerApp {
                 self.hero_log.note(&said);
             }
             if let Some(said) = self.lineup.tick(&mut self.sim) {
+                self.hero_log.note(&said);
+            }
+            if let Some(said) = self.gallery.tick(&mut self.sim) {
                 self.hero_log.note(&said);
             }
             if let Some(said) = self.spawn_override.tick(&mut self.sim, dt) {

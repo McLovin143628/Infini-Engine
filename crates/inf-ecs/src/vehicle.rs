@@ -3226,6 +3226,18 @@ pub const ART_BODY_PART: &str = "art_body";
 /// **What a seat cushion is covered in** (wave VEH3f) -- charcoal cloth.
 pub const SEAT_COLOR: crate::math::Color = crate::math::Color::new(0.09, 0.09, 0.1, 1.0);
 
+/// **The five DCC hero sets and the base `Guid` each names** (wave VEH3f;
+/// Ring 0 since the audit, so the shipped player's gallery can find a car
+/// that wears one) -- `inf_editor_core::vehicle_bodies::HeroSet::base` reads
+/// this table.
+pub const HERO_SETS: [(&str, u128); 5] = [
+    ("Sedan", 0x5645_4833_4845_524f_8000_0000_0000_0001),
+    ("Coupe", 0x5645_4833_4845_524f_8000_0000_0000_0002),
+    ("Suv", 0x5645_4833_4845_524f_8000_0000_0000_0003),
+    ("Pickup", 0x5645_4833_4845_524f_8000_0000_0000_0004),
+    ("Cruiser", 0x5645_4833_4845_524f_8000_0000_0000_0005),
+];
+
 /// **Which parts of a family a DCC hero body replaces** (wave VEH3f).
 ///
 /// The PANELS that make the silhouette -- the lower body and the greenhouse,

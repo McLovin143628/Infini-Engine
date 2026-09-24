@@ -2664,7 +2664,14 @@ fn the_roster_families_board_at_their_sockets_on_the_shipped_host() {
     );
     let (mut rows, mut bad) = (0usize, Vec::<String>::new());
     for row in [
-        "sedan", "sports", "suv", "truck", "van", "cruiser", "ambulance", "swat",
+        "sedan",
+        "sports",
+        "suv",
+        "truck",
+        "van",
+        "cruiser",
+        "ambulance",
+        "swat",
         "brute_bus",
         "jobuilt_hauler",
         "vapid_contender",
@@ -2676,7 +2683,12 @@ fn the_roster_families_board_at_their_sockets_on_the_shipped_host() {
             .parts()
             .iter()
             .find(|p| p.name == "seat_r")
-            .map(|p| (p.centre.x * def.half_extents.x, p.centre.z * def.half_extents.z))
+            .map(|p| {
+                (
+                    p.centre.x * def.half_extents.x,
+                    p.centre.z * def.half_extents.z,
+                )
+            })
             .unwrap_or((def.half_extents.x * 0.4, 0.0));
         let hero_at = DVec3::new(def.half_extents.x + 1.1, 0.0, seat.1 - 0.6);
         let mut sim = rigged_runtime_sim_for(row, hero_at);

@@ -150,6 +150,16 @@ param(
     # row of each of the eighteen classes spawned side by side through the
     # `vehicle.spawn` door, `y` the ground there. See `pie_drive::LINEUP_ENV`.
     [string]$Lineup = "",
+    # **THE ROSTER GALLERY** (VEH3f audit), `INF_PIE_GALLERY` =
+    # `ahead:M/side@start/dwell[;entry,...]`: one vehicle at a time put in
+    # front of the camera, a three-quarter view, each one noted in the hero log
+    # -- the eighteen classes' shortest rows then the five DCC hero sets unless
+    # entries are named. See `pie_drive::GALLERY_ENV`.
+    [string]$Gallery = "",
+    # **THE GALLERY LEG ON ITS OWN** (VEH3f audit): photographs every gallery
+    # note (`2NN-veh3f-gallery-*.png`), then the contact sheet
+    # (`299-veh3f-gallery-contact-sheet.png`) labelled from the notes.
+    [switch]$GalleryOnly,
     # **SKIP THE BACK-OFF** (VEH3e audit): the audio leg reverses off the kerb
     # first because the level parks its saloon nose-in; a placed car is already
     # on its road, and reversing spends the burnout beat on the way back.
@@ -550,9 +560,15 @@ if ($BoardHold -ne "") { $env:INF_PIE_BOARD_HOLD = $BoardHold; Say "board hold: 
 else { Remove-Item env:INF_PIE_BOARD_HOLD -ErrorAction Ignore }
 if ($Cutaway -gt 0.0 -and $Cutaway -lt 1.0) { $env:INF_PIE_CUTAWAY = "$Cutaway"; Say "cutaway: the seated car drawn at alpha $Cutaway" }
 else { Remove-Item env:INF_PIE_CUTAWAY -ErrorAction Ignore }
+# (VEH3f audit: the line-up's `if` had been dropped between the place-car
+# `if` and its `else`, so a -PlaceCar session with no -Lineup had its
+# placement REMOVED again on the next line.)
 if ($PlaceCar -ne "") { $env:INF_PIE_PLACE_CAR = $PlaceCar; Say "place car: $PlaceCar (the car nearest the hero)" }
-if ($Lineup -ne "") { $env:INF_PIE_LINEUP = $Lineup; Say "roster line-up: $Lineup" }
 else { Remove-Item env:INF_PIE_PLACE_CAR -ErrorAction Ignore }
+if ($Lineup -ne "") { $env:INF_PIE_LINEUP = $Lineup; Say "roster line-up: $Lineup" }
+else { Remove-Item env:INF_PIE_LINEUP -ErrorAction Ignore }
+if ($Gallery -ne "") { $env:INF_PIE_GALLERY = $Gallery; Say "roster gallery: $Gallery" }
+else { Remove-Item env:INF_PIE_GALLERY -ErrorAction Ignore }
 if ($AudioHold -gt 0.0) { $env:INF_PIE_AUDIO_HOLD = "$AudioHold"; Say "audio hold: $AudioHold s on the burnout, the thump and the slide" }
 else { Remove-Item env:INF_PIE_AUDIO_HOLD -ErrorAction Ignore }
 if ($NoAudioDevice) { $env:INF_AUDIO_DEVICE = "off"; Say "audio device: off (the preview is silent)" }
@@ -1279,9 +1295,48 @@ function Invoke-Veh3fLeg {
     Say ("VEH3f COLUMNS: roster classes the hero sat in: " + $(if ($classes.Count -gt 0) { $classes -join " " } else { "none (the hero walked)" }))
 }
 
+# ── THE GALLERY LEG (VEH3f audit) ────────────────────────────────────────────
+#
+# One frame per `INF_PIE_GALLERY` note, triggered on the NOTE (the player says
+# which row it put in front of the lens, and where), then a contact sheet whose
+# labels are those notes' own words -- never a list this script keeps.
+function Invoke-Veh3fGallery {
+    Restore-PlayerFocus "before the gallery leg"
+    $taken = @{}
+    $total = -1
+    $deadline = (Get-Date).AddSeconds(420)
+    while ((Get-Date) -lt $deadline) {
+        $notes = @(Get-Content $heroCsv -ErrorAction Ignore | Where-Object { $_ -match "INF_PIE_GALLERY (\d+)/(\d+)" })
+        foreach ($n in $notes) {
+            if ($n -match "INF_PIE_GALLERY (\d+)/(\d+)") {
+                $k = [int]$Matches[1]; $total = [int]$Matches[2]
+                if (-not $taken.ContainsKey($k)) {
+                    Start-Sleep -Milliseconds 1800
+                    $row = if ($n -match "row=(\S+)") { $Matches[1] } else { "row" }
+                    $cls = if ($n -match "class=(\S+)") { $Matches[1] } else { "class" }
+                    $file = Join-Path $OutDir ("{0}-veh3f-gallery-{1:D2}-{2}-{3}.png" -f (200 + $k), $k, $cls, $row)
+                    & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out $file | ForEach-Object { Say $_ }
+                    $taken[$k] = $n.TrimStart('#', ' ')
+                    Say ("VEH3f GALLERY: " + $taken[$k])
+                }
+            }
+        }
+        if ($total -gt 0 -and $taken.Count -ge $total) { break }
+        Start-Sleep -Milliseconds 250
+    }
+    Say ("VEH3f GALLERY: {0} of {1} frames" -f $taken.Count, $total)
+    $sheet = Join-Path $PSScriptRoot "contact_sheet.py"
+    & python $sheet $OutDir (Join-Path $OutDir "299-veh3f-gallery-contact-sheet.png") 2>&1 | ForEach-Object { Say "  sheet: $_" }
+    [InfInput]::Down(0x11); Start-Sleep -Milliseconds 2500; [InfInput]::Up(0x11)   # W
+}
+
 if ($RosterOnly) {
     Say "ROSTER ONLY (-RosterOnly): the roster leg, and nothing else"
     Invoke-Veh3fLeg
+}
+if ($GalleryOnly) {
+    Say "GALLERY ONLY (-GalleryOnly): the gallery leg, and nothing else"
+    Invoke-Veh3fGallery
 }
 if ($BoardingOnly) {
     Say "BOARDING ONLY (-BoardingOnly): the boarding leg, and nothing else"
@@ -1291,7 +1346,7 @@ if ($AudioOnly) {
     Say "AUDIO ONLY (-AudioOnly): the audio leg, and nothing else"
     Invoke-Veh3eLeg
 }
-if (-not $BoardingOnly -and -not $AudioOnly -and -not $RosterOnly) {
+if (-not $BoardingOnly -and -not $AudioOnly -and -not $RosterOnly -and -not $GalleryOnly) {
 
 # ── 5a. THE ISLAND'S OWN SIDEARM, with no environment variable ───────────────
 #
@@ -3002,7 +3057,7 @@ if (Test-Path $heroCsv) {
 Say ("windows now: " + ((Get-Process | Where-Object { $_.MainWindowTitle -ne "" -and ($_.ProcessName -like "inf*") } |
     ForEach-Object { "$($_.ProcessName)[$($_.Id)] '$($_.MainWindowTitle)'" }) -join " | "))
 
-if (-not $BoardingOnly -and -not $AudioOnly -and -not $RosterOnly) {
+if (-not $BoardingOnly -and -not $AudioOnly -and -not $RosterOnly -and -not $GalleryOnly) {
 # ── 6z. WAVE VEH3a — THE TYRES, AND WHAT THE GROUND UNDER THEM IS ────────────
 #
 # Four frames, every one TRIGGERED on `hero.csv`'s eight new columns rather than
