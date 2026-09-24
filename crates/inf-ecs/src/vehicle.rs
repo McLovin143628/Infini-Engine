@@ -4475,6 +4475,17 @@ pub struct VehicleDef {
     /// sign test on the mount's `z`, so a trailer's wheels are unsteered by
     /// construction -- which is what a trailer's wheels are.
     pub wheel_offset_z_m: f64,
+    /// **How many steered axles**, front first (audit, VEH3f): `1` for every
+    /// car, `2` for an eight-wheeled APC or a missile carrier. A float because
+    /// a catalogue row's every key is one; read as `round().clamp(1, 3)`.
+    pub front_axles: f64,
+    /// **How many rear axles** (audit, VEH3f): `1` for every car, `2` for a
+    /// tandem -- a 6x4 semi tractor, a 6x6, a three-axle coach.
+    pub rear_axles: f64,
+    /// **The spacing of the axles in one group**, metres (audit, VEH3f): a
+    /// front group runs back from `+half_wheelbase_m`, a rear group is centred
+    /// on `-half_wheelbase_m`. Unused with one axle a group.
+    pub axle_spacing_m: f64,
     /// **The hero body** (wave VEH3f): the base `Guid` of a set of per-part
     /// meshes built in the P23 DCC and committed as samples, or `None` for a
     /// row drawn in its family's primitives.
@@ -4532,6 +4543,9 @@ impl Default for VehicleDef {
             mass_kg: 0.0,
             drag_cd: 0.0,
             wheel_offset_z_m: 0.0,
+            front_axles: 1.0,
+            rear_axles: 1.0,
+            axle_spacing_m: 1.35,
             body_mesh: None,
             engine_clip: None,
             art: None,
@@ -4568,6 +4582,9 @@ impl VehicleDef {
             "mass_kg" => &mut self.mass_kg,
             "drag_coefficient" => &mut self.drag_cd,
             "wheel_offset_z_m" => &mut self.wheel_offset_z_m,
+            "front_axles" => &mut self.front_axles,
+            "rear_axles" => &mut self.rear_axles,
+            "axle_spacing_m" => &mut self.axle_spacing_m,
             _ => return self.class.set(name, value),
         };
         *slot = value;
@@ -4578,16 +4595,19 @@ impl VehicleDef {
     /// restated (the P29.6 A14 shape).
     pub fn geometry_names() -> &'static [&'static str] {
         &[
+            "axle_spacing_m",
             "buoyancy_density_kg_m3",
             "buoyancy_linear_drag",
             "density_kg_m3",
             "drag_coefficient",
+            "front_axles",
             "half_height_m",
             "half_length_m",
             "half_track_m",
             "half_wheelbase_m",
             "half_width_m",
             "mass_kg",
+            "rear_axles",
             "wheel_drop_m",
             "wheel_offset_z_m",
             "wheel_radius_m",
@@ -4603,15 +4623,48 @@ impl VehicleDef {
     /// [`wheel_offset_z_m`](Self::wheel_offset_z_m) shifts all four along `+Z`
     /// (wave VEH3f -- a trailer's tandem); it is zero for every other row, so
     /// every rig authored before the roster is byte-identical.
-    pub fn wheel_mounts(&self) -> [Vec3d; 4] {
+    ///
+    /// **N axles** (audit, VEH3f): [`front_axles`](Self::front_axles) steered
+    /// pairs running back from `+half_wheelbase_m` and
+    /// [`rear_axles`](Self::rear_axles) pairs centred on `-half_wheelbase_m`,
+    /// [`axle_spacing_m`](Self::axle_spacing_m) apart -- front group first,
+    /// each axle left then right. One and one is the four mounts this always
+    /// answered, in the same order, so every two-axle rig is byte-identical.
+    /// The wave ran every multi-axle row on four wheels because this was an
+    /// array of four; the solver, the rig and the recogniser were already
+    /// `Vec`s grouped by `WheelMount::steered`.
+    pub fn wheel_mounts(&self) -> Vec<Vec3d> {
         let (x, y, z) = (self.half_track_m, self.wheel_drop_m, self.half_wheelbase_m);
         let o = self.wheel_offset_z_m;
-        [
-            Vec3d::new(-x, y, o + z),
-            Vec3d::new(x, y, o + z),
-            Vec3d::new(-x, y, o - z),
-            Vec3d::new(x, y, o - z),
-        ]
+        let s = self.axle_spacing_m;
+        let mut out = Vec::with_capacity(self.wheel_count());
+        for k in 0..self.axles(self.front_axles) {
+            let at = o + z - k as f64 * s;
+            out.push(Vec3d::new(-x, y, at));
+            out.push(Vec3d::new(x, y, at));
+        }
+        let n = self.axles(self.rear_axles);
+        for k in 0..n {
+            let at = o - z + ((n - 1) as f64 * 0.5 - k as f64) * s;
+            out.push(Vec3d::new(-x, y, at));
+            out.push(Vec3d::new(x, y, at));
+        }
+        out
+    }
+
+    /// One group's axle count: `round().clamp(1, 3)`, and `1` for a non-finite
+    /// key.
+    fn axles(&self, v: f64) -> usize {
+        if v.is_finite() {
+            v.round().clamp(1.0, 3.0) as usize
+        } else {
+            1
+        }
+    }
+
+    /// **How many wheels this row stands on** (audit, VEH3f) -- two per axle.
+    pub fn wheel_count(&self) -> usize {
+        2 * (self.axles(self.front_axles) + self.axles(self.rear_axles))
     }
 
     /// **This row's chassis mass**, kg -- its collider's box at its density,
@@ -4621,7 +4674,7 @@ impl VehicleDef {
     }
 
     /// **What share of its suspension travel this row sits at, standing still**
-    /// (wave VEH3f) -- `m g / 4 / (k travel)`, the quantity every roster row is
+    /// (wave VEH3f) -- `m g / wheels / (k travel)`, the quantity every roster row is
     /// authored against (30 to 45 per cent) and the static-fraction arm reads
     /// against the SETTLED chassis rather than this formula.
     pub fn static_travel_frac(&self) -> f64 {
@@ -4630,7 +4683,7 @@ impl VehicleDef {
         if !(k > 0.0 && t > 0.0) {
             return f64::INFINITY;
         }
-        self.chassis_mass_kg() * 9.81 / 4.0 / (k * t)
+        self.chassis_mass_kg() * 9.81 / self.wheel_count() as f64 / (k * t)
     }
 
     /// **Resolve the derived keys** (wave VEH3f) -- `mass_kg` into the density

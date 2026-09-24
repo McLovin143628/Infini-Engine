@@ -23,7 +23,8 @@
 //! |---|---|---|---|---|
 //! | `every_roster_row_parses_round_trips_and_names_only_known_keys` | the committed roster through `merge_toml`; every key re-applied through `apply_table`; every class through the wire (`serde_json`) and `to_tuning`/`from_tuning` | an unknown key in `roster.toml`; a class key dropped from `VehicleClass::set` | 153 + 2 rows, 18 classes at the doc's counts, every key | **fails** -- 11 rows, no class |
 //! | `the_class_defaults_apply_before_the_row_and_a_row_override_moves_only_its_row` | `from_toml_table_with` against a mutated `ClassProfiles`, and a row edited once | the class table applied AFTER the row's keys | 20 coupes moved; one row moved | **fails** -- no class key |
-//! | `every_class_drives_inside_its_feel_band` | 0-100 (or 80 % of a lower limiter), the stop and the peak ramp-steer lateral g of every wheeled road row, DRIVEN on a shipped host | a class's gearing, grip or brakes moved | 135 rows, 15 classes | **fails** -- its rows have no class to be banded by |
+//! | `every_class_drives_inside_its_feel_band` | 0-100 (or 80 % of a lower limiter), the stop and the peak ramp-steer lateral g (the chassis's acceleration along its right axis while its sideslip is under 10 deg -- the audit's; the wave read `v x yaw rate`, a spin) of every wheeled road row, DRIVEN on a shipped host; the class ORDER coupe > sedan > suv > jeep | a class's gearing, grip or brakes moved; the lateral read back as `v x yaw rate` (audit) | 135 rows, 15 classes | **fails** -- its rows have no class to be banded by |
+//! | `a_multi_axle_rig_stands_on_all_its_wheels_and_they_carry_its_weight` (audit) | the rig in the WORLD: its wheel count, the grounded wheels, the struts' loads against the weight, per axle | `wheel_mounts` cut to four | 4 rows, 26 wheels | **fails** -- no multi-axle row |
 //! | `the_sports_row_is_under_four_seconds_by_gearing_with_its_spring_kept` | the island's sports row on the shipped host: 0-100 and its settled static fraction | first gear back to 4.4 | one launch | n/a -- it IS that row (4.32 s before) |
 //! | `every_bus_takes_longer_than_fifteen_seconds` | the five bus rows' sprints | a bus row given a coupe's engine | 5 rows | **fails** -- no bus |
 //! | `every_roster_row_settles_inside_its_static_fraction` | each wheeled row's struts after 120 settled steps | a row's spring halved | 135 rows | passes -- VEH3b sprung them at 45 % |
@@ -36,6 +37,8 @@
 //! | `traffic_draws_the_roster_by_class_weight` | 20 000 identities through `catalogue_row_id`, each class's share of the parked and circuit draws against its weight | the kerb draw given the circuit weights | 20 000 draws, every weighted class | **fails** -- no classes to weigh |
 //! | `the_island_census_by_class_and_no_two_cars_in_one_place` | the CI island, cooked and booted as the player boots it, after 10 island minutes (1 in dev/CI): traffic records and resident chassis by class; every resident chassis box against every other (SAT) where BOTH are parked (kerb or authored), hitched pairs excepted; moving contacts printed | `authored_footprints` answering empty; the kerb draw given the circuit weights | records, classes, pairs -- VACUOUS against its mutations (stated in the arm) | **fails** -- one silhouette set, no classes |
 //! | `the_real_islands_kerbs_step_around_its_fleets` | the LOCAL island (skips on CI): every parked chassis box against every other after 10 s | **none found** -- VACUOUS against the exclusion guards (stated in the arm) | 35 parked chassis, 23 kerb cars | passes |
+//! | `the_kerb_lattice_steps_around_an_authored_car_on_its_slot` (audit) | a fixture street's lattice with and without two authored saloons put where it parks: the two slots empty, no kerb box in an authored box | `authored_footprints` empty; `PARK_CLEAR_M` -3 | 20 -> 18 kerb cars | **fails** -- no lattice exclusion |
+//! | `no_two_kerb_slots_of_different_streets_are_within_five_metres` (audit) | `kerb_slots` over 144 swept two-street layouts | `JUNCTION_CLEAR_M` 0 | 58 845 cross-street pairs, the closest 5.89 m | passes -- the geometry predates the roster |
 //! | `pie_equals_shipping_on_three_classes_and_the_trailer` | every vehicle chassis pose, step by step, in `SimSession` and `RuntimeSim` -- four `vehicle.spawn`s and a hitched rig under one set of controls | either host's `vehicle.spawn` arm deleted | 600 steps, 6 vehicles | **fails** -- no `vehicle.spawn` |
 //! | `the_catalogue_loads_in_microseconds` | `merge_toml` of the roster, min of five | n/a -- a COST arm | 155 rows | n/a |
 //! | `sixty_four_mixed_class_cars_cost_what_they_print` | the vehicle phase's clock at 64 mixed-class cars against 64 of one row | n/a -- a COST arm | 64 cars | n/a |
@@ -419,20 +422,31 @@ type Band = (f64, f64);
 /// and the class ORDER is asserted beside them. Construction's lateral floor is
 /// 0: plant is timed at walking pace, where no lateral g is honest; that bound
 /// is vacuous by design and named in the audit's list.
+///
+/// **And twelve rows stand on their real axles** (audit, `front_axles` /
+/// `rear_axles`): the rear group's brake budget is shared evenly across a
+/// tandem whose two axles carry 30 % and 21 % of the weight, so the lighter
+/// axle's wheels reach their grip first and the stop falls 5-10 % (Dubsta 6x6
+/// 0.93 -> 0.84 g, the flatbed 0.77 -> 0.73, the Hauler 0.73 -> 0.67); the
+/// sprint moves through the extra wheels' rotating inertia on the auto-clutch
+/// launch (the Hauler 17.6 -> 19.9 s, the flatbed 25.2 -> 21.7). Truck stop
+/// floor 0.85 -> 0.82, freight sprint ceiling 19 -> 21, cargo sprint floor 22
+/// -> 20.5 and stop floor 0.73 -> 0.70 -- the model got more honest, and the
+/// in-group brake split by load is carried by name.
 fn band(c: RosterClass) -> (Band, Band, Band) {
     match c {
         RosterClass::Coupe => ((2.2, 6.6), (1.0, 1.2), (1.0, 1.3)),
         RosterClass::Sedan => ((2.6, 10.8), (0.97, 1.12), (0.82, 1.08)),
         RosterClass::Suv => ((2.9, 10.2), (0.9, 1.02), (0.72, 0.92)),
-        RosterClass::Truck => ((2.9, 15.2), (0.85, 1.04), (0.68, 0.92)),
+        RosterClass::Truck => ((2.9, 15.2), (0.82, 1.04), (0.68, 0.92)),
         RosterClass::Jeep => ((6.0, 9.6), (0.88, 0.96), (0.58, 0.8)),
         RosterClass::Hummer => ((4.5, 34.5), (0.78, 0.92), (0.6, 0.82)),
         RosterClass::Emergency => ((4.5, 25.0), (0.75, 1.03), (0.75, 1.0)),
         RosterClass::Military => ((7.0, 21.5), (0.65, 0.86), (0.15, 0.78)),
         RosterClass::Construction => ((0.5, 60.0), (0.3, 0.7), (0.0, 0.6)),
         RosterClass::Utility => ((7.0, 32.0), (0.75, 0.84), (0.28, 0.85)),
-        RosterClass::Freight => ((7.5, 19.0), (0.6, 0.78), (0.22, 0.8)),
-        RosterClass::Cargo => ((22.0, 32.5), (0.73, 0.79), (0.55, 0.78)),
+        RosterClass::Freight => ((7.5, 21.0), (0.6, 0.78), (0.22, 0.8)),
+        RosterClass::Cargo => ((20.5, 32.5), (0.7, 0.79), (0.55, 0.78)),
         RosterClass::Bus => ((15.0, 30.5), (0.61, 0.68), (0.5, 0.8)),
         RosterClass::Service => ((3.9, 9.5), (0.99, 1.04), (0.78, 0.98)),
         RosterClass::Van => ((8.5, 15.0), (0.82, 0.96), (0.6, 0.85)),
@@ -756,6 +770,73 @@ fn every_roster_row_settles_inside_its_static_fraction() {
     }
     println!("STATIC FRACTION: {n} rows settled between {lo:.3} and {hi:.3} of their travel");
     assert!(n >= 130);
+}
+
+/// **A multi-axle rig stands on all its wheels, and they carry its weight**
+/// (audit, VEH3f -- the brief's (f')).
+///
+/// The wave ran every six- and eight-wheeled row on four wheels (`wheel_mounts`
+/// was an array of four; the solver and the rig were already `Vec`s grouped by
+/// `WheelMount::steered`). Now a row says `front_axles` / `rear_axles` /
+/// `axle_spacing_m`. On the shipped host, settled on the slab: the rig in the
+/// WORLD has the wheel count the row names, every wheel is on the ground, the
+/// struts' loads sum to the chassis's weight (within 1 %), and each axle
+/// carries a share of it -- the 6x4 semi tractor, the 6x6, the 8x8 APC and
+/// the three-axle coach. Their feel is in `every_class_drives_inside_its_feel_band`.
+///
+/// **Mutation -> red**: `wheel_mounts` answering the first four mounts only
+/// (the rig has 4 wheels, not 6/8).
+#[test]
+fn a_multi_axle_rig_stands_on_all_its_wheels_and_they_carry_its_weight() {
+    let mut rows = 0usize;
+    for (id, want) in [
+        ("jobuilt_hauler", 6usize),
+        ("caracara_6x6", 6),
+        ("declasse_apc", 8),
+        ("dashhound", 6),
+    ] {
+        let def = *roster::roster().get(id).expect("the row");
+        assert_eq!(def.wheel_count(), want, "{id}: the row's own count");
+        let mut sim = flat_sim(&def);
+        for _ in 0..180 {
+            drive(&mut sim, CAR, VehicleControls::default());
+        }
+        let v = sim.bridge3d().vehicle_of(CAR).expect("a rig");
+        let wheels = v.wheels();
+        let mounts: Vec<f64> = v.rig().wheels.iter().map(|m| m.mount_local.z).collect();
+        let grounded = wheels.iter().filter(|w| w.contact.is_some()).count();
+        let total: f64 = wheels.iter().map(|w| w.load_n).sum();
+        let weight = def.chassis_mass_kg() * 9.81;
+        // Per axle: group the wheels by their mount's z.
+        let mut axles: BTreeMap<i64, f64> = BTreeMap::new();
+        for (w, z) in wheels.iter().zip(&mounts) {
+            *axles.entry((z * 100.0).round() as i64).or_default() += w.load_n;
+        }
+        let shares: Vec<String> = axles
+            .iter()
+            .rev()
+            .map(|(z, n)| format!("z {:+.2} m {:.0} %", *z as f64 / 100.0, 100.0 * n / weight))
+            .collect();
+        println!(
+            "MULTI-AXLE {id}: {} wheels in the world, {grounded} grounded; strut loads {total:.0} N against {weight:.0} N of weight ({:+.2} %); per axle {}",
+            wheels.len(),
+            100.0 * (total - weight) / weight,
+            shares.join(", ")
+        );
+        assert_eq!(wheels.len(), want, "{id}: the rig in the world");
+        assert_eq!(grounded, want, "{id}: a wheel is off the ground");
+        assert!(
+            ((total - weight) / weight).abs() < 0.01,
+            "{id}: the struts carry {total:.0} N of {weight:.0} N"
+        );
+        assert_eq!(axles.len(), want / 2, "{id}: the axles");
+        assert!(
+            axles.values().all(|n| *n > 0.08 * weight),
+            "{id}: an axle carries almost nothing: {shares:?}"
+        );
+        rows += 1;
+    }
+    assert_eq!(rows, 4);
 }
 
 // ── 3. THE ARTICULATED RIG AND THE TRACKS ───────────────────────────────────
@@ -1549,8 +1630,40 @@ fn the_island_census_by_class_and_no_two_cars_in_one_place() {
                     continue;
                 }
                 if moving(a.0, &sim) || moving(b.0, &sim) {
-                    if (a.1 - b.1).length() <= a.3.length() + b.3.length() && boxes_overlap(a, b) {
-                        moving_contacts.insert(key);
+                    if (a.1 - b.1).length() <= a.3.length() + b.3.length()
+                        && boxes_overlap(a, b)
+                        && moving_contacts.insert(key)
+                    {
+                        // What each was doing (the audit's (h'): the contact's
+                        // cause is read off these, not guessed).
+                        let w = sim.world();
+                        let what = |g: Uuid| {
+                            let rec = inf_ecs::traffic::traffic_of(w).and_then(|t| t.records.get(&g));
+                            let v = velocity(&sim, g);
+                            match rec {
+                                Some(r) => format!(
+                                    "traffic {:?} tier {:?} speed {:.1} m/s heading {:.0} deg",
+                                    inf_ecs::traffic::day_of(g),
+                                    r.tier,
+                                    DVec3::new(v.x, 0.0, v.z).length(),
+                                    r.yaw_deg
+                                ),
+                                None => format!(
+                                    "authored `{}` speed {:.1} m/s",
+                                    w.entity_of(g).and_then(|e| w.name_of(e)).unwrap_or("?"),
+                                    DVec3::new(v.x, 0.0, v.z).length()
+                                ),
+                            }
+                        };
+                        eprintln!(
+                            "  MOVING CONTACT at island second {}: {} at {:.2} and {} at {:.2} ({:.2} m apart)",
+                            (s + 1) / 60,
+                            what(a.0),
+                            a.1,
+                            what(b.0),
+                            b.1,
+                            (a.1 - b.1).length()
+                        );
                     }
                     continue;
                 }

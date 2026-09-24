@@ -2510,7 +2510,7 @@ pub fn size_the_suspension(def: &mut crate::vehicle::VehicleDef) {
     if !(mass.is_finite() && mass > 0.0) {
         return;
     }
-    let corner = mass * 0.25;
+    let corner = mass / def.wheel_count() as f64;
     let travel = if def.class.travel_m.is_finite() && def.class.travel_m > 0.0 {
         def.class.travel_m
     } else {
@@ -3305,8 +3305,8 @@ mod tests {
                 seen.push(def.body);
             }
             let mass = def.chassis_mass_kg();
-            let sag = mass * 0.25 * 9.81 / def.class.stiffness_n_per_m;
-            let frac = sag / def.class.travel_m;
+            let frac = def.static_travel_frac();
+            let sag = frac * def.class.travel_m;
             assert!(
                 (0.30..=0.45 + 1e-6).contains(&frac),
                 "{:?} at {mass:.0} kg sags {frac:.3} of its {:.3} m of travel",
