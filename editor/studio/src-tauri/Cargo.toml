@@ -81,6 +81,14 @@ portable-pty = { workspace = true }
 ignore = { workspace = true }
 regex = { workspace = true }
 
+# **The audio device** (VEH3e audit): the editor's Simulate plays through the
+# default output device (`SimSession::open_audio_device`) on Windows and macOS —
+# kira's WASAPI / CoreAudio backend, crates already in `Cargo.lock`. Linux keeps
+# the null backend until a runner carries the ALSA headers (see inf-player's
+# manifest for the price).
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+inf-audio = { workspace = true, features = ["cpal"] }
+
 [dev-dependencies]
 # The confinement arms in `commands/paths.rs` decide "the nearest ancestor that
 # EXISTS", which is a filesystem question and has to be asked of a real

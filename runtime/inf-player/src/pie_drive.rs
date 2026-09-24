@@ -424,6 +424,21 @@ pub const HERO_LOG_ENV: &str = "INF_PIE_HERO_LOG";
 /// because its mixer renders to the file instead of to a device.
 pub const RENDER_AUDIO_ENV: &str = "INF_RENDER_AUDIO";
 
+/// **`INF_AUDIO_DEVICE=off`** (VEH3e audit) keeps a windowed session off the
+/// output device: a demo run that should not make a noise, a machine whose
+/// default device misbehaves. Anything else, or unset, opens it.
+pub const AUDIO_DEVICE_ENV: &str = "INF_AUDIO_DEVICE";
+
+/// Whether [`AUDIO_DEVICE_ENV`] turns the device off.
+pub fn audio_device_off() -> bool {
+    std::env::var(AUDIO_DEVICE_ENV)
+        .map(|v| {
+            let v = v.trim();
+            v.eq_ignore_ascii_case("off") || v == "0"
+        })
+        .unwrap_or(false)
+}
+
 /// **Where a PREVIEW session should put the hero, and when** (CHAR1b.2 audit) —
 /// `"x,y,z@t"` world metres and seconds, `;`-separated, and nothing at all when
 /// unset. The `@t` is optional and defaults to [`SPAWN_DELAY_S`].

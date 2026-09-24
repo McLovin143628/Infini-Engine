@@ -27,6 +27,47 @@ use crate::sound::SoundData;
 /// The engine's opaque per-sound id, shared with [`crate::AudioEngine`].
 pub(crate) type VoiceId = u64;
 
+/// **The master bus every sink plays through** (VEH3e audit): kira's main
+/// track with the [`crate::limiter::MasterLimiter`] as its one effect. The
+/// device and the render-to-file door both build their manager with THIS
+/// track, so what a capture writes is what the speaker is given — one mixer,
+/// two sinks. `limit: false` is the measurement control (the limiter arm's
+/// "before"), never a shipped setting.
+fn master_track(limit: bool) -> kira::track::MainTrackBuilder {
+    let track = kira::track::MainTrackBuilder::new();
+    if limit {
+        track.with_built_effect(Box::new(LimiterEffect { inner: None }))
+    } else {
+        track
+    }
+}
+
+/// The limiter as a kira effect: built at the renderer's rate on `init`.
+struct LimiterEffect {
+    inner: Option<crate::limiter::MasterLimiter>,
+}
+
+impl kira::effect::Effect for LimiterEffect {
+    fn init(&mut self, sample_rate: u32, _internal_buffer_size: usize) {
+        self.inner = Some(crate::limiter::MasterLimiter::new(sample_rate));
+    }
+
+    fn on_change_sample_rate(&mut self, sample_rate: u32) {
+        self.inner = Some(crate::limiter::MasterLimiter::new(sample_rate));
+    }
+
+    fn process(&mut self, input: &mut [kira::Frame], _dt: f64, _info: &kira::info::Info) {
+        let Some(lim) = self.inner.as_mut() else {
+            return;
+        };
+        for f in input.iter_mut() {
+            let (l, r) = lim.process(f.left, f.right);
+            f.left = l;
+            f.right = r;
+        }
+    }
+}
+
 /// Owns the kira manager (when active) and the live per-sound kira handles.
 pub(crate) struct Backend {
     #[cfg(feature = "cpal")]
@@ -64,6 +105,39 @@ impl Backend {
         }
     }
 
+    /// **Open the default output device** (VEH3e audit) and say what happened
+    /// in one line: `audio: device <name> <rate> Hz opened`, or why the null
+    /// backend is playing instead (built without a device backend; no output
+    /// device; the device refused the stream). Never panics, never fails: a
+    /// machine with nothing to play through gets the no-device path.
+    pub(crate) fn device() -> (Self, String) {
+        #[cfg(feature = "cpal")]
+        {
+            match cpal_impl::Inner::open() {
+                Ok((inner, name, rate)) => (
+                    Self {
+                        inner: Some(inner),
+                        offline: None,
+                        null_voices: BTreeMap::new(),
+                    },
+                    format!("audio: device {name} {rate} Hz opened"),
+                ),
+                Err(why) => (
+                    Self::disabled(),
+                    format!("audio: no output device ({why}) -- the null backend plays"),
+                ),
+            }
+        }
+        #[cfg(not(feature = "cpal"))]
+        {
+            (
+                Self::disabled(),
+                "audio: built without a device backend (inf-audio `cpal` off) -- the null backend plays"
+                    .to_string(),
+            )
+        }
+    }
+
     /// A backend forced into the disabled state, regardless of build features —
     /// the deterministic target the no-device fallback tests run against.
     pub(crate) fn disabled() -> Self {
@@ -89,9 +163,9 @@ impl Backend {
     /// real kira mixer, clocked by [`render`](Self::render) instead of a device.
     /// Falls back to the no-device path if kira will not start (it has no reason
     /// not to: there is no device to fail to open).
-    pub(crate) fn offline(sample_rate: u32) -> Self {
+    pub(crate) fn offline(sample_rate: u32, limit: bool) -> Self {
         let mut b = Self::disabled();
-        b.offline = offline_impl::Inner::try_new(sample_rate);
+        b.offline = offline_impl::Inner::try_new(sample_rate, limit);
         b
     }
 
@@ -263,7 +337,7 @@ impl Backend {
 mod cpal_impl {
     use std::collections::HashMap;
 
-    use kira::backend::cpal::CpalBackend;
+    use kira::backend::cpal::{CpalBackend, CpalBackendSettings};
     use kira::sound::static_sound::StaticSoundHandle;
     use kira::sound::PlaybackState;
     use kira::{AudioManager, AudioManagerSettings, Decibels, Panning, PlaybackRate, Tween};
@@ -298,13 +372,42 @@ mod cpal_impl {
 
     impl Inner {
         pub(super) fn try_new() -> Option<Self> {
-            match AudioManager::<CpalBackend>::new(AudioManagerSettings::default()) {
-                Ok(manager) => Some(Self {
-                    manager,
-                    voices: HashMap::new(),
-                }),
-                // No device / no backend: the caller falls back to no-op mode.
-                Err(_) => None,
+            Self::open().ok().map(|(inner, _, _)| inner)
+        }
+
+        /// The default output device at its default config, behind the
+        /// master track — with the device's name and rate, or why not.
+        pub(super) fn open() -> Result<(Self, String, u32), String> {
+            use kira::backend::cpal::cpal::traits::{DeviceTrait, HostTrait};
+            let host = kira::backend::cpal::cpal::default_host();
+            let device = host
+                .default_output_device()
+                .ok_or_else(|| "no default output device".to_string())?;
+            let name = device.to_string();
+            let config = device
+                .default_output_config()
+                .map_err(|e| format!("{name}: {e}"))?
+                .config();
+            let rate = config.sample_rate;
+            let settings = AudioManagerSettings::<CpalBackend> {
+                capacities: Default::default(),
+                main_track_builder: super::master_track(true),
+                internal_buffer_size: 128,
+                backend_settings: CpalBackendSettings {
+                    device: Some(device),
+                    config: Some(config),
+                },
+            };
+            match AudioManager::<CpalBackend>::new(settings) {
+                Ok(manager) => Ok((
+                    Self {
+                        manager,
+                        voices: HashMap::new(),
+                    },
+                    name,
+                    rate,
+                )),
+                Err(e) => Err(format!("{name}: {e}")),
             }
         }
 
@@ -465,10 +568,10 @@ mod offline_impl {
     }
 
     impl Inner {
-        pub(super) fn try_new(sample_rate: u32) -> Option<Self> {
+        pub(super) fn try_new(sample_rate: u32, limit: bool) -> Option<Self> {
             let settings = AudioManagerSettings::<OfflineBackend> {
                 capacities: Default::default(),
-                main_track_builder: Default::default(),
+                main_track_builder: super::master_track(limit),
                 internal_buffer_size: 128,
                 backend_settings: sample_rate,
             };

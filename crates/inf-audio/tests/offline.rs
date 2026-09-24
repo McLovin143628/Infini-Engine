@@ -115,3 +115,71 @@ fn a_grain_at_a_pitch_fires_at_its_revs() {
     );
     assert!((f - 320.0).abs() <= 5.0, "the grain fires at {f} Hz");
 }
+
+/// Render `steps` fixed steps of `engine` after starting `n` copies of `data`
+/// at full volume on `n` sources, both channels kept.
+fn render_pile(engine: &mut AudioEngine, data: &SoundData, n: u64, steps: usize) -> Vec<f32> {
+    let cmds: Vec<AudioCommand> = (0..n)
+        .map(|i| {
+            let mut p = PlayCommand::new(100 + i, Uuid::from_u128(u128::from(3 + i)), "sfx");
+            p.looping = true;
+            p.pitch = 1.0 + 0.01 * i as f64;
+            AudioCommand::Play(p)
+        })
+        .collect();
+    let d = data.clone();
+    engine.drain(&cmds, &move |_| Some(d.clone()));
+    let mut out = Vec::new();
+    for _ in 0..steps {
+        out.extend(engine.render(800));
+    }
+    out
+}
+
+/// **THE MASTER BUS HAS A LIMITER, AND IT HOLDS** (VEH3e audit, carried 6: the
+/// course render clipped 30 samples). Five full-load V8 grains summed at full
+/// volume, rendered twice through the same offline mixer: WITHOUT the limiter
+/// (the measurement control) the sum crosses full scale on thousands of
+/// samples — the pile is loud enough for the limiter to have work — and WITH
+/// it (what the device and the capture both play through) not one sample
+/// reaches `limiter::CEILING`.
+#[test]
+fn the_master_limiter_holds_a_summed_mix_under_full_scale() {
+    let data = clip(8);
+    let raw = render_pile(&mut AudioEngine::offline_unlimited(RATE), &data, 5, 60);
+    let lim = render_pile(&mut AudioEngine::offline(RATE), &data, 5, 60);
+    let over = |x: &[f32], at: f32| x.iter().filter(|v| v.abs() >= at).count();
+    let peak = |x: &[f32]| x.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+    println!(
+        "five V8 grains at full volume: raw peak {:.3} with {} samples at or over full scale; limited peak {:.4} with {} at or over the {} ceiling",
+        peak(&raw),
+        over(&raw, 1.0),
+        peak(&lim),
+        over(&lim, inf_audio::limiter::CEILING),
+        inf_audio::limiter::CEILING
+    );
+    assert!(
+        over(&raw, 1.0) > 1_000,
+        "the control did not clip: the arm has nothing to hold"
+    );
+    assert_eq!(over(&lim, inf_audio::limiter::CEILING), 0);
+    assert!(
+        peak(&lim) > 0.7,
+        "the limiter crushed the mix to {}",
+        peak(&lim)
+    );
+}
+
+/// **THE DEVICE DOOR OPENS OR SAYS WHY** (VEH3e audit): never a panic, always
+/// one line a host can log; a live device names itself and its rate.
+#[test]
+fn the_device_opens_or_says_why() {
+    let (engine, line) = AudioEngine::open_device();
+    println!("{line}");
+    assert!(line.starts_with("audio: "), "{line}");
+    if engine.is_active() {
+        assert!(line.contains(" Hz opened"), "{line}");
+    } else {
+        assert!(line.contains("null backend"), "{line}");
+    }
+}

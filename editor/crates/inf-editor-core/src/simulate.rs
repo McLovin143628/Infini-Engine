@@ -685,7 +685,8 @@ impl SimSession {
             drained_overlaps: Vec::new(),
             logs: BoundedLog::default(),
             grounded: BTreeMap::new(),
-            audio: AudioEngine::new(),
+            // No device here (VEH3e audit) -- see `open_audio_device`.
+            audio: AudioEngine::disabled(),
             audio_clips: BTreeMap::new(),
             audio_cmds: Vec::new(),
             audio_started: BTreeSet::new(),
@@ -735,6 +736,21 @@ impl SimSession {
     /// [`set_state_machines`](Self::set_state_machines)).
     pub fn set_audio_clips(&mut self, clips: BTreeMap<Uuid, AudioAsset>) {
         self.audio_clips = clips;
+    }
+
+    /// **Play this Simulate session out loud** (VEH3e audit): the editor host
+    /// swaps the no-device engine for the default output device, keeping the
+    /// mixer, and logs the answer — `audio: device <name> <rate> Hz opened`,
+    /// or why the null backend plays (a build without `inf-audio`'s `cpal`
+    /// feature, a machine with no output). Every session starts disabled, so
+    /// tests and headless callers stay on the deterministic path; the command
+    /// stream is the same either way.
+    pub fn open_audio_device(&mut self) -> String {
+        let (engine, line) = AudioEngine::open_device();
+        let mixer = self.audio.mixer().clone();
+        self.audio = engine;
+        self.audio.set_mixer(mixer);
+        line
     }
 
     /// Install a named-bus [`MixerConfig`](inf_audio::MixerConfig) on the audio

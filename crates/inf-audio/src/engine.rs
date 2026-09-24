@@ -283,7 +283,32 @@ impl AudioEngine {
     /// clocked by [`render`](Self::render). What a capture run swaps in to write
     /// a WAV of exactly what the command stream would have played.
     pub fn offline(sample_rate: u32) -> Self {
-        Self::with_backend(Backend::offline(sample_rate))
+        Self::with_backend(Backend::offline(sample_rate, true))
+    }
+
+    /// **The same offline mixer WITHOUT the master limiter** (VEH3e audit) —
+    /// the measurement control a limiter arm renders its "before" through.
+    /// Nothing ships it: the device and [`offline`](Self::offline) both sit
+    /// behind [`crate::limiter::MasterLimiter`].
+    pub fn offline_unlimited(sample_rate: u32) -> Self {
+        Self::with_backend(Backend::offline(sample_rate, false))
+    }
+
+    /// **Open the machine's default output device** (VEH3e audit), behind the
+    /// same master track the render-to-file door uses, and the one line a host
+    /// logs about it: `audio: device <name> <rate> Hz opened`, or why the
+    /// no-device path is playing instead. Never fails and never panics — a
+    /// build without the `cpal` feature, a headless runner and a machine with
+    /// no output all come back as the [`disabled`](Self::disabled) engine with
+    /// a line that says so.
+    ///
+    /// A host calls this from its WINDOWED path only: every test and headless
+    /// session keeps [`disabled`](Self::disabled), because a live device
+    /// reports its one-shots finished on the audio thread's clock and the
+    /// no-device path's reap is deterministic.
+    pub fn open_device() -> (Self, String) {
+        let (backend, line) = Backend::device();
+        (Self::with_backend(backend), line)
     }
 
     /// **Render the next `frames` stereo frames** of an [`offline`](Self::offline)

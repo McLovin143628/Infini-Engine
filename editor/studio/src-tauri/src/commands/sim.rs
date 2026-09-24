@@ -269,6 +269,16 @@ pub async fn sim_start(
     session.set_skeletons(skeletons);
     session.set_pose_clips(pose_clips);
     session.set_audio_clips(audio_clips);
+    // OUT LOUD (VEH3e audit): the editor's Simulate plays through the default
+    // output device; `INF_AUDIO_DEVICE=off` keeps it silent, and a machine
+    // with no output logs why and plays the null backend.
+    if !std::env::var("INF_AUDIO_DEVICE")
+        .map(|v| v.trim().eq_ignore_ascii_case("off") || v.trim() == "0")
+        .unwrap_or(false)
+    {
+        let line = session.open_audio_device();
+        tracing::info!("{line}");
+    }
     session.set_cloths(cloths);
     session.set_hairs(hairs);
     session.set_voxel_volumes(voxel_volumes);

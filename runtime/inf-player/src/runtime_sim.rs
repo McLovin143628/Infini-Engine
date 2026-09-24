@@ -611,7 +611,11 @@ impl RuntimeSim {
             drained_overlaps: Vec::new(),
             logs: BoundedLog::default(),
             grounded: BTreeMap::new(),
-            audio: AudioEngine::new(),
+            // **No device here** (VEH3e audit): a `RuntimeSim` is built by
+            // every test and headless session, and a live device reaps its
+            // one-shots on the audio thread's clock. The windowed player opens
+            // one through `open_audio_device`.
+            audio: AudioEngine::disabled(),
             audio_clips: BTreeMap::new(),
             audio_cmds: Vec::new(),
             audio_started: BTreeSet::new(),
@@ -2734,6 +2738,42 @@ impl RuntimeSim {
         self.audio.set_mixer(mixer);
         self.audio_capture = Some((cap, sample_rate));
         Ok(())
+    }
+
+    /// **The render-to-file door WITHOUT the master limiter** (VEH3e audit) —
+    /// the measurement control the limiter arm renders its "before" through.
+    /// No shipped path calls it.
+    pub fn capture_audio_unlimited_to(
+        &mut self,
+        path: &std::path::Path,
+        sample_rate: u32,
+    ) -> std::io::Result<()> {
+        let cap = inf_audio::WavCapture::create(path, sample_rate)?;
+        let mixer = self.audio.mixer().clone();
+        self.audio = AudioEngine::offline_unlimited(sample_rate);
+        self.audio.set_mixer(mixer);
+        self.audio_capture = Some((cap, sample_rate));
+        Ok(())
+    }
+
+    /// **Play this session out loud** (VEH3e audit): swap the no-device engine
+    /// for the machine's default output device, behind the same master track
+    /// the capture renders through, keeping the mixer. Answers the line the
+    /// host logs — `audio: device <name> <rate> Hz opened`, or why the null
+    /// backend plays instead (a build without the device feature, a machine
+    /// with no output). Never fails. The command stream is untouched: a device
+    /// is a sink, not a sim.
+    pub fn open_audio_device(&mut self) -> String {
+        let (engine, line) = AudioEngine::open_device();
+        let mixer = self.audio.mixer().clone();
+        self.audio = engine;
+        self.audio.set_mixer(mixer);
+        line
+    }
+
+    /// Whether this session's audio is reaching a real device.
+    pub fn audio_device_active(&self) -> bool {
+        self.audio_capture.is_none() && self.audio.is_active()
     }
 
     /// How many stereo frames the capture has written, or `None` with no capture.

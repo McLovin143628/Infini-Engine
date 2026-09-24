@@ -60,9 +60,11 @@ inf-pcg = { workspace = true }
 inf-nav = { workspace = true }
 inf-blueprint = { workspace = true }
 # P12.3 audio: the runtime sim holds a long-lived `AudioEngine` host resource and
-# drains the audio command queue (cooked scenes with AudioSources play on a device
-# build, no-op consistently headless). Default features = the no-device path; the
-# windowed player build opts into `cpal` for real output.
+# drains the audio command queue. Every `RuntimeSim` starts on the no-device path
+# (tests and headless sessions stay deterministic); the WINDOWED player swaps in
+# the output device (`RuntimeSim::open_audio_device`). The device backend itself
+# is the `cpal` feature, enabled below for Windows and macOS only (VEH3e audit):
+# until then NO crate enabled it, so no build had ever played a sound on a device.
 inf-audio = { workspace = true }
 # P11.3 root motion: the pure root-delta extractor the runtime sim applies.
 inf-anim = { workspace = true }
@@ -108,6 +110,16 @@ raw-window-handle = { workspace = true }
 # `render_frame` / `sim_step` spans (and, at `RUST_LOG=trace`, the per-pass /
 # per-phase spans) stream live. See docs/profiling.md.
 tracy = ["dep:tracing-tracy"]
+
+# **The audio device** (VEH3e audit): `inf-audio`'s `cpal` feature — kira's
+# WASAPI / CoreAudio output, crates already in `Cargo.lock` — on the two desktop
+# targets whose system audio needs no extra headers. Linux is NOT enabled: cpal
+# links ALSA (`libasound2-dev`, and `pkg-config`) and the CI runner carries no
+# such headers, so a Linux player plays the null backend and logs why; the price
+# of turning it on is a runner apt line plus a `cargo deny` look at alsa-sys.
+# wasm and Android keep the no-device backend (their own targets never match).
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+inf-audio = { workspace = true, features = ["cpal"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = [

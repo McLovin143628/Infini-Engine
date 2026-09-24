@@ -294,13 +294,31 @@ impl PlayerApp {
         // to say what a drive SOUNDS like. Before the player's settings are
         // applied, so their volumes reach the capture's engine.
         #[cfg(not(target_arch = "wasm32"))]
-        if let Ok(path) = std::env::var(crate::pie_drive::RENDER_AUDIO_ENV) {
-            if !path.trim().is_empty() {
+        let capturing = match std::env::var(crate::pie_drive::RENDER_AUDIO_ENV) {
+            Ok(path) if !path.trim().is_empty() => {
                 match sim.capture_audio_to(std::path::Path::new(&path), 48_000) {
-                    Ok(()) => tracing::info!("inf-player: capturing the audio to {path}"),
-                    Err(e) => eprintln!("inf-player: cannot capture the audio to {path}: {e}"),
+                    Ok(()) => {
+                        tracing::info!("inf-player: capturing the audio to {path}");
+                        true
+                    }
+                    Err(e) => {
+                        eprintln!("inf-player: cannot capture the audio to {path}: {e}");
+                        false
+                    }
                 }
             }
+            _ => false,
+        };
+        // **OUT LOUD** (VEH3e audit): the windowed player plays through the
+        // machine's default output device -- since P12 it never had, because
+        // no crate enabled `inf-audio`'s device feature. A capture session is
+        // the offline sink instead (one mixer, two sinks: the same master
+        // track either way), and `INF_AUDIO_DEVICE=off` keeps a session silent.
+        // A machine with no output logs why and plays the null backend.
+        #[cfg(not(target_arch = "wasm32"))]
+        if !capturing && !crate::pie_drive::audio_device_off() {
+            let line = sim.open_audio_device();
+            tracing::info!("{line}");
         }
         let (ui, map) = crate::ui::PlayerUi::open(crate::ui::settings_dir(), map);
         if let Some(e) = &ui.load_error {
