@@ -1583,6 +1583,12 @@ pub enum BodyPartKind {
     Bumper,
     /// A window pane. It does not dent; it shatters.
     Glass,
+    /// **A seat cushion** (wave VEH3f) -- drawn inside the cabin, never shed,
+    /// never dented, and READ: `inf_ecs::boarding::sockets_of` seats a body on
+    /// its top face, which is how a bus's driver sits over the front axle and a
+    /// semi tractor's a metre above a saloon's. A family with no seat part keeps
+    /// the hull-fraction seat every family before the roster was measured on.
+    Seat,
 }
 
 /// **A door's hinge**: about the VERTICAL, at the door's own forward edge.
@@ -1674,6 +1680,9 @@ pub const KIND_TRUNK: u8 = 3;
 pub const KIND_BUMPER: u8 = 4;
 /// The same, for a [`BodyPartKind::Glass`].
 pub const KIND_GLASS: u8 = 5;
+/// The same, for a [`BodyPartKind::Seat`] (wave VEH3f) -- appended, as the
+/// wire numbers always are.
+pub const KIND_SEAT: u8 = 6;
 
 impl BodyPartKind {
     /// The frozen wire number this kind folds as — **append only**, exactly as
@@ -1687,6 +1696,7 @@ impl BodyPartKind {
             BodyPartKind::Trunk { .. } => KIND_TRUNK,
             BodyPartKind::Bumper => KIND_BUMPER,
             BodyPartKind::Glass => KIND_GLASS,
+            BodyPartKind::Seat => KIND_SEAT,
         }
     }
 
@@ -1699,6 +1709,7 @@ impl BodyPartKind {
             BodyPartKind::Trunk { .. } => "trunk",
             BodyPartKind::Bumper => "bumper",
             BodyPartKind::Glass => "glass",
+            BodyPartKind::Seat => "seat",
         }
     }
 
@@ -1723,12 +1734,12 @@ impl BodyPartKind {
     /// **Whether this kind can come off at all.** A panel is the body: it
     /// dents, it is written off, and it stays bolted to what it is part of.
     pub fn sheds(self) -> bool {
-        !matches!(self, BodyPartKind::Panel)
+        !matches!(self, BodyPartKind::Panel | BodyPartKind::Seat)
     }
 
     /// **Whether this kind DENTS.** Glass does not bend; it breaks.
     pub fn dents(self) -> bool {
-        !matches!(self, BodyPartKind::Glass)
+        !matches!(self, BodyPartKind::Glass | BodyPartKind::Seat)
     }
 
     /// **The share of a crash's impulse that flows through this part's own
@@ -1759,6 +1770,9 @@ impl BodyPartKind {
             BodyPartKind::Trunk { .. } => 0.20,
             BodyPartKind::Bumper => 1.00,
             BodyPartKind::Glass => 0.14,
+            // Inside the cabin: nothing reaches it that has not gone through a
+            // door or a bulkhead first.
+            BodyPartKind::Seat => 0.0,
         }
     }
 
@@ -1782,6 +1796,8 @@ impl BodyPartKind {
             BodyPartKind::Hood { .. } | BodyPartKind::Trunk { .. } => 8.0,
             BodyPartKind::Bumper => 20.0,
             BodyPartKind::Glass => 12.5,
+            // Never sheds, so it never needs a mass.
+            BodyPartKind::Seat => 0.0,
         }
     }
 
@@ -1826,6 +1842,7 @@ impl BodyPartKind {
     /// | `trunk`, `boot` or `tailgate` | [`Trunk`](BodyPartKind::Trunk) |
     /// | `bumper` | [`Bumper`](BodyPartKind::Bumper) |
     /// | `glass` | [`Glass`](BodyPartKind::Glass) |
+    /// | `seat` | [`Seat`](BodyPartKind::Seat) (wave VEH3f) |
     /// | anything else | [`Panel`](BodyPartKind::Panel) |
     ///
     /// The parts tables declare the same fact in their own
@@ -1848,6 +1865,8 @@ impl BodyPartKind {
             KIND_BUMPER
         } else if name.starts_with("glass") {
             KIND_GLASS
+        } else if name.starts_with("seat") {
+            KIND_SEAT
         } else {
             KIND_PANEL
         };
@@ -1876,6 +1895,7 @@ impl BodyPartKind {
             },
             KIND_BUMPER => BodyPartKind::Bumper,
             KIND_GLASS => BodyPartKind::Glass,
+            KIND_SEAT => BodyPartKind::Seat,
             _ => BodyPartKind::Panel,
         }
     }
@@ -2204,6 +2224,43 @@ pub enum VehicleBody {
     /// **A light helicopter** (wave VEH2c): a cabin, a tail boom, a fin, two
     /// skids and a main disc on the mast.
     Rotorcraft,
+    // ── the roster's families (wave VEH3f): `crate::vehicle_families` ──
+    /// A long-bonnet two-door grand tourer with long doors.
+    Coupe,
+    /// A short five-door hatchback.
+    Hatch,
+    /// An estate with roof rails and a tailgate.
+    Wagon,
+    /// A crew-cab (four-door) pickup; [`Truck`](Self::Truck) is the two-door.
+    Pickup4,
+    /// A short upright off-roader.
+    Jeep,
+    /// A wide military-derived four-door.
+    Hummer,
+    /// A single-deck bus, its driver seated over the front axle.
+    Bus,
+    /// A conventional semi tractor with a fifth wheel.
+    SemiTractor,
+    /// **A box semi-trailer** -- the first ARTICULATED rig: hitched to a
+    /// tractor's fifth wheel by a spherical `Joint3D` (see [`hitch_joint`]),
+    /// its wheels a tandem at the rear, unpowered and unboardable.
+    Trailer,
+    /// A medium-duty flatbed.
+    Flatbed,
+    /// A rigid tank truck -- and the concrete mixer's silhouette.
+    Tanker,
+    /// An armoured personnel carrier.
+    Apc,
+    /// **A TRACKED dozer** -- the tracks are a wheel row, and it steers by skid
+    /// (a class with no steering rack: `max_steer_deg = 0`).
+    Dozer,
+    /// A counterbalanced forklift.
+    Forklift,
+    /// A wrecker with a boom.
+    TowTruck,
+    /// **A light aeroplane, DORMANT until VEH3g**: drawn, rolls on its gear,
+    /// does not fly.
+    Aircraft,
 }
 
 /// The sedan's parts. `+Z` is forward, `+Y` is up.
@@ -2867,7 +2924,7 @@ const VAN_PARTS: &[BodyPart] = &[
 
 impl VehicleBody {
     /// Every family, in the canonical order.
-    pub const ALL: [VehicleBody; 7] = [
+    pub const ALL: [VehicleBody; 23] = [
         VehicleBody::Sedan,
         VehicleBody::Truck,
         VehicleBody::Sports,
@@ -2875,6 +2932,22 @@ impl VehicleBody {
         VehicleBody::Van,
         VehicleBody::Launch,
         VehicleBody::Rotorcraft,
+        VehicleBody::Coupe,
+        VehicleBody::Hatch,
+        VehicleBody::Wagon,
+        VehicleBody::Pickup4,
+        VehicleBody::Jeep,
+        VehicleBody::Hummer,
+        VehicleBody::Bus,
+        VehicleBody::SemiTractor,
+        VehicleBody::Trailer,
+        VehicleBody::Flatbed,
+        VehicleBody::Tanker,
+        VehicleBody::Apc,
+        VehicleBody::Dozer,
+        VehicleBody::Forklift,
+        VehicleBody::TowTruck,
+        VehicleBody::Aircraft,
     ];
 
     /// **The bodies that belong at a kerb** — the named civilian sub-list
@@ -2891,12 +2964,25 @@ impl VehicleBody {
     /// This is that commit and this is that list. A launch and a helicopter are
     /// not cars, and a town whose kerbs held boats would be the exact defect the
     /// note predicted.
-    pub const CIVILIAN: [VehicleBody; 5] = [
+    ///
+    /// **Extended per class at wave VEH3f**, and by exactly the families a
+    /// private owner parks outside a house: the coupe, the hatch, the estate,
+    /// the crew-cab pickup, the jeep and the hummer. A bus, a semi, a trailer,
+    /// a flatbed, a tanker, an APC, a dozer, a forklift, a wrecker and an
+    /// aeroplane are NOT, and `traffic::catalogue_row` never parks one at a
+    /// kerb.
+    pub const CIVILIAN: [VehicleBody; 11] = [
         VehicleBody::Sedan,
         VehicleBody::Truck,
         VehicleBody::Sports,
         VehicleBody::Suv,
         VehicleBody::Van,
+        VehicleBody::Coupe,
+        VehicleBody::Hatch,
+        VehicleBody::Wagon,
+        VehicleBody::Pickup4,
+        VehicleBody::Jeep,
+        VehicleBody::Hummer,
     ];
 
     /// The stable name a catalogue row names this family by.
@@ -2909,7 +2995,39 @@ impl VehicleBody {
             VehicleBody::Van => "van",
             VehicleBody::Launch => "launch",
             VehicleBody::Rotorcraft => "rotorcraft",
+            VehicleBody::Coupe => "coupe",
+            VehicleBody::Hatch => "hatch",
+            VehicleBody::Wagon => "wagon",
+            VehicleBody::Pickup4 => "pickup4",
+            VehicleBody::Jeep => "jeep",
+            VehicleBody::Hummer => "hummer",
+            VehicleBody::Bus => "bus",
+            VehicleBody::SemiTractor => "semi_tractor",
+            VehicleBody::Trailer => "trailer",
+            VehicleBody::Flatbed => "flatbed",
+            VehicleBody::Tanker => "tanker",
+            VehicleBody::Apc => "apc",
+            VehicleBody::Dozer => "dozer",
+            VehicleBody::Forklift => "forklift",
+            VehicleBody::TowTruck => "tow_truck",
+            VehicleBody::Aircraft => "aircraft",
         }
+    }
+
+    /// **Whether this family is TRACKED** (wave VEH3f): its wheel row is a pair
+    /// of tracks and it steers by skid. A property of the SILHOUETTE; what the
+    /// physics reads is the class's own `max_steer_deg = 0`, which a tracked
+    /// row's class defaults write (the `drivetrain`-is-a-spelling ruling: one
+    /// number in the solver, not an enum beside it).
+    pub fn tracked(self) -> bool {
+        matches!(self, VehicleBody::Dozer)
+    }
+
+    /// **Whether this family is towed rather than driven** (wave VEH3f) -- a
+    /// trailer. It is hitched by [`hitch_joint`], has no engine and no seat,
+    /// and a boarding never picks it.
+    pub fn towed(self) -> bool {
+        matches!(self, VehicleBody::Trailer)
     }
 
     /// Whether this family is drawn on **wheels** (wave VEH2c).
@@ -2932,7 +3050,23 @@ impl VehicleBody {
             | VehicleBody::Truck
             | VehicleBody::Sports
             | VehicleBody::Suv
-            | VehicleBody::Van => &[],
+            | VehicleBody::Van
+            | VehicleBody::Coupe
+            | VehicleBody::Hatch
+            | VehicleBody::Wagon
+            | VehicleBody::Pickup4
+            | VehicleBody::Jeep
+            | VehicleBody::Hummer
+            | VehicleBody::Bus
+            | VehicleBody::SemiTractor
+            | VehicleBody::Trailer
+            | VehicleBody::Flatbed
+            | VehicleBody::Tanker
+            | VehicleBody::Apc
+            | VehicleBody::Dozer
+            | VehicleBody::Forklift
+            | VehicleBody::TowTruck
+            | VehicleBody::Aircraft => &[],
             VehicleBody::Launch => LAUNCH_MOUNTS,
             VehicleBody::Rotorcraft => ROTORCRAFT_MOUNTS,
         }
@@ -2956,6 +3090,22 @@ impl VehicleBody {
             VehicleBody::Van => VAN_PARTS,
             VehicleBody::Launch => LAUNCH_PARTS,
             VehicleBody::Rotorcraft => ROTORCRAFT_PARTS,
+            VehicleBody::Coupe => crate::vehicle_families::COUPE_PARTS,
+            VehicleBody::Hatch => crate::vehicle_families::HATCH_PARTS,
+            VehicleBody::Wagon => crate::vehicle_families::WAGON_PARTS,
+            VehicleBody::Pickup4 => crate::vehicle_families::PICKUP4_PARTS,
+            VehicleBody::Jeep => crate::vehicle_families::JEEP_PARTS,
+            VehicleBody::Hummer => crate::vehicle_families::HUMMER_PARTS,
+            VehicleBody::Bus => crate::vehicle_families::BUS_PARTS,
+            VehicleBody::SemiTractor => crate::vehicle_families::SEMI_TRACTOR_PARTS,
+            VehicleBody::Trailer => crate::vehicle_families::TRAILER_PARTS,
+            VehicleBody::Flatbed => crate::vehicle_families::FLATBED_PARTS,
+            VehicleBody::Tanker => crate::vehicle_families::TANKER_PARTS,
+            VehicleBody::Apc => crate::vehicle_families::APC_PARTS,
+            VehicleBody::Dozer => crate::vehicle_families::DOZER_PARTS,
+            VehicleBody::Forklift => crate::vehicle_families::FORKLIFT_PARTS,
+            VehicleBody::TowTruck => crate::vehicle_families::TOW_TRUCK_PARTS,
+            VehicleBody::Aircraft => crate::vehicle_families::AIRCRAFT_PARTS,
         }
     }
 }
@@ -3002,6 +3152,44 @@ pub const CHASSIS_FRICTION: f64 = 0.5;
 /// distance this engine draws a car at, and it costs the renderer nothing it
 /// was not already paying for a body panel.
 pub const GLASS_COLOR: crate::math::Color = crate::math::Color::new(0.07, 0.09, 0.12, 1.0);
+
+/// **What a seat cushion is covered in** (wave VEH3f) -- charcoal cloth.
+pub const SEAT_COLOR: crate::math::Color = crate::math::Color::new(0.09, 0.09, 0.1, 1.0);
+
+/// **Which parts of a family a DCC hero body replaces** (wave VEH3f).
+///
+/// The PANELS that make the silhouette -- the lower body and the greenhouse,
+/// and the bonnet and the boot where the family has them -- and never a door, a
+/// pane or a bumper: those stay the VEH3c proxies they are, because a hinge, a
+/// shatter and a shed are what they are FOR, and a DCC mesh on a door would
+/// have to be cut to the door's own box to swing with it. An empty list is a
+/// family no hero set has been built for, which draws its primitives.
+pub fn hero_parts(body: VehicleBody) -> &'static [&'static str] {
+    match body {
+        VehicleBody::Sedan | VehicleBody::Sports | VehicleBody::Coupe => {
+            &["lower", "cabin", "bonnet", "boot"]
+        }
+        VehicleBody::Suv => &["lower", "cabin", "bonnet"],
+        VehicleBody::Truck => &["lower", "cab", "bed"],
+        _ => &[],
+    }
+}
+
+/// **The mesh guid of one hero part** -- a pure function of the set's base guid
+/// and the part's name, [`body_part_guid`]'s rule on a different salt, so a set
+/// is ONE authored guid and its files follow from it.
+pub fn hero_part_mesh_guid(base: Uuid, part: &str) -> Uuid {
+    let mut x = HERO_MESH_SALT ^ base.as_u128();
+    for b in part.as_bytes() {
+        x = x.rotate_left(13) ^ (*b as u128).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    }
+    x = x.rotate_left(29) ^ x.wrapping_mul(0xff51_afd7_ed55_8ccd_c4ce_b9fe_1a85_ec53);
+    // A version-4 shape, so a sidecar that prints it reads as a uuid.
+    uuid::Builder::from_random_bytes(x.to_be_bytes()).into_uuid()
+}
+
+/// The salt of [`hero_part_mesh_guid`] -- `"HEROBODYPARTMESH"` in ASCII.
+const HERO_MESH_SALT: u128 = 0x4845_524f_424f_4459_5041_5254_4d45_5348;
 
 /// **Where one vehicle goes and what it looks like** — the half of a rig that is
 /// not the [`VehicleDef`].
@@ -3184,7 +3372,10 @@ pub fn rig_nodes_at(
         // installs on a rig that does not exist.
         class: simulated.then_some(def.class),
         audio: spawn.engine_voice.then(|| AudioSource {
-            clip: spawn.clip,
+            // **A row's own clip wins** (wave VEH3f): `engine_clip` is the per-row
+            // override `vehicle_audio`'s planner plays in place of the grain
+            // family's three loads; a row without one keeps the spawn's.
+            clip: def.engine_clip.or(spawn.clip),
             looping: true,
             spatial: true,
             // Not autoplay: the VEH1a engine loop emits the `Play` itself, on
@@ -3236,7 +3427,17 @@ pub fn rig_nodes_at(
         // Built from the unliveried material and then overwritten, so a part
         // with no override is BYTE-IDENTICAL to what this loop wrote before the
         // livery existed rather than merely equal to it by inspection.
-        let mut material = if part.kind == BodyPartKind::Glass {
+        let mut material = if part.kind == BodyPartKind::Seat {
+            // **A seat is upholstery** (wave VEH3f): dark, matte, never the
+            // body's paint -- it is seen through the glass, and a cushion in the
+            // car's own red reads as a hole in the cabin.
+            Material {
+                base_color: SEAT_COLOR,
+                metallic: 0.0,
+                roughness: 0.85,
+                ..Default::default()
+            }
+        } else if part.kind == BodyPartKind::Glass {
             // **Glass is not paint** (wave VEH3c). A pane takes the body's
             // colour off nothing: it is dark, smooth and a little metallic,
             // which is what a car's glass reads as from outside under any sky.
@@ -3285,7 +3486,16 @@ pub fn rig_nodes_at(
             collider: None,
             mesh: Some(MeshRef {
                 primitive: part.primitive,
-                asset: None,
+                // **The hero body** (wave VEH3f): a panel the row's DCC-built
+                // set covers draws that mesh in its own unit box -- the same
+                // transform, the same scale, the same guid, so the bodywork
+                // (hinges, sheds, dents) moves the mesh exactly as it moved the
+                // box. Every other part, and every row without a set, draws its
+                // primitive as it always has.
+                asset: def
+                    .body_mesh
+                    .filter(|_| hero_parts(def.body).contains(&part.name))
+                    .map(|base| hero_part_mesh_guid(base, part.name)),
             }),
             material: Some(material),
             class: None,
@@ -3482,6 +3692,111 @@ pub fn spawn_rig_at(
     }
     world.mark_dirty();
     chassis
+}
+
+// ── the articulated rig (wave VEH3f) ─────────────────────────────────────────
+
+/// **Where a trailer's kingpin sits along its own length**, as a fraction of its
+/// half-length (wave VEH3f) -- a metre and change behind the nose on a 16 m
+/// box, which is where a real dry van's kingpin is.
+pub const KINGPIN_Z_FRAC: f64 = 0.86;
+
+/// **The tractor's fifth wheel**, chassis frame, metres -- the top face of its
+/// `fifth_wheel` part, read off the family table rather than restated, or
+/// `None` for a family with no fifth wheel (a car cannot tow a semi-trailer).
+pub fn fifth_wheel_local(tractor: &VehicleDef) -> Option<Vec3d> {
+    let part = tractor
+        .body
+        .parts()
+        .iter()
+        .find(|p| p.name == "fifth_wheel")?;
+    let h = tractor.half_extents;
+    Some(Vec3d::new(
+        part.centre.x * h.x,
+        (part.centre.y + part.half.y) * h.y,
+        part.centre.z * h.z,
+    ))
+}
+
+/// **The trailer's kingpin**, chassis frame, metres -- on its floor, at
+/// [`KINGPIN_Z_FRAC`] of its half-length ahead of centre.
+pub fn kingpin_local(trailer: &VehicleDef) -> Vec3d {
+    let h = trailer.half_extents;
+    Vec3d::new(0.0, -h.y, KINGPIN_Z_FRAC * h.z)
+}
+
+/// **The hitch** (wave VEH3f) -- the first articulated rig in this engine: a
+/// SPHERICAL `Joint3D` on the TRAILER's chassis whose other body is the
+/// tractor's, anchored at the kingpin and the fifth wheel. `None` when the
+/// tractor has no fifth wheel or the trailer is not a towed family.
+///
+/// # A joint that already existed, and one rule the bridge derives
+///
+/// `Joint3D` has been scene content since v6 and both hosts build it through
+/// `PhysicsBridge3D::sync`, so a hitch costs no schema and is PIE == shipping by
+/// construction. What a hitch needs that a ragdoll's joint does not is its
+/// CONTACTS OFF: the trailer's nose overhangs the tractor's deck by design, and
+/// the two chassis boxes overlap there. `Joint3D` has no `contacts` flag (retired
+/// at P29 -- adding one is a bincode-positional bump), so the bridge DERIVES it:
+/// a joint whose two bodies are both vehicle chassis runs with its contacts off
+/// (`inf_physics::d3::ecs`, `reconcile_joint`). A ragdoll's bones are not chassis
+/// and keep theirs.
+pub fn hitch_joint(
+    tractor: Uuid,
+    tractor_def: &VehicleDef,
+    trailer_def: &VehicleDef,
+) -> Option<crate::components::Joint3D> {
+    if !trailer_def.body.towed() {
+        return None;
+    }
+    let fifth = fifth_wheel_local(tractor_def)?;
+    Some(crate::components::Joint3D {
+        other: crate::refs::EntityRef::new(tractor),
+        kind: crate::components::JointKind3D::Spherical,
+        local_anchor: kingpin_local(trailer_def),
+        other_anchor: fifth,
+        ..Default::default()
+    })
+}
+
+/// **Where a trailer's chassis origin goes** so its kingpin sits on a tractor's
+/// fifth wheel, the two lined up on one heading -- the placement an author (or a
+/// gate) makes before the first step, so the joint starts SOLVED rather than
+/// yanking two tonnes of steel together on step one.
+pub fn hitched_trailer_at(
+    tractor_at: DVec3,
+    yaw_deg: f64,
+    tractor_def: &VehicleDef,
+    trailer_def: &VehicleDef,
+) -> Option<DVec3> {
+    let fifth = fifth_wheel_local(tractor_def)?;
+    let pin = kingpin_local(trailer_def);
+    let d = Vec3d::new(fifth.x - pin.x, fifth.y - pin.y, fifth.z - pin.z);
+    let r = yaw_deg.to_radians();
+    let (sn, cs) = (inf_math::psin64(r), inf_math::pcos64(r));
+    // Yaw about +Y, +Z forward: x' = x cos + z sin, z' = -x sin + z cos.
+    Some(tractor_at + DVec3::new(d.x * cs + d.z * sn, d.y, -d.x * sn + d.z * cs))
+}
+
+/// **Hitch a trailer that is already in a world** to a tractor that is -- the
+/// runtime door (the authoring door inserts the same component through
+/// `SceneDoc`). Returns whether the joint was written.
+pub fn hitch(
+    world: &mut EcsWorld,
+    tractor: Uuid,
+    tractor_def: &VehicleDef,
+    trailer: Uuid,
+    trailer_def: &VehicleDef,
+) -> bool {
+    let Some(joint) = hitch_joint(tractor, tractor_def, trailer_def) else {
+        return false;
+    };
+    let Some(e) = world.entity_of(trailer) else {
+        return false;
+    };
+    world.world_mut().entity_mut(e).insert(joint);
+    world.mark_dirty();
+    true
 }
 
 /// **Take a rig back out of a world** — the other half of [`spawn_rig`], and
@@ -3886,6 +4201,16 @@ pub const DIFF_SPEED_BAND: f64 = 2.0;
 /// `front_torque_split` and gets exactly what it asks for.
 pub const AWD_FRONT_SPLIT: f64 = 0.4;
 
+/// **How hard a tracked machine skids itself round** (wave VEH3f) -- the share
+/// of its driveline ceiling applied as a left/right differential at full steer,
+/// split across its wheels.
+///
+/// Half: enough that a 38-tonne dozer's tracks break their lateral grip and it
+/// pivots on the spot, not so much that a full-throttle straight run with a
+/// touch of steer spends its whole ceiling turning. The yaw rate it buys is
+/// measured by `veh3f_gate::the_tracked_rig_turns_by_skid`, not asserted here.
+pub const SKID_STEER_FORCE_FRAC: f64 = 0.5;
+
 /// A tyre's width as a fraction of its own radius.
 ///
 /// One number for the whole engine rather than a per-class knob, on
@@ -3962,7 +4287,64 @@ pub struct VehicleDef {
     pub wheel_drop_m: f64,
     /// The tuning installed on the chassis at creation.
     pub class: crate::components::VehicleClass,
+    /// **Which roster class this row belongs to** (wave VEH3f), or `None` for a
+    /// row that named none -- the eleven island rows that predate the roster.
+    ///
+    /// Set by the row's `class = "..."` key, which is also what applies that
+    /// class's DEFAULTS before the row's own keys (see
+    /// [`from_toml_table_with`](Self::from_toml_table_with) for the resolution
+    /// order). Free: this type derives no `Serialize`.
+    pub roster_class: Option<crate::roster::RosterClass>,
+    /// **The mass the row asked for**, kg, or `0` for a row that gave a density
+    /// (wave VEH3f).
+    ///
+    /// The research doc's `VehicleDataProfile` carries `mass_kg`, and the rig
+    /// weighs a car by its collider's `density_kg_m3` over its half-extents. So
+    /// `mass_kg` is a DERIVED key: it is resolved into the density LAST, after
+    /// every geometry key of the class and the row has landed, so a row that
+    /// changes its length keeps the mass it named rather than the density its
+    /// class implied.
+    pub mass_kg: f64,
+    /// **The drag coefficient the row asked for**, or `0` (wave VEH3f).
+    ///
+    /// The doc's `drag_coefficient`, resolved LAST into
+    /// `class.drag_n_per_mps2 = 1/2 rho Cd A` with `A` the frontal box times
+    /// [`FRONTAL_FILL`] -- the same derived-key shape as
+    /// [`mass_kg`](Self::mass_kg).
+    pub drag_cd: f64,
+    /// **How far the wheel row is shifted along `+Z`**, metres (wave VEH3f).
+    ///
+    /// Zero for every row but a trailer's: a semi-trailer's axles are a tandem
+    /// at the REAR and its front rides on the tractor's fifth wheel, so both of
+    /// its axle pairs sit behind the chassis centre. `WheelMount::steered` is a
+    /// sign test on the mount's `z`, so a trailer's wheels are unsteered by
+    /// construction -- which is what a trailer's wheels are.
+    pub wheel_offset_z_m: f64,
+    /// **The hero body** (wave VEH3f): the base `Guid` of a set of per-part
+    /// meshes built in the P23 DCC and committed as samples, or `None` for a
+    /// row drawn in its family's primitives.
+    ///
+    /// Each panel the set covers carries `MeshRef { primitive, asset:
+    /// Some(hero_part_mesh_guid(base, part)) }` -- see [`hero_part_mesh_guid`]
+    /// and [`HERO_PARTS`].
+    pub body_mesh: Option<Uuid>,
+    /// **The row's own engine clip** (wave VEH3f), or `None` for the grain
+    /// family its three acoustic tunables pick. When set it is written onto the
+    /// chassis emitter, and `vehicle_audio`'s planner plays it in place of the
+    /// family's three load grains -- the per-row clip override.
+    pub engine_clip: Option<Uuid>,
 }
+
+/// **How much of its frontal BOX a body presents to the air** (wave VEH3f) --
+/// the `A` in a row's derived `drag_coefficient`.
+///
+/// A car is not a brick: the greenhouse is narrower than the sills and the
+/// bumper corners are rounded. Eighty-five per cent of width times height is the
+/// usual rule of thumb for a road car's frontal area.
+pub const FRONTAL_FILL: f64 = 0.85;
+
+/// **Air density at sea level**, kg/m3 -- the `rho` of the drag equation.
+pub const AIR_DENSITY_KG_M3: f64 = 1.225;
 
 impl Default for VehicleDef {
     /// The P29.7 test rig, **with its length and its width the right way
@@ -3987,6 +4369,12 @@ impl Default for VehicleDef {
             buoyancy_density_kg_m3: 0.0,
             buoyancy_linear_drag: 0.0,
             class: crate::components::VehicleClass::default(),
+            roster_class: None,
+            mass_kg: 0.0,
+            drag_cd: 0.0,
+            wheel_offset_z_m: 0.0,
+            body_mesh: None,
+            engine_clip: None,
         }
     }
 }
@@ -4017,6 +4405,9 @@ impl VehicleDef {
             "half_track_m" => &mut self.half_track_m,
             "half_wheelbase_m" => &mut self.half_wheelbase_m,
             "wheel_drop_m" => &mut self.wheel_drop_m,
+            "mass_kg" => &mut self.mass_kg,
+            "drag_coefficient" => &mut self.drag_cd,
+            "wheel_offset_z_m" => &mut self.wheel_offset_z_m,
             _ => return self.class.set(name, value),
         };
         *slot = value;
@@ -4030,12 +4421,15 @@ impl VehicleDef {
             "buoyancy_density_kg_m3",
             "buoyancy_linear_drag",
             "density_kg_m3",
+            "drag_coefficient",
             "half_height_m",
             "half_length_m",
             "half_track_m",
             "half_wheelbase_m",
             "half_width_m",
+            "mass_kg",
             "wheel_drop_m",
+            "wheel_offset_z_m",
             "wheel_radius_m",
         ]
     }
@@ -4045,14 +4439,53 @@ impl VehicleDef {
     ///
     /// One place, so the generator that spawns a car and any test that checks
     /// one cannot disagree about where its wheels are.
+    ///
+    /// [`wheel_offset_z_m`](Self::wheel_offset_z_m) shifts all four along `+Z`
+    /// (wave VEH3f -- a trailer's tandem); it is zero for every other row, so
+    /// every rig authored before the roster is byte-identical.
     pub fn wheel_mounts(&self) -> [Vec3d; 4] {
         let (x, y, z) = (self.half_track_m, self.wheel_drop_m, self.half_wheelbase_m);
+        let o = self.wheel_offset_z_m;
         [
-            Vec3d::new(-x, y, z),
-            Vec3d::new(x, y, z),
-            Vec3d::new(-x, y, -z),
-            Vec3d::new(x, y, -z),
+            Vec3d::new(-x, y, o + z),
+            Vec3d::new(x, y, o + z),
+            Vec3d::new(-x, y, o - z),
+            Vec3d::new(x, y, o - z),
         ]
+    }
+
+    /// **This row's chassis mass**, kg -- its collider's box at its density,
+    /// which is what rapier weighs it at.
+    pub fn chassis_mass_kg(&self) -> f64 {
+        8.0 * self.half_extents.x * self.half_extents.y * self.half_extents.z * self.density_kg_m3
+    }
+
+    /// **What share of its suspension travel this row sits at, standing still**
+    /// (wave VEH3f) -- `m g / 4 / (k travel)`, the quantity every roster row is
+    /// authored against (30 to 45 per cent) and the static-fraction arm reads
+    /// against the SETTLED chassis rather than this formula.
+    pub fn static_travel_frac(&self) -> f64 {
+        let k = self.class.stiffness_n_per_m;
+        let t = self.class.travel_m;
+        if !(k > 0.0 && t > 0.0) {
+            return f64::INFINITY;
+        }
+        self.chassis_mass_kg() * 9.81 / 4.0 / (k * t)
+    }
+
+    /// **Resolve the derived keys** (wave VEH3f) -- `mass_kg` into the density
+    /// and `drag_coefficient` into `drag_n_per_mps2`, against the FINAL
+    /// half-extents. Called once, after every table of a row has been applied.
+    pub fn resolve_derived(&mut self) {
+        let h = self.half_extents;
+        let volume = 8.0 * h.x * h.y * h.z;
+        if self.mass_kg > 0.0 && volume > 0.0 {
+            self.density_kg_m3 = self.mass_kg / volume;
+        }
+        if self.drag_cd > 0.0 {
+            let area = 4.0 * h.x * h.y * FRONTAL_FILL;
+            self.class.drag_n_per_mps2 = 0.5 * AIR_DENSITY_KG_M3 * self.drag_cd * area;
+        }
     }
 
     /// **Read one catalogue row**, or `None` when the table has no `[vehicle]`
@@ -4064,6 +4497,31 @@ impl VehicleDef {
     pub fn from_toml_table(
         t: &toml::map::Map<String, toml::Value>,
     ) -> Result<Option<Self>, String> {
+        Self::from_toml_table_with(t, crate::roster::class_profiles())
+    }
+
+    /// [`from_toml_table`](Self::from_toml_table) against a named set of CLASS
+    /// DEFAULTS (wave VEH3f) -- the door a gate uses to mutate a default and see
+    /// every row of the class move.
+    ///
+    /// # The resolution order, pinned
+    ///
+    /// 1. `VehicleDef::default()`;
+    /// 2. the CLASS table the row's `class = "..."` names, applied by the same
+    ///    [`apply_table`](Self::apply_table) as the row (its spellings, then its
+    ///    numbers);
+    /// 3. the ROW's own table: `body`, then `differential`, then `drivetrain`,
+    ///    then the two asset keys, then every number -- so anything a row says
+    ///    beats anything its class says, whatever order the TOML map iterates;
+    /// 4. the derived keys (`mass_kg`, `drag_coefficient`) against the FINAL
+    ///    half-extents ([`resolve_derived`](Self::resolve_derived)).
+    ///
+    /// A row with no `class` key skips step 2, which is every row that predates
+    /// the roster -- they parse to exactly what they parsed to before.
+    pub fn from_toml_table_with(
+        t: &toml::map::Map<String, toml::Value>,
+        classes: &crate::roster::ClassProfiles,
+    ) -> Result<Option<Self>, String> {
         let Some(v) = t.get("vehicle") else {
             return Ok(None);
         };
@@ -4071,6 +4529,33 @@ impl VehicleDef {
             .as_table()
             .ok_or_else(|| "`vehicle` must be a table".to_string())?;
         let mut def = VehicleDef::default();
+        if let Some(c) = table.get("class") {
+            let name = c
+                .as_str()
+                .ok_or_else(|| "`class` must be a string".to_string())?;
+            let class = crate::roster::RosterClass::from_name(name)
+                .ok_or_else(|| format!("unknown roster class `{name}`"))?;
+            let defaults = classes
+                .get(class)
+                .ok_or_else(|| format!("no class defaults for `{name}`"))?;
+            def.apply_table(defaults)
+                .map_err(|e| format!("class `{name}` defaults: {e}"))?;
+            def.roster_class = Some(class);
+        }
+        def.apply_table(table)?;
+        def.resolve_derived();
+        Ok(Some(def))
+    }
+
+    /// **Apply one TOML table of vehicle keys** onto this def (wave VEH3f's
+    /// split of the VEH1a parser, so a class's defaults and a row's own keys go
+    /// through ONE door). The spellings resolve before any number; an unknown
+    /// key is a refusal by name.
+    pub fn apply_table(
+        &mut self,
+        table: &toml::map::Map<String, toml::Value>,
+    ) -> Result<(), String> {
+        let def = self;
         if let Some(b) = table.get("body") {
             let name = b
                 .as_str()
@@ -4138,8 +4623,27 @@ impl VehicleDef {
             };
             def.class.front_torque_split = split;
         }
+        // **The two asset keys** (wave VEH3f): a hero body's base guid and a
+        // per-row engine clip, each a `Uuid` string. A malformed one is a
+        // refusal by name, as a malformed number is.
+        for (key, slot) in [
+            ("body_mesh", &mut def.body_mesh),
+            ("engine_clip", &mut def.engine_clip),
+        ] {
+            if let Some(v) = table.get(key) {
+                let text = v
+                    .as_str()
+                    .ok_or_else(|| format!("`{key}` must be a uuid string"))?;
+                *slot = Some(
+                    Uuid::parse_str(text).map_err(|e| format!("`{key}` is not a uuid ({e})"))?,
+                );
+            }
+        }
         for (k, v) in table {
-            if k == "body" || k == "drivetrain" || k == "differential" {
+            if matches!(
+                k.as_str(),
+                "body" | "drivetrain" | "differential" | "class" | "body_mesh" | "engine_clip"
+            ) {
                 continue;
             }
             let n = v
@@ -4150,7 +4654,7 @@ impl VehicleDef {
                 return Err(format!("unknown vehicle key `{k}`"));
             }
         }
-        Ok(Some(def))
+        Ok(())
     }
 }
 
@@ -4767,6 +5271,14 @@ pub trait Vehicle: Send + Sync + 'static {
     /// with no engine at all answers `false`.
     fn turbocharged(&self) -> bool {
         false
+    }
+
+    /// **Whether a driver can take this vehicle** (wave VEH3f). `false` for a
+    /// class with no engine at all -- a TRAILER, whose driveline ceiling is
+    /// zero -- which the interaction layer then never offers an `Enter` on:
+    /// there is no seat in a box van and nothing to drive if there were.
+    fn boardable(&self) -> bool {
+        true
     }
 
     /// **What this class calls idle**, rpm (wave VEH3b) — the number
@@ -7567,6 +8079,10 @@ impl Vehicle for RaycastVehicle {
         self.tuning.turbo_boost_max.is_finite() && self.tuning.turbo_boost_max > 0.0
     }
 
+    fn boardable(&self) -> bool {
+        self.tuning.max_engine_force_n > 0.0
+    }
+
     /// **The voice telemetry** (wave VEH3e): the crank, the load, the boost,
     /// the gearbox input shaft as the DRIVEN wheels imply it, and each axle's
     /// worst normalised slip and deepest strut over its grounded wheels.
@@ -7982,6 +8498,49 @@ impl Vehicle for RaycastVehicle {
             let transfer = lsd_transfer_nm(preload, ramp, axle_nm, delta) * direction;
             self.drive_nm[slow] += transfer;
             self.drive_nm[fast] -= transfer;
+        }
+
+        // ── SKID STEER (wave VEH3f) ──────────────────────────────────────────
+        //
+        // **A class with no steering rack steers with its tracks.** A dozer's
+        // wheel row IS its tracks, and a tracked machine turns by driving one
+        // side faster than the other -- at a standstill, one forward and one
+        // back. The discriminator is DERIVED from a number the class already
+        // carries rather than minted as a field (v28 is spent, and the VEH2a
+        // ruling is that an enum beside a number is two sources of truth):
+        // `max_steer_deg <= 0` means there is no rack, so the rack's own pass
+        // above has already held every wheel at zero degrees and ESC has nothing
+        // to read. Every row that predates the roster steers with a rack, so
+        // this pass is inert on all of them.
+        //
+        // The differential is a share of the driveline ceiling applied at the
+        // contact patch, NOT a share of the crank's torque: a pivot turn is made
+        // with the throttle shut, where `crank` is idle, and a skid term that
+        // scaled with it would leave a dozer unable to turn on the spot. The
+        // ceiling pass below bounds the sum exactly as it bounds a straight
+        // pull, and traction control caps each side like any wheel.
+        if !(self.tuning.max_steer_deg > 0.0) {
+            let steer = if self.controls.steer.is_finite() {
+                self.controls.steer.clamp(-1.0, 1.0)
+            } else {
+                0.0
+            };
+            if steer != 0.0 && wheels > 0 {
+                let per_wheel_n = SKID_STEER_FORCE_FRAC
+                    * self.tuning.max_engine_force_n.max(0.0)
+                    * self.engine_scale.clamp(0.0, 1.0)
+                    / wheels as f64;
+                for i in 0..wheels {
+                    // `+steer` is a RIGHT turn: the near (`-X`) side drives
+                    // forward and the off side back.
+                    let side = if self.rig.wheels[i].mount_local.x < 0.0 {
+                        1.0
+                    } else {
+                        -1.0
+                    };
+                    self.drive_nm[i] += side * steer * per_wheel_n * self.wheel_radius(i);
+                }
+            }
         }
 
         // ── traction control ─────────────────────────────────────────────────
@@ -13141,7 +13700,7 @@ mod tests {
     #[test]
     fn every_authored_part_is_recognised_as_the_kind_it_declares() {
         let mut seen = 0usize;
-        let mut kinds = [0usize; 6];
+        let mut kinds = [0usize; 7];
         for body in VehicleBody::ALL {
             for part in body.parts() {
                 let got = BodyPartKind::of(part.name, part.centre, part.half);
@@ -13167,18 +13726,19 @@ mod tests {
             }
         }
         eprintln!(
-            "parts: {seen} over {} families — panel {} door {} hood {} trunk {} bumper {} glass {}",
+            "parts: {seen} over {} families — panel {} door {} hood {} trunk {} bumper {} glass {} seat {}",
             VehicleBody::ALL.len(),
             kinds[0],
             kinds[1],
             kinds[2],
             kinds[3],
             kinds[4],
-            kinds[5]
+            kinds[5],
+            kinds[6]
         );
         // The engagement count: this is not a test of an empty list.
         assert!(seen >= 60, "only {seen} parts over seven families");
-        for (i, name) in ["panel", "door", "hood", "trunk", "bumper", "glass"]
+        for (i, name) in ["panel", "door", "hood", "trunk", "bumper", "glass", "seat"]
             .into_iter()
             .enumerate()
         {

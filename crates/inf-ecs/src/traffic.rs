@@ -2317,52 +2317,92 @@ pub fn heading_of_yaw(yaw_deg: f64) -> DVec3 {
     DVec3::new(inf_math::psin64(r), 0.0, inf_math::pcos64(r))
 }
 
-/// **Which catalogue row a slot's car is** — drawn from the car's own guid.
+/// **Which catalogue row a slot's car is** — drawn from the car's own guid, BY
+/// CLASS WEIGHT over the roster (wave VEH3f).
 ///
-/// The rows are the five the island's own fleet declares, named here rather
-/// than read from it because `inf-ecs` is Ring 0 and the catalogue is authoring
-/// input in Ring 1. What Ring 0 owns is the *geometry and tuning* of a class
-/// ([`crate::vehicle::VehicleDef`]), and these are that type's own defaults
-/// wearing five different silhouettes — a traffic stream of five shapes rather
-/// than of one, which is what `frames/driving/0014` shows (a van, a saloon and
-/// a pickup in three consecutive lanes).
+/// # What changed, and what did not
+///
+/// Until VEH3f this drew a SILHOUETTE uniformly over `VehicleBody::CIVILIAN`
+/// and sized a `VehicleDef::default()` to it: five shapes on one engine, one
+/// gearbox and one set of tyres. It now draws a ROW of
+/// [`crate::roster::roster`] -- a lore-named car with its own mass, engine,
+/// gearing, springs and voice -- in two steps off ONE counter-hash draw
+/// (`crowd::agent_unit(guid, 0, SALT_CLASS)`, no RNG state): a class by weight,
+/// then a row of that class. Both hosts, every run, the same car in the same
+/// space.
+///
+/// # THE KERB TRAP, per class
+///
+/// Which weights apply is the car's own DAY ([`day_of`]): a car that is parked
+/// for ever, or commutes between two kerbs, takes
+/// [`RosterClass::parked_weight`](crate::roster::RosterClass::parked_weight) --
+/// sedans, SUVs, pickups, coupes, vans, taxis, jeeps and hummers, and nothing
+/// else; a car that drives a day or night CIRCUIT takes
+/// [`circuit_weight`](crate::roster::RosterClass::circuit_weight), which adds
+/// buses, cargo and utility trucks. Emergency rows are never traffic (dispatch
+/// sends them), and air, sea, military, construction, freight and trailers
+/// never reach a road this way at all. A row must also FIT a kerb slot
+/// ([`KERB_SLOT_M`] less a metre and a half of standing room) and belong to a
+/// wheeled, untowed family.
 pub fn catalogue_row(guid: Uuid) -> crate::vehicle::VehicleDef {
-    use crate::vehicle::VehicleBody;
-    // **`CIVILIAN`, not `ALL`** — the kerb trap, sprung and closed in the same
-    // commit that could have sprung it (wave VEH2c). This draw is UNIFORM over
-    // whatever list it is handed, so the day `ALL` grew a launch and a
-    // helicopter was the day every sixth and seventh kerb slot in every town on
-    // the island would have held a boat. `VehicleBody::CIVILIAN`'s own doc
-    // carries the rest of the argument; the size table below stays exhaustive
-    // over `VehicleBody`, so that the NEXT family is a compile error here
-    // rather than a boat on a pavement.
-    let bodies = VehicleBody::CIVILIAN;
-    let i = (crate::crowd::agent_unit(guid, 0, SALT_CLASS) * bodies.len() as f64) as usize;
-    let body = bodies[i.min(bodies.len() - 1)];
-    let mut def = crate::vehicle::VehicleDef {
-        body,
-        ..Default::default()
+    use crate::roster::{pick_row, RosterClass};
+    let circuit = matches!(
+        day_of(guid),
+        TrafficDay::DayCircuit | TrafficDay::NightCircuit
+    );
+    let unit = crate::crowd::agent_unit(guid, 0, SALT_CLASS);
+    let fits = |d: &crate::vehicle::VehicleDef| {
+        d.body.wheeled() && !d.body.towed() && 2.0 * d.half_extents.z <= KERB_SLOT_M - 1.5
     };
-    // The silhouettes differ in size as well as in shape, or five families draw
-    // as one box in five costumes.
-    let (l, w, h) = match body {
-        VehicleBody::Sports => (2.10, 0.90, 0.60),
-        VehicleBody::Sedan => (2.25, 0.92, 0.72),
-        VehicleBody::Suv => (2.35, 0.98, 0.88),
-        VehicleBody::Truck => (2.70, 1.02, 0.85),
-        VehicleBody::Van => (2.70, 1.00, 1.05),
-        // Unreachable from the draw above and deliberately still written:
-        // this match is the tripwire that makes a new family visible HERE,
-        // and an arm that answered with a wildcard would have let a launch
-        // through wearing a saloon's dimensions.
-        VehicleBody::Launch => (2.60, 1.05, 0.95),
-        VehicleBody::Rotorcraft => (2.40, 1.20, 1.00),
+    let picked = if circuit {
+        pick_row(unit, RosterClass::circuit_weight, fits)
+    } else {
+        pick_row(
+            unit,
+            RosterClass::parked_weight,
+            |d: &crate::vehicle::VehicleDef| {
+                fits(d) && crate::vehicle::VehicleBody::CIVILIAN.contains(&d.body)
+            },
+        )
     };
-    def.half_extents = crate::math::Vec3d::new(w, h, l);
-    def.half_track_m = w - 0.12;
-    def.half_wheelbase_m = l - 0.55;
-    size_the_suspension(&mut def);
-    def
+    match picked {
+        Some((_, def)) => *def,
+        // Unreachable with the committed roster (every parked class has rows
+        // that fit), and still a car rather than a panic: the default rig,
+        // sprung to hold itself up.
+        None => {
+            let mut def = crate::vehicle::VehicleDef::default();
+            size_the_suspension(&mut def);
+            def
+        }
+    }
+}
+
+/// **The roster row id a slot's car is** -- [`catalogue_row`]'s other half,
+/// for the census and the instruments (wave VEH3f). The same draw, answered as
+/// the row's id rather than its geometry.
+pub fn catalogue_row_id(guid: Uuid) -> Option<&'static str> {
+    use crate::roster::{pick_row, RosterClass};
+    let circuit = matches!(
+        day_of(guid),
+        TrafficDay::DayCircuit | TrafficDay::NightCircuit
+    );
+    let unit = crate::crowd::agent_unit(guid, 0, SALT_CLASS);
+    let fits = |d: &crate::vehicle::VehicleDef| {
+        d.body.wheeled() && !d.body.towed() && 2.0 * d.half_extents.z <= KERB_SLOT_M - 1.5
+    };
+    let picked = if circuit {
+        pick_row(unit, RosterClass::circuit_weight, fits)
+    } else {
+        pick_row(
+            unit,
+            RosterClass::parked_weight,
+            |d: &crate::vehicle::VehicleDef| {
+                fits(d) && crate::vehicle::VehicleBody::CIVILIAN.contains(&d.body)
+            },
+        )
+    };
+    picked.map(|(id, _)| id)
 }
 
 /// The share of a strut's travel a parked car sits at.
@@ -3198,60 +3238,50 @@ mod tests {
     /// belly defect was measured on — would still be forty green assertions.
     #[test]
     fn every_catalogue_row_sits_inside_its_own_travel() {
+        // **RE-RULED at wave VEH3f, with the cause.** Until the roster a
+        // traffic row was `VehicleDef::default()` wearing one of five
+        // silhouettes, and `size_the_suspension` sprung it at EXACTLY
+        // `STATIC_SAG_FRAC` of its travel with EXACTLY `GROUND_CLEARANCE_M`
+        // under its hull -- so this arm asserted those two numbers to 1e-9.
+        // A traffic car is now a ROSTER ROW, which authors its own spring for
+        // 30-45 % static travel (the VEH3b audit's band, measured over every
+        // row by `veh3f_gate::every_roster_row_sits_at_its_static_fraction`), so
+        // the claim here is the BAND, the clearance and the effort -- over a
+        // sweep that must meet at least nine of the kerb's families.
         let mut seen: Vec<crate::vehicle::VehicleBody> = Vec::new();
-        for k in 0..40u64 {
+        for k in 0..400u64 {
             let def = catalogue_row(Uuid::from_u64_pair(0xC0FFEE, k));
             if !seen.contains(&def.body) {
                 seen.push(def.body);
             }
-            let mass = 8.0
-                * def.half_extents.x
-                * def.half_extents.y
-                * def.half_extents.z
-                * def.density_kg_m3;
+            let mass = def.chassis_mass_kg();
             let sag = mass * 0.25 * 9.81 / def.class.stiffness_n_per_m;
+            let frac = sag / def.class.travel_m;
             assert!(
-                sag < def.class.travel_m,
-                "{:?} at {mass:.0} kg sags {sag:.3} m into {:.3} m of travel",
+                (0.30..=0.45 + 1e-6).contains(&frac),
+                "{:?} at {mass:.0} kg sags {frac:.3} of its {:.3} m of travel",
                 def.body,
                 def.class.travel_m
             );
-            assert!(
-                (sag / def.class.travel_m - STATIC_SAG_FRAC).abs() < 1e-6,
-                "{:?} sags {:.3} of its travel",
-                def.body,
-                sag / def.class.travel_m
-            );
-            // …and it has the effort to move its own mass.
-            assert!(def.class.max_engine_force_n > mass * 2.0);
-            assert!(def.class.brake_force_n > def.class.max_engine_force_n);
-            // …and its hull is off the road WITH the springs loaded, which is
-            // the case the default rig's `wheel_drop_m` did not survive.
+            // …and it has the effort to move its own mass and the brakes to
+            // stop it.
+            assert!(def.class.max_engine_force_n > mass * 1.5, "{:?}", def.body);
+            assert!(def.class.brake_force_n > mass * 4.0, "{:?}", def.body);
+            // …and its hull is off the road WITH the springs loaded.
             let origin = crate::vehicle::resting_origin_y(&def, 0.0) - sag;
             let clearance = origin - def.half_extents.y;
             assert!(
-                (clearance - GROUND_CLEARANCE_M).abs() < 1e-9,
+                clearance > 0.08,
                 "{:?} clears the road by {clearance:.3} m at static sag",
                 def.body
             );
         }
-        // `CIVILIAN`, not `ALL` (wave VEH2c): this arm's subject is what
-        // `catalogue_row` can produce, and a boat has no springs to check. The
-        // two craft answer `suspension_rest_m() == 0.0`, which is asserted
-        // where they are.
-        assert_eq!(
-            seen.len(),
-            crate::vehicle::VehicleBody::CIVILIAN.len(),
-            "the sweep only met {seen:?} — a silhouette this arm does not draw is a \
-             silhouette nothing checks the springs of"
+        assert!(
+            seen.len() >= 9,
+            "the sweep only met {seen:?}: a silhouette this arm does not draw is one nothing checks the springs of"
         );
     }
 
-    /// **Every catalogue row can actually be driven.** The wave's own arms found
-    /// a traffic car that would not move under full throttle, and the question a
-    /// world-level test cannot answer is whether the fault is the world or the
-    /// ROW: `catalogue_row` overrides four of a `VehicleDef`'s geometry fields,
-    /// and a rig whose wheels the recogniser cannot tell apart, or whose gearbox
     /// **NO KERB IN ANY TOWN EVER HOLDS A BOAT** — the kerb trap, armed
     /// (wave VEH2c).
     ///
@@ -3273,31 +3303,58 @@ mod tests {
         for b in VehicleBody::CIVILIAN {
             assert!(b.wheeled(), "{:?} is in CIVILIAN and has mounts", b.name());
         }
+        // **Twelve families are not kerb families** (wave VEH3f): the launch,
+        // the rotorcraft, and ten of the roster's -- the bus, the semi tractor,
+        // the trailer, the flatbed, the tanker, the APC, the dozer, the
+        // forklift, the wrecker and the aeroplane. A family added to `ALL`
+        // without a decision about the kerb still reds here.
         assert_eq!(
             VehicleBody::ALL.len() - VehicleBody::CIVILIAN.len(),
-            2,
+            12,
             "a family was added to ALL without a decision about the kerb"
         );
 
-        // …and the DRAW, over two thousand kerb slots, which is far more than
-        // the island has. A uniform draw over seven would put roughly 570 boats
-        // in here.
+        // …and the DRAW. A car that PARKS -- for ever, or at both ends of a
+        // commute -- takes the kerb's weights, and every body it can draw is a
+        // civilian one. Circuit cars (a bus, a cargo truck, a utility truck)
+        // rest at their home slot between shifts, which is a layover and not a
+        // parked car; they are counted apart and must reach a non-kerb family,
+        // or the class weights would be a statement about nothing.
         let mut seen = std::collections::BTreeSet::new();
-        for k in 0..2_000u64 {
+        let mut circuit_heavy = 0usize;
+        for k in 0..4_000u64 {
             let guid = Uuid::from_u64_pair(0x4B33, k);
             let body = catalogue_row(guid).body;
-            assert!(
-                VehicleBody::CIVILIAN.contains(&body),
-                "kerb slot {k} drew a {}",
-                body.name()
-            );
-            seen.insert(body.name());
+            match day_of(guid) {
+                TrafficDay::Parked | TrafficDay::Commute => {
+                    assert!(
+                        VehicleBody::CIVILIAN.contains(&body),
+                        "kerb slot {k} parked a {}",
+                        body.name()
+                    );
+                    assert!(body.wheeled());
+                    seen.insert(body.name());
+                }
+                TrafficDay::DayCircuit | TrafficDay::NightCircuit => {
+                    assert!(body.wheeled() && !body.towed(), "{}", body.name());
+                    circuit_heavy += usize::from(!VehicleBody::CIVILIAN.contains(&body));
+                }
+            }
         }
-        // Vacuity guard: the draw really does reach all five, so "every one was
-        // civilian" is not a statement about a constant.
-        assert_eq!(seen.len(), 5, "the draw only reached {seen:?}");
+        // Vacuity guards: the parked draw really reaches the kerb's families,
+        // and the circuit draw really reaches a bus or a truck.
+        assert!(seen.len() >= 9, "the parked draw only reached {seen:?}");
+        assert!(
+            circuit_heavy > 0,
+            "no circuit car was ever a bus or a truck"
+        );
     }
 
+    /// **Every catalogue row can actually be driven.** The wave's own arms found
+    /// a traffic car that would not move under full throttle, and the question a
+    /// world-level test cannot answer is whether the fault is the world or the
+    /// ROW: `catalogue_row` overrides four of a `VehicleDef`'s geometry fields,
+    /// and a rig whose wheels the recogniser cannot tell apart, or whose gearbox
     /// hands out no ratio, is a car nothing can drive anywhere.
     #[test]
     fn every_catalogue_row_makes_torque_at_a_standstill() {

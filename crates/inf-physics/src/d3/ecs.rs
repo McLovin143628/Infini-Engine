@@ -2440,6 +2440,24 @@ impl PhysicsBridge3D {
             if d.other == guid {
                 return None;
             }
+            // **A HITCH runs with its contacts off** (wave VEH3f). A joint whose
+            // two bodies are both vehicle chassis is an articulated rig -- a
+            // trailer's kingpin on a tractor's fifth wheel -- and its two boxes
+            // overlap at the coupling by design. `Joint3D` carries no contacts
+            // flag (retired at P29; adding one is a bincode-positional scene
+            // bump), so the rule is DERIVED here, from what the two ends are.
+            // `reconcile_vehicles` ran earlier in this same sync, so the map is
+            // current on the first step; a ragdoll's bones are not chassis and
+            // keep their contacts.
+            let hitch = self.vehicles.contains_key(&guid) && self.vehicles.contains_key(&d.other);
+            let d = if hitch {
+                JointSync3D {
+                    other: d.other,
+                    desc: d.desc.without_contacts(),
+                }
+            } else {
+                d
+            };
             self.entities.get(&d.other).map(|r| (r.body, d))
         });
 

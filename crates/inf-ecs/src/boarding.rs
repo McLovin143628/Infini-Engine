@@ -512,6 +512,54 @@ pub fn sockets_of(half: Vec3d, offset: Vec3d, parts: &[PartGeom]) -> VehicleSock
         wheel_hub,
         wheel_rim_m: WHEEL_RIM_FRAC * hx,
     };
+    // ── the SEAT RULE per silhouette (wave VEH3f) ───────────────────────────
+    //
+    // A family that DRAWS its seats (`BodyPartKind::Seat`, a `seat*` part) is
+    // seated on them: the driver on the cushion furthest to `+X` (the centreline
+    // counts, for a dozer's or a forklift's one seat), the passenger on the
+    // cushion furthest to `-X`. The pedals and the wheel then follow the DRIVER
+    // in metres rather than the hull in fractions, because the reason for the
+    // rule is that a bus's driver sits over its front axle, eleven metres from
+    // where a fraction of the hull would put him, and the fractions would leave
+    // his pedals behind him. Every family that predates the roster draws no seat
+    // and keeps every number above, byte for byte.
+    let seat_top = |p: &PartGeom| {
+        Vec3d::new(
+            offset.x + p.centre_frac.x * hx,
+            offset.y + (p.centre_frac.y + p.half_frac.y.abs()) * hy,
+            offset.z + p.centre_frac.z * hz,
+        )
+    };
+    let mut driver: Option<&PartGeom> = None;
+    let mut passenger: Option<&PartGeom> = None;
+    for p in parts.iter().filter(|p| p.kind == crate::vehicle::KIND_SEAT) {
+        if p.centre_frac.x >= -1e-9 {
+            if driver.is_none_or(|d| p.centre_frac.x > d.centre_frac.x) {
+                driver = Some(p);
+            }
+        } else if passenger.is_none_or(|q| p.centre_frac.x < q.centre_frac.x) {
+            passenger = Some(p);
+        }
+    }
+    if let Some(d) = driver {
+        let c = seat_top(d);
+        out.seat_r = c;
+        out.pedal_throttle = Vec3d::new(
+            c.x + SEATED_PEDAL_M.0,
+            c.y + SEATED_PEDAL_M.1,
+            c.z + SEATED_PEDAL_M.2,
+        );
+        out.pedal_brake = Vec3d::new(
+            c.x - SEATED_PEDAL_M.0,
+            c.y + SEATED_PEDAL_M.1,
+            c.z + SEATED_PEDAL_M.2,
+        );
+        out.wheel_hub = Vec3d::new(c.x, c.y + SEATED_HUB_M.0, c.z + SEATED_HUB_M.1);
+        out.wheel_rim_m = SEATED_RIM_M;
+    }
+    if let Some(p) = passenger {
+        out.seat_l = seat_top(p);
+    }
     // ── the handles, from the DOORS (VEH3c's own derivation) ────────────────
     //
     // The door's outer face just under its top edge, pushed out along the
@@ -679,6 +727,20 @@ pub fn inner_handle_in_door(
         (cushion.z + INNER_PULL_AHEAD_M - door_centre_m.z).clamp(-0.9 * hz, 0.9 * hz),
     )
 }
+
+/// **Where a seated driver's pedals are, from the cushion**, metres -- `(half the
+/// throttle/brake spread, down, forward)` (wave VEH3f). The SAE H-point-to-heel
+/// relationship of an upright seating position: a metre of leg, most of it
+/// forward.
+pub const SEATED_PEDAL_M: (f64, f64, f64) = (0.08, -0.30, 0.80);
+
+/// **Where a seated driver's wheel hub is, from the cushion**, metres -- `(up,
+/// forward)` (wave VEH3f).
+pub const SEATED_HUB_M: (f64, f64) = (0.40, 0.45);
+
+/// **The rim radius on a family with drawn seats**, metres (wave VEH3f) -- a
+/// real wheel, not a fraction of a hull that might be a bus.
+pub const SEATED_RIM_M: f64 = 0.19;
 
 /// How far AHEAD of the seat's H-point the inner pull is, metres — the front of
 /// the arm rest, under a seated elbow.

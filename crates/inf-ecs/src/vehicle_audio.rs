@@ -1137,7 +1137,14 @@ fn car_loops(
     let mut out = Vec::with_capacity(7);
     for (i, load) in EngineLoad::ALL.iter().enumerate() {
         let layer = VoiceLayer::ALL[i];
-        out.push((layer, grain_clip(family, *load), level * w[i], gp));
+        // **A row's own clip OVERRIDES the grain** (wave VEH3f). A roster row
+        // that names `engine_clip` has it written onto its emitter, and it plays
+        // in all three load slots -- crossfaded by the same load weights and
+        // pitched by the same grain pitch -- so an authored engine is heard
+        // through the stack rather than beside it. Until this wave a clip on a
+        // voiced car's emitter was silently ignored.
+        let clip = src.clip.unwrap_or_else(|| grain_clip(family, *load));
+        out.push((layer, clip, level * w[i], gp));
     }
     let (wv, wp) = whine_voice(t);
     out.push((VoiceLayer::Whine, whine_clip(), base * wv, wp));

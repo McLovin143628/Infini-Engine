@@ -53,6 +53,11 @@ pub fn vehicle_candidates(
         if occupied.contains(&chassis) {
             continue;
         }
+        // **A trailer is not a seat** (wave VEH3f): an unpowered class answers
+        // `boardable() == false` and is never offered.
+        if !bridge.vehicle_of(chassis).is_some_and(|v| v.boardable()) {
+            continue;
+        }
         let Some((seat, _, _)) = seat_pose(bridge, chassis) else {
             continue;
         };
