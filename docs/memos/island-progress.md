@@ -40920,7 +40920,11 @@ tunables, `EXPECTED_LEVELS` 24 -- no schema move; `Cargo.lock` unchanged.
   the dozer pivots at 0.670 rad/s.
 * **Bodies**: DCC-lofted hero panels (sedan, coupe, SUV, pickup, cruiser --
   18 panels, 16 661 B each, `samples/vehicle-bodies/`, ours) on
-  `RigNode.mesh.asset`; the construction pack through the UE bridge,
+  `RigNode.mesh.asset` [**audit: PANELS ON THE BOX FAMILY, not car bodies** --
+  each set is 3-4 closed rounded slabs (304 vertices a panel) in the unit boxes
+  of the parts they replace; the whole drawn car's side outline differs from
+  the all-box car by 3.6-8.7 %; no arches, apertures or shut lines. See the
+  audit block below]; the construction pack through the UE bridge,
   LOCAL-ONLY (`inf-import --vehicles`: manifest slot names, connected pieces,
   tyres that stand on the ground, a wheel is its tyre and everything inside
   it; per-body TOML; `island-refresh.ps1 -SyncVehicles`); a committed
@@ -40960,3 +40964,74 @@ moving traffic passes through parked cars (3 contacts in 10 island minutes);
 the crowd's morning commute takes the CI island's step from 20 to ~450 ms
 (character move), so the ten-minute census is 88 minutes of wall; the Fab
 licence tier is the user's to confirm; a bought car pack is the user's call.
+
+## WAVE VEH3f — THE AUDIT (2026-09-24)
+
+Range `8f9847b3..` over the wave's fifteen commits; report
+`campaign-briefs/veh3f-audit-report.md`; frames `AUDIT-VEH3f-FINAL/`. No
+schema move (v28 / 13 / 100 / 24); goldens 66, none re-blessed; `Cargo.lock`
+unchanged; the showcase island re-blessed once (Harbour City's JoBuilt Hauler
+now stands on six wheels).
+
+### audit: what the columns measured
+
+* **The lateral column was a spin, not a grip.** `v x yaw rate` over a ramp
+  steer that ends past the limit read an SUV at 1.53 g, a jeep at 1.31 g, a
+  sedan at 1.66 g on a mu-0.9 slab. Read as the chassis's own acceleration
+  along its right axis while its sideslip is under 10 degrees: coupe
+  1.09-1.22, sedan 0.89-1.01, SUV 0.79-0.85, truck 0.75-0.85, jeep 0.66-0.69,
+  van 0.67-0.78, bus 0.59-0.72 (a steady circle agrees). Bands re-derived,
+  the class order asserted.
+* **The re-bless's cause re-measured** (each row's CoG put back to the box
+  default): freight's holds (stop 0.64 -> 0.73 g); military's and the van's do
+  not (0.66 and 0.84 g on the box CoG too -- the drafted floors were a car's).
+* **The hero bodies measured** (above): panels on boxes. A car SHELL (one
+  closed loft with arches and a glasshouse, and the door/bonnet/boot panels cut
+  from it so VEH3c's parts keep working) is priced at ~3.5 days and carried.
+* **"Hands and feet 0.0 mm off"** was the Yard fixture. On the shipped host
+  (posed joints against live sockets) the hands missed the rim by 46 mm on the
+  island pickup, 101-104 on the van and ambulance, 208 on the bus, 348 on the
+  semi cab: every socket height was a fraction of the HULL. Capped in metres
+  from the seat (hub rise 0.40, reach 0.45, rim 0.19, pedal drop 0.30, handle
+  0.85 above its sill): 0.00 mm at the rim and pedals on twelve rows, and at the
+  outer handle on all but the semi cab (its sill 1.9 m up) and the art tractor
+  (no door).
+
+### audit: built, not carried
+
+* **Multi-axle rigs**: the limit was `wheel_mounts`' array of four; the solver
+  was already N-wheel. `front_axles` / `rear_axles` / `axle_spacing_m`; twelve
+  rows on their real axles (6x4 semis, 6x6s, 8x8s, tandem haulers, the coach),
+  re-sprung k x 4/N. In the world: 6/6/8/6 wheels, strut loads = weight within
+  0.03 %.
+* **The lattice's guards armed**: a fixture street puts an authored car ON a
+  kerb slot (both mutations red); the self-exclusion never fired on either
+  island and cannot (two streets' slots are >= 5.89 m apart), so it is gone.
+* **The census in CI time**: 88 minutes were the crowd's morning commute, not
+  the traffic; a traffic census with the crowd cleared runs ten island minutes
+  in 6 min 31 s release (1 minute in dev/CI), same result.
+* **The gallery** (`INF_PIE_GALLERY`, `demo.ps1 -Gallery -GalleryOnly`): one
+  roster class or hero set at a time, noted and photographed.
+
+### judged, held
+
+d0b8cdd1's "8 of 11 refs": correct streaming -- the camp car is 1.10 km from
+spawn and resident 0.5 s after the hero arrives 40 m from it; the DAG compare
+still covers all eleven refs. The committed art fallback is ours (the family's
+DCC boxes + DCC cylinders at the art rows' measured extents -- numbers, not
+geometry); nothing from the pack is in `git ls-files`.
+
+### carried, by name
+
+The car shell (~3.5 d); art-row door proxies (a per-machine art door split,
+~1 d a machine -- an invisible proxy door was refused as a door nobody sees
+move); the cab-step climb for high cabs (~1.5 d); the inner handle latches
+before the reach ramps in on every row but the saloons (~0.5 d); the tandem's
+in-group brake split by load (~0.5 d); moving-traffic contacts (all three are
+STOPPED cars whose bodies met: the following rule tests an obstacle's centre
+against a 2.5 m corridor, so a car parked askew, a car turning at a junction
+and a car pulling out past its neighbour intrude with their length, ~0.5 d for
+a footprint-aware gap); the Harbour City box trailer stands on no wheel
+(pitched 4.7 deg, its rig placed over lower ground, ~0.5 d); the Pickup hero
+set hangs on no car in the committed island; the crowd's commute cliff.
+
