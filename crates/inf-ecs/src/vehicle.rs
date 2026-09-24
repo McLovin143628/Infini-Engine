@@ -8538,7 +8538,15 @@ impl Vehicle for RaycastVehicle {
                     } else {
                         -1.0
                     };
-                    self.drive_nm[i] += side * steer * per_wheel_n * self.wheel_radius(i);
+                    // **Bounded by what the ground can take** under this
+                    // wheel (last step's load times its longitudinal grip):
+                    // a track that is handed more than its footprint can
+                    // push against only spins, and the first cut -- unbounded
+                    // -- spun a pivoting dozer's wheels to 7 000 rad/s.
+                    let grip =
+                        self.wheels[i].load_n.max(0.0) * self.tuning.longitudinal_grip.max(0.0);
+                    let force = per_wheel_n.min(grip);
+                    self.drive_nm[i] += side * steer * force * self.wheel_radius(i);
                 }
             }
         }

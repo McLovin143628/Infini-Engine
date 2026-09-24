@@ -3180,11 +3180,14 @@ peak_torque_rpm = 1600.0
 redline_rpm = 3000.0
 shift_up_rpm = 2820.0
 shift_down_rpm = 1080.0
-final_drive = 5.724
+final_drive = 4.579
 max_speed_mps = 26.39
-max_engine_force_n = 111610.0
+max_engine_force_n = 17170.0
 brake_force_n = 31780.0
 handbrake_force_n = 14300.0
+gear_count = 1.0
+gear_1_ratio = 1.0
+reverse_ratio = 1.0
 cylinders = 8.0
 max_steer_deg = 0.0
 min_steer_deg = 0.0
@@ -3247,16 +3250,19 @@ shift_up_rpm = 1880.0
 shift_down_rpm = 910.0
 final_drive = 36.249
 max_speed_mps = 3.06
-max_engine_force_n = 988610.0
+max_engine_force_n = 164770.0
 brake_force_n = 223670.0
 handbrake_force_n = 100650.0
+gear_count = 1.0
+gear_1_ratio = 1.0
+reverse_ratio = 1.0
 cylinders = 6.0
 max_steer_deg = 0.0
 min_steer_deg = 0.0
 differential = "locked"
 
 # HVY Cutter -- inspired by the Caterpillar 349 excavator -- rotating boom and bucket excavator (TRACKED).
-# 48000 kg on 0.20 m of travel: 30 % static by construction (k = m g / 4 / (travel x 0.30)).
+# 48000 kg on 0.20 m of travel: 30 % static by construction (k = m g / 4 / (travel x 0.30)). Single ratio; travel speed RAISED from 5 to 9.1 km/h by the 40:1 launch limit.
 [hvy_cutter]
 label = "HVY Cutter"
 
@@ -3279,11 +3285,14 @@ peak_torque_rpm = 1600.0
 redline_rpm = 2000.0
 shift_up_rpm = 1880.0
 shift_down_rpm = 910.0
-final_drive = 72.498
-max_speed_mps = 1.39
-max_engine_force_n = 1739960.0
+final_drive = 40.0
+max_speed_mps = 2.52
+max_engine_force_n = 160000.0
 brake_force_n = 282530.0
 handbrake_force_n = 127140.0
+gear_count = 1.0
+gear_1_ratio = 1.0
+reverse_ratio = 1.0
 cylinders = 6.0
 max_steer_deg = 0.0
 min_steer_deg = 0.0
@@ -3319,6 +3328,7 @@ max_engine_force_n = 401530.0
 brake_force_n = 423790.0
 handbrake_force_n = 190710.0
 cylinders = 16.0
+rolling_resistance = 0.018
 
 # HVY Mixer -- inspired by the Peterbilt 365 concrete mixer -- a rotating-drum cement truck.
 # 30000 kg on 0.20 m of travel: 30 % static by construction (k = m g / 4 / (travel x 0.30)).
@@ -3344,13 +3354,14 @@ peak_torque_rpm = 1200.0
 redline_rpm = 2100.0
 shift_up_rpm = 1970.0
 shift_down_rpm = 910.0
-final_drive = 4.187
-max_speed_mps = 27.78
-max_engine_force_n = 100480.0
+final_drive = 4.652
+max_speed_mps = 25.0
+max_engine_force_n = 111650.0
 brake_force_n = 176580.0
 handbrake_force_n = 79460.0
 cylinders = 6.0
 turbo_boost_max = 0.8
+rolling_resistance = 0.012
 
 # HVY Forklift -- inspired by the Toyota Core IC forklift -- a dual-fork warehouse lifter.
 # 4200 kg on 0.20 m of travel: 30 % static by construction (k = m g / 4 / (travel x 0.30)).
@@ -3379,9 +3390,12 @@ shift_up_rpm = 2630.0
 shift_down_rpm = 1010.0
 final_drive = 16.026
 max_speed_mps = 5.28
-max_engine_force_n = 70510.0
+max_engine_force_n = 11750.0
 brake_force_n = 24720.0
 handbrake_force_n = 11120.0
+gear_count = 1.0
+gear_1_ratio = 1.0
+reverse_ratio = 1.0
 cylinders = 4.0
 
 # Vapid Bucket Truck -- inspired by the International Durastar bucket truck -- a hydraulic boom lift.
@@ -3911,8 +3925,8 @@ brake_force_n = 97320.0
 handbrake_force_n = 43790.0
 cylinders = 6.0
 
-# Vapid Rental Shuttle -- inspired by the Ford E-450 shuttle -- an airport and hotel passenger bus.
-# 6000 kg on 0.20 m of travel: 36 % static by construction (k = m g / 4 / (travel x 0.36)).
+# Vapid Rental Shuttle -- inspired by the Ford E-450 shuttle -- an airport and hotel passenger bus, laden.
+# 7200 kg on 0.20 m of travel: 36 % static by construction (k = m g / 4 / (travel x 0.36)).
 [vapid_rental_shuttle]
 label = "Vapid Rental Shuttle"
 
@@ -3921,24 +3935,24 @@ class = "bus"
 half_width_m = 1.2
 half_height_m = 1.37
 half_length_m = 3.75
-mass_kg = 6000.0
+mass_kg = 7200.0
 drag_coefficient = 0.6
 wheel_radius_m = 0.42
 half_track_m = 1.032
 half_wheelbase_m = 2.1
 wheel_drop_m = -1.21
-stiffness_n_per_m = 204380.0
-damping_ns_per_m = 19260.0
-peak_torque_nm = 925.0
-peak_torque_rpm = 2800.0
-redline_rpm = 4500.0
-shift_up_rpm = 4230.0
-shift_down_rpm = 1620.0
-final_drive = 8.783
+stiffness_n_per_m = 245250.0
+damping_ns_per_m = 23110.0
+peak_torque_nm = 780.0
+peak_torque_rpm = 2600.0
+redline_rpm = 4200.0
+shift_up_rpm = 3950.0
+shift_down_rpm = 1510.0
+final_drive = 8.198
 max_speed_mps = 33.33
-max_engine_force_n = 67710.0
-brake_force_n = 36490.0
-handbrake_force_n = 16420.0
+max_engine_force_n = 53290.0
+brake_force_n = 43790.0
+handbrake_force_n = 19710.0
 cylinders = 8.0
 engine_voice_kind = 1.0
 

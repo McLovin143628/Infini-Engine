@@ -349,7 +349,16 @@ torque_curve_bias = 0.4
 engine_brake_nm = 55.0
 final_drive = 3.95
 gear_count = 7.0
-gear_1_ratio = 4.4
+# **A LONGER FIRST GEAR** (wave VEH3f -- the sports row back under its band BY
+# GEARING). VEH3b's springs put this row at 45 % of its travel standing, which
+# is right, and its 0-100 went from 3.98 s to 4.32 s against a class band of
+# under four: a 4.4 first gear put 460 N.m through a 3.95 final drive onto a
+# rear axle that could not take it, and the launch spent a second spinning the
+# tyres past their peak slip. 3.8 keeps the rears in their traction window off
+# the line -- measured on the shipped host: 0-100 in 3.70 s, the spring and the
+# 45 % untouched. (An LSD alone moved it by nothing; a front split of 0.2 made
+# it a 3.1 s all-wheel-drive car, which it is not.)
+gear_1_ratio = 3.8
 gear_2_ratio = 2.9
 gear_3_ratio = 1.9
 gear_4_ratio = 1.45

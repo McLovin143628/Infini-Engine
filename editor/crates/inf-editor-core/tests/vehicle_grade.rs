@@ -558,12 +558,18 @@ const SPECS: [Spec; 5] = [
     Spec {
         id: "sports",
         sprint_to_mps: 27.78,
-        // **4.28 s and 29.0 m, +/- 5 %** (`audit:` VEH3b -- THE SPRINGS; wave
-        // VEH3b measured 3.75 s / 30.0 m on the old rate and VEH2a 3.98 / 31.1).
-        sprint_max_s: 4.49,
-        sprint_min_s: 4.07,
-        brake_max_m: 30.5,
-        brake_min_m: 27.5,
+        // **3.70 s and 28.8 m, +/- 5 %** -- RE-BLESSED ONCE, WITH ITS CAUSE
+        // (wave VEH3f): the row's FIRST GEAR went from 4.4 to 3.8, which is the
+        // roster wave's order to bring the sports car back under its class's
+        // four seconds by gearing and never by softening the spring below the
+        // 45 % VEH3b set (it is still 45.0 %). The stop moved 0.2 m with it,
+        // which is the car arriving at 100 km/h a gear-change later. The
+        // history: VEH3b's audit measured 4.28 s / 29.0 m on these springs,
+        // wave VEH3b 3.75 / 30.0 on the old rate, VEH2a 3.98 / 31.1.
+        sprint_max_s: 3.89,
+        sprint_min_s: 3.52,
+        brake_max_m: 30.2,
+        brake_min_m: 27.4,
         top_frac: (0.88, 1.02),
     },
     Spec {
