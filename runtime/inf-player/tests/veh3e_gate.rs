@@ -1940,7 +1940,11 @@ fn the_course_render_does_not_clip() {
         }
         let _ = std::fs::write(dir.join("course.csv"), csv);
     }
-    let clipped = |x: &[i16]| x.iter().filter(|v| **v >= 32_767 || **v <= -32_767).count();
+    let clipped = |x: &[i16]| {
+        x.iter()
+            .filter(|v| **v == i16::MAX || **v <= -32_767)
+            .count()
+    };
     let peak =
         |x: &[i16]| x.iter().map(|v| i32::from(*v).abs()).max().unwrap_or(0) as f64 / 32_767.0;
     let rms = |x: &[i16]| {
@@ -1992,7 +1996,7 @@ fn a_traffic_car_sings_the_near_stack_on_its_own_cadence() {
     pop.records.insert(
         TRAFFIC,
         inf_ecs::traffic::TrafficRecord::parked(
-            def.clone(),
+            def,
             inf_ecs::math::Color::new(0.5, 0.5, 0.5, 1.0),
             DVec3::new(6.0, 1.0, 0.0),
             0.0,
