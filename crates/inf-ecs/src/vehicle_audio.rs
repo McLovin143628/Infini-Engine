@@ -34,8 +34,8 @@
 //! is `Full` (a real rig inside `TRAFFIC_FULL_M` with an AI driver: the cars
 //! near the hero) and sings the NEAR stack: ONE grain (the half-load one,
 //! pitched by its revs and voiced by its level), ONE squeal (its worse
-//! axle's slip) and its rolling road, each loop re-told at most every [`NEAR_EVERY`] steps on a
-//! phase spread by its key. A crossing's traffic is heard from the kerb; a
+//! axle's slip) and its rolling road, each loop re-told at most every
+//! [`NEAR_EVERY`] steps on a phase spread by its key. A crossing's traffic is heard from the kerb; a
 //! queue of it does not flood the log.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -331,8 +331,9 @@ impl VoiceLayer {
 }
 
 /// **The salts a car's source keys are spread over** — `crate::weapon::
-/// LAYER_SALTS`' construction and its reason: ten voices need ten keys, none of
-/// which may be the chassis's own emitter key.
+/// LAYER_SALTS`' construction and its reason: eleven voices need eleven keys
+/// (the rolling road's the eleventh, VEH3e audit), none of which may be the
+/// chassis's own emitter key.
 pub const VOICE_SALTS: [u64; 11] = [
     0x5645_4833_0000_0001,
     0x5645_4833_0000_0002,
