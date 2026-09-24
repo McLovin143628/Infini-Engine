@@ -721,7 +721,8 @@ fn three_sirens_do_not_evict_the_audio_log() {
     let (run, sim) = player_run(true);
     let dropped = sim.dropped_audio_commands();
     let log = sim.audio_command_log().len();
-    let capacity = inf_core::DEFAULT_LOG_CAPACITY;
+    // The ring the shipped host holds (65 536 since VEH3e), not the default.
+    let capacity = inf_audio::AUDIO_LOG_CAPACITY;
     let mut positions = 0usize;
     let mut plays = 0usize;
     let mut stops = 0usize;
