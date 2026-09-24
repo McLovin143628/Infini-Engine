@@ -2111,6 +2111,141 @@ impl BoardHold {
     }
 }
 
+/// **The demo loop's HOLD on an AUDIO beat** (VEH3e audit), `INF_PIE_AUDIO_HOLD`
+/// = `seconds`: a PREVIEW session freezes its fixed steps for `seconds` of wall
+/// time the first time, per boarding, the camera subject's car reaches each of
+/// three beats a frame of the car's voice has to show:
+///
+/// * `burnout` — a squeal (read back off the AUDIO ENGINE's voice) louder than
+///   0.2 below [`BURNOUT_BEAT_MPS`];
+/// * `thump` — a surface impulse the stream PLAYED on the car's keys since the
+///   last display frame, faster than 3 m/s;
+/// * `slide` — a squeal louder than 0.3 above [`SLIDE_BEAT_MPS`].
+///
+/// It exists because the implementer's burnout frame was taken ~1 s after the
+/// row that triggered it, with the HUD's squeal already back at zero — a frame
+/// of a claim that could not be seen — and a kerb's thump is ONE step. The
+/// steps are the same steps: a hold runs no step and changes none (the mixer
+/// keeps playing the loops it was told), so nothing the simulation or the
+/// command stream does depends on it. [`BOARD_HOLD_ENV`]'s own door, one
+/// instrument over; its five beats are pinned by VEH3d's gate and these three
+/// are not theirs.
+pub const AUDIO_HOLD_ENV: &str = "INF_PIE_AUDIO_HOLD";
+
+/// The beat names [`AUDIO_HOLD_ENV`] fires on, in bit order.
+pub const AUDIO_HOLD_BEATS: [&str; 3] = ["burnout", "thump", "slide"];
+
+/// The `burnout` beat's ceiling, m/s: a tyre screaming while the car barely
+/// moves.
+pub const BURNOUT_BEAT_MPS: f64 = 5.0;
+
+/// The `slide` beat's floor, m/s.
+pub const SLIDE_BEAT_MPS: f64 = 8.0;
+
+/// See [`AUDIO_HOLD_ENV`].
+#[derive(Debug, Default, Clone)]
+pub struct AudioHold {
+    hold_s: f64,
+    left_s: f64,
+    fired: u8,
+    audio_seen: u64,
+}
+
+impl AudioHold {
+    /// Read [`AUDIO_HOLD_ENV`]; inert when absent or unreadable.
+    pub fn from_env() -> Self {
+        let hold_s = std::env::var(AUDIO_HOLD_ENV)
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|s| s.is_finite() && *s > 0.0)
+            .unwrap_or(0.0)
+            .min(30.0);
+        Self::new(hold_s)
+    }
+
+    /// A hold of `hold_s` seconds — what [`Self::from_env`] builds, for a gate.
+    pub fn new(hold_s: f64) -> Self {
+        Self {
+            hold_s,
+            ..Default::default()
+        }
+    }
+
+    /// Whether this frame's fixed steps are held.
+    pub fn holding(&self) -> bool {
+        self.left_s > 0.0
+    }
+
+    /// One display frame: count a running hold down, or start one on a beat not
+    /// yet held this boarding. Answers a log line when a hold starts.
+    pub fn tick(&mut self, sim: &RuntimeSim, dt: f64) -> Option<String> {
+        use inf_ecs::vehicle_audio::{entity_key, voice_key, VoiceLayer};
+        if self.hold_s <= 0.0 {
+            return None;
+        }
+        // What the stream queued since the last display frame -- a frame can
+        // run several fixed steps, and a kerb's Play is on one of them.
+        let queued = sim.audio_commands_queued();
+        let fresh = queued.saturating_sub(self.audio_seen) as usize;
+        self.audio_seen = queued;
+        if self.left_s > 0.0 {
+            self.left_s = (self.left_s - dt.max(0.0)).max(0.0);
+            return None;
+        }
+        let world = sim.world();
+        let hero = inf_ecs::movement::camera_subject(world)?;
+        let seat = world
+            .world()
+            .get::<inf_ecs::components::CharacterMovement>(world.entity_of(hero)?)?
+            .runtime
+            .seat;
+        if !seat.is_seated() {
+            self.fired = 0;
+            return None;
+        }
+        let car = seat.vehicle;
+        let speed = sim
+            .vehicles()
+            .iter()
+            .find(|o| o.chassis == car)
+            .and_then(|o| o.voice)
+            .map(|t| t.speed_mps.abs())?;
+        let key = entity_key(car);
+        let squeal = [VoiceLayer::SquealFront, VoiceLayer::SquealRear]
+            .iter()
+            .filter_map(|l| sim.voice_params(voice_key(key, *l)))
+            .fold(0.0f64, |m, (v, _)| m.max(v));
+        let impulses = [
+            voice_key(key, VoiceLayer::ImpulseFront),
+            voice_key(key, VoiceLayer::ImpulseRear),
+        ];
+        let log = sim.audio_command_log();
+        let thump = log[log.len().saturating_sub(fresh)..]
+            .iter()
+            .any(|c| matches!(c, inf_audio::AudioCommand::Play(p) if impulses.contains(&p.source)));
+        let bit = if squeal > 0.2 && speed < BURNOUT_BEAT_MPS {
+            0u8
+        } else if thump && speed > 3.0 {
+            1
+        } else if squeal > 0.3 && speed > SLIDE_BEAT_MPS {
+            2
+        } else {
+            return None;
+        };
+        if self.fired & (1 << bit) != 0 {
+            return None;
+        }
+        self.fired |= 1 << bit;
+        self.left_s = self.hold_s;
+        Some(format!(
+            "{AUDIO_HOLD_ENV} held `{}` for {:.1}s at step {} (squeal {squeal:.3} at {speed:.2} m/s, thump {thump})",
+            AUDIO_HOLD_BEATS[bit as usize],
+            self.hold_s,
+            sim.steps()
+        ))
+    }
+}
+
 /// **The demo loop's see-through car** (VEH3d audit), `INF_PIE_CUTAWAY` = an
 /// alpha in `(0, 1)`: in a PREVIEW session, every drawn part of the car the
 /// camera subject is SEATED in (or climbing into) is drawn TRANSLUCENT at that

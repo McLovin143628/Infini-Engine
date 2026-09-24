@@ -34,6 +34,7 @@
 //! | `the_course_render_does_not_clip` (audit) | the WAV BYTES of the shipped course rendered through the render-to-file door, with the master track and without it | the limiter taken off the master track | the control's peak within 1 dB of full scale | n/a -- a property of the mix, not the stream |
 //! | `a_traffic_car_sings_the_near_stack_on_its_own_cadence` (audit) | the planner's cues for a traffic car beside an authored one: which keys Play, how often a loop is re-told, the grain pitch sent | `NEAR_EVERY` 1; the traffic test answering false | two Plays, >10 pitches | **fails** -- traffic was voiceless |
 //! | `the_road_rolls_by_speed_on_its_surface` (audit) | the roll key's folded volume/pitch each step against `roll_voice(speed)`; its re-`Play` clip on gravel | `roll_voice` reading the throttle; the roll clip pinned to sealed | loud >15 m/s, silent stopped, a gravel re-Play | **fails** -- no roll key |
+//! | `the_audio_hold_freezes_each_beat_once` (audit) | the demo's `AudioHold` ticked between the shipped course's steps; the stream with holds against the stream without | the thump beat's speed floor flipped | three beats held | n/a -- an instrument |
 //! | `a_bail_out_lands_with_a_thud` | the thud key on a moving exit | the thud branch deleted | one bail | **fails** |
 //! | `pie_equals_shipping_on_the_audio_course` | both hosts' per-step command slices | the planner called with `dt * 2.0` in one host | every kind of cue seen | passes — it compares, it does not judge |
 //! | `the_audio_log_holds_the_drive_and_the_count_is_stated` | `dropped_audio_commands`, the per-step counts | `AUDIO_LOG_CAPACITY` cut to 4096 | the whole course | passes (3 a step) |
@@ -1843,6 +1844,19 @@ fn wav_samples(bytes: &[u8]) -> Vec<i16> {
         .collect()
 }
 
+/// The 31 COMMITTED clips, decoded from their `.inf_audio` payloads -- what a
+/// cooked pack resolves them to.
+fn committed_clips() -> BTreeMap<Uuid, inf_audio::AudioAsset> {
+    let dir = inf_editor_core::samples::vehicle_audio_dir();
+    let mut clips = BTreeMap::new();
+    for (i, name) in va::VEHICLE_CLIP_NAMES.iter().enumerate() {
+        let bytes = std::fs::read(dir.join(format!("Vehicle_{name}.inf_audio"))).expect("a clip");
+        let asset: inf_audio::AudioAsset = inf_asset::decode(&bytes).expect("an audio payload");
+        clips.insert(va::vehicle_clip(i as u8), asset);
+    }
+    clips
+}
+
 /// The shipped course rendered through the render-to-file door into `path`:
 /// `limited` is the shipped master track, `!limited` the measurement control.
 fn render_course(path: &Path, limited: bool) -> Vec<i16> {
@@ -1862,16 +1876,7 @@ fn render_course(path: &Path, limited: bool) -> Vec<i16> {
         glam::DVec2::new(0.0, -9.81),
         HZ,
     );
-    // The 31 COMMITTED clips, decoded from their `.inf_audio` payloads --
-    // what a cooked pack resolves them to.
-    let dir = inf_editor_core::samples::vehicle_audio_dir();
-    let mut clips = BTreeMap::new();
-    for (i, name) in va::VEHICLE_CLIP_NAMES.iter().enumerate() {
-        let bytes = std::fs::read(dir.join(format!("Vehicle_{name}.inf_audio"))).expect("a clip");
-        let asset: inf_audio::AudioAsset = inf_asset::decode(&bytes).expect("an audio payload");
-        clips.insert(va::vehicle_clip(i as u8), asset);
-    }
-    sim.set_audio_clips(clips);
+    sim.set_audio_clips(committed_clips());
     if limited {
         sim.capture_audio_to(path, 48_000).expect("a capture");
     } else {
@@ -2095,6 +2100,82 @@ fn a_traffic_car_sings_the_near_stack_on_its_own_cadence() {
         started, left,
         "getting out did not drop back to the NEAR stack"
     );
+}
+
+/// **THE AUDIO HOLD FREEZES EACH BEAT ONCE** (VEH3e audit, (e')) — the demo
+/// loop's `INF_PIE_AUDIO_HOLD` instrument, driven here the way `window.rs`
+/// drives it (one tick a display frame, no step while it holds) over the
+/// shipped course: the burnout at the line, the kerb's thump, the handbrake
+/// slide — each held exactly once, and the held steps are the SAME steps (the
+/// command stream with the holds equals the stream without them).
+///
+/// **Mutation → red**: the thump read off the last step's slice only (a frame
+/// that ran two steps misses the kerb) -- here one step a frame, so the red
+/// mutation is the beat's `speed > 3.0` flipped.
+#[test]
+fn the_audio_hold_freezes_each_beat_once() {
+    use inf_player::pie_drive::{AudioHold, AUDIO_HOLD_BEATS};
+    let plain = shipped_course();
+    let mut sim = inf_player::runtime_sim::RuntimeSim::new(
+        shipped_world(&course_def()),
+        Vec::new(),
+        glam::DVec2::new(0.0, -9.81),
+        HZ,
+    );
+    // The clips, so the engine holds the voices the beats read back.
+    sim.set_audio_clips(committed_clips());
+    let mut host = Shipped(sim);
+    let mut hold = AudioHold::new(0.1);
+    let mut notes: Vec<String> = Vec::new();
+    let mut wheel: Option<u32> = None;
+    let mut step = 0u32;
+    let mut frames = 0u32;
+    let mut held = 0u32;
+    let mut cmds: Vec<AudioCommand> = Vec::new();
+    while step < BOARD_MAX + DRIVE_STEPS {
+        frames += 1;
+        assert!(
+            frames < 20 * (BOARD_MAX + DRIVE_STEPS),
+            "the hold never let go"
+        );
+        if let Some(n) = hold.tick(&host.0, DT) {
+            notes.push(n);
+        }
+        if hold.holding() {
+            held += 1;
+            continue;
+        }
+        let k = wheel.map(|w| step - w);
+        if k.is_some_and(|k| k >= DRIVE_STEPS) {
+            break;
+        }
+        let i = match k {
+            None if step == BOARD_PRESS => Intent::press(),
+            None => Intent::default(),
+            Some(k) => course(k),
+        };
+        let before = host.log().len();
+        host.step(i);
+        cmds.extend_from_slice(&host.log()[before..]);
+        let (phase, _, _, seated, _) = board_of(host.world());
+        if wheel.is_none() && at_wheel(phase, seated) {
+            wheel = Some(step + 1);
+        }
+        step += 1;
+    }
+    for n in &notes {
+        println!("  {n}");
+    }
+    println!("{held} display frames held");
+    for beat in AUDIO_HOLD_BEATS {
+        let n = notes
+            .iter()
+            .filter(|s| s.contains(&format!("held `{beat}`")))
+            .count();
+        assert_eq!(n, 1, "the `{beat}` beat was held {n} times");
+    }
+    let plain: Vec<AudioCommand> = plain.iter().flat_map(|s| s.cmds.clone()).collect();
+    assert_eq!(cmds, plain, "the holds changed the command stream");
 }
 
 // ── 10. BOTH HOSTS ──────────────────────────────────────────────────────────

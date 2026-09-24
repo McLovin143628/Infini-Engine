@@ -204,6 +204,10 @@ pub struct PlayerApp {
     /// unless `INF_PIE_BOARD_HOLD` is set, consulted only in a PREVIEW session.
     /// See [`crate::pie_drive::BoardHold`].
     board_hold: crate::pie_drive::BoardHold,
+    /// **The demo loop's hold on an audio beat** (VEH3e audit) — inert unless
+    /// `INF_PIE_AUDIO_HOLD` is set, consulted only in a PREVIEW session. See
+    /// [`crate::pie_drive::AudioHold`].
+    audio_hold: crate::pie_drive::AudioHold,
     /// **The demo loop's see-through car** (VEH3d audit) — inert unless
     /// `INF_PIE_CUTAWAY` is set, consulted only in a PREVIEW session. See
     /// [`crate::pie_drive::Cutaway`].
@@ -344,6 +348,7 @@ impl PlayerApp {
             hero_log: crate::pie_drive::HeroLog::from_env(),
             spawn_override: crate::pie_drive::SpawnOverride::from_env(),
             board_hold: crate::pie_drive::BoardHold::from_env(),
+            audio_hold: crate::pie_drive::AudioHold::from_env(),
             cutaway: crate::pie_drive::Cutaway::from_env(),
             time_scale: crate::pie_drive::time_scale_from_env(),
             vmeshes,
@@ -1238,6 +1243,9 @@ impl PlayerApp {
             if let Some(said) = self.board_hold.tick(&self.sim, dt) {
                 self.hero_log.note(&said);
             }
+            if let Some(said) = self.audio_hold.tick(&self.sim, dt) {
+                self.hero_log.note(&said);
+            }
             if let Some(said) = self.cutaway.tick(&mut self.sim) {
                 self.hero_log.note(&said);
             }
@@ -1246,7 +1254,8 @@ impl PlayerApp {
         let held = input::held_actions(&self.input_state, dt);
         // PIE pause freezes the sim but keeps rendering the last frame; so does
         // a preview's hold on a boarding beat (`INF_PIE_BOARD_HOLD`).
-        if !self.paused && !(self.pie.is_some() && self.board_hold.holding()) {
+        let audio_held = self.pie.is_some() && self.audio_hold.holding();
+        if !self.paused && !(self.pie.is_some() && self.board_hold.holding()) && !audio_held {
             let sim_dt = if self.pie.is_some() {
                 dt * self.time_scale
             } else {
