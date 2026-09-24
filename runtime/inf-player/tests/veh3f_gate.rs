@@ -405,3 +405,107 @@ fn zz_sports_variants() {
         );
     }
 }
+
+const TRAILER: Uuid = Uuid::from_u128(0x5E3F_0003);
+
+/// A shipped host with a tractor and, optionally, its trailer hitched.
+fn rig_sim(tractor: &VehicleDef, trailer: Option<&VehicleDef>) -> RuntimeSim {
+    let mut world = EcsWorld::new();
+    slab(
+        &mut world,
+        GROUND,
+        DVec3::new(0.0, -0.5, 0.0),
+        DVec3::new(HALF, 0.5, HALF),
+        0.9,
+    );
+    let at = DVec3::new(
+        0.0,
+        inf_ecs::vehicle::resting_origin_y(tractor, 0.0),
+        -HALF + 200.0,
+    );
+    spawn(&mut world, CAR, tractor, at, 0.0);
+    if let Some(t) = trailer {
+        let tat = inf_ecs::vehicle::hitched_trailer_at(at, 0.0, tractor, t).expect("a fifth wheel");
+        spawn(&mut world, TRAILER, t, tat, 0.0);
+        assert!(inf_ecs::vehicle::hitch(
+            &mut world, CAR, tractor, TRAILER, t
+        ));
+    }
+    world.propagate();
+    RuntimeSim::new(world, Vec::new(), glam::DVec2::new(0.0, -9.81), HZ)
+}
+
+fn yaw_of(sim: &RuntimeSim, guid: Uuid) -> f64 {
+    let b = sim.bridge3d();
+    let q = b
+        .body_of(guid)
+        .and_then(|body| b.world().body_rotation(body))
+        .unwrap_or(glam::DQuat::IDENTITY);
+    let f = q * DVec3::Z;
+    inf_math::patan2_64(f.x, f.z)
+}
+
+#[test]
+#[ignore]
+fn zz_trailer_debug() {
+    let tractor = *roster::roster().get("mtl_packer").unwrap();
+    let trailer = *roster::roster().get("jobuilt_box_trailer").unwrap();
+    let mut sim = rig_sim(&tractor, Some(&trailer));
+    for i in 0..1500 {
+        let t = i as f64 * DT;
+        let steer = if t > 6.0 {
+            0.35 * inf_math::psin64(t * 0.9)
+        } else {
+            0.0
+        };
+        let throttle = if velocity(&sim, CAR).length() < 11.0 {
+            0.7
+        } else {
+            0.0
+        };
+        drive(
+            &mut sim,
+            CAR,
+            VehicleControls {
+                throttle,
+                steer,
+                ..Default::default()
+            },
+        );
+        if i % 60 == 0 {
+            let a = yaw_of(&sim, CAR);
+            let b = yaw_of(&sim, TRAILER);
+            let pt = position(&sim, CAR);
+            let pl = position(&sim, TRAILER);
+            println!("t {t:.1} v {:.1} tractor yaw {:.1} trailer yaw {:.1} hitch {:.1} deg ty {:.2} ly {:.2} gap {:.2}", velocity(&sim, CAR).length(), a.to_degrees(), b.to_degrees(), (a-b).to_degrees(), pt.y, pl.y, (pt-pl).length());
+        }
+    }
+}
+
+#[test]
+#[ignore]
+fn zz_track_debug() {
+    for id in ["hvy_dozer", "hvy_cutter", "hvy_scarab"] {
+        let def = *roster::roster().get(id).unwrap();
+        for (thr, st) in [(0.0, 1.0), (0.6, 0.5), (0.6, 0.0)] {
+            let mut sim = flat_sim(&def);
+            for _ in 0..120 {
+                drive(&mut sim, CAR, VehicleControls::default());
+            }
+            let y0 = yaw_of(&sim, CAR);
+            for _ in 0..300 {
+                drive(
+                    &mut sim,
+                    CAR,
+                    VehicleControls {
+                        throttle: thr,
+                        steer: st,
+                        ..Default::default()
+                    },
+                );
+            }
+            let w = sim.bridge3d().vehicle_of(CAR).unwrap().wheels().to_vec();
+            println!("{id} thr {thr} steer {st}: yaw rate {:.3} rad/s, turned {:.1} deg in 5 s, v {:.2}, omegas {:.1} {:.1} {:.1} {:.1}", yaw_rate(&sim, CAR), (yaw_of(&sim, CAR)-y0).to_degrees(), velocity(&sim, CAR).length(), w[0].omega_rad_s, w[1].omega_rad_s, w[2].omega_rad_s, w[3].omega_rad_s);
+        }
+    }
+}

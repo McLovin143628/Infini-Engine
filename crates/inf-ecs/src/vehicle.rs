@@ -4211,6 +4211,16 @@ pub const AWD_FRONT_SPLIT: f64 = 0.4;
 /// measured by `veh3f_gate::the_tracked_rig_turns_by_skid`, not asserted here.
 pub const SKID_STEER_FORCE_FRAC: f64 = 0.5;
 
+/// **The share of its lateral grip a track keeps at full skid** (wave VEH3f) --
+/// the turning-resistance coefficient of a tracked machine over the grip it
+/// drives with. A fifth, MEASURED into place on the shipped host: at 0.35 a
+/// 38-tonne dozer pivoted 30 degrees in five seconds, at 0.2 it pivots at 25
+/// degrees a second, which is a D8's own pivot rate. (The published ratio for
+/// steel tracks on firm ground is 0.3-0.6; the four wheels this rig stands on
+/// hold their line harder than two continuous tracks do, and this is the
+/// difference.)
+pub const SKID_LATERAL_KEEP: f64 = 0.2;
+
 /// A tyre's width as a fraction of its own radius.
 ///
 /// One number for the whole engine rather than a per-class knob, on
@@ -5463,6 +5473,9 @@ pub struct RaycastVehicle {
     /// **Which tyres are flat**, a bitmask by [`VehicleRig::wheels`] index
     /// (wave VEH3c).
     flats: u8,
+    /// **This step's lateral relief** (wave VEH3f): `1` unless the class skid
+    /// steers and the driver is steering -- see [`SKID_LATERAL_KEEP`].
+    skid_relief: f64,
 }
 
 impl RaycastVehicle {
@@ -5493,6 +5506,7 @@ impl RaycastVehicle {
             // that is never damaged behaves exactly as it did before wave VEH3c.
             engine_scale: 1.0,
             flats: 0,
+            skid_relief: 1.0,
             tuning,
         }
     }
@@ -7592,6 +7606,12 @@ pub struct TyreContext {
     /// **Whether this tyre is flat** (wave VEH3c) — `WheelState::flat`, carried
     /// into the one place a grip multiplier is decided.
     pub flat: bool,
+    /// **The share of its LATERAL grip this tyre keeps**, `(0, 1]` (wave VEH3f)
+    /// -- `1` for every wheel but a skid-steering track's. A track turns by
+    /// shearing its footprint sideways, and the turning resistance a track
+    /// meets is well under the grip it drives with; without this the lateral
+    /// stick held a pivoting dozer to nine degrees in five seconds.
+    pub lateral_relief: f64,
 }
 
 impl TyreContext {
@@ -7654,6 +7674,7 @@ impl TyreContext {
         heat_grip: 1.0,
         camber_deg: 0.0,
         flat: false,
+        lateral_relief: 1.0,
     };
 }
 
@@ -7796,7 +7817,7 @@ pub fn tyre_force_with(
         tuning.tyre_load_sensitivity,
     );
     let mu_y = load_sensitive_mu(
-        tuning.lateral_grip * world,
+        tuning.lateral_grip * world * ctx.lateral_relief.clamp(0.0, 1.0),
         load_n,
         static_load_n,
         tuning.tyre_load_sensitivity,
@@ -8519,6 +8540,7 @@ impl Vehicle for RaycastVehicle {
         // scaled with it would leave a dozer unable to turn on the spot. The
         // ceiling pass below bounds the sum exactly as it bounds a straight
         // pull, and traction control caps each side like any wheel.
+        self.skid_relief = 1.0;
         if !(self.tuning.max_steer_deg > 0.0) {
             let steer = if self.controls.steer.is_finite() {
                 self.controls.steer.clamp(-1.0, 1.0)
@@ -8526,6 +8548,7 @@ impl Vehicle for RaycastVehicle {
                 0.0
             };
             if steer != 0.0 && wheels > 0 {
+                self.skid_relief = 1.0 - (1.0 - SKID_LATERAL_KEEP) * steer.abs();
                 let per_wheel_n = SKID_STEER_FORCE_FRAC
                     * self.tuning.max_engine_force_n.max(0.0)
                     * self.engine_scale.clamp(0.0, 1.0)
@@ -8968,6 +8991,7 @@ impl Vehicle for RaycastVehicle {
                     None => self.tuning.camber_deg,
                 },
                 flat: state.flat,
+                lateral_relief: self.skid_relief,
             };
             let world = ctx.grip_scale();
             // Heat softens the STIFFNESS as well as the peak — the doc's *shifts
@@ -8984,7 +9008,7 @@ impl Vehicle for RaycastVehicle {
                 self.tuning.tyre_load_sensitivity,
             );
             let mu_y = load_sensitive_mu(
-                self.tuning.lateral_grip * world,
+                self.tuning.lateral_grip * world * ctx.lateral_relief.clamp(0.0, 1.0),
                 load,
                 static_load,
                 self.tuning.tyre_load_sensitivity,
