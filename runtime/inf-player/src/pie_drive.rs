@@ -2371,10 +2371,13 @@ impl Lineup {
             let t = *world
                 .world()
                 .get::<inf_ecs::components::Transform>(world.entity_of(hero)?)?;
-            let h = t.rotation.y.to_radians();
+            // Where the CAMERA looks (a standing hero's body yaw need not be
+            // the view's -- the first session put the line behind the lens).
+            let view = sim.camera().pose.yaw_deg;
+            let h = view.to_radians();
             let fwd = glam::DVec3::new(inf_math::psin64(h), 0.0, inf_math::pcos64(h));
             at = t.translation.to_dvec3() + fwd * m;
-            yaw = t.rotation.y + 180.0;
+            yaw = view + 180.0;
         }
         let r = yaw.to_radians();
         // The line runs across the heading: +X of a car facing `yaw`.

@@ -1273,6 +1273,9 @@ function Invoke-Veh3fLeg {
     $rows = @(Get-Content $heroCsv -ErrorAction Ignore | Where-Object { $_ -match "^[0-9]" } |
         Where-Object { ($_ -split ",").Count -gt 76 })
     $classes = @($rows | ForEach-Object { ($_ -split ",")[72] } | Where-Object { $_ -ne "-" } | Select-Object -Unique)
+    # ...and a short walk, so the session's own "Play played" floor is met by a
+    # hero that moved rather than by one that stood photographing.
+    [InfInput]::Down(0x11); Start-Sleep -Milliseconds 2500; [InfInput]::Up(0x11)   # W
     Say ("VEH3f COLUMNS: roster classes the hero sat in: " + $(if ($classes.Count -gt 0) { $classes -join " " } else { "none (the hero walked)" }))
 }
 

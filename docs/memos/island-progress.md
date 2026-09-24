@@ -40877,3 +40877,86 @@ grains are peak-normalised, so a redline pull is only +1.9 dB over idle in
 grain RMS (a tuning pass); traffic beyond `TRAFFIC_FULL_M` is a drawn body with
 no telemetry and stays silent; the island kerb and slide frames (the placement door cannot see a street's ground or what stands on it — the shipped course fires all three held beats). See the report.
 Report: `campaign-briefs/veh3e-audit-report.md`.
+
+## WAVE VEH3f — THE VEHICLE ROSTER (2026-09-24)
+
+Range `913b02f0..` (implementer; nothing pushed). Report:
+`campaign-briefs/veh3f-implementer-report.md`. Scene v28, payload 13, 100
+tunables, `EXPECTED_LEVELS` 24 -- no schema move; `Cargo.lock` unchanged.
+
+### what landed
+
+* **The roster**: `crates/inf-ecs/src/roster.toml` -- the research doc's 153
+  lore rows at its counts (coupe 20, sedan 20, SUV 20, truck 20, jeep 5,
+  hummer 5, emergency 5, military 5, construction 5, utility 5, freight 5,
+  cargo 5, bus 5, service 5, van 5, airplane 5, helicopter 5, marine 8) plus
+  two trailers; ids are the lore names, the real-world inspiration a comment.
+  `roster_classes.toml` is the doc's handling-profile table as class defaults a
+  row overrides (defaults -> class -> row spellings -> row numbers -> derived
+  `mass_kg` / `drag_coefficient`). Every wheeled row is sprung for its static
+  fraction (measured 0.310 .. 0.440 of travel over 135 rows) and voiced.
+  `vehicle.define` / `vehicle.spawn` (both hosts, `item.define`'s shape) load
+  and spawn rows at runtime; no asset kind; `MAX_VEHICLE_DEFS` 256.
+* **Sixteen new silhouettes** (`vehicle_families.rs`): coupe, hatch, wagon,
+  crew-cab pickup, jeep, hummer, bus, semi tractor, trailer, flatbed, tanker,
+  APC, dozer (tracked), forklift, tow truck, aircraft (dormant). Every one has VEH3c parts
+  and draws its SEATS; a drawn seat gives the driver's seat its plan position
+  (a bus driver sits over his front axle, by his folding door), the heights
+  stay the hull's fractions (measured: moving the heights alone left a
+  crew-cab driver 0.21 m under his cushion -- reverted). Pedal and hub reach
+  are capped in metres (0.80 / 0.60 m).
+* **The feel**, measured on the shipped host (0-100 or 80 % of a lower
+  limiter, the stop, the peak ramp-steer lateral g): every class inside its
+  band; the sports row 3.70 s by gearing (first gear 4.4 -> 3.8, spring kept
+  at 0.448 of travel); every bus 18.5-29.6 s.
+* **The articulated rig**: a spherical `Joint3D` at the kingpin, contacts off
+  between two chassis (derived in the bridge), the coupling height derived
+  from BOTH rows (a tractor that took the construction pack's art put its
+  saddle 0.25 m under the kingpin, and the rig climbed 3 m off the slab).
+  Slalom: peak hitch 9.8 deg, the trailer's heading 0.93 s behind, kingpin gap
+  0.000 m. Towing costs the tractor 3.65 s to 60 km/h.
+* **Skid steer**: a rackless class turns on a left/right torque split bounded
+  by the ground's grip, with the tread's lateral grip relieved (0.2 kept):
+  the dozer pivots at 0.670 rad/s.
+* **Bodies**: DCC-lofted hero panels (sedan, coupe, SUV, pickup, cruiser --
+  18 panels, 16 661 B each, `samples/vehicle-bodies/`, ours) on
+  `RigNode.mesh.asset`; the construction pack through the UE bridge,
+  LOCAL-ONLY (`inf-import --vehicles`: manifest slot names, connected pieces,
+  tyres that stand on the ground, a wheel is its tyre and everything inside
+  it; per-body TOML; `island-refresh.ps1 -SyncVehicles`); a committed
+  FALLBACK at the same GUIDs (`samples/vehicle-art/`, 431 KB, ours).
+* **The island**: traffic draws the roster by class weight through ONE door
+  (`catalogue_row_id`; the gate's mutation run found two); the parked lattice
+  steps around the authored fleet and itself; Eastgate's construction lot and
+  Harbour City's two tractor-trailers.
+* **A wheel ray excludes its own car's hinged parts**: a Caracara 6x6's front
+  wheel stood on its own open door and the truck climbed 0.92 m onto it.
+* `AUDIO_LOG_CAPACITY` 65 536 -> 131 072 (the roster's traffic sings 59 696
+  commands on EMS2's fixture, 35 419 at VEH3e).
+* Goldens 64 -> 66 (`hero_sedan`, `hero_pickup`; ADDED, nothing re-blessed).
+
+### re-blessed, with cause
+
+The class feel bands once (the per-row centre of gravity moved the heavy
+classes' stop and lateral g); `vehicle_grade`'s sports spec (3.70 s / 28.8 m);
+veh3e's course car keeps first gear 4.4 (the new gearing rolled its exit);
+char1c's anti-vacuity (the kerb van the boom clipped is now a saloon);
+island_gate's mesh-ref arm (hero bodies; the camp car's cell is not resident).
+
+### the vacuous, said
+
+The census's and the real island's overlap arms are VACUOUS against the
+lattice's guards: with the exclusion, the clearance and the self-exclusion
+each removed both stay green (no kerb slot on either island binds). They
+assert the world's state; the class weights are the draw arm's.
+
+### carried, by name
+
+Mesh-space dents (the dent stays a proxy); the seat's HEIGHT from a drawn
+cushion; multi-axle rigs drawn on four wheels; art rows carry no VEH3c part
+proxies; the 40:1 launch limit raised the plant's travel speed; air and sea
+rows dormant (VEH3g); EMS still on VEH2c rows; trailer brakes not forwarded;
+moving traffic passes through parked cars (3 contacts in 10 island minutes);
+the crowd's morning commute takes the CI island's step from 20 to ~450 ms
+(character move), so the ten-minute census is 88 minutes of wall; the Fab
+licence tier is the user's to confirm; a bought car pack is the user's call.
