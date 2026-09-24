@@ -1271,7 +1271,7 @@ fn plan_car(
         for (layer, clip, volume, pitch) in loops {
             let source = voice_key(key, layer);
             // A NEAR loop is re-told on its own phase only (see `NEAR_EVERY`).
-            let due = !mem.near || tick.wrapping_add(source) % NEAR_EVERY == 0;
+            let due = !mem.near || tick.wrapping_add(source).is_multiple_of(NEAR_EVERY);
             match mem.loops.get_mut(&source) {
                 Some(s) if s.clip == clip && !due => {}
                 // A new voice, or a squeal whose surface changed under it:
