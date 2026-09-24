@@ -1458,12 +1458,26 @@ fn both_hosts_resolve_the_same_dag_for_every_mesh_the_island_draws() {
     println!("MESH REFS: {} — {refs:?}", refs.len());
     // The exact expected count, taken from the fixture, asserted BEFORE anything
     // is compared — the P21.4 rule. Two hosts that both draw nothing agree.
+    //
+    // Wave VEH3f: the four road layers AND the DCC hero bodies the fixture's
+    // authored rows now hang on their panels (`vehicle_bodies::hero_meshes`,
+    // the committed set) -- seven of them on this fixture, every one a mesh the
+    // two hosts must resolve the same DAG for.
+    let hero: std::collections::BTreeSet<Uuid> = inf_editor_core::vehicle_bodies::hero_meshes()
+        .into_iter()
+        .map(|m| m.guid)
+        .collect();
+    let heroes = refs.iter().filter(|g| hero.contains(g)).count();
     assert_eq!(
-        refs.len(),
+        refs.len() - heroes,
         4,
-        "the island's rigid mesh refs are the four road layers; this fixture has \
+        "the island's non-vehicle rigid mesh refs are the four road layers; this fixture has \
          {} and the comparison below would be measuring the wrong thing",
-        refs.len()
+        refs.len() - heroes
+    );
+    assert!(
+        heroes > 0,
+        "no authored row hangs a hero body, so the vehicle half of this arm is empty"
     );
 
     // ── the PIE host's registry, built the way `inf-player --pie` builds it ──
@@ -1629,12 +1643,42 @@ fn both_hosts_resolve_the_same_dag_for_every_mesh_the_island_draws() {
     let (drawn, prims) = project(&pie);
     let (none_drawn, prims_empty) = project(&inf_player::vmesh::VmeshRegistry::new());
     println!("FRAME: vgeom {drawn} / prims {prims} — empty registry: vgeom {none_drawn} / prims {prims_empty}");
+    // Wave VEH3f: a mesh ref is DRAWN when the entity hanging it is resident in
+    // the booted world. The road layers always are; a hero body hangs on a car,
+    // and the fixture's camp car stands in a partition cell this boot (no
+    // streaming attached) does not load -- its three panels are refs and not
+    // instances, which is the partition working, not the registry failing.
+    let resident: Vec<Uuid> = {
+        let mut out: Vec<Uuid> = Vec::new();
+        for &guid in doc.order() {
+            let Some(e) = doc.world().entity_of(guid) else {
+                continue;
+            };
+            let Some(mesh) = doc
+                .world()
+                .world()
+                .get::<inf_ecs::components::MeshRef>(e)
+                .and_then(|m| m.asset)
+            else {
+                continue;
+            };
+            if sim.sim.world().entity_of(guid).is_some() && !out.contains(&mesh) {
+                out.push(mesh);
+            }
+        }
+        out
+    };
+    println!("RESIDENT MESH REFS: {} of {}", resident.len(), refs.len());
+    assert!(
+        resident.len() > 4,
+        "no hero panel is resident, so the vehicle half is empty"
+    );
     assert_eq!(
         drawn,
-        refs.len(),
+        resident.len(),
         "the payload's registry put {drawn} vgeom instances in the frame for {} \
-         rigid mesh refs",
-        refs.len()
+         resident rigid mesh refs",
+        resident.len()
     );
     assert_eq!(
         none_drawn, 0,

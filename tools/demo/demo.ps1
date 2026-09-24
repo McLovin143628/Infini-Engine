@@ -104,6 +104,11 @@ param(
     # **THE AUDIO LEG ON ITS OWN** (wave VEH3e). Runs `Invoke-Veh3eLeg` straight
     # after the player is up and skips every other leg, `-BoardingOnly`'s shape.
     [switch]$AudioOnly,
+    # **THE ROSTER LEG ON ITS OWN** (wave VEH3f). Runs `Invoke-Veh3fLeg` straight
+    # after the player is up -- it waits for `-Lineup`'s spawn, photographs the
+    # line from the hero, then turns left and right across it -- and skips every
+    # other leg, `-AudioOnly`'s shape.
+    [switch]$RosterOnly,
     # **WRITE THE SESSION'S AUDIO TO A WAV** (wave VEH3e), `INF_RENDER_AUDIO`:
     # the player's mixer renders to this file (through the same kira mixer the
     # device path uses) instead of to a device. Empty is off.
@@ -1238,6 +1243,43 @@ function Invoke-Veh3eLeg {
     Say ("VEH3e COLUMNS: gears " + ($gears -join " ") + "; surfaces " + ($surf -join " ") + "; thumps $thumps; voice_cmds per step, mean " + $(if ($cmds.Count -gt 0) { "{0:N2}" -f (($cmds | Measure-Object -Average).Average) } else { "-" }))
 }
 
+# ── THE ROSTER LEG (wave VEH3f) ──────────────────────────────────────────────
+#
+# The line `-Lineup` spawns (INF_PIE_LINEUP) is photographed from where the
+# hero stands: once straight on, then turned left and right across it, so the
+# three frames are a contact sheet of the line between them. It triggers on the
+# player's OWN note that the line was spawned, never on a sleep alone.
+function Invoke-Veh3fLeg {
+    Restore-PlayerFocus "before the roster leg"
+    $seen = $false
+    for ($k = 0; $k -lt 120 -and -not $seen; $k++) {
+        $seen = @(Get-Content $heroCsv -ErrorAction Ignore | Where-Object { $_ -match "INF_PIE_LINEUP" }).Count -gt 0
+        if (-not $seen) { Start-Sleep -Milliseconds 500 }
+    }
+    if (-not $seen) {
+        Say "VEH3f: the line-up was never spawned (no INF_PIE_LINEUP note in sixty seconds) -- no roster frame in this session"
+        return
+    }
+    $note = @(Get-Content $heroCsv -ErrorAction Ignore | Where-Object { $_ -match "INF_PIE_LINEUP" })[0]
+    Say ("VEH3f: " + $note.TrimStart('#', ' '))
+    Start-Sleep -Seconds 3
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "130-veh3f-line-centre.png") | ForEach-Object { Say $_ }
+    foreach ($leg in @(@{ dx = -22; name = "131-veh3f-line-left" }, @{ dx = 44; name = "132-veh3f-line-right" })) {
+        for ($i = 0; $i -lt 20; $i++) { [InfInput]::Look($leg.dx, 0); Start-Sleep -Milliseconds 16 }
+        Start-Sleep -Milliseconds 1200
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir ($leg.name + ".png")) | ForEach-Object { Say $_ }
+    }
+    for ($i = 0; $i -lt 20; $i++) { [InfInput]::Look(-22, 0); Start-Sleep -Milliseconds 16 }
+    $rows = @(Get-Content $heroCsv -ErrorAction Ignore | Where-Object { $_ -match "^[0-9]" } |
+        Where-Object { ($_ -split ",").Count -gt 76 })
+    $classes = @($rows | ForEach-Object { ($_ -split ",")[72] } | Where-Object { $_ -ne "-" } | Select-Object -Unique)
+    Say ("VEH3f COLUMNS: roster classes the hero sat in: " + $(if ($classes.Count -gt 0) { $classes -join " " } else { "none (the hero walked)" }))
+}
+
+if ($RosterOnly) {
+    Say "ROSTER ONLY (-RosterOnly): the roster leg, and nothing else"
+    Invoke-Veh3fLeg
+}
 if ($BoardingOnly) {
     Say "BOARDING ONLY (-BoardingOnly): the boarding leg, and nothing else"
     Invoke-Veh3dLeg
@@ -1246,7 +1288,7 @@ if ($AudioOnly) {
     Say "AUDIO ONLY (-AudioOnly): the audio leg, and nothing else"
     Invoke-Veh3eLeg
 }
-if (-not $BoardingOnly -and -not $AudioOnly) {
+if (-not $BoardingOnly -and -not $AudioOnly -and -not $RosterOnly) {
 
 # ── 5a. THE ISLAND'S OWN SIDEARM, with no environment variable ───────────────
 #
@@ -2909,7 +2951,7 @@ else {
     }
 }
 
-}   # -not $BoardingOnly -and -not $AudioOnly (sections 5 .. 5e)
+}   # -not $BoardingOnly -and -not $AudioOnly -and -not $RosterOnly (sections 5 .. 5e)
 
 # ── 6. what the hero did, in metres ──────────────────────────────────────────
 if (Test-Path $heroCsv) {
@@ -2957,7 +2999,7 @@ if (Test-Path $heroCsv) {
 Say ("windows now: " + ((Get-Process | Where-Object { $_.MainWindowTitle -ne "" -and ($_.ProcessName -like "inf*") } |
     ForEach-Object { "$($_.ProcessName)[$($_.Id)] '$($_.MainWindowTitle)'" }) -join " | "))
 
-if (-not $BoardingOnly -and -not $AudioOnly) {
+if (-not $BoardingOnly -and -not $AudioOnly -and -not $RosterOnly) {
 # ── 6z. WAVE VEH3a — THE TYRES, AND WHAT THE GROUND UNDER THEM IS ────────────
 #
 # Four frames, every one TRIGGERED on `hero.csv`'s eight new columns rather than
@@ -3492,7 +3534,7 @@ if (-not $veh_driving) {
 Invoke-Veh3dLeg
 # ── 6z5. WAVE VEH3e — the audio leg, in a full run ───────────────────────────
 Invoke-Veh3eLeg
-}   # -not $BoardingOnly -and -not $AudioOnly (sections 6z .. 6z5)
+}   # -not $BoardingOnly -and -not $AudioOnly -and -not $RosterOnly (sections 6z .. 6z5)
 
 # ── 7. close ─────────────────────────────────────────────────────────────────
 if ($KeepOpen) {

@@ -28,6 +28,8 @@ Useful switches:
 | `-OutDir <path>` | where the PNGs and the CSV go (default: a timestamped folder under the system temp dir) |
 | `-KeepOpen` | leave the editor running at the end |
 | `-Port <n>` | the WebView2 debug port (default 9222) |
+| `-Lineup <where>@<s>[;row,...]` | (wave VEH3f) `INF_PIE_LINEUP`: spawn a line of roster rows at `s` seconds -- `x,y,z/yaw`, or `ahead:M` metres in front of the hero across its heading, each car on the terrain; one row of each of the eighteen classes unless rows are named |
+| `-RosterOnly` | (wave VEH3f) the roster leg alone: wait for the line-up's note, photograph it straight on and turned left and right (`130`-`132-veh3f-line-*.png`) |
 | `-PlayMode window` | **the default since the CHAR1b.2 audit** — drive "Play in New Window" instead of the embedded viewport. Needs the CDP path, because a menu item has no coordinate to fall back to; `-PlayMode embedded` is the other way and is what the roadmap calls the preview |
 
 ## What it produces

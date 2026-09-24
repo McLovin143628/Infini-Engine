@@ -2263,13 +2263,20 @@ impl CarPlacement {
 }
 
 /// **The demo loop's ROSTER LINE-UP** (wave VEH3f), `INF_PIE_LINEUP` =
-/// `x,y,z/yaw@seconds`: in a PREVIEW session, at `seconds` of sim time, one row
-/// of EACH of the doc's eighteen classes is spawned side by side on a line
-/// through `(x, y, z)` -- `y` the ground there -- every one facing `yaw`
-/// degrees, the shortest row of each class so the line stays a street's width,
-/// through the `vehicle.spawn` Blueprint verb's own door
-/// (`inf_ecs::roster::spawn_defined`). One placement, applied once; the rows are
-/// the committed catalogue, and nothing about them is special-cased.
+/// `WHERE@seconds[;row,row,...]`: in a PREVIEW session, at `seconds` of sim
+/// time, a line of roster rows is spawned side by side, through the
+/// `vehicle.spawn` Blueprint verb's own door (`inf_ecs::roster::spawn_defined`).
+///
+/// * `WHERE` is `x,y,z/yaw` (a line through that point, every car facing
+///   `yaw` degrees, `y` the ground there), or `ahead:M` -- `M` metres in front
+///   of the camera subject, across its heading, every car facing it, each one
+///   stood on the terrain under its own spot.
+/// * With no row list: one row of EACH of the doc's eighteen classes, the
+///   shortest of each so the line stays a street's width. With one: those rows,
+///   in that order.
+///
+/// One placement, applied once; the rows are the committed catalogue, and
+/// nothing about them is special-cased.
 ///
 /// It exists because the island parks the classes that fit a kerb and a lot of
 /// the construction ones, and a frame of all eighteen has nowhere else to come
@@ -2280,6 +2287,10 @@ pub const LINEUP_ENV: &str = "INF_PIE_LINEUP";
 #[derive(Debug, Default, Clone)]
 pub struct Lineup {
     at: Option<(glam::DVec3, f64, f64)>,
+    /// `ahead:M` -- metres in front of the camera subject, instead of `at`'s
+    /// point and heading.
+    ahead_m: Option<f64>,
+    rows: Vec<String>,
     done: bool,
 }
 
@@ -2287,9 +2298,37 @@ impl Lineup {
     /// Read [`LINEUP_ENV`]; inert when absent, a refusal on stderr when
     /// malformed.
     pub fn from_env() -> Self {
-        let Ok(v) = std::env::var(LINEUP_ENV) else {
+        let Ok(raw) = std::env::var(LINEUP_ENV) else {
             return Self::default();
         };
+        let (v, rows) = match raw.split_once(';') {
+            Some((a, r)) => (
+                a.to_string(),
+                r.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect(),
+            ),
+            None => (raw.clone(), Vec::new()),
+        };
+        if let Some(rest) = v.trim().strip_prefix("ahead:") {
+            let (m, when) = match rest.split_once('@') {
+                Some((m, t)) => (m.trim().parse::<f64>().ok(), t.trim().parse::<f64>().ok()),
+                None => (rest.trim().parse::<f64>().ok(), Some(1.0)),
+            };
+            return match (m, when) {
+                (Some(m), Some(t)) if m.is_finite() && t.is_finite() => Self {
+                    at: Some((glam::DVec3::ZERO, 0.0, t.max(0.0))),
+                    ahead_m: Some(m),
+                    rows,
+                    done: false,
+                },
+                _ => {
+                    eprintln!("inf-player: {LINEUP_ENV} `{raw}` is not `ahead:M@seconds`");
+                    Self::default()
+                }
+            };
+        }
         let parsed = (|| {
             let (body, when) = match v.trim().split_once('@') {
                 Some((b, t)) => (b, t.trim().parse::<f64>().ok()?),
@@ -2311,6 +2350,8 @@ impl Lineup {
         }
         Self {
             at: parsed,
+            ahead_m: None,
+            rows,
             done: false,
         }
     }
@@ -2318,45 +2359,90 @@ impl Lineup {
     /// Spawn the line once its time has come. Answers a log line when it does.
     pub fn tick(&mut self, sim: &mut RuntimeSim) -> Option<String> {
         use inf_ecs::roster::{self, RosterClass};
-        let (at, yaw, when) = self.at?;
+        let (mut at, mut yaw, when) = self.at?;
         if self.done || (sim.steps() as f64) / 60.0 < when {
             return None;
         }
         self.done = true;
+        let on_terrain = self.ahead_m.is_some();
+        if let Some(m) = self.ahead_m {
+            let world = sim.world();
+            let hero = inf_ecs::movement::camera_subject(world)?;
+            let t = *world
+                .world()
+                .get::<inf_ecs::components::Transform>(world.entity_of(hero)?)?;
+            let h = t.rotation.y.to_radians();
+            let fwd = glam::DVec3::new(inf_math::psin64(h), 0.0, inf_math::pcos64(h));
+            at = t.translation.to_dvec3() + fwd * m;
+            yaw = t.rotation.y + 180.0;
+        }
         let r = yaw.to_radians();
         // The line runs across the heading: +X of a car facing `yaw`.
         let side = glam::DVec3::new(inf_math::pcos64(r), 0.0, -inf_math::psin64(r));
-        let mut offset = 0.0f64;
-        let mut placed = Vec::new();
-        for class in RosterClass::ALL {
-            if class == RosterClass::Trailer {
-                continue;
-            }
-            let Some((id, def)) = roster::rows_of(class)
+        // The line: the rows asked for, or the shortest row of every class.
+        let wanted: Vec<(String, String)> = if self.rows.is_empty() {
+            RosterClass::ALL
                 .into_iter()
-                .filter_map(|id| roster::roster().get(id).map(|d| (id, *d)))
-                .min_by(|a, b| {
-                    a.1.half_extents
-                        .z
-                        .total_cmp(&b.1.half_extents.z)
-                        .then(a.0.cmp(b.0))
+                .filter(|c| *c != RosterClass::Trailer)
+                .filter_map(|class| {
+                    roster::rows_of(class)
+                        .into_iter()
+                        .filter_map(|id| roster::roster().get(id).map(|d| (id, *d)))
+                        .min_by(|a, b| {
+                            a.1.half_extents
+                                .z
+                                .total_cmp(&b.1.half_extents.z)
+                                .then(a.0.cmp(b.0))
+                        })
+                        .map(|(id, _)| (class.name().to_string(), id.to_string()))
                 })
-            else {
+                .collect()
+        } else {
+            self.rows
+                .iter()
+                .map(|id| ("row".to_string(), id.clone()))
+                .collect()
+        };
+        // Centred on `at`: half the line's width to either side.
+        let widths: Vec<f64> = wanted
+            .iter()
+            .map(|(_, id)| {
+                roster::roster()
+                    .get(id)
+                    .map(|d| 2.0 * d.half_extents.x.abs() + 3.0)
+                    .unwrap_or(0.0)
+            })
+            .collect();
+        let mut offset = -0.5 * widths.iter().sum::<f64>();
+        let mut placed = Vec::new();
+        for (label, id) in &wanted {
+            let Some(def) = roster::roster().get(id).copied() else {
                 continue;
             };
             let hx = def.half_extents.x.abs();
             offset += hx;
             let mut p = at + side * offset;
-            p.y = inf_ecs::vehicle::resting_origin_y(&def, at.y) + 0.05;
+            let ground = if on_terrain {
+                let g = sim.terrain_height_at(p.x, p.z);
+                if g.is_finite() {
+                    g
+                } else {
+                    at.y
+                }
+            } else {
+                at.y
+            };
+            p.y = inf_ecs::vehicle::resting_origin_y(&def, ground) + 0.05;
             if roster::spawn_defined(sim.world_mut(), id, p, yaw).is_some() {
-                placed.push(format!("{}={id}", class.name()));
+                placed.push(format!("{label}={id}"));
             }
             offset += hx + 3.0;
         }
         sim.world_mut().propagate();
         Some(format!(
-            "{LINEUP_ENV} at t={when:.1}s spawned {} rows along {offset:.1} m from {:.2},{:.2},{:.2} facing {yaw:.0} deg: {}",
+            "{LINEUP_ENV} at t={when:.1}s spawned {} rows along {:.1} m centred on {:.2},{:.2},{:.2} facing {yaw:.0} deg: {}",
             placed.len(),
+            widths.iter().sum::<f64>(),
             at.x,
             at.y,
             at.z,

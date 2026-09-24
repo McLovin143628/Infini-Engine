@@ -738,6 +738,9 @@ fn the_trailer_follows_through_a_slalom_and_does_not_separate() {
     let (mut peak_hitch, mut worst_gap, mut min_y) = (0.0f64, 0.0f64, f64::MAX);
     let (mut tractor_peak, mut trailer_peak) = ((0.0f64, 0usize), (0.0f64, 0usize));
     let mut last_hitch = 0.0f64;
+    // The slalom's own trace, for a frame of it (`INF_VEH3F_TRACE_DIR`): step,
+    // time, steer, both headings, the hitch angle and the kingpin gap.
+    let mut trace = String::from("step,t,steer,tractor_deg,trailer_deg,hitch_deg,gap_m\n");
     for i in 0..1_500usize {
         let t = i as f64 * DT;
         let steer = if t > 6.0 && t < 17.0 {
@@ -775,6 +778,15 @@ fn the_trailer_follows_through_a_slalom_and_does_not_separate() {
         let f = position(&sim, CAR) + rotation(&sim, CAR) * fifth;
         worst_gap = worst_gap.max((k - f).length());
         min_y = min_y.min(position(&sim, TRAILER).y);
+        trace.push_str(&format!(
+            "{i},{t:.4},{steer:.4},{a:.4},{b:.4},{hitch:.4},{:.5}\n",
+            (k - f).length()
+        ));
+    }
+    if let Some(dir) = std::env::var_os("INF_VEH3F_TRACE_DIR") {
+        let path = std::path::Path::new(&dir).join("trailer-slalom.csv");
+        std::fs::write(&path, &trace).expect("the trace writes");
+        println!("THE TRAILER: trace written to {}", path.display());
     }
     let lag_s = (trailer_peak.1 as f64 - tractor_peak.1 as f64) * DT;
     println!(
