@@ -23,10 +23,20 @@
 //!
 //! # Who sings
 //!
-//! A car with an [`AudioSource`] — `RigSpawn::engine_voice`, which traffic
-//! never sets — whose engine is RUNNING: somebody is in it, or its drivetrain is
-//! not quiet. A parked car nobody is in is silent (its loops are stopped), which
-//! is also what keeps an island of parked cars out of the audio log.
+//! A car with an [`AudioSource`] whose engine is RUNNING: somebody is in it, or
+//! its drivetrain is not quiet. A parked car nobody is in is silent (its loops
+//! are stopped), which is also what keeps an island of parked cars out of the
+//! audio log.
+//!
+//! **Two tiers** (VEH3e audit). A car the level authored — the hero's, a
+//! fleet's — sings the FULL stack. A TRAFFIC car (a record of
+//! [`crate::traffic::TrafficPopulationRes`]) gets an emitter only while its tier
+//! is `Full` (a real rig inside `TRAFFIC_FULL_M` with an AI driver: the cars
+//! near the hero) and sings the NEAR stack: ONE grain (the half-load one,
+//! pitched by its revs and voiced by its level) and ONE squeal (its worse
+//! axle's slip), each loop re-told at most every [`NEAR_EVERY`] steps on a
+//! phase spread by its key. A crossing's traffic is heard from the kerb; a
+//! queue of it does not flood the log.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -674,6 +684,8 @@ struct CarMemory {
     throttle: f64,
     compression_m: [f64; 2],
     hot: [bool; 2],
+    /// Sings the NEAR stack (a traffic car).
+    near: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -696,6 +708,9 @@ struct DoorMemory {
 pub struct VoiceMemory {
     cars: BTreeMap<Uuid, CarMemory>,
     doors: BTreeMap<Uuid, DoorMemory>,
+    /// Plans made so far — the NEAR tier's update phase. A count of calls,
+    /// the same in both hosts; not a clock.
+    tick: u64,
 }
 
 /// The source key of an entity — the P12.3 convention both hosts use.
@@ -731,6 +746,14 @@ impl VoiceMemory {
         self.cars.values().filter(|c| !c.loops.is_empty()).count()
     }
 
+    /// How many of them sing the NEAR stack (traffic), right now.
+    pub fn near_voiced_cars(&self) -> usize {
+        self.cars
+            .values()
+            .filter(|c| c.near && !c.loops.is_empty())
+            .count()
+    }
+
     /// What the queue was last told about one looping voice, or `None`.
     pub fn loop_state(&self, source: u64) -> Option<LoopState> {
         self.cars
@@ -763,6 +786,9 @@ impl VoiceMemory {
             1.0 / 60.0
         };
         let mut seen: BTreeSet<Uuid> = BTreeSet::new();
+        self.tick = self.tick.wrapping_add(1);
+        let tick = self.tick;
+        let traffic = crate::traffic::traffic_of(world).map(|t| &t.records);
         for (chassis, t) in cars {
             let Some(e) = world.entity_of(*chassis) else {
                 continue;
@@ -776,8 +802,10 @@ impl VoiceMemory {
             };
             seen.insert(*chassis);
             let at = src.spatial.then(|| position_of(world, *chassis));
+            let near = traffic.is_some_and(|r| r.contains_key(chassis));
             let mem = self.cars.entry(*chassis).or_default();
-            plan_car(&mut cues, mem, *chassis, t, family, &src, at, dt);
+            mem.near = near;
+            plan_car(&mut cues, mem, *chassis, t, family, &src, at, dt, tick);
         }
         // A car that has gone — despawned, or lost its emitter — is silenced.
         let gone: Vec<Uuid> = self
@@ -1074,6 +1102,59 @@ fn car_loops(
     out
 }
 
+/// **How often a NEAR voice is re-told**, fixed steps (VEH3e audit). A driven
+/// traffic car's grain changes pitch and its emitter moves on every step, so a
+/// loop told everything would cost up to three commands a step a car; told
+/// every fourth step, on a phase its key spreads so a queue's cars do not all
+/// speak on one step, it costs under one. A `Play` and a `Stop` are never
+/// deferred.
+pub const NEAR_EVERY: u64 = 4;
+
+/// **The NEAR stack's level** under the full stack's (VEH3e audit) — a car
+/// driving past is heard, not mixed like the one the player drives.
+pub const NEAR_GAIN: f64 = 0.8;
+
+/// The loops a NEAR (traffic) car sings: the half-load grain at the engine's
+/// level and its revs' pitch, and one squeal on its worse axle.
+fn near_loops(
+    t: &VoiceTelemetry,
+    family: GrainFamily,
+    src: &AudioSource,
+) -> Vec<(VoiceLayer, Uuid, f64, f64)> {
+    let base = NEAR_GAIN
+        * if src.volume.is_finite() {
+            src.volume.max(0.0)
+        } else {
+            1.0
+        };
+    let authored_pitch = if src.pitch.is_finite() && src.pitch > 0.0 {
+        src.pitch
+    } else {
+        1.0
+    };
+    let gp = (grain_pitch(t, family) * authored_pitch).clamp(PITCH_MIN, PITCH_MAX);
+    let worse = if t.axles[0].slip > t.axles[1].slip {
+        t.axles[0]
+    } else {
+        t.axles[1]
+    };
+    let (sv, sp) = squeal_voice(worse.slip);
+    vec![
+        (
+            VoiceLayer::GrainMid,
+            grain_clip(family, EngineLoad::Mid),
+            base * engine_level(t),
+            gp,
+        ),
+        (
+            VoiceLayer::SquealRear,
+            squeal_clip(SurfaceVoice::of(worse.surface)),
+            base * sv,
+            sp,
+        ),
+    ]
+}
+
 #[allow(clippy::too_many_arguments)]
 fn plan_car(
     cues: &mut Vec<VoiceCue>,
@@ -1084,6 +1165,7 @@ fn plan_car(
     src: &AudioSource,
     at: Option<DVec3>,
     dt: f64,
+    tick: u64,
 ) {
     let key = entity_key(chassis);
     let base = if src.volume.is_finite() {
@@ -1094,9 +1176,17 @@ fn plan_car(
     let first = !mem.seen;
     mem.seen = true;
     if t.running() {
-        for (layer, clip, volume, pitch) in car_loops(t, family, src) {
+        let loops = if mem.near {
+            near_loops(t, family, src)
+        } else {
+            car_loops(t, family, src)
+        };
+        for (layer, clip, volume, pitch) in loops {
             let source = voice_key(key, layer);
+            // A NEAR loop is re-told on its own phase only (see `NEAR_EVERY`).
+            let due = !mem.near || tick.wrapping_add(source) % NEAR_EVERY == 0;
             match mem.loops.get_mut(&source) {
+                Some(s) if s.clip == clip && !due => {}
                 // A new voice, or a squeal whose surface changed under it:
                 // (re)start it with everything it needs in one command.
                 Some(s) if s.clip == clip => update_loop(cues, source, s, volume, pitch, at),
@@ -1125,6 +1215,7 @@ fn plan_car(
         }
         // THE BLOW-OFF: the throttle SHUT on boost.
         if !first
+            && !mem.near
             && t.turbocharged
             && mem.throttle >= BLOW_OFF_FROM
             && finite01(t.throttle) <= BLOW_OFF_TO

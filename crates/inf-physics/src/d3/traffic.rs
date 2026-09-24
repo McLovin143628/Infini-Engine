@@ -311,10 +311,14 @@ pub fn step_traffic(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64)
                         yaw_deg: yaw,
                         paint: rec.paint,
                         clip: None,
-                        // **Silent until the emitter can follow the car** — see
-                        // `RigSpawn::engine_voice` for VEH2a's carried item 5,
-                        // which is the whole reason.
-                        engine_voice: false,
+                        // **A car near the hero SINGS** (VEH3e audit): the
+                        // emitter follows the car since VEH3e (`SetPosition`
+                        // on the planner's own cadence), which was VEH2a's
+                        // whole reason for silence. Only the `Full` tier -- a
+                        // real rig with a driver and telemetry -- gets one,
+                        // and it sings the planner's NEAR stack
+                        // (`inf_ecs::vehicle_audio::NEAR_EVERY`).
+                        engine_voice: want == RigDetail::Full,
                         // **Traffic is CIVILIAN** (wave EMS1). The emergency
                         // fleet is authored content on Path A and never reaches
                         // this door; a livery here would be a police cruiser at

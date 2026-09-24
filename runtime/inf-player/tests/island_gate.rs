@@ -7348,6 +7348,15 @@ struct RushRun {
     /// all. These are the same `state_bytes` digest over the approach, every
     /// press and the whole stolen drive.
     jack_digests: Vec<u64>,
+    /// **`audit:` VEH3e — the traffic SINGS**, read off the command stream over
+    /// the window: every audio command it queued (the whole slice, compared
+    /// between the hosts), the most any one step queued, how many distinct
+    /// TRAFFIC cars' NEAR grain keys were addressed, and the log's evictions
+    /// across the window (which must be zero for the slice to be whole).
+    audio: Vec<String>,
+    audio_max_step: usize,
+    near_singing: usize,
+    audio_dropped: u64,
 }
 
 /// Freeze this host's day at `hour`, local.
@@ -7431,13 +7440,46 @@ fn rush_hour(sim: &mut RuntimeSim, centre: glam::DVec3) -> RushRun {
     let mut digests = Vec::with_capacity(RUSH_STEPS);
     let mut seen: std::collections::BTreeSet<u64> = Default::default();
     let mut walked = 0u64;
+    let near_keys: std::collections::BTreeMap<u64, uuid::Uuid> = start
+        .keys()
+        .map(|g| {
+            (
+                inf_ecs::vehicle_audio::voice_key(
+                    inf_ecs::vehicle_audio::entity_key(*g),
+                    inf_ecs::vehicle_audio::VoiceLayer::GrainMid,
+                ),
+                *g,
+            )
+        })
+        .collect();
+    let dropped_before = sim.dropped_audio_commands();
+    let mut audio: Vec<String> = Vec::new();
+    let mut audio_max_step = 0usize;
+    let mut singing: std::collections::BTreeSet<uuid::Uuid> = Default::default();
     for _ in 0..RUSH_STEPS {
+        let before = sim.audio_command_log().len();
         sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
         let d = digest(&sim.state_bytes());
         seen.insert(d);
         digests.push(d);
         walked += sim.crowd_stats().steered;
+        let slice = &sim.audio_command_log()[before.min(sim.audio_command_log().len())..];
+        audio_max_step = audio_max_step.max(slice.len());
+        for c in slice {
+            let key = match c {
+                inf_audio::AudioCommand::Play(p) => Some(p.source),
+                inf_audio::AudioCommand::SetPitch { source, .. }
+                | inf_audio::AudioCommand::SetVolume { source, .. }
+                | inf_audio::AudioCommand::SetPosition { source, .. } => Some(*source),
+                _ => None,
+            };
+            if let Some(g) = key.and_then(|k| near_keys.get(&k)) {
+                singing.insert(*g);
+            }
+            audio.push(format!("{c:?}"));
+        }
     }
+    let audio_dropped = sim.dropped_audio_commands() - dropped_before;
     let traffic = sim.traffic_stats();
     let crowd = sim.crowd_stats();
     let car_moved_m = inf_physics::d3::traffic::records(sim.world())
@@ -7492,6 +7534,10 @@ fn rush_hour(sim: &mut RuntimeSim, centre: glam::DVec3) -> RushRun {
         .max_by(|a, b| a.1.total_cmp(&b.1).then(b.0.cmp(&a.0)))
         .map(|(g, _)| g);
     let mut run = RushRun {
+        audio,
+        audio_max_step,
+        near_singing: singing.len(),
+        audio_dropped,
         digests,
         distinct: seen.len(),
         streets,
@@ -8047,8 +8093,31 @@ fn pie_equals_shipping_at_rush_hour_with_cars_on_the_streets() {
             run.victim_away_m,
             run.jack_digests.len()
         );
+        println!(
+            "VEH3e {label}: THE TRAFFIC SINGS -- {} traffic car(s) addressed on their NEAR grain key over the {RUSH_STEPS}-step window; {} audio command(s), {:.2} a step, at most {} on one step; the 65 536 log holds {:.0} s at that rate; evicted over the window: {}",
+            run.near_singing,
+            run.audio.len(),
+            run.audio.len() as f64 / RUSH_STEPS as f64,
+            run.audio_max_step,
+            inf_audio::AUDIO_LOG_CAPACITY as f64
+                / (run.audio.len() as f64 / RUSH_STEPS as f64).max(1e-9)
+                / 60.0,
+            run.audio_dropped
+        );
+        assert_eq!(
+            run.audio_dropped, 0,
+            "{label}: the audio log evicted inside the window"
+        );
+        assert!(
+            run.near_singing > 0,
+            "{label}: not one traffic car sang at the crossroads"
+        );
         runs.push((label, run));
     }
+    assert_eq!(
+        runs[0].1.audio, runs[1].1.audio,
+        "the hosts' audio streams differ over the rush hour"
+    );
 
     // ── the per-host arms, BEFORE the compare. Two empty streets agree
     //    perfectly, so every claim below is armed with a count.
