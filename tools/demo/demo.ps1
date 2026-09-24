@@ -1295,12 +1295,37 @@ function Invoke-Veh3fLeg {
     Say ("VEH3f COLUMNS: roster classes the hero sat in: " + $(if ($classes.Count -gt 0) { $classes -join " " } else { "none (the hero walked)" }))
 }
 
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class InfShotMin {
+  public delegate bool EnumProc(IntPtr hWnd, IntPtr lParam);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc f, IntPtr lParam);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+  // Minimise every visible top-level window a process owns -- its main window
+  // AND its floating panels, which are not owned by the main one.
+  public static int MinimizeAll(uint pid) {
+    int n = 0;
+    EnumWindows((h, l) => { uint p; GetWindowThreadProcessId(h, out p); if (p == pid && IsWindowVisible(h)) { ShowWindow(h, 6); n++; } return true; }, IntPtr.Zero);
+    return n;
+  }
+}
+"@
 # ── THE GALLERY LEG (VEH3f audit) ────────────────────────────────────────────
 #
 # One frame per `INF_PIE_GALLERY` note, triggered on the NOTE (the player says
 # which row it put in front of the lens, and where), then a contact sheet whose
 # labels are those notes' own words -- never a list this script keeps.
 function Invoke-Veh3fGallery {
+    # The editor's windows out of the way: a floating editor panel stays on
+    # top of the player (the first audit session photographed one over every
+    # car -- a WebView2 panel that had died of the commit limit).
+    foreach ($ed in @(Get-Process -Name inf-studio, msedgewebview2 -ErrorAction Ignore)) {
+        $m = [InfShotMin]::MinimizeAll([uint32]$ed.Id)
+        Say "VEH3f GALLERY: minimised $m editor window(s)"
+    }
     Restore-PlayerFocus "before the gallery leg"
     $taken = @{}
     $total = -1
@@ -1315,7 +1340,10 @@ function Invoke-Veh3fGallery {
                     $row = if ($n -match "row=(\S+)") { $Matches[1] } else { "row" }
                     $cls = if ($n -match "class=(\S+)") { $Matches[1] } else { "class" }
                     $file = Join-Path $OutDir ("{0}-veh3f-gallery-{1:D2}-{2}-{3}.png" -f (200 + $k), $k, $cls, $row)
-                    & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out $file | ForEach-Object { Say $_ }
+                    # The PLAYER's window alone, raised: the first audit session
+                    # photographed the whole desktop, the game a 1296x759 window
+                    # over the editor.
+                    & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out $file -WindowTitle "(PIE)" -Foreground | ForEach-Object { Say $_ }
                     $taken[$k] = $n.TrimStart('#', ' ')
                     Say ("VEH3f GALLERY: " + $taken[$k])
                 }

@@ -1638,7 +1638,8 @@ fn the_island_census_by_class_and_no_two_cars_in_one_place() {
                         // cause is read off these, not guessed).
                         let w = sim.world();
                         let what = |g: Uuid| {
-                            let rec = inf_ecs::traffic::traffic_of(w).and_then(|t| t.records.get(&g));
+                            let rec =
+                                inf_ecs::traffic::traffic_of(w).and_then(|t| t.records.get(&g));
                             let v = velocity(&sim, g);
                             match rec {
                                 Some(r) => format!(
