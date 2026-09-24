@@ -32,6 +32,7 @@
 //! | `the_door_slams_on_the_shut_step_and_the_motor_rows_are_silent` | the door keys on a RIGGED shipped host against `door_deg` and `handle_weight` | the handle gate dropped; the shut edge dropped | slam rows, hand rows, motor rows | **fails** — no door sound at all |
 //! | `a_door_held_open_through_the_close_does_not_slam` (audit) | the slam key on a shipped exit whose door is held open through `ClosingDoor`, against a control that shuts; the joint's angle off the damage row | the end-step hinge read reverted to the machine's reset `door_deg` | one timed-out close, one shut close | **passes** (no door sound at all) -- the false slam was VEH3e's own |
 //! | `the_course_render_does_not_clip` (audit) | the WAV BYTES of the shipped course rendered through the render-to-file door, with the master track and without it | the limiter taken off the master track | the control's peak within 1 dB of full scale | n/a -- a property of the mix, not the stream |
+//! | `a_traffic_car_sings_the_near_stack_on_its_own_cadence` (audit) | the planner's cues for a traffic car beside an authored one: which keys Play, how often a loop is re-told, the grain pitch sent | `NEAR_EVERY` 1; the traffic test answering false | two Plays, >10 pitches | **fails** -- traffic was voiceless |
 //! | `a_bail_out_lands_with_a_thud` | the thud key on a moving exit | the thud branch deleted | one bail | **fails** |
 //! | `pie_equals_shipping_on_the_audio_course` | both hosts' per-step command slices | the planner called with `dt * 2.0` in one host | every kind of cue seen | passes — it compares, it does not judge |
 //! | `the_audio_log_holds_the_drive_and_the_count_is_stated` | `dropped_audio_commands`, the per-step counts | `AUDIO_LOG_CAPACITY` cut to 4096 | the whole course | passes (3 a step) |
@@ -1851,6 +1852,110 @@ fn the_course_render_does_not_clip() {
     assert!(rms(&lim) > rms(&raw) * 0.89, "the limiter ate the drive");
     assert_eq!(clipped(&lim), 0, "the shipped mix clipped");
     assert!(peak(&lim) < ceiling + 1.0 / 32_767.0, "over the ceiling");
+}
+
+/// **A TRAFFIC CAR SINGS THE NEAR STACK, ON ITS OWN CADENCE** (VEH3e audit,
+/// (d')). Two cars side by side through the shipped planner, the same
+/// telemetry every step (revs climbing 1 000 -> 5 000 rpm, then a slide): the
+/// level's own car and a TRAFFIC car (a record of the population resource).
+///
+/// * the traffic car starts exactly TWO loops — the half-load grain of its
+///   own family and one squeal — and never the idle / full grains, the whine
+///   or the turbo;
+/// * each of its loops is re-told at most once per `NEAR_EVERY` steps, and the
+///   grain pitch it is told is the revs' own `(rpm/2400)(cyl/family cyl)`;
+/// * the authored car gets the full stack and more than twice the commands.
+///
+/// **Mutations → red**: `NEAR_EVERY` 1 (every step re-told); the traffic test
+/// in `plan` answering false (the full stack for traffic).
+#[test]
+fn a_traffic_car_sings_the_near_stack_on_its_own_cadence() {
+    const TRAFFIC: Uuid = Uuid::from_u128(0x5E3E_0071);
+    let mut world = EcsWorld::new();
+    let def = course_def();
+    spawn_car(&mut world, CHASSIS, DVec3::new(0.0, 1.0, 0.0), &def, true);
+    spawn_car(&mut world, TRAFFIC, DVec3::new(6.0, 1.0, 0.0), &def, true);
+    let mut pop = inf_ecs::traffic::TrafficPopulationRes::default();
+    pop.records.insert(
+        TRAFFIC,
+        inf_ecs::traffic::TrafficRecord::parked(
+            def.clone(),
+            inf_ecs::math::Color::new(0.5, 0.5, 0.5, 1.0),
+            DVec3::new(6.0, 1.0, 0.0),
+            0.0,
+        ),
+    );
+    world.world_mut().insert_resource(pop);
+    world.propagate();
+    let family = GrainFamily::P8Cross;
+    let mut mem = VoiceMemory::new();
+    let tk = |l: VoiceLayer| va::voice_key(va::entity_key(TRAFFIC), l);
+    let traffic_keys: BTreeSet<u64> = VoiceLayer::ALL.iter().map(|l| tk(*l)).collect();
+    let mut plays: Vec<u64> = Vec::new();
+    let mut last_told: BTreeMap<u64, usize> = BTreeMap::new();
+    let (mut t_updates, mut h_updates) = (0usize, 0usize);
+    let mut pitches_checked = 0usize;
+    const STEPS: usize = 160;
+    for i in 0..STEPS {
+        let mut t = telemetry(
+            if i >= 120 { 1.6 } else { 0.0 },
+            20.0,
+            SurfaceClass::Asphalt,
+        );
+        t.rpm = 1_000.0 + 4_000.0 * (i.min(119) as f64 / 119.0);
+        t.throttle = (i as f64 / 80.0).min(1.0);
+        let cues = mem.plan(&world, &[(CHASSIS, t), (TRAFFIC, t)], DT);
+        for c in &cues {
+            let k = c.source();
+            if traffic_keys.contains(&k) {
+                match c {
+                    va::VoiceCue::Play { .. } => plays.push(k),
+                    _ => {
+                        t_updates += 1;
+                        if let Some(prev) = last_told.insert(k, i).filter(|p| *p != i) {
+                            assert!(
+                                i - prev >= va::NEAR_EVERY as usize,
+                                "step {i}: a NEAR loop re-told {} step(s) after the last",
+                                i - prev
+                            );
+                        }
+                    }
+                }
+                if let va::VoiceCue::Pitch { pitch, .. } = c {
+                    if k == tk(VoiceLayer::GrainMid) {
+                        let want = va::grain_pitch(&t, family);
+                        assert!((pitch - want).abs() < 1e-12, "step {i}: {pitch} vs {want}");
+                        pitches_checked += 1;
+                    }
+                }
+            } else if !matches!(c, va::VoiceCue::Play { .. }) {
+                h_updates += 1;
+            }
+        }
+    }
+    println!(
+        "THE NEAR STACK: traffic Plays on {:?}; {t_updates} traffic updates vs {h_updates} for the level's car over {STEPS} steps; {pitches_checked} grain pitches checked; near voiced {} of {}",
+        plays
+            .iter()
+            .map(|k| VoiceLayer::ALL.iter().find(|l| tk(**l) == *k).copied())
+            .collect::<Vec<_>>(),
+        mem.near_voiced_cars(),
+        mem.voiced_cars()
+    );
+    assert_eq!(
+        plays,
+        vec![tk(VoiceLayer::GrainMid), tk(VoiceLayer::SquealRear)],
+        "the traffic car's loops"
+    );
+    assert!(
+        t_updates > 0 && pitches_checked > 10,
+        "the NEAR voice was never re-told"
+    );
+    assert!(
+        h_updates > 2 * t_updates,
+        "the NEAR stack is not cheaper: {t_updates} vs {h_updates}"
+    );
+    assert_eq!((mem.near_voiced_cars(), mem.voiced_cars()), (1, 2));
 }
 
 // ── 10. BOTH HOSTS ──────────────────────────────────────────────────────────
