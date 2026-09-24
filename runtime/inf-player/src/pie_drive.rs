@@ -1816,7 +1816,9 @@ impl HeroLog {
                     .unwrap_or("-");
                 let skid = row
                     .and_then(|id| inf_ecs::roster::roster().get(id))
-                    .is_some_and(|d| !(d.class.max_steer_deg > 0.0));
+                    .is_some_and(|d| {
+                        d.class.max_steer_deg.is_nan() || d.class.max_steer_deg <= 0.0
+                    });
                 let yaw = if skid {
                     let b = sim.bridge3d();
                     b.body_of(car)

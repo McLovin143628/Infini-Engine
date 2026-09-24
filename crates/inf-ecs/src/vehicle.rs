@@ -8695,7 +8695,7 @@ impl Vehicle for RaycastVehicle {
         // ceiling pass below bounds the sum exactly as it bounds a straight
         // pull, and traction control caps each side like any wheel.
         self.skid_relief = 1.0;
-        if !(self.tuning.max_steer_deg > 0.0) {
+        if self.tuning.max_steer_deg.is_nan() || self.tuning.max_steer_deg <= 0.0 {
             let steer = if self.controls.steer.is_finite() {
                 self.controls.steer.clamp(-1.0, 1.0)
             } else {

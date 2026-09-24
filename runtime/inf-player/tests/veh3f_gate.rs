@@ -203,7 +203,7 @@ fn static_fraction(sim: &RuntimeSim, guid: Uuid, travel: f64) -> f64 {
         .filter(|w| w.contact.is_some())
         .map(|w| rest - w.length_m)
         .collect();
-    if grounded.is_empty() || !(travel > 0.0) {
+    if grounded.is_empty() || (travel.is_nan() || travel <= 0.0) {
         return f64::NAN;
     }
     grounded.iter().sum::<f64>() / grounded.len() as f64 / travel
@@ -852,7 +852,7 @@ fn the_semi_is_slower_with_its_trailer_than_without() {
 #[test]
 fn the_tracked_rig_turns_by_skid() {
     let def = *roster::roster().get("hvy_dozer").expect("the dozer");
-    assert!(def.body.tracked() && !(def.class.max_steer_deg > 0.0));
+    assert!(def.body.tracked() && def.class.max_steer_deg <= 0.0);
     let pivot = |steer: f64| -> (f64, f64, f64) {
         let mut sim = flat_sim(&def);
         for _ in 0..120 {

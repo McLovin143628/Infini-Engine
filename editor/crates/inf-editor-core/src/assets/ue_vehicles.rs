@@ -135,7 +135,7 @@ fn is_wheel_slot(name: &str) -> bool {
 }
 
 /// Union-find over welded vertex keys.
-fn find(parent: &mut Vec<usize>, mut i: usize) -> usize {
+fn find(parent: &mut [usize], mut i: usize) -> usize {
     while parent[i] != i {
         parent[i] = parent[parent[i]];
         i = parent[i];
@@ -181,7 +181,7 @@ pub fn split_vehicle(
             }
         }
     }
-    if !(lo.x < hi.x) {
+    if lo.x.is_nan() || hi.x.is_nan() || lo.x >= hi.x {
         return Err(format!("{}: the mesh has no geometry", key.name()));
     }
     // ── the wheel pieces ──

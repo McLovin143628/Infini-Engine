@@ -1924,7 +1924,7 @@ pub fn route_walk(
     let pts = &routes[ri].points;
     // Walk toward the longer end, so a settlement near a route's end still has
     // road ahead of it.
-    let forward = pts.len() - i0 >= i0 + 1;
+    let forward = pts.len() - i0 > i0;
     let order: Vec<usize> = if forward {
         (i0..pts.len()).collect()
     } else {

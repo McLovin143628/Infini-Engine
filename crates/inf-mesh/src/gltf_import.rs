@@ -505,7 +505,6 @@ pub fn import_gltf(path: &Path) -> Result<GltfImport, MeshError> {
                 _ => Vec::new(),
             };
 
-            let mut verts = verts;
             if skin.is_empty() {
                 if let Some(m) = mesh_world
                     .get(&mesh.index())

@@ -311,6 +311,9 @@ pub fn rows_of(class: RosterClass) -> Vec<&'static str> {
         .collect()
 }
 
+/// One class in a weighted draw: the class, its weight, and its rows.
+type ClassRows = (RosterClass, f64, Vec<(&'static str, &'static VehicleDef)>);
+
 /// **A deterministic weighted draw** over the roster -- first a class by
 /// `weight`, then a row of that class uniformly, among the rows `fits` accepts.
 ///
@@ -323,25 +326,24 @@ pub fn pick_row(
     weight: impl Fn(RosterClass) -> f64,
     fits: impl Fn(&VehicleDef) -> bool,
 ) -> Option<(&'static str, &'static VehicleDef)> {
-    let classes: Vec<(RosterClass, f64, Vec<(&'static str, &'static VehicleDef)>)> =
-        RosterClass::ALL
-            .into_iter()
-            .filter_map(|c| {
-                let w = weight(c);
-                if !(w > 0.0) {
-                    return None;
-                }
-                let rows: Vec<(&'static str, &'static VehicleDef)> = roster()
-                    .0
-                    .iter()
-                    .filter(|(_, d)| d.roster_class == Some(c) && fits(d))
-                    .map(|(id, d)| (id.as_str(), d))
-                    .collect();
-                (!rows.is_empty()).then_some((c, w, rows))
-            })
-            .collect();
+    let classes: Vec<ClassRows> = RosterClass::ALL
+        .into_iter()
+        .filter_map(|c| {
+            let w = weight(c);
+            if w.is_nan() || w <= 0.0 {
+                return None;
+            }
+            let rows: Vec<(&'static str, &'static VehicleDef)> = roster()
+                .0
+                .iter()
+                .filter(|(_, d)| d.roster_class == Some(c) && fits(d))
+                .map(|(id, d)| (id.as_str(), d))
+                .collect();
+            (!rows.is_empty()).then_some((c, w, rows))
+        })
+        .collect();
     let total: f64 = classes.iter().map(|(_, w, _)| w).sum();
-    if !(total > 0.0) {
+    if total.is_nan() || total <= 0.0 {
         return None;
     }
     let u = if unit.is_finite() {

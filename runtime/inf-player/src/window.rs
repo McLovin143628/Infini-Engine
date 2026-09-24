@@ -819,7 +819,7 @@ impl PlayerApp {
         // the hitch angle or the skid yaw when the car has one.
         let skid = inf_ecs::roster::row_of(sim.world(), vehicle)
             .and_then(|id| inf_ecs::roster::roster().get(id))
-            .is_some_and(|d| !(d.class.max_steer_deg > 0.0));
+            .is_some_and(|d| d.class.max_steer_deg.is_nan() || d.class.max_steer_deg <= 0.0);
         let yaw = skid.then(|| {
             let b = sim.bridge3d();
             b.body_of(vehicle)
