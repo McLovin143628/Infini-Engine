@@ -722,6 +722,30 @@ pub fn import_manifest(
                             let toml =
                                 super::ue_vehicles::body_toml(&split, &mesh.source, &licence);
                             std::fs::write(dir.join(format!("{}.vehicle.toml", key.name())), toml)?;
+                            // The island recipe copies the committed FALLBACK into
+                            // the content root under these same GUIDs; two files
+                            // claiming one GUID is a registry that answers either,
+                            // so the art REPLACES the copy (a rebuilt island puts
+                            // it back; `island-refresh.ps1 -SyncVehicles` re-runs
+                            // this import after it).
+                            let mut stems = vec![format!("{}_body", key.name())];
+                            stems.extend((0..4).map(|i| format!("{}_wheel{i}", key.name())));
+                            let mut dropped = 0usize;
+                            for stem in stems {
+                                for ext in ["inf_mesh", "inf_mesh.toml"] {
+                                    let copy = project.root().join(format!("{stem}.{ext}"));
+                                    if copy.is_file() {
+                                        std::fs::remove_file(&copy)?;
+                                        dropped += 1;
+                                    }
+                                }
+                            }
+                            if dropped > 0 {
+                                report.advisories.push(format!(
+                                    "vehicle: {}: removed {dropped} fallback file(s) the recipe copied at the art's GUIDs",
+                                    key.name()
+                                ));
+                            }
                             let b = &mesh.bounds_cm;
                             report.advisories.push(format!(
                                 "vehicle: {} -> {} ({} tris, {} wheel pieces, {} rig wheels, {} sockets); half-extents {:.2} x {:.2} x {:.2} m against the exporter's box {:.2} x {:.2} x {:.2} m",

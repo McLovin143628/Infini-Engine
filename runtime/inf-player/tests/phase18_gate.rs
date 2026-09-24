@@ -1484,7 +1484,7 @@ fn the_composed_frame_stays_inside_the_frame_budget() {
 /// P20.3 also **re-blessed the three P20.1 water scenes**, deliberately: shoreline
 /// wetness is default-on and all three carry terrain, so their ground at and below
 /// the water level is now darker. Every other image is byte-identical.
-const GOLDENS: [&str; 64] = [
+const GOLDENS: [&str; 66] = [
     "2d_lit.png",
     "aerial_fog.png",
     "billboards.png",
@@ -1521,6 +1521,12 @@ const GOLDENS: [&str; 64] = [
     // at.
     "ground_close.png",
     "hdr_bloom.png",
+    // Wave VEH3f: the two committed DCC hero bodies -- the saloon's four
+    // lofted panels and the pickup's -- drawn from the committed `.inf_mesh`
+    // bytes through the vgeom path, the arm that says the roster's hero rows
+    // draw real meshes and not boxes. ADDED; nothing re-blessed.
+    "hero_pickup.png",
+    "hero_sedan.png",
     // Wave VIS1b: the lens trio -- vignette, chromatic aberration, film grain --
     // on one high-contrast scene. All three are zero at the default.
     "lens_trio.png",

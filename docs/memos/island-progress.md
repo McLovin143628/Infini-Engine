@@ -31366,6 +31366,7 @@ their own terms, and nobody has read them.
 | `MS_MossEss` | 2 moss surfaces | Fab Standard License — user-confirmed 2026-09-05 |
 | `Downtown_West` | 10 meshes, **13** materials *(audit: the count was 12)*, 2 light fixtures | **unknown** — Marketplace/Fab pack in this project, with its own listing terms. Verify on its Fab page before shipping. |
 | `AdvancedRealisticGlass` | 2 materials, parameters only | **unknown** — as above |
+| `ConstructionVehiclesPack1` (wave VEH3f) | 7 machines (excavator, track loader, tandem tipper, mixer, forklift, mobile crane, long-nose tractor; 99 663-282 873 tris each), 38 materials, 112 maps; split by `inf-import --vehicles` into a chassis and four wheels each at the roster's art GUIDs | **Fab Standard -- user to confirm before ship.** The pack's row is in `FabLibrary\listings_v1.db`; no licence text on disk, and the tier (Personal/Professional) is not recorded in the cache. | **LOCAL ONLY.** `island-build/project/Content/UE/Vehicles/`, never committed (`veh3f_gate::nothing_from_unreal_is_committed` reads `git ls-files`); a checkout without it draws the committed fallback at the same GUIDs. |
 
 **The character packs (wave CHAR1a).** Three sources, three different positions,
 and the difference is why the wave is arranged the way it is. Each row is

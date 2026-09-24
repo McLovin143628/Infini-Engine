@@ -1957,7 +1957,10 @@ fn the_golden_set_is_pinned_and_additive_after_phase_28() {
     // `INF_GOLDEN_STRICT=1` with the two existing skinned goldens unmoved.
     // Wave CHAR1a.3 added `skinned_sections.png` -- a two-section skinned body,
     // the arm behind `.inf_mesh` v3's material-slot table. 63 -> 64.
-    const GOLDENS: usize = 64;
+    // Wave VEH3f added `hero_sedan.png` and `hero_pickup.png` -- the committed
+    // DCC hero bodies drawn from their own `.inf_mesh` bytes. 64 -> 66; nothing
+    // was re-blessed.
+    const GOLDENS: usize = 66;
     /// `xxh3_128` over `"{file_name} {hex}\n"` for every golden, name-sorted.
     /// **RULE: this may change only in a commit that adds a golden, or in one
     /// whose stated purpose is to change what the engine LOOKS like.**
@@ -2149,7 +2152,7 @@ fn the_golden_set_is_pinned_and_additive_after_phase_28() {
     // Wave CHAR1a.3: `skinned_sections.png` joined the set (63 -> 64) and no
     // existing frame moved -- the whole 124-scene suite runs green under
     // `INF_GOLDEN_STRICT=1`, which is what says this digest moved by an ADDITION.
-    const GOLDEN_SET_DIGEST: &str = "596b82abb30b94e3b1e29928f0f8ddd5";
+    const GOLDEN_SET_DIGEST: &str = "03409fcf94ae5d2114fe2300f76e9aad";
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")

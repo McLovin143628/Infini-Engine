@@ -211,6 +211,9 @@ pub struct PlayerApp {
     /// **The demo loop's clear-road car placement** (VEH3e audit) — inert
     /// unless `INF_PIE_PLACE_CAR` is set, consulted only in a PREVIEW session.
     car_placement: crate::pie_drive::CarPlacement,
+    /// The roster line-up (wave VEH3f), inert unless `INF_PIE_LINEUP` is set,
+    /// consulted only in a PREVIEW session.
+    lineup: crate::pie_drive::Lineup,
     /// **The demo loop's see-through car** (VEH3d audit) — inert unless
     /// `INF_PIE_CUTAWAY` is set, consulted only in a PREVIEW session. See
     /// [`crate::pie_drive::Cutaway`].
@@ -361,6 +364,7 @@ impl PlayerApp {
             board_hold: crate::pie_drive::BoardHold::from_env(),
             audio_hold: crate::pie_drive::AudioHold::from_env(),
             car_placement: crate::pie_drive::CarPlacement::from_env(),
+            lineup: crate::pie_drive::Lineup::from_env(),
             cutaway: crate::pie_drive::Cutaway::from_env(),
             time_scale: crate::pie_drive::time_scale_from_env(),
             vmeshes,
@@ -811,12 +815,30 @@ impl PlayerApp {
                 )
             })
             .unwrap_or_default();
+        // **The roster row** (wave VEH3f): class, lore name, body kind, and
+        // the hitch angle or the skid yaw when the car has one.
+        let skid = inf_ecs::roster::row_of(sim.world(), vehicle)
+            .and_then(|id| inf_ecs::roster::roster().get(id))
+            .is_some_and(|d| !(d.class.max_steer_deg > 0.0));
+        let yaw = skid.then(|| {
+            let b = sim.bridge3d();
+            b.body_of(vehicle)
+                .and_then(|body| b.world().body_angvel(body))
+                .map(|w| w.y)
+                .unwrap_or(0.0)
+        });
+        let roster = inf_ecs::roster::roster_readout(sim.world(), vehicle, yaw);
         let mut text = head;
         for line in [drive, row, damage, audio] {
             if !line.is_empty() {
                 text.push('\n');
                 text.push_str(&line);
             }
+        }
+        // ...and the roster row under them (wave VEH3f), on the same terms.
+        if !roster.is_empty() {
+            text.push('\n');
+            text.push_str(&roster);
         }
         Some(text)
     }
@@ -1254,6 +1276,9 @@ impl PlayerApp {
             // in the same log, so a frame taken after it can be read against a
             // line that names where the hero was put.
             if let Some(said) = self.car_placement.tick(&mut self.sim) {
+                self.hero_log.note(&said);
+            }
+            if let Some(said) = self.lineup.tick(&mut self.sim) {
                 self.hero_log.note(&said);
             }
             if let Some(said) = self.spawn_override.tick(&mut self.sim, dt) {

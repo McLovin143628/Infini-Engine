@@ -461,6 +461,25 @@ pub const VEHICLE_STEP_BUDGET_MS: f64 = 0.5;
 /// first time a level puts cars on its roads.
 pub const VEHICLE_BUDGET_CARS: usize = 64;
 
+/// **What merging the whole vehicle roster may cost**, milliseconds (wave
+/// VEH3f).
+///
+/// `VehicleDefs::merge_toml` over the committed roster -- 153 rows and two
+/// trailers, every key refused by name if unknown, every class default applied
+/// before its row -- is what a level pays the first time anything names a row
+/// (`inf_ecs::roster::roster`, once per process) and what each `vehicle.define`
+/// node pays for its own TOML. It is measured by
+/// `veh3f_gate::the_catalogue_loads_in_microseconds`, the minimum of five, and
+/// the figure is in `docs/profiling.md`.
+///
+/// # A clock, so: release only, real machine only
+///
+/// [`CITY_STEP_BUDGET_MS`]'s conditioning -- reported everywhere, asserted under
+/// `cargo test --release` off CI.
+///
+/// **RATCHET RULE (§8): this constant may only ever DECREASE.** Minted at 10.0: the first release reading was 4.57 ms alone and 6.51 ms with the rest of the gate running beside it, and the budget is minted over the loaded figure.
+pub const ROSTER_LOAD_BUDGET_MS: f64 = 10.0;
+
 /// **What the `gameplay` phase may cost with a firefight in the air**,
 /// milliseconds (wave WPN2a).
 ///

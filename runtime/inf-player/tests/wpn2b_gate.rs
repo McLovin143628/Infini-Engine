@@ -2599,10 +2599,15 @@ fn the_hero_log_and_its_readme_agree() {
     // on the same argument: a shift, a burnout and a kerb all read the same in
     // `speed`, and a frame of the whine stepping, a squeal or a thump has to be
     // triggered on a column that can see it.
+    // **Seventy-seven since wave VEH3f**, which appended the five roster
+    // columns on the same argument: a line-up of eighteen classes, a trailer
+    // swinging through a slalom and a dozer pivoting on its tracks all read
+    // `Driving` in the mode column, and a frame of each has to be triggered on
+    // a column that can see it.
     let n = width(&armed);
-    assert_eq!(n, 72, "the row is {n} fields and this arm's word is 72");
+    assert_eq!(n, 77, "the row is {n} fields and this arm's word is 77");
     assert!(
-        README.contains("SEVENTY-TWO") || README.contains("seventy-two"),
+        README.contains("SEVENTY-SEVEN") || README.contains("seventy-seven"),
         "`tools/demo/README.md` does not say how many columns hero.csv has"
     );
     for col in [
@@ -2638,6 +2643,12 @@ fn the_hero_log_and_its_readme_agree() {
         "engine_scale",
         "flats",
         "panes_broken",
+        // Wave VEH3f's five.
+        "roster_class",
+        "roster_row",
+        "body_kind",
+        "hitch_deg",
+        "track_yaw",
         "parts_shed",
         // Wave VEH3d's seven.
         "board",

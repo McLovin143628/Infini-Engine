@@ -141,6 +141,10 @@ param(
     # moment later). The audio leg's launch, kerb and slide need a straight
     # empty street, and the saloon is parked at the crossroads' traffic queue.
     [string]$PlaceCar = "",
+    # **THE ROSTER LINE-UP** (wave VEH3f), `INF_PIE_LINEUP` = `x,y,z/yaw@s`: one
+    # row of each of the eighteen classes spawned side by side through the
+    # `vehicle.spawn` door, `y` the ground there. See `pie_drive::LINEUP_ENV`.
+    [string]$Lineup = "",
     # **SKIP THE BACK-OFF** (VEH3e audit): the audio leg reverses off the kerb
     # first because the level parks its saloon nose-in; a placed car is already
     # on its road, and reversing spends the burnout beat on the way back.
@@ -542,6 +546,7 @@ else { Remove-Item env:INF_PIE_BOARD_HOLD -ErrorAction Ignore }
 if ($Cutaway -gt 0.0 -and $Cutaway -lt 1.0) { $env:INF_PIE_CUTAWAY = "$Cutaway"; Say "cutaway: the seated car drawn at alpha $Cutaway" }
 else { Remove-Item env:INF_PIE_CUTAWAY -ErrorAction Ignore }
 if ($PlaceCar -ne "") { $env:INF_PIE_PLACE_CAR = $PlaceCar; Say "place car: $PlaceCar (the car nearest the hero)" }
+if ($Lineup -ne "") { $env:INF_PIE_LINEUP = $Lineup; Say "roster line-up: $Lineup" }
 else { Remove-Item env:INF_PIE_PLACE_CAR -ErrorAction Ignore }
 if ($AudioHold -gt 0.0) { $env:INF_PIE_AUDIO_HOLD = "$AudioHold"; Say "audio hold: $AudioHold s on the burnout, the thump and the slide" }
 else { Remove-Item env:INF_PIE_AUDIO_HOLD -ErrorAction Ignore }

@@ -12143,3 +12143,223 @@ fn road1b_a_rivers_contrast_against_its_bank_at_200m() {
          frame cannot say anything about contrast"
     );
 }
+
+// ── wave VEH3f: THE HERO BODIES ──────────────────────────────────────────────
+//
+// The first authored meshes ever drawn on a vehicle: the island saloon's and
+// pickup's DCC-lofted panels (`samples/vehicle-bodies/`), read from the
+// COMMITTED `.inf_mesh` bytes, meshlet-built, and hung at the island rows' own
+// part transforms. Two goldens ADDED, one stated purpose: that the committed
+// files are real car panels that draw (a saloon's raked greenhouse over its
+// rounded lower body, a pickup's cab and bed) and not boxes. Nothing already
+// blessed moves.
+//
+// This crate names no asset codec (`inf-asset` is not a dependency of
+// `inf-render`, and adding one would move `Cargo.lock`), so the bytes are read
+// by the few lines below -- bincode's standard varint layout of `MeshAsset`'s
+// head, positions, normals and indices of every submesh. That is a READER of
+// the committed file, not a second copy of its geometry: a panel re-lofted by
+// the generator changes these frames, which is the point.
+
+/// A bincode varint (`<251` inline; `251`/`252`/`253` prefix a u16/u32/u64).
+fn hero_varint(b: &[u8], at: &mut usize) -> u64 {
+    let t = b[*at];
+    *at += 1;
+    let n = match t {
+        0..=250 => return t as u64,
+        251 => 2,
+        252 => 4,
+        _ => 8,
+    };
+    let mut v = 0u64;
+    for i in 0..n {
+        v |= (b[*at + i] as u64) << (8 * i);
+    }
+    *at += n;
+    v
+}
+
+fn hero_f32(b: &[u8], at: &mut usize) -> f32 {
+    let v = f32::from_le_bytes([b[*at], b[*at + 1], b[*at + 2], b[*at + 3]]);
+    *at += 4;
+    v
+}
+
+/// Positions, normals and indices of a committed `.inf_mesh` (every submesh,
+/// concatenated) -- the head of `MeshAsset` in field order: `schema_version`,
+/// `submeshes: Vec<SubMesh { name, vertices: Vec<MeshVertex { position,
+/// normal, uv, tangent }>, indices, material_slot, skin }>`.
+fn hero_mesh(bytes: &[u8]) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<u32>) {
+    let mut at = 0usize;
+    let _schema = hero_varint(bytes, &mut at);
+    let subs = hero_varint(bytes, &mut at);
+    let (mut pos, mut nrm, mut idx) = (Vec::new(), Vec::new(), Vec::new());
+    for _ in 0..subs {
+        let name = hero_varint(bytes, &mut at) as usize;
+        at += name;
+        let base = pos.len() as u32;
+        let nv = hero_varint(bytes, &mut at);
+        for _ in 0..nv {
+            let p = [
+                hero_f32(bytes, &mut at),
+                hero_f32(bytes, &mut at),
+                hero_f32(bytes, &mut at),
+            ];
+            let n = [
+                hero_f32(bytes, &mut at),
+                hero_f32(bytes, &mut at),
+                hero_f32(bytes, &mut at),
+            ];
+            at += 4 * (2 + 4); // uv + tangent
+            pos.push(p);
+            nrm.push(n);
+        }
+        let ni = hero_varint(bytes, &mut at);
+        for _ in 0..ni {
+            idx.push(base + hero_varint(bytes, &mut at) as u32);
+        }
+        // material_slot: Option<u32> (0 = None, 1 + varint = Some).
+        if bytes[at] == 1 {
+            at += 1;
+            let _ = hero_varint(bytes, &mut at);
+        } else {
+            at += 1;
+        }
+        // skin: Vec<VertexSkin> -- empty on a rigid panel.
+        let skin = hero_varint(bytes, &mut at);
+        assert_eq!(skin, 0, "a hero panel is rigid");
+    }
+    (pos, nrm, idx)
+}
+
+/// One set's panels as vgeom assets + instances at a row's part transforms.
+/// `parts`: (committed file bytes, part centre and FULL size in metres).
+fn hero_scene(parts: &[(&[u8], [f64; 3], [f32; 3])], color: [f32; 4]) -> RenderScene {
+    let mut scene = RenderScene {
+        grid_enabled: true,
+        ..Default::default()
+    };
+    for (i, (bytes, centre, size)) in parts.iter().enumerate() {
+        let (p, n, idx) = hero_mesh(bytes);
+        assert!(
+            p.len() > 100 && idx.len() > 300,
+            "a hero panel is a real mesh"
+        );
+        let mesh = inf_vgeom::build::build_vgeom(&p, &n, &[], &[], &idx, Default::default());
+        let id = 0x5645_4833_0000_0000_0000_0000_0000_0100u128 + i as u128;
+        scene
+            .vgeom_assets
+            .push(VgeomAsset::from_mesh(id, &mesh).expect("index the vmesh"));
+        scene.vgeom_instances.push(VgeomInstance::lit(
+            id,
+            DVec3::new(centre[0], centre[1], centre[2]),
+            Quat::IDENTITY,
+            Vec3::new(size[0], size[1], size[2]),
+            color,
+            1 + i as u32,
+        ));
+    }
+    scene.lights.push(RenderLight {
+        kind: LightKind::Directional,
+        color: [1.0, 0.97, 0.9],
+        intensity: 3.0,
+        direction: Vec3::new(0.45, 0.8, 0.35).normalize(),
+        position: DVec3::ZERO,
+        range: 0.0,
+        ..RenderLight::default()
+    });
+    scene.mark_dirty();
+    scene
+}
+
+/// The island saloon row's half-extents (`sedan`: 0.92 x 0.62 x 2.2 m) times
+/// `SEDAN_PARTS`' own fractions -- lower, cabin, bonnet, boot -- as
+/// `(centre, full size)`, metres.
+fn sedan_parts() -> [([f64; 3], [f32; 3]); 4] {
+    let h = [0.92f64, 0.62, 2.2];
+    let part = |c: [f64; 3], half: [f64; 3]| {
+        (
+            [c[0] * h[0], c[1] * h[1] + 0.9, c[2] * h[2]],
+            [
+                (2.0 * half[0] * h[0]) as f32,
+                (2.0 * half[1] * h[1]) as f32,
+                (2.0 * half[2] * h[2]) as f32,
+            ],
+        )
+    };
+    [
+        part([0.0, -0.5, 0.0], [1.0, 0.5, 1.0]),
+        part([0.0, 0.5, -0.06], [0.86, 0.5, 0.42]),
+        part([0.0, 0.15, 0.62], [0.94, 0.15, 0.36]),
+        part([0.0, 0.18, -0.72], [0.94, 0.18, 0.26]),
+    ]
+}
+
+#[test]
+fn golden_hero_sedan() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let files: [&[u8]; 4] = [
+        include_bytes!("../../../samples/vehicle-bodies/Sedan_lower.inf_mesh"),
+        include_bytes!("../../../samples/vehicle-bodies/Sedan_cabin.inf_mesh"),
+        include_bytes!("../../../samples/vehicle-bodies/Sedan_bonnet.inf_mesh"),
+        include_bytes!("../../../samples/vehicle-bodies/Sedan_boot.inf_mesh"),
+    ];
+    let t = sedan_parts();
+    let parts: Vec<(&[u8], [f64; 3], [f32; 3])> = files
+        .iter()
+        .zip(t.iter())
+        .map(|(b, (c, s))| (*b, *c, *s))
+        .collect();
+    let scene = hero_scene(&parts, [0.62, 0.08, 0.07, 1.0]);
+    let view = look_view(DVec3::new(4.2, 2.6, 5.4), DVec3::new(0.0, 0.8, 0.0));
+    let img = check_golden_with(&gpu, "hero_sedan", &scene, &view, vgeom_settings());
+    let lit = img
+        .chunks(4)
+        .filter(|p| p[0] as u16 > p[2] as u16 + 40)
+        .count();
+    assert!(lit > 2_000, "the saloon's red panels covered only {lit} px");
+}
+
+#[test]
+fn golden_hero_pickup() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    // The island pickup (`truck`: 1.02 x 0.82 x 2.65 m) and TRUCK_PARTS' lower,
+    // cab and bed fractions.
+    let h = [1.02f64, 0.82, 2.65];
+    let part = |c: [f64; 3], half: [f64; 3]| {
+        (
+            [c[0] * h[0], c[1] * h[1] + 1.1, c[2] * h[2]],
+            [
+                (2.0 * half[0] * h[0]) as f32,
+                (2.0 * half[1] * h[1]) as f32,
+                (2.0 * half[2] * h[2]) as f32,
+            ],
+        )
+    };
+    let files: [&[u8]; 3] = [
+        include_bytes!("../../../samples/vehicle-bodies/Pickup_lower.inf_mesh"),
+        include_bytes!("../../../samples/vehicle-bodies/Pickup_cab.inf_mesh"),
+        include_bytes!("../../../samples/vehicle-bodies/Pickup_bed.inf_mesh"),
+    ];
+    let t = [
+        part([0.0, -0.6, 0.0], [1.0, 0.4, 1.0]),
+        part([0.0, 0.4, 0.5], [0.94, 0.6, 0.42]),
+        part([0.0, -0.1, -0.5], [0.96, 0.1, 0.5]),
+    ];
+    let parts: Vec<(&[u8], [f64; 3], [f32; 3])> = files
+        .iter()
+        .zip(t.iter())
+        .map(|(b, (c, s))| (*b, *c, *s))
+        .collect();
+    let scene = hero_scene(&parts, [0.10, 0.22, 0.52, 1.0]);
+    let view = look_view(DVec3::new(-4.6, 2.9, 6.0), DVec3::new(0.0, 1.0, 0.0));
+    let img = check_golden_with(&gpu, "hero_pickup", &scene, &view, vgeom_settings());
+    let lit = img
+        .chunks(4)
+        .filter(|p| p[2] as u16 > p[0] as u16 + 40)
+        .count();
+    assert!(
+        lit > 2_000,
+        "the pickup's blue panels covered only {lit} px"
+    );
+}

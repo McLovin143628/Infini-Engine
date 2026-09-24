@@ -36,6 +36,7 @@
 #   pwsh tools/demo/island-refresh.ps1 -SkipBuild      # restore only
 #   pwsh tools/demo/island-refresh.ps1 -SkipRestore    # build only (do not)
 #   pwsh tools/demo/island-refresh.ps1 -SyncAudio      # the sound libraries only
+#   pwsh tools/demo/island-refresh.ps1 -SyncVehicles   # the construction art only
 #
 # `-SyncAudio` (VEH3e audit) is the NON-destructive refresh for a wave that only
 # grew a generated sound library: it copies `samples/vehicle-audio/` and
@@ -55,12 +56,32 @@ param(
     [string]$Dest = "UE/Mannequins",
     [switch]$SkipBuild,
     [switch]$SkipRestore,
-    [switch]$SyncAudio
+    [switch]$SyncAudio,
+    [switch]$SyncVehicles
 )
 
 $ErrorActionPreference = "Stop"
 $holder = (Resolve-Path (Join-Path $Repo "..")).Path
 function Say($m) { Write-Host ("[{0}] {1}" -f (Get-Date -Format "HH:mm:ss"), $m) }
+
+# `-SyncVehicles` (wave VEH3f) puts the construction machines' REAL art at the
+# GUIDs the roster's art rows name: `inf-import --vehicles` over the
+# ConstructionVehiclesPack1 export, into `Content/UE/Vehicles/<machine>/`, and it
+# removes the committed fallback the recipe copied at those GUIDs. LOCAL ONLY
+# (Fab Standard -- the user confirms the licence before anything ships). A plain
+# `inf island build` copies the fallback back; run this after it.
+if ($SyncVehicles) {
+    $manifest = Join-Path $holder "$UeOut/veh3f/manifest.json"
+    if (-not (Test-Path $manifest)) { throw "no $manifest -- run tools/ue-export/export.py for ConstructionVehiclesPack1 first" }
+    Say "building inf-import (release)"
+    & cargo build --release -p inf-import -j 3
+    if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
+    $import = Join-Path $Repo "target\release\inf-import.exe"
+    & $import --manifest $manifest --into (Join-Path $holder $Project) --pack ConstructionVehiclesPack1 --dest UE --vehicles
+    if ($LASTEXITCODE -ne 0) { throw "inf-import --vehicles failed" }
+    Say "construction art synced into $Project/Content/UE/Vehicles"
+    exit 0
+}
 
 if ($SyncAudio) {
     $content = Join-Path (Join-Path $holder $Project) "Content"

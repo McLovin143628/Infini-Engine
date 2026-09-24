@@ -3159,7 +3159,7 @@ engine_voice_kind = 1.0
 turbo_boost_max = 0.6
 
 # HVY Nightshark -- inspired by the IAG Sentinel ARV -- armoured personnel carrier with bullet-resistant plating.
-# 7000 kg on 0.32 m of travel: 30 % static by construction (k = m g / 4 / (travel x 0.30)).
+# 7000 kg on 0.32 m of travel: 31 % static by construction (k = m g / 4 / (travel x 0.31)).
 [hvy_nightshark]
 label = "HVY Nightshark"
 
@@ -3176,8 +3176,8 @@ half_track_m = 1.032
 half_wheelbase_m = 1.68
 wheel_drop_m = -0.86
 cog_height_m = -0.31
-stiffness_n_per_m = 178830.0
-damping_ns_per_m = 21230.0
+stiffness_n_per_m = 173060.0
+damping_ns_per_m = 20880.0
 peak_torque_nm = 1000.0
 peak_torque_rpm = 2000.0
 redline_rpm = 3200.0
@@ -3191,7 +3191,7 @@ handbrake_force_n = 22250.0
 cylinders = 8.0
 
 # Mammoth Squaddie -- inspired by the GAZ Tigr -- all-terrain light utility troop mover.
-# 6000 kg on 0.32 m of travel: 30 % static by construction (k = m g / 4 / (travel x 0.30)).
+# 6000 kg on 0.32 m of travel: 31 % static by construction (k = m g / 4 / (travel x 0.31)).
 [mammoth_squaddie]
 label = "Mammoth Squaddie"
 
@@ -3208,8 +3208,8 @@ half_track_m = 1.032
 half_wheelbase_m = 1.71
 wheel_drop_m = -0.86
 cog_height_m = -0.31
-stiffness_n_per_m = 153280.0
-damping_ns_per_m = 18200.0
+stiffness_n_per_m = 148340.0
+damping_ns_per_m = 17900.0
 peak_torque_nm = 900.0
 peak_torque_rpm = 1800.0
 redline_rpm = 3000.0
@@ -3223,7 +3223,7 @@ handbrake_force_n = 19070.0
 cylinders = 6.0
 
 # HVY Chernobog -- inspired by the MAZ-543 missile transporter -- heavy multi-axle rocket platform (four drawn wheels).
-# 20000 kg on 0.32 m of travel: 30 % static by construction (k = m g / 4 / (travel x 0.30)).
+# 20000 kg on 0.32 m of travel: 31 % static by construction (k = m g / 4 / (travel x 0.31)).
 [hvy_chernobog]
 label = "HVY Chernobog"
 
@@ -3240,8 +3240,8 @@ half_track_m = 1.29
 half_wheelbase_m = 3.6
 wheel_drop_m = -0.98
 cog_height_m = -0.66
-stiffness_n_per_m = 510940.0
-damping_ns_per_m = 60650.0
+stiffness_n_per_m = 494460.0
+damping_ns_per_m = 59670.0
 peak_torque_nm = 2500.0
 peak_torque_rpm = 1300.0
 redline_rpm = 2200.0
@@ -3255,7 +3255,7 @@ handbrake_force_n = 63570.0
 cylinders = 12.0
 
 # HVY Scarab -- inspired by the Howe and Howe Ripsaw EV2 -- high-speed TRACKED military vehicle.
-# 4500 kg on 0.32 m of travel: 30 % static by construction (k = m g / 4 / (travel x 0.30)).
+# 4500 kg on 0.32 m of travel: 31 % static by construction (k = m g / 4 / (travel x 0.31)).
 [hvy_scarab]
 label = "HVY Scarab"
 
@@ -3272,8 +3272,8 @@ half_track_m = 0.975
 half_wheelbase_m = 0.78
 wheel_drop_m = -0.6
 cog_height_m = 0.1
-stiffness_n_per_m = 114960.0
-damping_ns_per_m = 13650.0
+stiffness_n_per_m = 111250.0
+damping_ns_per_m = 13420.0
 peak_torque_nm = 1500.0
 peak_torque_rpm = 1600.0
 redline_rpm = 3000.0
@@ -3293,7 +3293,7 @@ min_steer_deg = 0.0
 differential = "locked"
 
 # Declasse APC -- inspired by the BTR-80 amphibious -- eight-wheeled armoured personnel carrier (four drawn wheels).
-# 13600 kg on 0.32 m of travel: 30 % static by construction (k = m g / 4 / (travel x 0.30)).
+# 13600 kg on 0.32 m of travel: 31 % static by construction (k = m g / 4 / (travel x 0.31)).
 [declasse_apc]
 label = "Declasse APC"
 
@@ -3310,8 +3310,8 @@ half_track_m = 1.247
 half_wheelbase_m = 2.295
 wheel_drop_m = -0.81
 cog_height_m = -0.31
-stiffness_n_per_m = 347440.0
-damping_ns_per_m = 41240.0
+stiffness_n_per_m = 336230.0
+damping_ns_per_m = 40570.0
 peak_torque_nm = 1250.0
 peak_torque_rpm = 1800.0
 redline_rpm = 2600.0
@@ -3325,7 +3325,7 @@ handbrake_force_n = 43230.0
 cylinders = 8.0
 
 # HVY Dozer -- inspired by the Caterpillar D8T bulldozer -- heavy TRACKED earthmover with a front blade.
-# 38000 kg on 0.20 m of travel: 30 % static by construction (k = m g / 4 / (travel x 0.30)).
+# 38000 kg on 0.20 m of travel: 31 % static by construction (k = m g / 4 / (travel x 0.31)).
 [hvy_dozer]
 label = "HVY Dozer"
 
@@ -3340,10 +3340,10 @@ drag_coefficient = 0.9
 wheel_radius_m = 0.55
 half_track_m = 1.0673
 half_wheelbase_m = 0.8538
-wheel_drop_m = -1.2161
+wheel_drop_m = -1.2181
 cog_height_m = -0.456
-stiffness_n_per_m = 1553250.0
-damping_ns_per_m = 145770.0
+stiffness_n_per_m = 1503150.0
+damping_ns_per_m = 143400.0
 peak_torque_nm = 2500.0
 peak_torque_rpm = 1300.0
 redline_rpm = 2000.0
@@ -3364,7 +3364,7 @@ differential = "locked"
 art = "dozer"
 
 # HVY Cutter -- inspired by the Caterpillar 349 excavator -- rotating boom and bucket excavator (TRACKED).
-# 48000 kg on 0.20 m of travel: 30 % static by construction (k = m g / 4 / (travel x 0.30)). Single ratio; travel speed RAISED from 5 to 9.1 km/h by the 40:1 launch limit.
+# 48000 kg on 0.20 m of travel: 31 % static by construction (k = m g / 4 / (travel x 0.31)). Single ratio; travel speed RAISED from 5 to 9.1 km/h by the 40:1 launch limit.
 [hvy_cutter]
 label = "HVY Cutter"
 
@@ -3379,10 +3379,10 @@ drag_coefficient = 0.9
 wheel_radius_m = 0.5
 half_track_m = 1.1678
 half_wheelbase_m = 0.9343
-wheel_drop_m = -1.82
+wheel_drop_m = -1.822
 cog_height_m = -1.01
-stiffness_n_per_m = 1962000.0
-damping_ns_per_m = 184130.0
+stiffness_n_per_m = 1898710.0
+damping_ns_per_m = 181130.0
 peak_torque_nm = 2000.0
 peak_torque_rpm = 1600.0
 redline_rpm = 2000.0
@@ -3403,7 +3403,7 @@ differential = "locked"
 art = "excavator"
 
 # HVY Dump Truck -- inspired by the Mack Granite tandem tipper -- a road-going construction dump truck (drawn with the pack's AmericanDumpTruck; the doc's CAT 777 has no art).
-# 26000 kg on 0.20 m of travel: 30 % static by construction (k = m g / 4 / (travel x 0.30)).
+# 22000 kg on 0.20 m of travel: 31 % static by construction (k = m g / 4 / (travel x 0.31)).
 [hvy_dump_truck]
 label = "HVY Dump Truck"
 
@@ -3413,25 +3413,25 @@ body = "flatbed"
 half_width_m = 1.4729
 half_height_m = 1.4988
 half_length_m = 4.8238
-mass_kg = 26000.0
+mass_kg = 22000.0
 drag_coefficient = 0.8
 wheel_radius_m = 0.5764
 half_track_m = 1.0848
 half_wheelbase_m = 3.6374
-wheel_drop_m = -1.1301
+wheel_drop_m = -1.1321
 cog_height_m = -0.399
-stiffness_n_per_m = 1062750.0
-damping_ns_per_m = 99740.0
-peak_torque_nm = 1222.2
+stiffness_n_per_m = 870240.0
+damping_ns_per_m = 83020.0
+peak_torque_nm = 1444.4
 peak_torque_rpm = 1200.0
 redline_rpm = 2100.0
 shift_up_rpm = 1970.0
 shift_down_rpm = 910.0
 final_drive = 4.619
 max_speed_mps = 26.39
-max_engine_force_n = 105770.0
-brake_force_n = 153040.0
-handbrake_force_n = 68870.0
+max_engine_force_n = 125000.0
+brake_force_n = 129490.0
+handbrake_force_n = 58270.0
 cylinders = 6.0
 turbo_boost_max = 0.8
 rolling_resistance = 0.012
@@ -3439,7 +3439,7 @@ art = "dump_truck"
 wheel_offset_z_m = 0.4015
 
 # HVY Mixer -- inspired by the Peterbilt 365 concrete mixer -- a rotating-drum cement truck.
-# 30000 kg on 0.20 m of travel: 30 % static by construction (k = m g / 4 / (travel x 0.30)).
+# 26000 kg on 0.20 m of travel: 31 % static by construction (k = m g / 4 / (travel x 0.31)).
 [hvy_mixer]
 label = "HVY Mixer"
 
@@ -3449,25 +3449,25 @@ body = "tanker"
 half_width_m = 1.4729
 half_height_m = 1.8448
 half_length_m = 4.9304
-mass_kg = 30000.0
+mass_kg = 26000.0
 drag_coefficient = 0.8
 wheel_radius_m = 0.5758
 half_track_m = 1.1788
 half_wheelbase_m = 3.6374
-wheel_drop_m = -1.4762
+wheel_drop_m = -1.4782
 cog_height_m = -0.745
-stiffness_n_per_m = 1226250.0
-damping_ns_per_m = 115080.0
-peak_torque_nm = 1222.2
+stiffness_n_per_m = 1028470.0
+damping_ns_per_m = 98110.0
+peak_torque_nm = 1444.4
 peak_torque_rpm = 1200.0
 redline_rpm = 2100.0
 shift_up_rpm = 1970.0
 shift_down_rpm = 910.0
 final_drive = 4.87
 max_speed_mps = 25.0
-max_engine_force_n = 111650.0
-brake_force_n = 176580.0
-handbrake_force_n = 79460.0
+max_engine_force_n = 131950.0
+brake_force_n = 153040.0
+handbrake_force_n = 68870.0
 cylinders = 6.0
 turbo_boost_max = 0.8
 rolling_resistance = 0.012
@@ -3475,7 +3475,7 @@ art = "mixer"
 wheel_offset_z_m = 0.5082
 
 # HVY Forklift -- inspired by the Hyster H360 yard forklift -- a large dual-fork container-yard lifter (the pack's Forklift; the doc's Toyota Core IC is a quarter of its size).
-# 9000 kg on 0.20 m of travel: 30 % static by construction (k = m g / 4 / (travel x 0.30)).
+# 9000 kg on 0.20 m of travel: 31 % static by construction (k = m g / 4 / (travel x 0.31)).
 [hvy_forklift]
 label = "HVY Forklift"
 
@@ -3491,10 +3491,10 @@ drag_coefficient = 0.9
 wheel_radius_m = 0.5034
 half_track_m = 0.6965
 half_wheelbase_m = 1.0327
-wheel_drop_m = -0.8817
+wheel_drop_m = -0.8837
 cog_height_m = -0.075
-stiffness_n_per_m = 367880.0
-damping_ns_per_m = 34520.0
+stiffness_n_per_m = 356010.0
+damping_ns_per_m = 33960.0
 peak_torque_nm = 450.0
 peak_torque_rpm = 1600.0
 redline_rpm = 2800.0
@@ -3513,7 +3513,7 @@ art = "forklift"
 wheel_offset_z_m = -0.6998
 
 # Vapid Bucket Truck -- inspired by the Liebherr LTM all-terrain mobile crane -- a telescopic boom lift (drawn with the pack's MobileCrane; four of its axles drawn as four wheels).
-# 36000 kg on 0.24 m of travel: 38 % static by construction (k = m g / 4 / (travel x 0.38)).
+# 30000 kg on 0.24 m of travel: 38 % static by construction (k = m g / 4 / (travel x 0.38)).
 [vapid_bucket_truck]
 label = "Vapid Bucket Truck"
 
@@ -3523,25 +3523,25 @@ body = "tow_truck"
 half_width_m = 1.603
 half_height_m = 2.0189
 half_length_m = 8.7037
-mass_kg = 36000.0
+mass_kg = 30000.0
 drag_coefficient = 0.85
 wheel_radius_m = 0.7248
 half_track_m = 0.9872
 half_wheelbase_m = 4.8326
 wheel_drop_m = -1.5494
 cog_height_m = -1.188
-stiffness_n_per_m = 968090.0
-damping_ns_per_m = 93340.0
-peak_torque_nm = 1277.8
+stiffness_n_per_m = 806740.0
+damping_ns_per_m = 77790.0
+peak_torque_nm = 1666.7
 peak_torque_rpm = 1300.0
 redline_rpm = 2100.0
 shift_up_rpm = 1970.0
 shift_down_rpm = 910.0
 final_drive = 8.842
 max_speed_mps = 22.22
-max_engine_force_n = 140290.0
-brake_force_n = 282530.0
-handbrake_force_n = 127140.0
+max_engine_force_n = 182990.0
+brake_force_n = 235440.0
+handbrake_force_n = 105950.0
 cylinders = 6.0
 turbo_boost_max = 0.8
 art = "crane_truck"

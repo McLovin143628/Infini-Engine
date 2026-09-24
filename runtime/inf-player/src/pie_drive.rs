@@ -1790,9 +1790,55 @@ impl HeroLog {
             }
             None => (0, 0.0, 0.0, 0.0, "-", 0.0, 0.0, 0.0, 0.0, 0.0, 0),
         };
+        // **THE ROSTER COLUMNS** (wave VEH3f): which class and which lore row
+        // the car the hero sits in is, what its body is drawn with, the hitch
+        // angle when a trailer rides its fifth wheel, and the yaw rate when it
+        // steers by skid -- read off the WORLD (`inf_ecs::roster::row_of`,
+        // `body_kind`, `hitch_angle_deg`) and the chassis's own rapier body,
+        // never off a table the driver chose from.
+        let seated_car = guid
+            .and_then(|g| sim.world().entity_of(g))
+            .and_then(|e| {
+                sim.world()
+                    .world()
+                    .get::<inf_ecs::components::CharacterMovement>(e)
+                    .map(|cm| cm.runtime.seat)
+            })
+            .filter(|seat| seat.is_seated())
+            .map(|seat| seat.vehicle);
+        let (r_class, r_row, r_body, r_hitch, r_track) = match seated_car {
+            Some(car) => {
+                let row = inf_ecs::roster::row_of(sim.world(), car);
+                let class = row
+                    .and_then(|id| inf_ecs::roster::roster().get(id))
+                    .and_then(|d| d.roster_class)
+                    .map(|c| c.name())
+                    .unwrap_or("-");
+                let skid = row
+                    .and_then(|id| inf_ecs::roster::roster().get(id))
+                    .is_some_and(|d| !(d.class.max_steer_deg > 0.0));
+                let yaw = if skid {
+                    let b = sim.bridge3d();
+                    b.body_of(car)
+                        .and_then(|body| b.world().body_angvel(body))
+                        .map(|w| w.y)
+                        .unwrap_or(0.0)
+                } else {
+                    0.0
+                };
+                (
+                    class,
+                    row.unwrap_or("-"),
+                    inf_ecs::roster::body_kind(sim.world(), car),
+                    inf_ecs::roster::hitch_angle_deg(sim.world(), car),
+                    yaw,
+                )
+            }
+            None => ("-", "-", "-", None, 0.0),
+        };
         let line = match &probe.hero {
             Some(h) => format!(
-                "{:.3},{},{:.4},{:.4},{:.4},{},{:.4},{:.4},{:.2},{:.2},{:.2},{},{},{:.4},{:.4},{:.2},{},{},{},{:.3},{},{:.3},{},{:.3},{:.4},{:.4},{:.4},{},{},{},{},{},{},{},{},{},{:.1},{:.1},{:.1},{:.1},{:.1},{},{:.4},{:.4},{:.3},{:.0},{:.3},{:.3},{},{:.1},{:.1},{},{},{},{},{},{:.4},{:.1},{:.4},{:.4},{:.1},{},{:.2},{:.3},{:.3},{},{:.3},{:.3},{:.3},{:.3},{:.2},{}\n",
+                "{:.3},{},{:.4},{:.4},{:.4},{},{:.4},{:.4},{:.2},{:.2},{:.2},{},{},{:.4},{:.4},{:.2},{},{},{},{:.3},{},{:.3},{},{:.3},{:.4},{:.4},{:.4},{},{},{},{},{},{},{},{},{},{:.1},{:.1},{:.1},{:.1},{:.1},{},{:.4},{:.4},{:.3},{:.0},{:.3},{:.3},{},{:.1},{:.1},{},{},{},{},{},{:.4},{:.1},{:.4},{:.4},{:.1},{},{:.2},{:.3},{:.3},{},{:.3},{:.3},{:.3},{:.3},{:.2},{},{},{},{},{},{:.4}\n",
                 sim.steps() as f64 / 60.0,
                 probe.frame,
                 h.position[0],
@@ -1875,7 +1921,15 @@ impl HeroLog {
                 v_sq_f,
                 v_sq_r,
                 v_cmds,
-                v_thumps
+                v_thumps,
+                r_class,
+                r_row,
+                r_body,
+                match r_hitch {
+                    Some(a) => format!("{a:.2}"),
+                    None => String::new(),
+                },
+                r_track
             ),
             // **`no-hero` NAMES THE MODE COLUMN** (WPN2b audit, carried 224).
             //
@@ -1889,11 +1943,11 @@ impl HeroLog {
             // wave FIX1 and harmless only because no predicate happened to
             // match either spelling.
             //
-            // The row is 72 fields wide since wave VEH3e — 61 at VEH3d plus
-            // the eleven audio columns — which the gate asserts against the
+            // The row is 77 fields wide since wave VEH3f — 72 at VEH3e plus
+            // the five roster columns — which the gate asserts against the
             // armed branch above it and against the demo README.
             None => format!(
-                "{:.3},{},,,,no-hero,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,\n",
+                "{:.3},{},,,,no-hero,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,\n",
                 sim.steps() as f64 / 60.0,
                 probe.frame
             ),
@@ -2202,6 +2256,109 @@ impl CarPlacement {
             at.y,
             at.z,
             if placed { "placed" } else { "REFUSED (no body)" }
+        ))
+    }
+}
+
+/// **The demo loop's ROSTER LINE-UP** (wave VEH3f), `INF_PIE_LINEUP` =
+/// `x,y,z/yaw@seconds`: in a PREVIEW session, at `seconds` of sim time, one row
+/// of EACH of the doc's eighteen classes is spawned side by side on a line
+/// through `(x, y, z)` -- `y` the ground there -- every one facing `yaw`
+/// degrees, the shortest row of each class so the line stays a street's width,
+/// through the `vehicle.spawn` Blueprint verb's own door
+/// (`inf_ecs::roster::spawn_defined`). One placement, applied once; the rows are
+/// the committed catalogue, and nothing about them is special-cased.
+///
+/// It exists because the island parks the classes that fit a kerb and a lot of
+/// the construction ones, and a frame of all eighteen has nowhere else to come
+/// from.
+pub const LINEUP_ENV: &str = "INF_PIE_LINEUP";
+
+/// See [`LINEUP_ENV`].
+#[derive(Debug, Default, Clone)]
+pub struct Lineup {
+    at: Option<(glam::DVec3, f64, f64)>,
+    done: bool,
+}
+
+impl Lineup {
+    /// Read [`LINEUP_ENV`]; inert when absent, a refusal on stderr when
+    /// malformed.
+    pub fn from_env() -> Self {
+        let Ok(v) = std::env::var(LINEUP_ENV) else {
+            return Self::default();
+        };
+        let parsed = (|| {
+            let (body, when) = match v.trim().split_once('@') {
+                Some((b, t)) => (b, t.trim().parse::<f64>().ok()?),
+                None => (v.trim(), 1.0),
+            };
+            let (coords, yaw) = match body.split_once('/') {
+                Some((c, y)) => (c, y.trim().parse::<f64>().ok()?),
+                None => (body, 0.0),
+            };
+            let p: Vec<f64> = coords
+                .split(',')
+                .filter_map(|x| x.trim().parse::<f64>().ok())
+                .collect();
+            (p.len() == 3 && p.iter().all(|x| x.is_finite()) && yaw.is_finite() && when.is_finite())
+                .then(|| (glam::DVec3::new(p[0], p[1], p[2]), yaw, when.max(0.0)))
+        })();
+        if parsed.is_none() {
+            eprintln!("inf-player: {LINEUP_ENV} `{v}` is not `x,y,z/yaw@seconds`");
+        }
+        Self {
+            at: parsed,
+            done: false,
+        }
+    }
+
+    /// Spawn the line once its time has come. Answers a log line when it does.
+    pub fn tick(&mut self, sim: &mut RuntimeSim) -> Option<String> {
+        use inf_ecs::roster::{self, RosterClass};
+        let (at, yaw, when) = self.at?;
+        if self.done || (sim.steps() as f64) / 60.0 < when {
+            return None;
+        }
+        self.done = true;
+        let r = yaw.to_radians();
+        // The line runs across the heading: +X of a car facing `yaw`.
+        let side = glam::DVec3::new(inf_math::pcos64(r), 0.0, -inf_math::psin64(r));
+        let mut offset = 0.0f64;
+        let mut placed = Vec::new();
+        for class in RosterClass::ALL {
+            if class == RosterClass::Trailer {
+                continue;
+            }
+            let Some((id, def)) = roster::rows_of(class)
+                .into_iter()
+                .filter_map(|id| roster::roster().get(id).map(|d| (id, *d)))
+                .min_by(|a, b| {
+                    a.1.half_extents
+                        .z
+                        .total_cmp(&b.1.half_extents.z)
+                        .then(a.0.cmp(b.0))
+                })
+            else {
+                continue;
+            };
+            let hx = def.half_extents.x.abs();
+            offset += hx;
+            let mut p = at + side * offset;
+            p.y = inf_ecs::vehicle::resting_origin_y(&def, at.y) + 0.05;
+            if roster::spawn_defined(sim.world_mut(), id, p, yaw).is_some() {
+                placed.push(format!("{}={id}", class.name()));
+            }
+            offset += hx + 3.0;
+        }
+        sim.world_mut().propagate();
+        Some(format!(
+            "{LINEUP_ENV} at t={when:.1}s spawned {} rows along {offset:.1} m from {:.2},{:.2},{:.2} facing {yaw:.0} deg: {}",
+            placed.len(),
+            at.x,
+            at.y,
+            at.z,
+            placed.join(" ")
         ))
     }
 }
