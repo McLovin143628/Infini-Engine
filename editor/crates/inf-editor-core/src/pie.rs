@@ -232,6 +232,12 @@ impl PieSession {
         let (eof_tx, stderr_eof) = mpsc::channel();
         std::thread::spawn(move || {
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                // The player's audio device line (VEH3e audit) reaches the
+                // editor's own log: which device a Play session is heard on is
+                // a fact the person pressing Play should be able to read.
+                if line.starts_with("audio: ") {
+                    tracing::info!("pie: {line}");
+                }
                 sink.lock().expect("stderr sink poisoned").push(line);
             }
             // Sending after the loop is what makes this a happens-before edge:

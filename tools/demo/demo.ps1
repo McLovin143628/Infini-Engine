@@ -129,6 +129,17 @@ param(
     # he is out. The saloon's primitive body is an opaque box; without this the
     # seated, full-lock and throttle frames show a roof and no body.
     [double]$Cutaway = 0.0,
+    # **HOLD ON AN AUDIO BEAT** (VEH3e audit), `INF_PIE_AUDIO_HOLD` = seconds:
+    # the preview freezes its fixed steps the first time, per boarding, the
+    # car reaches the burnout, the kerb's thump and the handbrake slide, so a
+    # frame triggered on the row that saw it still shows it (the implementer's
+    # burnout frame landed a second late with the squeal already at zero). A
+    # hold runs no step; the mixer keeps playing what it was told.
+    [double]$AudioHold = 0.0,
+    # **SILENT** (VEH3e audit), `INF_AUDIO_DEVICE=off`: the player does not open
+    # the output device. Without it the preview plays OUT LOUD, and says which
+    # device in the hero log (`# audio: device ... opened`).
+    [switch]$NoAudioDevice,
     # Place the second committed body beside the pawn before the editor frame,
     # in the DOCUMENT only. See tools/demo/place.mjs for why it is not saved.
     [bool]$PlaceFemale = $true,
@@ -521,6 +532,10 @@ if ($BoardHold -ne "") { $env:INF_PIE_BOARD_HOLD = $BoardHold; Say "board hold: 
 else { Remove-Item env:INF_PIE_BOARD_HOLD -ErrorAction Ignore }
 if ($Cutaway -gt 0.0 -and $Cutaway -lt 1.0) { $env:INF_PIE_CUTAWAY = "$Cutaway"; Say "cutaway: the seated car drawn at alpha $Cutaway" }
 else { Remove-Item env:INF_PIE_CUTAWAY -ErrorAction Ignore }
+if ($AudioHold -gt 0.0) { $env:INF_PIE_AUDIO_HOLD = "$AudioHold"; Say "audio hold: $AudioHold s on the burnout, the thump and the slide" }
+else { Remove-Item env:INF_PIE_AUDIO_HOLD -ErrorAction Ignore }
+if ($NoAudioDevice) { $env:INF_AUDIO_DEVICE = "off"; Say "audio device: off (the preview is silent)" }
+else { Remove-Item env:INF_AUDIO_DEVICE -ErrorAction Ignore }
 if ($RenderAudio -ne "") { $env:INF_RENDER_AUDIO = $RenderAudio; Say "render audio: the session's mix is written to $RenderAudio" }
 else { Remove-Item env:INF_RENDER_AUDIO -ErrorAction Ignore }
 if ($TimeScale -lt 1.0) { $env:INF_PIE_TIME_SCALE = "$TimeScale"; Say "time scale: $TimeScale (the preview's fixed steps per wall second)" }
@@ -1117,6 +1132,13 @@ function Invoke-Veh3dLeg {
 # out -- with `-RenderAudio` the whole session is written to a WAV through the
 # offline mixer.
 function Invoke-Veh3eLeg {
+    # WHICH DEVICE (VEH3e audit): the player notes its `audio:` line in the
+    # hero log -- a device opened, or why the null backend plays (a capture
+    # session renders to its WAV instead and notes nothing).
+    $dev = @(Get-Content $heroCsv -ErrorAction Ignore | Where-Object { $_ -match "^# audio: " })
+    if ($dev.Count -gt 0) { Say ("AUDIO DEVICE: " + $dev[0].Substring(2)) }
+    elseif ($RenderAudio -ne "") { Say "AUDIO DEVICE: none -- this session renders to $RenderAudio (one mixer, the file is the sink)" }
+    else { Say "AUDIO DEVICE: the player noted no device line" }
     Restore-PlayerFocus "before the audio leg"
     Stand-Up "before the audio leg" | Out-Null
     $isRow = { param($c) $c.Count -gt 71 }

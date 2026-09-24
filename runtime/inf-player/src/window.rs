@@ -320,16 +320,24 @@ impl PlayerApp {
         // track either way), and `INF_AUDIO_DEVICE=off` keeps a session silent.
         // A machine with no output logs why and plays the null backend.
         #[cfg(not(target_arch = "wasm32"))]
-        if !capturing && !crate::pie_drive::audio_device_off() {
+        let device_line = if !capturing && !crate::pie_drive::audio_device_off() {
             let line = sim.open_audio_device();
             tracing::info!("{line}");
-        }
+            // On stderr too: a PIE session's stdout is the protocol, and the
+            // editor forwards the player's `audio:` lines into its own log.
+            eprintln!("{line}");
+            Some(line)
+        } else {
+            None
+        };
+        #[cfg(target_arch = "wasm32")]
+        let device_line: Option<String> = None;
         let (ui, map) = crate::ui::PlayerUi::open(crate::ui::settings_dir(), map);
         if let Some(e) = &ui.load_error {
             tracing::warn!("inf-player: {e}");
         }
         ui.apply_to_sim(&mut sim);
-        Self {
+        let mut app = Self {
             title,
             width,
             height,
@@ -361,7 +369,13 @@ impl PlayerApp {
             canvas: None,
             #[cfg(any(target_arch = "wasm32", target_os = "android"))]
             touch: crate::input::default_touch_controls(),
+        };
+        // The device line into the demo loop's hero log, where a session's
+        // own record can be read back beside its frames.
+        if let Some(line) = device_line {
+            app.hero_log.note(&line);
         }
+        app
     }
 
     /// Drain any pending PIE control frames. Returns `true` to request exit

@@ -35,6 +35,14 @@
 #   pwsh tools/demo/island-refresh.ps1                 # build + restore
 #   pwsh tools/demo/island-refresh.ps1 -SkipBuild      # restore only
 #   pwsh tools/demo/island-refresh.ps1 -SkipRestore    # build only (do not)
+#   pwsh tools/demo/island-refresh.ps1 -SyncAudio      # the sound libraries only
+#
+# `-SyncAudio` (VEH3e audit) is the NON-destructive refresh for a wave that only
+# grew a generated sound library: it copies `samples/vehicle-audio/` and
+# `samples/weapon-audio/` into the project's `Content/` -- where the recipe's
+# `content` list puts them -- byte for byte, and touches nothing else. The VEH3e
+# implementer copied the 56 vehicle files by hand (byte-identical, verified by the
+# audit); this is that copy, repeatable.
 param(
     # The engine checkout. The project and the manifests live beside it.
     [string]$Repo = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
@@ -46,12 +54,29 @@ param(
     # Where the clips go. The original import's answer; see the note above.
     [string]$Dest = "UE/Mannequins",
     [switch]$SkipBuild,
-    [switch]$SkipRestore
+    [switch]$SkipRestore,
+    [switch]$SyncAudio
 )
 
 $ErrorActionPreference = "Stop"
 $holder = (Resolve-Path (Join-Path $Repo "..")).Path
 function Say($m) { Write-Host ("[{0}] {1}" -f (Get-Date -Format "HH:mm:ss"), $m) }
+
+if ($SyncAudio) {
+    $content = Join-Path (Join-Path $holder $Project) "Content"
+    if (-not (Test-Path $content)) { throw "no $content -- build the island first" }
+    $copied = 0; $same = 0
+    foreach ($lib in @("vehicle-audio", "weapon-audio")) {
+        foreach ($f in Get-ChildItem (Join-Path $Repo "samples/$lib") -File) {
+            $dest = Join-Path $content $f.Name
+            $fresh = -not (Test-Path $dest)
+            if (-not $fresh) { $fresh = (Get-FileHash $f.FullName).Hash -ne (Get-FileHash $dest).Hash }
+            if ($fresh) { Copy-Item $f.FullName $dest -Force; $copied++ } else { $same++ }
+        }
+    }
+    Say "sound libraries synced into $content`: $copied copied, $same already identical"
+    exit 0
+}
 
 # The two binaries, built release because this writes hundreds of megabytes of
 # texture and a debug importer takes minutes to do it.
