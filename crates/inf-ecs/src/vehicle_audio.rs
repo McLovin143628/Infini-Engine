@@ -713,6 +713,18 @@ pub struct VoiceMemory {
     tick: u64,
 }
 
+/// Every car a player-controlled body is seated in, in guid order.
+fn player_cars(world: &EcsWorld) -> BTreeSet<Uuid> {
+    let w = world.world();
+    let Some(mut q) = w.try_query::<&CharacterMovement>() else {
+        return BTreeSet::new();
+    };
+    q.iter(w)
+        .filter(|cm| cm.player_controlled && cm.runtime.seat.is_seated())
+        .map(|cm| cm.runtime.seat.vehicle)
+        .collect()
+}
+
 /// The source key of an entity — the P12.3 convention both hosts use.
 pub fn entity_key(guid: Uuid) -> u64 {
     guid.as_u128() as u64
@@ -789,6 +801,9 @@ impl VoiceMemory {
         self.tick = self.tick.wrapping_add(1);
         let tick = self.tick;
         let traffic = crate::traffic::traffic_of(world).map(|t| &t.records);
+        // The cars a PLAYER sits in sing the full stack whoever's they are —
+        // a stolen traffic car is the player's car now.
+        let played = player_cars(world);
         for (chassis, t) in cars {
             let Some(e) = world.entity_of(*chassis) else {
                 continue;
@@ -802,7 +817,8 @@ impl VoiceMemory {
             };
             seen.insert(*chassis);
             let at = src.spatial.then(|| position_of(world, *chassis));
-            let near = traffic.is_some_and(|r| r.contains_key(chassis));
+            let near =
+                traffic.is_some_and(|r| r.contains_key(chassis)) && !played.contains(chassis);
             let mem = self.cars.entry(*chassis).or_default();
             mem.near = near;
             plan_car(&mut cues, mem, *chassis, t, family, &src, at, dt, tick);
@@ -1181,6 +1197,19 @@ fn plan_car(
         } else {
             car_loops(t, family, src)
         };
+        // A loop the stack no longer has (a traffic car the player got out
+        // of drops to the NEAR stack) is stopped, in key order.
+        let keep: BTreeSet<u64> = loops.iter().map(|l| voice_key(key, l.0)).collect();
+        let gone: Vec<u64> = mem
+            .loops
+            .keys()
+            .filter(|k| !keep.contains(k))
+            .copied()
+            .collect();
+        for source in gone {
+            mem.loops.remove(&source);
+            cues.push(VoiceCue::Stop { source });
+        }
         for (layer, clip, volume, pitch) in loops {
             let source = voice_key(key, layer);
             // A NEAR loop is re-told on its own phase only (see `NEAR_EVERY`).

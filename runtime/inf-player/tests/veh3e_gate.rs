@@ -1956,6 +1956,62 @@ fn a_traffic_car_sings_the_near_stack_on_its_own_cadence() {
         "the NEAR stack is not cheaper: {t_updates} vs {h_updates}"
     );
     assert_eq!((mem.near_voiced_cars(), mem.voiced_cars()), (1, 2));
+
+    // THE PLAYER TAKES IT: a player-controlled body seated in the traffic car
+    // makes it the player's car -- the full stack starts on the keys the NEAR
+    // stack did not have -- and getting out drops it back, STOPPING them.
+    let h = world.spawn_with_guid(HERO, "Hero", None);
+    world.world_mut().entity_mut(h).insert(hero_bits());
+    let seat = |world: &mut EcsWorld, car: Uuid| {
+        world
+            .world_mut()
+            .get_mut::<CharacterMovement>(h)
+            .expect("a mover")
+            .runtime
+            .seat
+            .vehicle = car;
+    };
+    let t = telemetry(0.0, 20.0, SurfaceClass::Asphalt);
+    seat(&mut world, TRAFFIC);
+    let took: Vec<va::VoiceCue> = mem
+        .plan(&world, &[(TRAFFIC, t)], DT)
+        .into_iter()
+        .filter(|c| traffic_keys.contains(&c.source()))
+        .collect();
+    let started: BTreeSet<u64> = took
+        .iter()
+        .filter(|c| matches!(c, va::VoiceCue::Play { .. }))
+        .map(|c| c.source())
+        .collect();
+    seat(&mut world, Uuid::nil());
+    let left: BTreeSet<u64> = mem
+        .plan(&world, &[(TRAFFIC, t)], DT)
+        .into_iter()
+        .filter(|c| matches!(c, va::VoiceCue::Stop { .. }) && traffic_keys.contains(&c.source()))
+        .map(|c| c.source())
+        .collect();
+    println!(
+        "THE PLAYER TAKES A TRAFFIC CAR: {} loop(s) started, {} stopped on getting out",
+        started.len(),
+        left.len()
+    );
+    let full: BTreeSet<u64> = [
+        VoiceLayer::GrainIdle,
+        VoiceLayer::GrainFull,
+        VoiceLayer::Whine,
+        VoiceLayer::SquealFront,
+    ]
+    .iter()
+    .map(|l| tk(*l))
+    .collect();
+    assert!(
+        full.is_subset(&started),
+        "the player's traffic car did not get the full stack"
+    );
+    assert_eq!(
+        started, left,
+        "getting out did not drop back to the NEAR stack"
+    );
 }
 
 // ── 10. BOTH HOSTS ──────────────────────────────────────────────────────────
