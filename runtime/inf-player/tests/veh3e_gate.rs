@@ -33,6 +33,7 @@
 //! | `a_door_held_open_through_the_close_does_not_slam` (audit) | the slam key on a shipped exit whose door is held open through `ClosingDoor`, against a control that shuts; the joint's angle off the damage row | the end-step hinge read reverted to the machine's reset `door_deg` | one timed-out close, one shut close | **passes** (no door sound at all) -- the false slam was VEH3e's own |
 //! | `the_course_render_does_not_clip` (audit) | the WAV BYTES of the shipped course rendered through the render-to-file door, with the master track and without it | the limiter taken off the master track | the control's peak within 1 dB of full scale | n/a -- a property of the mix, not the stream |
 //! | `a_traffic_car_sings_the_near_stack_on_its_own_cadence` (audit) | the planner's cues for a traffic car beside an authored one: which keys Play, how often a loop is re-told, the grain pitch sent | `NEAR_EVERY` 1; the traffic test answering false | two Plays, >10 pitches | **fails** -- traffic was voiceless |
+//! | `the_road_rolls_by_speed_on_its_surface` (audit) | the roll key's folded volume/pitch each step against `roll_voice(speed)`; its re-`Play` clip on gravel | `roll_voice` reading the throttle; the roll clip pinned to sealed | loud >15 m/s, silent stopped, a gravel re-Play | **fails** -- no roll key |
 //! | `a_bail_out_lands_with_a_thud` | the thud key on a moving exit | the thud branch deleted | one bail | **fails** |
 //! | `pie_equals_shipping_on_the_audio_course` | both hosts' per-step command slices | the planner called with `dt * 2.0` in one host | every kind of cue seen | passes — it compares, it does not judge |
 //! | `the_audio_log_holds_the_drive_and_the_count_is_stated` | `dropped_audio_commands`, the per-step counts | `AUDIO_LOG_CAPACITY` cut to 4096 | the whole course | passes (3 a step) |
@@ -1074,6 +1075,66 @@ fn the_squeal_follows_slip_and_not_speed() {
         slow_loud > 5 && fast_loud > 5,
         "the course did not slide at both speeds"
     );
+}
+
+/// **THE ROAD ROLLS BY SPEED, ON ITS SURFACE** (VEH3e audit, (g')). Over the
+/// shipped course, on every step the roll key is live, its folded volume and
+/// pitch are `roll_voice` of that step's own telemetry (speed; no wheel down,
+/// no roll), and the clip is the rear axle's surface: the slide onto the
+/// gravel strip re-`Play`s the roll with `Roll_Gravel`.
+///
+/// **Anti-vacuity**: loud steps above 15 m/s AND silent steps stopped with the
+/// engine running; a gravel re-Play.
+///
+/// **Mutations → red**: `roll_voice` reading the throttle instead of the
+/// speed; the roll clip pinned to the sealed surface.
+#[test]
+fn the_road_rolls_by_speed_on_its_surface() {
+    let steps = shipped_course();
+    let states = fold(&steps);
+    let roll = key(VoiceLayer::Roll);
+    let (mut checked, mut loud_fast, mut quiet_stopped) = (0usize, 0usize, 0usize);
+    let mut worst = 0.0f64;
+    for (s, st) in steps.iter().zip(&states) {
+        let Some(v) = s.voice else { continue };
+        let Some(q) = st.get(&roll) else { continue };
+        let (wv, wp) = va::roll_voice(&v);
+        let wv = if wv >= va::VOICE_FLOOR { wv } else { 0.0 };
+        worst = worst.max((q.volume - wv).abs());
+        if wv > 0.0 {
+            worst = worst.max((q.pitch - wp).abs());
+        }
+        checked += 1;
+        if v.speed_mps.abs() > 15.0 && q.volume > 0.1 {
+            loud_fast += 1;
+        }
+        if v.speed_mps.abs() < 0.3 && v.running() && q.volume == 0.0 {
+            quiet_stopped += 1;
+        }
+    }
+    let gravel: Vec<usize> = steps
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| {
+            plays_on(s, roll)
+                .iter()
+                .any(|p| p.clip == va::roll_clip(SurfaceVoice::Loose))
+        })
+        .map(|(i, _)| i)
+        .collect();
+    println!(
+        "THE ROLLING ROAD: {checked} live steps, worst |sent - roll_voice| {worst:.2e}; loud above 15 m/s on {loud_fast}, silent at a standstill on {quiet_stopped}; re-Played onto gravel on steps {gravel:?}"
+    );
+    assert!(checked > 300);
+    assert!(
+        worst < 1e-12,
+        "a roll volume or pitch is not roll_voice(speed)"
+    );
+    assert!(
+        loud_fast > 10 && quiet_stopped > 10,
+        "the course never rolled fast and stood still"
+    );
+    assert!(!gravel.is_empty(), "the roll never changed onto the gravel");
 }
 
 /// **A SQUEAL CHANGES ITS CLIP WITH THE SURFACE**: the handbrake slide carries
