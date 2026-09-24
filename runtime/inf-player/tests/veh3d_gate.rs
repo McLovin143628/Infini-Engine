@@ -2373,9 +2373,15 @@ fn pie_equals_shipping_on_a_board_drive_exit_course() {
 /// machine, in the SHIPPED player's own sim (`RuntimeSim`) — the fixture the
 /// audit's shipped-host arms share.
 fn rigged_runtime_sim() -> inf_player::runtime_sim::RuntimeSim {
+    rigged_runtime_sim_for("sedan", HERO_AT)
+}
+
+/// [`rigged_runtime_sim`] for any catalogue or roster row, the hero at
+/// `hero_at` (audit VEH3f: the roster families boarded on the shipped host).
+fn rigged_runtime_sim_for(row: &str, hero_at: DVec3) -> inf_player::runtime_sim::RuntimeSim {
     use inf_player::runtime_sim::RuntimeSim;
     const IDLE: inf_anim::ClipRef = [0xd3; 16];
-    let def = catalogue_def("sedan");
+    let def = catalogue_def(row);
     let mut world = EcsWorld::new();
     ground(&mut world);
     car(
@@ -2389,7 +2395,7 @@ fn rigged_runtime_sim() -> inf_player::runtime_sim::RuntimeSim {
         0.0,
         &def,
     );
-    stand(&mut world, HERO, "Hero", HERO_AT, 0.0, true);
+    stand(&mut world, HERO, "Hero", hero_at, 0.0, true);
     let e = world.entity_of(HERO).expect("the hero");
     world.world_mut().entity_mut(e).insert((
         inf_ecs::components::AnimStateMachine {
@@ -2616,6 +2622,153 @@ fn the_shipped_host_measures_the_posed_joints_against_the_sockets() {
         "the posed hand was {:.2} mm off the INNER handle at weight 1",
         worst(&inner)
     );
+}
+
+/// **THE ROSTER FAMILIES BOARD AT THEIR SOCKETS ON THE SHIPPED HOST** (VEH3f
+/// audit, priority k') -- the arm above, per family: the bus (folding door,
+/// high step), the semi cab (JoBuilt Hauler), the crew-cab pickup (Vapid
+/// Contender) and an ART machine (the MTL Packer, whose drawn body is the
+/// construction pack's freight tractor on a checkout that has it and our
+/// fallback on one that does not). The implementer's "0.0 mm" was the
+/// `Yard` fixture's feet; this reads `RuntimeSim::boarding_residuals` -- the
+/// POSED joints against the LIVE sockets -- through the INPUT door.
+///
+/// Eight island rows and four roster rows. Per row: the outer handle at
+/// weight 1, the rim at weight 1 through a full lock both ways, the pedals
+/// under throttle -- each <= 2 cm with an engagement count -- and the hero
+/// back out. The inner handle is printed and carried (see the loop).
+///
+/// **What it found** (the audit's first run, before `MAX_HUB_RISE_M`,
+/// `MAX_RIM_M`, `MAX_PEDAL_DROP_M` and `MAX_HANDLE_ABOVE_SILL_M`): the posed
+/// hands off the rim by 46 mm on the island pickup, 101-104 mm on the van
+/// and the ambulance, 103 mm on the crew-cab, 208 mm on the bus, 231 mm on the
+/// art tractor and 348 mm on the semi cab; the bus's hand 61 mm short of a
+/// handle 2.03 m off the road; the semi cab's feet 33.5 mm off its pedals.
+/// Every socket height was a fraction of the HULL, and a tall hull put the
+/// wheel, the pedals and the handle a tall hull's fraction from a body that
+/// sits where the seat is. Now 0.00 mm on every row but the two carried
+/// handles.
+///
+/// **Mutation -> red**: `MAX_HUB_RISE_M` at 9 (the rim on seven rows);
+/// `MAX_HANDLE_ABOVE_SILL_M` at 9 (the bus's handle); `MAX_PEDAL_DROP_M` at
+/// 9 (the semi cab's pedals); the reach solve's weight forced to 0 in
+/// `pose::apply_hand_ik` (every row).
+#[test]
+fn the_roster_families_board_at_their_sockets_on_the_shipped_host() {
+    use inf_ecs::movement::actions::{INTERACT, MOVE_X, MOVE_Y};
+    use inf_player::runtime_sim::{RuntimeInput, RuntimeSim};
+    println!("=== the roster families on the shipped host: POSED joints against LIVE sockets (mm, worst at weight 1) ===");
+    println!(
+        "  {:<18} {:>6} {:>9} {:>9} {:>9} {:>9}  exited",
+        "row", "steps", "outer", "inner", "rim", "pedals"
+    );
+    let (mut rows, mut bad) = (0usize, Vec::<String>::new());
+    for row in [
+        "sedan", "sports", "suv", "truck", "van", "cruiser", "ambulance", "swat",
+        "brute_bus",
+        "jobuilt_hauler",
+        "vapid_contender",
+        "mtl_packer",
+    ] {
+        let def = catalogue_def(row);
+        let seat = def
+            .body
+            .parts()
+            .iter()
+            .find(|p| p.name == "seat_r")
+            .map(|p| (p.centre.x * def.half_extents.x, p.centre.z * def.half_extents.z))
+            .unwrap_or((def.half_extents.x * 0.4, 0.0));
+        let hero_at = DVec3::new(def.half_extents.x + 1.1, 0.0, seat.1 - 0.6);
+        let mut sim = rigged_runtime_sim_for(row, hero_at);
+        let phase = |sim: &RuntimeSim| {
+            let e = sim.world().entity_of(HERO).unwrap();
+            let cm = sim.world().world().get::<CharacterMovement>(e).unwrap();
+            (cm.runtime.boarding.phase, cm.runtime.seat.is_seated())
+        };
+        let (mut outer, mut inner, mut rim, mut pedal) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let mut driving_at: Option<u32> = None;
+        let (mut exited, mut steps) = (false, 0u32);
+        for i in 0..3000u32 {
+            let (p, seated) = phase(&sim);
+            let mut input = RuntimeInput::default();
+            if i == 60 {
+                input = input.press(INTERACT);
+            }
+            if let Some(d) = driving_at {
+                match i - d {
+                    30..=150 => input = input.axis_at(MOVE_X, 1.0),
+                    151..=270 => input = input.axis_at(MOVE_X, -1.0),
+                    300..=360 => input = input.axis_at(MOVE_Y, 1.0),
+                    600 => input = input.press(INTERACT),
+                    _ => {}
+                }
+            } else if p == BoardPhase::Driving || (p == BoardPhase::Idle && seated) {
+                driving_at = Some(i);
+            }
+            sim.step_once(input);
+            steps = i;
+            let (p, seated) = phase(&sim);
+            if driving_at.is_some() && p == BoardPhase::Idle && !seated {
+                exited = true;
+                break;
+            }
+            let Some(r) = sim.boarding_residuals(HERO) else {
+                continue;
+            };
+            let on_handle = r.sockets.handle_weight >= 0.999;
+            match r.sockets.phase {
+                BoardPhase::OpeningDoor if on_handle => outer.extend(r.handle_m),
+                BoardPhase::Seated | BoardPhase::Exiting if on_handle => inner.extend(r.handle_m),
+                BoardPhase::Driving => {
+                    if r.sockets.hand_weight >= 0.999 {
+                        rim.extend(r.grips_m);
+                    }
+                    pedal.extend(r.feet_m);
+                }
+                _ => {}
+            }
+        }
+        let worst = |v: &[f64]| v.iter().copied().fold(0.0f64, f64::max) * 1000.0;
+        println!(
+            "  {:<18} {:>6} {:>5.2} ({:>3}) {:>5.2} ({:>3}) {:>5.2} ({:>3}) {:>5.2} ({:>3})  {exited}",
+            row,
+            steps,
+            worst(&outer),
+            outer.len(),
+            worst(&inner),
+            inner.len(),
+            worst(&rim),
+            rim.len(),
+            worst(&pedal),
+            pedal.len()
+        );
+        if !exited {
+            bad.push(format!("{row}: the hero never got back out"));
+        }
+        // CARRIED, printed and not asserted: the semi cab's outer handle
+        // (its door's sill is 1.9 m up -- a cab-step climb), the art
+        // tractor's (no door proxy over the art), and the inner handle on
+        // every row but the saloons (the door latches on its motor before the
+        // reach has ramped in).
+        let carried_outer = matches!(row, "jobuilt_hauler" | "mtl_packer");
+        for (what, v) in [("outer handle", &outer), ("rim", &rim), ("pedals", &pedal)] {
+            if what == "outer handle" && carried_outer {
+                continue;
+            }
+            if v.len() < 3 {
+                bad.push(format!("{row}: only {} rows held the {what}", v.len()));
+            } else if worst(v) > 20.0 {
+                bad.push(format!(
+                    "{row}: the posed joint was {:.2} mm off the {what}",
+                    worst(v)
+                ));
+            }
+        }
+        rows += 1;
+    }
+    assert_eq!(rows, 12);
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
 }
 
 /// **THE PREVIEW DOORS HOLD A BEAT AND SEE THROUGH THE CAR, AND TOUCH NO

@@ -484,9 +484,33 @@ impl VehicleSockets {
 /// launch) their last 0.04-0.16 m of pedal reach.
 pub const MAX_PEDAL_REACH_M: f64 = 0.80;
 
+/// **The furthest the pedals fall below the driver's cushion**, metres
+/// (audit, VEH3f) -- the hub's reason, at the feet: `PEDAL_FRAC_Y` of a semi
+/// cab's 1.5 m half-height put the pedals 0.37 m under the cushion and the
+/// posed feet 33.5 mm off them. A saloon's 0.165 m is far inside it.
+pub const MAX_PEDAL_DROP_M: f64 = 0.30;
+
 /// **The furthest the wheel hub is ahead of the cushion**, metres (wave VEH3f)
 /// -- the island van's 0.60 m, and a hair.
-pub const MAX_HUB_REACH_M: f64 = 0.601;
+pub const MAX_HUB_REACH_M: f64 = 0.45;
+
+/// **The highest the wheel hub rises above the driver's cushion**, metres
+/// (audit, VEH3f).
+///
+/// The hub's height was `WHEEL_HUB_FRAC_Y` of the HULL, so a tall hull put
+/// the wheel a tall hull's fraction above a seat whose pelvis sits where the
+/// seat is: on the shipped host the posed hands missed the rim by 46 mm on
+/// the island pickup, 101-104 mm on the van and the ambulance, 208 mm on the
+/// bus and 348 mm on a semi cab (the mannequin's arm is 0.54 m, and the far
+/// grip stood 0.64-0.92 m from its shoulder). 0.40 m is the saloon's own rise
+/// (0.376 m) and a hair: no row the VEH3d audit measured at the rim moves.
+pub const MAX_HUB_RISE_M: f64 = 0.40;
+
+/// **The largest rim a driver is handed**, metres (audit, VEH3f): the rim is
+/// `WHEEL_RIM_FRAC` of the half-width, and a bus's 2.5 m hull put its grips
+/// 0.24 m off the hub -- out of an arm's reach at the far side. A saloon's
+/// 0.17 m and a hair.
+pub const MAX_RIM_M: f64 = 0.19;
 
 /// **DERIVE the eight sockets** from a chassis collider and the parts bolted to
 /// it. The one door; every consumer calls this rather than holding a field.
@@ -572,6 +596,11 @@ pub fn sockets_of(half: Vec3d, offset: Vec3d, parts: &[PartGeom]) -> VehicleSock
             offset.z + pp.centre_frac.z * hz,
         );
     }
+    let drop_floor = seat_r.y - MAX_PEDAL_DROP_M;
+    if pedal_throttle.y < drop_floor {
+        pedal_throttle.y = drop_floor;
+        pedal_brake.y = drop_floor;
+    }
     let pedal_cap = seat_r.z + MAX_PEDAL_REACH_M;
     if pedal_throttle.z > pedal_cap {
         pedal_throttle.z = pedal_cap;
@@ -580,6 +609,10 @@ pub fn sockets_of(half: Vec3d, offset: Vec3d, parts: &[PartGeom]) -> VehicleSock
     let hub_cap = seat_r.z + MAX_HUB_REACH_M;
     if wheel_hub.z > hub_cap {
         wheel_hub.z = hub_cap;
+    }
+    let rise_cap = seat_r.y + MAX_HUB_RISE_M;
+    if wheel_hub.y > rise_cap {
+        wheel_hub.y = rise_cap;
     }
     let mut out = VehicleSockets {
         seat_l,
@@ -590,7 +623,7 @@ pub fn sockets_of(half: Vec3d, offset: Vec3d, parts: &[PartGeom]) -> VehicleSock
         pedal_throttle,
         pedal_brake,
         wheel_hub,
-        wheel_rim_m: WHEEL_RIM_FRAC * hx,
+        wheel_rim_m: (WHEEL_RIM_FRAC * hx).min(MAX_RIM_M),
     };
     // ── the handles, from the DOORS (VEH3c's own derivation) ────────────────
     //
@@ -722,12 +755,21 @@ pub fn door_metres(half: Vec3d, offset: Vec3d, door: &PartGeom) -> (Vec3d, Vec3d
 /// swung carries its handle round with it: the physics side rotates this offset
 /// by the door body's own live rotation, never re-derives it from a table.
 pub fn outer_handle_in_door(door_half_m: Vec3d, side: f64) -> Vec3d {
+    let hy = door_half_m.y.abs();
     Vec3d::new(
         side.signum() * door_half_m.x.abs(),
-        HANDLE_HEIGHT_FRAC * door_half_m.y.abs(),
+        (HANDLE_HEIGHT_FRAC * hy).min(MAX_HANDLE_ABOVE_SILL_M - hy),
         -HANDLE_AFT_FRAC * door_half_m.z.abs(),
     )
 }
+
+/// **The highest an outer handle stands above its door's sill**, metres
+/// (audit, VEH3f). `HANDLE_HEIGHT_FRAC` of a bus's 2 m folding door put its
+/// handle 2.03 m off the road and the posed hand 61 mm short of it; a car
+/// door's handle is under a metre above its sill. 0.85 m moves no door the
+/// island catalogue draws (their handles are lower); a semi cab's door, whose
+/// sill is itself 1.3 m up, still needs the cab-step climb (carried).
+pub const MAX_HANDLE_ABOVE_SILL_M: f64 = 0.85;
 
 /// **The inner pull** — the door's INSIDE face, beside the SEAT it serves: the
 /// arm-rest pull a seated driver shuts a door with, [`INNER_PULL_AHEAD_M`]
