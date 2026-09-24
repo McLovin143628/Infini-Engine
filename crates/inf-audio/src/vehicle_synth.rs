@@ -343,7 +343,7 @@ pub fn squeal_pcm(surface: u8) -> Vec<f64> {
 ///
 /// Six tenths of a second, looping without a seam: every modulation closes in
 /// whole cycles over it (multiples of 5/3 Hz), and the noise is
-/// [`seamless_noise`]. The engine voices it by SPEED and picks it by SURFACE —
+/// `seamless_noise`. The engine voices it by SPEED and picks it by SURFACE —
 /// the research doc's "continuous surface roll noise".
 pub fn roll_pcm(surface: u8) -> Vec<f64> {
     let rate = f64::from(SYNTH_RATE);
