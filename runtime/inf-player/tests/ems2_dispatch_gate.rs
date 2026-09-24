@@ -725,7 +725,44 @@ fn three_sirens_do_not_evict_the_audio_log() {
     let mut positions = 0usize;
     let mut plays = 0usize;
     let mut stops = 0usize;
+    // **The sirens' balance, not the town's** (re-blessed with this cause by
+    // the VEH3e audit). Traffic near the hero SINGS now -- a traffic car in
+    // the `Full` tier plays the planner's NEAR stack on its own salted keys --
+    // so a count of every `Play` against every `Stop` in the log was no longer
+    // a count of sirens (53 open against 2 units still out, all of the rest
+    // traffic engines that were still running). The voices of the traffic
+    // population are set aside by key; what remains is what this arm names.
+    let traffic_voices: std::collections::BTreeSet<u64> = inf_ecs::traffic::traffic_of(sim.world())
+        .map(|t| {
+            t.records
+                .keys()
+                .flat_map(|g| {
+                    inf_ecs::vehicle_audio::VoiceLayer::ALL
+                        .iter()
+                        .map(move |l| {
+                            inf_ecs::vehicle_audio::voice_key(
+                                inf_ecs::vehicle_audio::entity_key(*g),
+                                *l,
+                            )
+                        })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut traffic_cmds = 0usize;
     for c in sim.audio_command_log() {
+        let source = match c {
+            inf_audio::AudioCommand::Play(p) => Some(p.source),
+            inf_audio::AudioCommand::Stop { source }
+            | inf_audio::AudioCommand::SetPosition { source, .. }
+            | inf_audio::AudioCommand::SetPitch { source, .. }
+            | inf_audio::AudioCommand::SetVolume { source, .. } => Some(*source),
+            _ => None,
+        };
+        if source.is_some_and(|k| traffic_voices.contains(&k)) {
+            traffic_cmds += 1;
+            continue;
+        }
         match c {
             inf_audio::AudioCommand::SetPosition { .. } => positions += 1,
             inf_audio::AudioCommand::Play(_) => plays += 1,
@@ -733,6 +770,7 @@ fn three_sirens_do_not_evict_the_audio_log() {
             _ => {}
         }
     }
+    println!("EMS2: {traffic_cmds} command(s) on the traffic's own voice keys, set aside");
     println!(
         "\nEMS2 audio ring over {RUN} steps: {log} of {capacity} held, {dropped} \
          dropped; {plays} Play, {positions} SetPosition, {stops} Stop \
