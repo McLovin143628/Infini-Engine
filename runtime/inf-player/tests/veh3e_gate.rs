@@ -30,6 +30,7 @@
 //! | `the_kerb_thumps_front_then_rear` | the impulse keys' Plays at the kerb | the rising-edge guard dropped (an impulse every step of a spike) | two thumps | **fails** |
 //! | `a_parked_car_is_silent_until_somebody_gets_in` | the car keys before boarding, at entry, after exit | `running()` answering true | steps silent, Plays at entry, Stops at exit | **fails** — a Play on the first step it is seen |
 //! | `the_door_slams_on_the_shut_step_and_the_motor_rows_are_silent` | the door keys on a RIGGED shipped host against `door_deg` and `handle_weight` | the handle gate dropped; the shut edge dropped | slam rows, hand rows, motor rows | **fails** — no door sound at all |
+//! | `a_door_held_open_through_the_close_does_not_slam` (audit) | the slam key on a shipped exit whose door is held open through `ClosingDoor`, against a control that shuts; the joint's angle off the damage row | the end-step hinge read reverted to the machine's reset `door_deg` | one timed-out close, one shut close | **passes** (no door sound at all) -- the false slam was VEH3e's own |
 //! | `a_bail_out_lands_with_a_thud` | the thud key on a moving exit | the thud branch deleted | one bail | **fails** |
 //! | `pie_equals_shipping_on_the_audio_course` | both hosts' per-step command slices | the planner called with `dt * 2.0` in one host | every kind of cue seen | passes — it compares, it does not judge |
 //! | `the_audio_log_holds_the_drive_and_the_count_is_stated` | `dropped_audio_commands`, the per-step counts | `AUDIO_LOG_CAPACITY` cut to 4096 | the whole course | passes (3 a step) |
@@ -1542,6 +1543,169 @@ fn the_door_slams_on_the_shut_step_and_the_motor_rows_are_silent() {
     assert_eq!(
         slams_direct, 1,
         "a door that stayed shut slammed {slams_direct} times"
+    );
+}
+
+/// One stationary exit on the shipped host, the hero's door HELD OPEN through
+/// the whole `ClosingDoor` phase when `hold` — the damage row's motor target
+/// rewritten to the open angle every step, which is a hand (or a bollard) on
+/// the door: the joint re-aims whenever its command moves. Answers the slam
+/// steps, the step the boarding ended on, and the door's MEASURED hinge angle
+/// (off the joint, through the damage row) on that step.
+fn exit_with_the_door(hold: bool) -> (Vec<usize>, Option<usize>, f64, usize) {
+    fn exit(k: u32) -> Intent {
+        if k == 60 {
+            Intent::press()
+        } else {
+            Intent::default()
+        }
+    }
+    let mut host = Shipped(inf_player::runtime_sim::RuntimeSim::new(
+        shipped_world(&course_def()),
+        Vec::new(),
+        glam::DVec2::new(0.0, -9.81),
+        HZ,
+    ));
+    let slam = va::door_key(va::entity_key(HERO), DoorLayer::Slam);
+    let mut wheel: Option<u32> = None;
+    let mut slams = Vec::new();
+    let mut ended: Option<usize> = None;
+    let mut end_deg = f64::NAN;
+    let mut door = Uuid::nil();
+    let mut open_deg = 0.0f64;
+    let mut closing_steps = 0usize;
+    let mut last = BoardPhase::Idle;
+    for step in 0..(BOARD_MAX + 400) {
+        let k = wheel.map(|w| step - w);
+        if k.is_some_and(|k| k >= 400) {
+            break;
+        }
+        let i = match k {
+            None if step == BOARD_PRESS => Intent::press(),
+            None => Intent::default(),
+            Some(k) => exit(k),
+        };
+        let before = host.0.audio_command_log().len();
+        host.step(i);
+        let sim = &mut host.0;
+        assert_eq!(sim.dropped_audio_commands(), 0);
+        let cmds = &sim.audio_command_log()[before..];
+        if cmds
+            .iter()
+            .any(|c| matches!(c, AudioCommand::Play(p) if p.source == slam))
+        {
+            slams.push(step as usize);
+        }
+        let (phase, _, _, seated, _) = board_of(sim.world());
+        {
+            let e = sim.world().entity_of(HERO).expect("the hero");
+            let b = sim
+                .world()
+                .world()
+                .get::<CharacterMovement>(e)
+                .expect("a mover")
+                .runtime
+                .boarding;
+            if !b.door.is_nil() {
+                door = b.door;
+            }
+        }
+        let part = |sim: &inf_player::runtime_sim::RuntimeSim| {
+            inf_ecs::bodywork::damage_row(sim.world(), CHASSIS)
+                .and_then(|r| r.parts.get(&door).copied())
+        };
+        if phase == BoardPhase::Exiting {
+            // The open target, SIGNED: a left-hand door opens to a negative
+            // hinge angle.
+            if let Some(p) = part(sim) {
+                if p.target_deg.abs() > open_deg.abs() {
+                    open_deg = p.target_deg;
+                }
+            }
+        }
+        if phase == BoardPhase::ClosingDoor {
+            closing_steps += 1;
+            if hold && open_deg != 0.0 {
+                if let Some(r) = inf_ecs::bodywork::damage_mut(sim.world_mut())
+                    .rows
+                    .get_mut(&CHASSIS)
+                {
+                    if let Some(s) = r.parts.get_mut(&door) {
+                        s.target_deg = open_deg;
+                    }
+                }
+            }
+        }
+        if last == BoardPhase::ClosingDoor && phase != BoardPhase::ClosingDoor && ended.is_none() {
+            ended = Some(step as usize);
+            end_deg = part(sim).map(|p| p.angle_deg.abs()).unwrap_or(f64::NAN);
+        }
+        last = phase;
+        if wheel.is_none() && at_wheel(phase, seated) {
+            wheel = Some(step + 1);
+        }
+    }
+    (slams, ended, end_deg, closing_steps)
+}
+
+/// **A DOOR HELD OPEN THROUGH THE CLOSE DOES NOT SLAM** (VEH3e audit, carried
+/// 5 — the false slam). A `ClosingDoor` that times out resets the boarding
+/// machine, `door_deg` included, to zero whether or not the door shut; the
+/// planner read that reset as the hinge crossing shut and slammed a door that
+/// was standing open. On the SHIPPED host, one stationary exit twice:
+///
+/// * the control — the door shuts on its motor: the phase ends early (well
+///   inside `CLOSING_MAX_S`), the joint reads shut, and the slam lands on that
+///   end step, once;
+/// * held — the door's motor is re-aimed open every `ClosingDoor` step (a
+///   hand, a bollard): the phase runs the whole `CLOSING_MAX_S` and TIMES OUT,
+///   the joint reads OPEN on the end step, and **no slam** is played.
+///
+/// **Mutation → red**: the planner's end-step hinge read back to the
+/// machine's own reset `door_deg` (the pre-audit code) slams the held door.
+#[test]
+fn a_door_held_open_through_the_close_does_not_slam() {
+    // Only the EXIT's slams: the entry shut its door long before.
+    let after = |r: (Vec<usize>, Option<usize>, f64, usize)| {
+        let from = r.1.unwrap_or(0).saturating_sub(120);
+        (
+            r.0.into_iter().filter(|s| *s > from).collect::<Vec<_>>(),
+            r.1,
+            r.2,
+            r.3,
+        )
+    };
+    let (c_slams, c_end, c_deg, c_len) = after(exit_with_the_door(false));
+    let (h_slams, h_end, h_deg, h_len) = after(exit_with_the_door(true));
+    println!(
+        "THE CLOSE: shut on its motor -- {c_len} ClosingDoor steps, ended at {c_end:?} with the joint at {c_deg:.2} deg, slams {c_slams:?}; HELD OPEN -- {h_len} steps, ended at {h_end:?} with the joint at {h_deg:.2} deg, slams {h_slams:?}"
+    );
+    let limit = (inf_ecs::boarding::CLOSING_MAX_S * HZ).round() as usize;
+    assert!(c_end.is_some() && h_end.is_some(), "a close never ended");
+    assert!(
+        c_len < limit,
+        "the control's door did not shut on its own ({c_len} steps)"
+    );
+    assert!(
+        c_deg <= DOOR_SHUT_DEG,
+        "the control ended with the door at {c_deg}"
+    );
+    assert_eq!(
+        c_slams,
+        vec![c_end.unwrap()],
+        "the control's slam is not on its end step"
+    );
+    assert!(
+        h_len + 1 >= limit,
+        "the held close did not time out ({h_len} steps)"
+    );
+    assert!(
+        h_deg > 20.0,
+        "the held door was not open at the end ({h_deg} deg)"
+    );
+    assert!(
+        h_slams.is_empty(),
+        "a door standing open slammed: {h_slams:?}"
     );
 }
 

@@ -682,6 +682,9 @@ struct DoorMemory {
     mark_s: f64,
     door_deg: f64,
     door: Uuid,
+    /// The car the door belongs to — where its measured hinge is read on the
+    /// step a boarding ends (VEH3e audit).
+    vehicle: Uuid,
     roll: bool,
     bail: bool,
     creak: Option<LoopState>,
@@ -814,6 +817,7 @@ impl VoiceMemory {
                 mark_s: -1.0,
                 door_deg: b.door_deg,
                 door: b.door,
+                vehicle: b.vehicle,
                 roll,
                 bail: b.bail,
                 creak: None,
@@ -865,14 +869,36 @@ impl VoiceMemory {
             // including the step a closing boarding ENDS on, where the
             // machine has just measured the door shut and reset itself (its
             // `door` is nil by then, so the door is the one remembered).
+            //
+            // **The hinge as the JOINT has it on that end step** (VEH3e audit,
+            // carried 5): a boarding that ends resets the machine's own
+            // `door_deg` to 0 whether or not the door shut — a `ClosingDoor`
+            // that TIMES OUT against something in the way ends with the door
+            // standing open, and the reset read as a crossing was a slam out
+            // of an open door. So the end step reads the part's measured angle
+            // off the car's damage row (VEH3c folds the joint into it), and
+            // only a door that is really shut slams.
             let closing = matches!(mem.phase, BoardPhase::Seated | BoardPhase::ClosingDoor);
             let slam_door = if b.door.is_nil() { mem.door } else { b.door };
+            let now_deg = if b.door.is_nil() && !mem.door.is_nil() {
+                let car = if b.vehicle.is_nil() {
+                    mem.vehicle
+                } else {
+                    b.vehicle
+                };
+                crate::bodywork::damage_row(world, car)
+                    .and_then(|r| r.parts.get(&mem.door))
+                    .map(|p| p.angle_deg.abs())
+                    .unwrap_or(b.door_deg)
+            } else {
+                b.door_deg
+            };
             if !slam_door.is_nil()
                 && closing
                 && mem.door_deg > DOOR_SHUT_DEG
-                && b.door_deg <= DOOR_SHUT_DEG
+                && now_deg <= DOOR_SHUT_DEG
             {
-                let rate = (b.door_deg - mem.door_deg) / dt;
+                let rate = (now_deg - mem.door_deg) / dt;
                 let v = SLAM_GAIN * (rate.abs() / 150.0).clamp(0.4, 1.0);
                 cues.push(one_shot(DoorLayer::Slam, v));
             }
@@ -922,6 +948,9 @@ impl VoiceMemory {
             mem.door_deg = b.door_deg;
             if !b.door.is_nil() {
                 mem.door = b.door;
+            }
+            if !b.vehicle.is_nil() {
+                mem.vehicle = b.vehicle;
             }
             mem.roll = roll;
             mem.bail = b.bail;
