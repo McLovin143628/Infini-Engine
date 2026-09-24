@@ -20,7 +20,7 @@
 //!
 //! | arm | reads | mutation that reds it | engagement | the old loop? |
 //! |---|---|---|---|---|
-//! | `the_stack_is_seven_loops_on_salted_keys_in_a_pinned_order` | the Plays at the engine's start: keys, clips, order | two layers swapped in `car_loops`; two salts made equal | 7 Plays, 7 distinct keys | **fails** — one Play, on the chassis key |
+//! | `the_stack_is_eight_loops_on_salted_keys_in_a_pinned_order` | the Plays at the engine's start: keys, clips, order (the rolling road the eighth, VEH3e audit) | two layers swapped in `car_loops`; two salts made equal | 8 Plays, 8 distinct keys | **fails** — one Play, on the chassis key |
 //! | `the_grain_period_is_in_the_committed_bytes` | the COMMITTED `.inf_audio` bytes, parsed and measured here; then every emitted grain pitch x the measured period against `(rpm/60)(cyl/2)` | `GRAIN_REF_RPM` in `inf_ecs` moved off the baked 2400 | 15 clips, driven steps with a grain pitch | **fails** — its pitch is `0.65..2.05` of revs |
 //! | `the_squeal_follows_slip_and_not_speed` | the squeal key's commands at two speeds with one slip, and over the course against `squeal_voice(slip)` | the squeal fed `slip x speed/10` | loud squeal steps below 5 m/s AND above 15 m/s | **fails** — no squeal key |
 //! | `a_squeal_changes_its_clip_with_the_surface` | the squeal key's re-`Play` clip on the gravel strip | the surface voice ignored (always sealed) | re-Plays onto gravel | **fails** |
@@ -37,7 +37,7 @@
 //! | `pie_equals_shipping_on_the_audio_course` | both hosts' per-step command slices | the planner called with `dt * 2.0` in one host | every kind of cue seen | passes — it compares, it does not judge |
 //! | `the_audio_log_holds_the_drive_and_the_count_is_stated` | `dropped_audio_commands`, the per-step counts | `AUDIO_LOG_CAPACITY` cut to 4096 | the whole course | passes (3 a step) |
 //! | `sixty_four_cars_cost_what_they_print` | the audio phase's own clock at 64 cars, 1 and 64 voiced, and the whole step against a voiceless control | n/a — a COST arm | cars voiced, commands a step | n/a |
-//! | `a_cooked_pack_carries_every_vehicle_clip` | the cooked pack's `.inf_audio` index | the engine-clip closure deleted from the cook | 28 clips | **fails** — none in the pack |
+//! | `a_cooked_pack_carries_every_vehicle_clip` | the cooked pack's `.inf_audio` index | the engine-clip closure deleted from the cook | 31 clips | **fails** — none in the pack |
 //! | `the_planner_is_a_function_of_the_stream_so_far` | two runs of the course; the planner's source | a clock or an RNG in `vehicle_audio.rs` | whole course | passes |
 //! | `the_shipped_host_draws_the_audio_row_and_logs_the_columns` | `window.rs` / `pie_drive.rs` source + the Ring-0 row | the call deleted | one row | n/a |
 
@@ -655,7 +655,7 @@ fn car_cmds(s: &Step) -> usize {
 /// **Mutations → red**: two layers swapped in `car_loops`; two
 /// `VOICE_SALTS` made equal (one key, so one Play replaces another).
 #[test]
-fn the_stack_is_seven_loops_on_salted_keys_in_a_pinned_order() {
+fn the_stack_is_eight_loops_on_salted_keys_in_a_pinned_order() {
     let steps = shipped_course();
     let start = steps
         .iter()
@@ -684,6 +684,7 @@ fn the_stack_is_seven_loops_on_salted_keys_in_a_pinned_order() {
             VoiceLayer::SquealRear,
             va::squeal_clip(SurfaceVoice::Sealed),
         ),
+        (VoiceLayer::Roll, va::roll_clip(SurfaceVoice::Sealed)),
     ];
     let plays: Vec<&inf_audio::PlayCommand> = steps[start]
         .cmds
@@ -698,7 +699,7 @@ fn the_stack_is_seven_loops_on_salted_keys_in_a_pinned_order() {
         steps[start].board.0,
         plays.len()
     );
-    assert_eq!(plays.len(), want.len(), "the stack is seven loops");
+    assert_eq!(plays.len(), want.len(), "the stack is eight loops");
     let mut distinct = BTreeSet::new();
     for (p, (layer, clip)) in plays.iter().zip(want) {
         println!(
@@ -710,7 +711,7 @@ fn the_stack_is_seven_loops_on_salted_keys_in_a_pinned_order() {
         assert!(p.looping, "{layer:?} is a loop");
         distinct.insert(p.source);
     }
-    assert_eq!(distinct.len(), 7, "two loops share a key");
+    assert_eq!(distinct.len(), 8, "two loops share a key");
     let bare = va::entity_key(CHASSIS);
     let on_bare = steps
         .iter()
@@ -750,8 +751,8 @@ fn the_stack_is_seven_loops_on_salted_keys_in_a_pinned_order() {
     let max = steps.iter().map(car_cmds).max().unwrap_or(0);
     println!("  worst single step: {max} commands");
     assert!(
-        max <= 7 * 3 + 3,
-        "a step queued {max} car commands; seven loops x three plus three one-shots is the ceiling"
+        max <= 8 * 3 + 3,
+        "a step queued {max} car commands; eight loops x three plus three one-shots is the ceiling"
     );
 }
 
@@ -1379,6 +1380,7 @@ fn a_parked_car_is_silent_until_somebody_gets_in() {
         VoiceLayer::Turbo,
         VoiceLayer::SquealFront,
         VoiceLayer::SquealRear,
+        VoiceLayer::Roll,
     ]
     .into_iter()
     .map(key)
@@ -1427,8 +1429,8 @@ fn a_parked_car_is_silent_until_somebody_gets_in() {
         })
         .sum();
     assert_eq!(
-        stopped, 7,
-        "the engine switched off {stopped} of its seven loops"
+        stopped, 8,
+        "the engine switched off {stopped} of its eight loops"
     );
     assert!(stops.iter().all(|i| steps[*i].k.is_some_and(|k| k > 640)));
 }
@@ -1784,7 +1786,7 @@ fn render_course(path: &Path, limited: bool) -> Vec<i16> {
         glam::DVec2::new(0.0, -9.81),
         HZ,
     );
-    // The 28 COMMITTED clips, decoded from their `.inf_audio` payloads --
+    // The 31 COMMITTED clips, decoded from their `.inf_audio` payloads --
     // what a cooked pack resolves them to.
     let dir = inf_editor_core::samples::vehicle_audio_dir();
     let mut clips = BTreeMap::new();
@@ -1944,7 +1946,11 @@ fn a_traffic_car_sings_the_near_stack_on_its_own_cadence() {
     );
     assert_eq!(
         plays,
-        vec![tk(VoiceLayer::GrainMid), tk(VoiceLayer::SquealRear)],
+        vec![
+            tk(VoiceLayer::GrainMid),
+            tk(VoiceLayer::SquealRear),
+            tk(VoiceLayer::Roll)
+        ],
         "the traffic car's loops"
     );
     assert!(

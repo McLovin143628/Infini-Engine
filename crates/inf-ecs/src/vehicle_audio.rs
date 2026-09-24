@@ -33,8 +33,8 @@
 //! [`crate::traffic::TrafficPopulationRes`]) gets an emitter only while its tier
 //! is `Full` (a real rig inside `TRAFFIC_FULL_M` with an AI driver: the cars
 //! near the hero) and sings the NEAR stack: ONE grain (the half-load one,
-//! pitched by its revs and voiced by its level) and ONE squeal (its worse
-//! axle's slip), each loop re-told at most every [`NEAR_EVERY`] steps on a
+//! pitched by its revs and voiced by its level), ONE squeal (its worse
+//! axle's slip) and its rolling road, each loop re-told at most every [`NEAR_EVERY`] steps on a
 //! phase spread by its key. A crossing's traffic is heard from the kerb; a
 //! queue of it does not flood the log.
 
@@ -64,7 +64,7 @@ pub const WHINE_REF_RPM: f64 = 3_000.0;
 
 /// **Every vehicle clip, by index** — `inf_audio::vehicle_synth::
 /// VEHICLE_CLIP_NAMES` restated, and asserted equal by `veh3e_gate`.
-pub const VEHICLE_CLIP_NAMES: [&str; 28] = [
+pub const VEHICLE_CLIP_NAMES: [&str; 31] = [
     "Grain_P4_Idle",
     "Grain_P4_Mid",
     "Grain_P4_Full",
@@ -93,6 +93,9 @@ pub const VEHICLE_CLIP_NAMES: [&str; 28] = [
     "Door_Creak",
     "Door_Slam",
     "Body_Thud",
+    "Roll_Asphalt",
+    "Roll_Gravel",
+    "Roll_Soft",
 ];
 
 /// The clip at `index` into [`VEHICLE_CLIP_NAMES`].
@@ -260,6 +263,11 @@ pub fn squeal_clip(voice: SurfaceVoice) -> Uuid {
     vehicle_clip(18 + voice.index())
 }
 
+/// A ROLLING tyre's loop on a surface (VEH3e audit).
+pub fn roll_clip(voice: SurfaceVoice) -> Uuid {
+    vehicle_clip(28 + voice.index())
+}
+
 /// A suspension spike's one-shot on a surface.
 pub fn impulse_clip(voice: SurfaceVoice) -> Uuid {
     vehicle_clip(21 + voice.index())
@@ -295,11 +303,14 @@ pub enum VoiceLayer {
     ImpulseFront,
     /// A rear-axle one.
     ImpulseRear,
+    /// The tyres ROLLING on the road (VEH3e audit) — appended, so every key
+    /// above keeps its salt.
+    Roll,
 }
 
 impl VoiceLayer {
     /// Every layer, in the order the planner addresses them.
-    pub const ALL: [VoiceLayer; 10] = [
+    pub const ALL: [VoiceLayer; 11] = [
         VoiceLayer::GrainIdle,
         VoiceLayer::GrainMid,
         VoiceLayer::GrainFull,
@@ -310,6 +321,7 @@ impl VoiceLayer {
         VoiceLayer::BlowOff,
         VoiceLayer::ImpulseFront,
         VoiceLayer::ImpulseRear,
+        VoiceLayer::Roll,
     ];
 
     /// Its index into [`Self::ALL`].
@@ -321,7 +333,7 @@ impl VoiceLayer {
 /// **The salts a car's source keys are spread over** — `crate::weapon::
 /// LAYER_SALTS`' construction and its reason: ten voices need ten keys, none of
 /// which may be the chassis's own emitter key.
-pub const VOICE_SALTS: [u64; 10] = [
+pub const VOICE_SALTS: [u64; 11] = [
     0x5645_4833_0000_0001,
     0x5645_4833_0000_0002,
     0x5645_4833_0000_0003,
@@ -332,6 +344,7 @@ pub const VOICE_SALTS: [u64; 10] = [
     0x5645_4833_0000_0008,
     0x5645_4833_0000_0009,
     0x5645_4833_0000_000a,
+    0x5645_4833_0000_000b,
 ];
 
 /// The key one layer of one car plays on.
@@ -559,6 +572,35 @@ pub fn squeal_voice(slip: f64) -> (f64, f64) {
     let vol = SQUEAL_GAIN * x * x * (3.0 - 2.0 * x);
     let pitch = 0.9 + 0.25 * ((s - SQUEAL_ONSET) / 4.0).clamp(0.0, 1.0);
     (vol, pitch)
+}
+
+/// **The rolling road's full voice**, m/s — 108 km/h (VEH3e audit).
+pub const ROLL_FULL_MPS: f64 = 30.0;
+/// How loud the rolling road is at [`ROLL_FULL_MPS`].
+pub const ROLL_GAIN: f64 = 0.35;
+/// Below this a rolling tyre is silent, m/s.
+pub const ROLL_ONSET_MPS: f64 = 0.5;
+
+/// **THE ROLLING ROAD** (VEH3e audit, the research doc's "continuous surface
+/// roll noise"): voiced by SPEED — rising faster than linear, as tyre noise
+/// does — and silent with no wheel on the ground; pitched a little higher as
+/// the tread blocks come round faster. The SURFACE picks the clip
+/// ([`roll_clip`]), so a car that leaves the tarmac for gravel changes its
+/// roll, not its level.
+pub fn roll_voice(t: &VoiceTelemetry) -> (f64, f64) {
+    let speed = if t.speed_mps.is_finite() {
+        t.speed_mps.abs()
+    } else {
+        0.0
+    };
+    let grounded = t.axles.iter().any(|a| a.grounded);
+    let x = (speed / ROLL_FULL_MPS).clamp(0.0, 1.0);
+    let vol = if grounded && speed >= ROLL_ONSET_MPS {
+        ROLL_GAIN * x * (0.35 + 0.65 * x)
+    } else {
+        0.0
+    };
+    (vol, 0.8 + 0.45 * x)
 }
 
 /// The strut closing speed an impulse needs, m/s.
@@ -1115,6 +1157,13 @@ fn car_loops(
             sp,
         ));
     }
+    let (rv, rp) = roll_voice(t);
+    out.push((
+        VoiceLayer::Roll,
+        roll_clip(SurfaceVoice::of(t.axles[1].surface)),
+        base * rv,
+        rp,
+    ));
     out
 }
 
@@ -1131,7 +1180,8 @@ pub const NEAR_EVERY: u64 = 4;
 pub const NEAR_GAIN: f64 = 0.8;
 
 /// The loops a NEAR (traffic) car sings: the half-load grain at the engine's
-/// level and its revs' pitch, and one squeal on its worse axle.
+/// level and its revs' pitch, one squeal on its worse axle, and its rolling
+/// road — which is most of what a passing car sounds like from the kerb.
 fn near_loops(
     t: &VoiceTelemetry,
     family: GrainFamily,
@@ -1155,6 +1205,7 @@ fn near_loops(
         t.axles[1]
     };
     let (sv, sp) = squeal_voice(worse.slip);
+    let (rv, rp) = roll_voice(t);
     vec![
         (
             VoiceLayer::GrainMid,
@@ -1167,6 +1218,12 @@ fn near_loops(
             squeal_clip(SurfaceVoice::of(worse.surface)),
             base * sv,
             sp,
+        ),
+        (
+            VoiceLayer::Roll,
+            roll_clip(SurfaceVoice::of(t.axles[1].surface)),
+            base * rv,
+            rp,
         ),
     ]
 }
@@ -1444,7 +1501,7 @@ mod tests {
         ] {
             keys.insert(door_key(k, d));
         }
-        assert_eq!(keys.len(), 14);
+        assert_eq!(keys.len(), 15);
         assert!(!keys.contains(&k));
         for s in crate::weapon::LAYER_SALTS {
             assert!(!keys.contains(&(k ^ s)));

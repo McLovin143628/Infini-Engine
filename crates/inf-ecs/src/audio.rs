@@ -138,12 +138,12 @@ mod tests {
     /// **CARRIED 43'S DOOR** — every clip the engine plays without a level
     /// naming it, so a cook and a PIE payload can close over them.
     #[test]
-    fn the_engine_names_sixty_eight_clips_no_component_ever_references() {
+    fn the_engine_names_seventy_one_clips_no_component_ever_references() {
         let clips = active_test_clips();
         assert_eq!(
             clips.len(),
-            68,
-            "thirty-six report clips, the casing, the venue loop, wave WPN2d's blast plus its two melee surfaces, and wave VEH3e's twenty-eight vehicle clips"
+            71,
+            "thirty-six report clips, the casing, the venue loop, wave WPN2d's blast plus its two melee surfaces, and wave VEH3e's thirty-one vehicle clips (the rolling road's three from its audit)"
         );
         for clip in crate::vehicle_audio::vehicle_clips() {
             assert!(clips.contains(&clip), "a vehicle clip is missing");

@@ -1,5 +1,6 @@
-//! **The vehicle generator** (wave VEH3e) — twenty-eight `.inf_audio` clips a
-//! car is heard through, made of arithmetic at asset-build time.
+//! **The vehicle generator** (wave VEH3e) — thirty-one `.inf_audio` clips a
+//! car is heard through, made of arithmetic at asset-build time (the last
+//! three, the rolling road, from the VEH3e audit).
 //!
 //! [`crate::synth`]'s header is the argument for synthesising at build time and
 //! committing the bytes, and every rule of it holds here: the only PCM door is
@@ -17,7 +18,7 @@
 //! [`GRAIN_CYCLES`] whole engine cycles at [`GRAIN_REF_RPM`]: a four-stroke
 //! fires every cylinder once per two revolutions, so at the reference the clip
 //! holds `cylinders × GRAIN_CYCLES` firing events spaced
-//! `60 / ((rpm / 60) · (cylinders / 2))` seconds apart — **the firing period is
+//! `1 / ((rpm / 60) · (cylinders / 2))` seconds apart — **the firing period is
 //! in the file**, which is what `veh3e_gate` measures off the bytes. The engine
 //! plays it pitched by `rpm / GRAIN_REF_RPM`, so a four-cylinder and a V8 at the
 //! same revs fire at 1 : 2 by construction and not by a number in a table.
@@ -61,7 +62,7 @@ pub const LOAD_NAMES: [&str; 3] = ["Idle", "Mid", "Full"];
 /// **Every clip this module generates, by index** — the order
 /// `inf_ecs::vehicle_audio::VehicleClip::ALL` publishes. The first fifteen are
 /// the grains, family-major.
-pub const VEHICLE_CLIP_NAMES: [&str; 28] = [
+pub const VEHICLE_CLIP_NAMES: [&str; 31] = [
     "Grain_P4_Idle",
     "Grain_P4_Mid",
     "Grain_P4_Full",
@@ -90,6 +91,9 @@ pub const VEHICLE_CLIP_NAMES: [&str; 28] = [
     "Door_Creak",
     "Door_Slam",
     "Body_Thud",
+    "Roll_Asphalt",
+    "Roll_Gravel",
+    "Roll_Soft",
 ];
 
 /// **The gear-whine tone at a pitch of one**, hertz: 22 050 / 18, so one cycle
@@ -332,6 +336,65 @@ pub fn squeal_pcm(surface: u8) -> Vec<f64> {
     }
 }
 
+/// **A tyre ROLLING on a surface** (VEH3e audit) — by surface index: `0`
+/// sealed (the road roar: a dark broadband rush with a tread-block pulse), `1`
+/// loose (the crunch: bright noise under a patter of grains), `2` soft (the
+/// rumble: very dark noise, slowly breathing).
+///
+/// Six tenths of a second, looping without a seam: every modulation closes in
+/// whole cycles over it (multiples of 5/3 Hz), and the noise is
+/// [`seamless_noise`]. The engine voices it by SPEED and picks it by SURFACE —
+/// the research doc's "continuous surface roll noise".
+pub fn roll_pcm(surface: u8) -> Vec<f64> {
+    let rate = f64::from(SYNTH_RATE);
+    let len = (0.6 * rate).round() as usize;
+    let seed = 0x5645_4833_0000_0400u64 + u64::from(surface);
+    match surface {
+        0 => {
+            let body = seamless_noise(len, 650.0, seed);
+            let air = seamless_noise(len, 2_400.0, seed ^ 0x5);
+            let out = (0..len)
+                .map(|i| {
+                    let t = i as f64 / rate;
+                    let tread = 0.85 + 0.15 * psine(25.0 * t);
+                    (body[i] * 1.6 + air[i] * 0.35) * tread
+                })
+                .collect();
+            normalize(out)
+        }
+        1 => {
+            let rush = seamless_noise(len, 4_500.0, seed);
+            let mut out: Vec<f64> = rush.iter().map(|x| 0.45 * x).collect();
+            let step = (0.007 * rate) as usize;
+            let k = decay_per_sample(0.0015, SYNTH_RATE);
+            let mut g = 0usize;
+            while g * step < len {
+                let amp = 0.3 + 0.7 * pnoise(seed ^ 0x9, g as u64).abs();
+                let start =
+                    g * step + (pnoise(seed ^ 0xb, g as u64).abs() * step as f64 * 0.5) as usize;
+                let mut env = amp;
+                for j in 0..(0.006 * rate) as usize {
+                    out[(start + j) % len] += env * pnoise(seed ^ 0xa, (g * 1000 + j) as u64);
+                    env *= k;
+                }
+                g += 1;
+            }
+            normalize(out)
+        }
+        2 => {
+            let noise = seamless_noise(len, 220.0, seed);
+            let out = (0..len)
+                .map(|i| {
+                    let t = i as f64 / rate;
+                    noise[i] * (0.75 + 0.25 * psine(5.0 * t))
+                })
+                .collect();
+            normalize(out)
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// **A one-shot of `seconds`**: a low decaying tone (fundamental, decay), an
 /// attack click, and a noise body under its own cutoff and decay.
 #[allow(clippy::too_many_arguments)]
@@ -501,6 +564,7 @@ pub fn vehicle_clip_pcm(index: u8) -> Vec<f64> {
         18..=20 => squeal_pcm(index - 18),
         21..=23 => impulse_pcm(index - 21),
         24..=27 => door_pcm(index - 24),
+        28..=30 => roll_pcm(index - 28),
         _ => Vec::new(),
     }
 }
@@ -613,11 +677,11 @@ mod tests {
                 "{name} is not deterministic"
             );
         }
-        assert!(vehicle_clip_pcm(28).is_empty());
+        assert!(vehicle_clip_pcm(31).is_empty());
     }
 
     /// **THE FIRING PERIOD IS IN THE SAMPLES** — counted, per family and per
-    /// load, against `60 / ((rpm / 60) · (cylinders / 2))` at the reference.
+    /// load, against `1 / ((rpm / 60) · (cylinders / 2))` s at the reference.
     #[test]
     fn every_grain_fires_at_its_cylinder_counts_rate() {
         assert_eq!(grain_loop_samples(), 8_820);
