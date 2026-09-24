@@ -40823,3 +40823,56 @@ which is the tier rule's reason.
    slide and kerb triggers never fired there (the gate course carries both).
 
 Report: `campaign-briefs/veh3e-implementer-report.md`.
+
+## WAVE VEH3e — THE AUDIT (2026-09-23)
+
+### audit: the engine had never been heard
+
+No crate enabled `inf-audio`'s `cpal` feature, so since P12 no editor and no
+player had played a sound on a device — the wave's captures were the first
+time a vehicle voice reached samples at all. `inf-player` and `inf-studio` now
+enable it on Windows and macOS (Linux keeps the null backend until a runner has
+the ALSA headers); every `RuntimeSim` / `SimSession` starts on the no-device
+path and the WINDOWED player and the editor's Simulate open the default device
+(`AudioEngine::open_device`), logging `audio: device <name> <rate> Hz opened`
+or why the null backend plays. The relaunched editor's own Output Log carries
+the PIE player's line; `Cargo.lock` did not move.
+
+The device and the render-to-file door are one mixer with two sinks: both
+managers are built with the same master track, whose one effect is a soft-knee
+look-ahead limiter (`inf_audio::limiter`, ceiling 0.96, below it by
+construction). The course rendered with a loud row (emitter 2.4) clips 229
+samples without it and 0 through it.
+
+### audit: built, not carried
+
+* **The false slam**: a `ClosingDoor` that times out resets the machine's
+  `door_deg` to 0 whether or not the door shut. On the end step the planner now
+  reads the joint's measured angle off the damage row: a door held open through
+  the close (72 steps, 65.65°) slams 0 times; the control that shuts slams once.
+* **The traffic near the hero sings** (the brief's ruling; the wave had made it
+  all voiceless): a traffic car in the `Full` tier gets an emitter and the NEAR
+  stack — the half-load grain, one squeal, the rolling road — each loop re-told
+  at most every 4 steps on a phase its key spreads. A traffic car a player sits
+  in is the player's car (the full stack) and drops back when he gets out.
+  Island fixture crossroads at rush hour, both hosts equal: 5 traffic cars
+  singing, 6.31 commands a step, at most 19, the log holds 173 s, 0 evicted.
+* **The rolling road**: three generated seamless loops (sealed / loose /
+  soft), voiced by speed and chosen by surface — the eighth loop of the full
+  stack (`VoiceLayer::Roll`, appended). 31 clips, 62 files, 543 448 bytes.
+* **The demo's instruments**: `INF_PIE_AUDIO_HOLD` freezes the burnout, the
+  thump and the slide once per boarding (the wave's burnout frame was a second
+  late); `INF_PIE_PLACE_CAR` puts the voiced car nearest the hero on a chosen
+  road; `island-refresh.ps1 -SyncAudio` is the repeatable, non-destructive copy
+  of the sound libraries into the showcase project.
+* The formula in the brief's (b) — and in the generator's own docs — is
+  `1 / ((rpm/60)(cyl/2))` seconds, not `60 / (…)`.
+
+### carried, by name
+
+The per-sample granular synth (priced by the wave at ~1.5 days); Linux device
+output (a runner apt line and a `cargo deny` look at alsa-sys); the full-load
+grains are peak-normalised, so a redline pull is only +1.9 dB over idle in
+grain RMS (a tuning pass); traffic beyond `TRAFFIC_FULL_M` is a drawn body with
+no telemetry and stays silent; the island kerb and slide frames (the placement door cannot see a street's ground or what stands on it — the shipped course fires all three held beats). See the report.
+Report: `campaign-briefs/veh3e-audit-report.md`.
