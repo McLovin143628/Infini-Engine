@@ -2111,6 +2111,101 @@ impl BoardHold {
     }
 }
 
+/// **The demo loop's CLEAR ROAD** (VEH3e audit), `INF_PIE_PLACE_CAR` =
+/// `x,y,z/yaw@seconds`: in a PREVIEW session, at `seconds` of sim time, the car
+/// NEAREST the camera subject is put at `(x, y, z)` facing `yaw` degrees
+/// (`atan2(dx, dz)`, the placement's own convention), through
+/// [`RuntimeSim::place_vehicle`] — the rig as a unit. Pair it with
+/// `INF_PIE_SPAWN_AT` a moment later to stand the hero at its door.
+///
+/// It exists because three sessions of the VEH3e audio leg launched the
+/// island's saloon from the Harbour City crossroads into the traffic queued at
+/// the crossing, and the kerb and the slide were never reached: the car is
+/// where the level parked it, and the cert needs a straight, empty street.
+/// One placement, applied once; it moves a car, never a rule.
+pub const PLACE_CAR_ENV: &str = "INF_PIE_PLACE_CAR";
+
+/// See [`PLACE_CAR_ENV`].
+#[derive(Debug, Default, Clone)]
+pub struct CarPlacement {
+    at: Option<(glam::DVec3, f64, f64)>,
+    done: bool,
+}
+
+impl CarPlacement {
+    /// Read [`PLACE_CAR_ENV`]; inert when absent, a refusal on stderr when
+    /// malformed.
+    pub fn from_env() -> Self {
+        let Ok(v) = std::env::var(PLACE_CAR_ENV) else {
+            return Self::default();
+        };
+        let parsed = (|| {
+            let (body, when) = match v.trim().split_once('@') {
+                Some((b, t)) => (b, t.trim().parse::<f64>().ok()?),
+                None => (v.trim(), 1.0),
+            };
+            let (coords, yaw) = match body.split_once('/') {
+                Some((c, y)) => (c, y.trim().parse::<f64>().ok()?),
+                None => (body, 0.0),
+            };
+            let p: Vec<f64> = coords
+                .split(',')
+                .filter_map(|x| x.trim().parse::<f64>().ok())
+                .collect();
+            (p.len() == 3 && p.iter().all(|x| x.is_finite()) && yaw.is_finite() && when.is_finite())
+                .then(|| (glam::DVec3::new(p[0], p[1], p[2]), yaw, when.max(0.0)))
+        })();
+        if parsed.is_none() {
+            eprintln!("inf-player: {PLACE_CAR_ENV} `{v}` is not `x,y,z/yaw@seconds`");
+        }
+        Self {
+            at: parsed,
+            done: false,
+        }
+    }
+
+    /// Place the car once its time has come. Answers a log line when it does.
+    pub fn tick(&mut self, sim: &mut RuntimeSim) -> Option<String> {
+        let (at, yaw, when) = self.at?;
+        if self.done || (sim.steps() as f64) / 60.0 < when {
+            return None;
+        }
+        self.done = true;
+        let world = sim.world();
+        let hero = inf_ecs::movement::camera_subject(world)?;
+        let from = world
+            .world()
+            .get::<inf_ecs::components::Transform>(world.entity_of(hero)?)?
+            .translation
+            .to_dvec3();
+        let car = sim
+            .vehicles()
+            .iter()
+            .filter(|o| o.voice.is_some())
+            .filter_map(|o| {
+                let e = world.entity_of(o.chassis)?;
+                let p = world
+                    .world()
+                    .get::<inf_ecs::components::Transform>(e)?
+                    .translation
+                    .to_dvec3();
+                Some((o.chassis, (p - from).length()))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)))?;
+        let rot = glam::DQuat::from_rotation_y(yaw.to_radians());
+        let placed = sim.place_vehicle(car.0, at, rot);
+        Some(format!(
+            "{PLACE_CAR_ENV} at t={when:.1}s put the car {} ({:.1} m from the hero) at {:.2},{:.2},{:.2} facing {yaw:.0} deg: {}",
+            car.0,
+            car.1,
+            at.x,
+            at.y,
+            at.z,
+            if placed { "placed" } else { "REFUSED (no body)" }
+        ))
+    }
+}
+
 /// **The demo loop's HOLD on an AUDIO beat** (VEH3e audit), `INF_PIE_AUDIO_HOLD`
 /// = `seconds`: a PREVIEW session freezes its fixed steps for `seconds` of wall
 /// time the first time, per boarding, the camera subject's car reaches each of

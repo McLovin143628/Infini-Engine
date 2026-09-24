@@ -136,6 +136,15 @@ param(
     # burnout frame landed a second late with the squeal already at zero). A
     # hold runs no step; the mixer keeps playing what it was told.
     [double]$AudioHold = 0.0,
+    # **THE CLEAR ROAD** (VEH3e audit), `INF_PIE_PLACE_CAR` = `x,y,z/yaw@s`: the
+    # car nearest the hero is put there at that sim time (pair with -SpawnAt a
+    # moment later). The audio leg's launch, kerb and slide need a straight
+    # empty street, and the saloon is parked at the crossroads' traffic queue.
+    [string]$PlaceCar = "",
+    # **SKIP THE BACK-OFF** (VEH3e audit): the audio leg reverses off the kerb
+    # first because the level parks its saloon nose-in; a placed car is already
+    # on its road, and reversing spends the burnout beat on the way back.
+    [switch]$NoBackoff,
     # **SILENT** (VEH3e audit), `INF_AUDIO_DEVICE=off`: the player does not open
     # the output device. Without it the preview plays OUT LOUD, and says which
     # device in the hero log (`# audio: device ... opened`).
@@ -532,6 +541,8 @@ if ($BoardHold -ne "") { $env:INF_PIE_BOARD_HOLD = $BoardHold; Say "board hold: 
 else { Remove-Item env:INF_PIE_BOARD_HOLD -ErrorAction Ignore }
 if ($Cutaway -gt 0.0 -and $Cutaway -lt 1.0) { $env:INF_PIE_CUTAWAY = "$Cutaway"; Say "cutaway: the seated car drawn at alpha $Cutaway" }
 else { Remove-Item env:INF_PIE_CUTAWAY -ErrorAction Ignore }
+if ($PlaceCar -ne "") { $env:INF_PIE_PLACE_CAR = $PlaceCar; Say "place car: $PlaceCar (the car nearest the hero)" }
+else { Remove-Item env:INF_PIE_PLACE_CAR -ErrorAction Ignore }
 if ($AudioHold -gt 0.0) { $env:INF_PIE_AUDIO_HOLD = "$AudioHold"; Say "audio hold: $AudioHold s on the burnout, the thump and the slide" }
 else { Remove-Item env:INF_PIE_AUDIO_HOLD -ErrorAction Ignore }
 if ($NoAudioDevice) { $env:INF_AUDIO_DEVICE = "off"; Say "audio device: off (the preview is silent)" }
@@ -1171,11 +1182,13 @@ function Invoke-Veh3eLeg {
     # BACK OFF THE KERB FIRST (the first run): the island's parked saloon sits
     # nose-in, and a launch from where it stands spun its front wheels against
     # the stop for eleven seconds at 0.03 m/s -- a burnout, and no drive.
-    [InfInput]::Down(0x1F); [InfInput]::Down(0x1E)   # S + A: reverse, steering away
-    Start-Sleep -Milliseconds 2200
-    [InfInput]::Up(0x1E); [InfInput]::Up(0x1F)
-    Wait-ForHero -Csv $heroCsv -What "stopped after backing off" -TimeoutS 4.0 `
-        -Predicate { param($c) (& $isRow $c) -and ([math]::Abs([double]$c[6]) -lt 0.4) } | Out-Null
+    if (-not $NoBackoff) {
+        [InfInput]::Down(0x1F); [InfInput]::Down(0x1E)   # S + A: reverse, steering away
+        Start-Sleep -Milliseconds 2200
+        [InfInput]::Up(0x1E); [InfInput]::Up(0x1F)
+        Wait-ForHero -Csv $heroCsv -What "stopped after backing off" -TimeoutS 4.0 `
+            -Predicate { param($c) (& $isRow $c) -and ([math]::Abs([double]$c[6]) -lt 0.4) } | Out-Null
+    }
     # THE LAUNCH: the burnout at the line, then the shifts.
     [InfInput]::Down(0x11)   # W
     # EITHER axle: the island's saloons are front-drive (the first run's car
@@ -1187,6 +1200,12 @@ function Invoke-Veh3eLeg {
     Wait-ForHero -Csv $heroCsv -What "the first upshift (gear 2, the whine stepped down)" -TimeoutS 10.0 `
         -Predicate { param($c) (& $isRow $c) -and ([int]$c[61] -ge 2) -and ([double]$c[67] -gt 0.0) } `
         -Out (Join-Path $OutDir "122-veh3e-shift.png") | Out-Null
+    # ON A PLACED CAR the street is straight and the kerb is to the RIGHT of
+    # the lane it was put in: a short right-hand tap at speed runs the front
+    # wheel up it (the level's own kerb, 0.15 m).
+    if ($PlaceCar -ne "") {
+        [InfInput]::Down(0x20); Start-Sleep -Milliseconds 350; [InfInput]::Up(0x20)   # D
+    }
     Wait-ForHero -Csv $heroCsv -What "a kerb or a landing (a surface impulse played)" -TimeoutS 6.0 `
         -Predicate { param($c) (& $isRow $c) -and ([int]$c[71] -gt 0) -and ([double]$c[6] -gt 3.0) } `
         -Out (Join-Path $OutDir "123-veh3e-thump.png") | Out-Null

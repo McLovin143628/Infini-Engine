@@ -208,6 +208,9 @@ pub struct PlayerApp {
     /// `INF_PIE_AUDIO_HOLD` is set, consulted only in a PREVIEW session. See
     /// [`crate::pie_drive::AudioHold`].
     audio_hold: crate::pie_drive::AudioHold,
+    /// **The demo loop's clear-road car placement** (VEH3e audit) — inert
+    /// unless `INF_PIE_PLACE_CAR` is set, consulted only in a PREVIEW session.
+    car_placement: crate::pie_drive::CarPlacement,
     /// **The demo loop's see-through car** (VEH3d audit) — inert unless
     /// `INF_PIE_CUTAWAY` is set, consulted only in a PREVIEW session. See
     /// [`crate::pie_drive::Cutaway`].
@@ -357,6 +360,7 @@ impl PlayerApp {
             spawn_override: crate::pie_drive::SpawnOverride::from_env(),
             board_hold: crate::pie_drive::BoardHold::from_env(),
             audio_hold: crate::pie_drive::AudioHold::from_env(),
+            car_placement: crate::pie_drive::CarPlacement::from_env(),
             cutaway: crate::pie_drive::Cutaway::from_env(),
             time_scale: crate::pie_drive::time_scale_from_env(),
             vmeshes,
@@ -1249,6 +1253,9 @@ impl PlayerApp {
             // ninety-second walk of the player start. It fires once and says so
             // in the same log, so a frame taken after it can be read against a
             // line that names where the hero was put.
+            if let Some(said) = self.car_placement.tick(&mut self.sim) {
+                self.hero_log.note(&said);
+            }
             if let Some(said) = self.spawn_override.tick(&mut self.sim, dt) {
                 self.hero_log.note(&said);
             }

@@ -1289,6 +1289,21 @@ impl RuntimeSim {
         &self.bridge3d
     }
 
+    /// **Put a car somewhere, as a unit** (VEH3e audit) — the chassis, its
+    /// live parts and its document transform through
+    /// `inf_physics::d3::bodywork::place_vehicle`, both velocities zeroed.
+    /// The demo loop's clear-road placement is the one caller; `false` when the
+    /// chassis has no body.
+    pub fn place_vehicle(&mut self, chassis: Uuid, at: glam::DVec3, rot: glam::DQuat) -> bool {
+        inf_physics::d3::bodywork::place_vehicle(
+            &mut self.world,
+            &mut self.bridge3d,
+            chassis,
+            at,
+            rot,
+        )
+    }
+
     /// Mutable access to the 3D bridge, for a **scene query** (P21.4).
     ///
     /// `cast_ray` needs `&mut` because rapier's query pipeline updates itself
