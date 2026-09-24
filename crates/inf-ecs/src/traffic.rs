@@ -1968,12 +1968,16 @@ fn derive_parked(world: &mut EcsWorld, stamp: u64) {
     // 0.026 m of clearance, on top of the other. A slot whose car would come
     // within `PARK_CLEAR_M` of an authored chassis is simply not occupied.
     let authored = authored_footprints(world, &kept);
-    // …and where the lattice's OWN cars stand, as it places them: two kerb
-    // slots close together (a narrow street's two kerbs, a junction's corner)
-    // are two cars in one space, which is the other half of that audit's
-    // finding. The FIRST slot in the lattice's own order keeps its car, so the
-    // answer is a pure function of the streets.
-    let mut lattice: Vec<(DVec2, f64)> = Vec::new();
+    // **No self-exclusion** (audit, VEH3f). The wave also kept a list of the
+    // lattice's own cars and refused a slot near one ("a narrow street's two
+    // kerbs, a junction's corner"). `kerb_slots` already makes that
+    // impossible: a slot stands `gap/2 + JUNCTION_CLEAR_M` >= 10 m from every
+    // other street's segment and 5 m from its own, so two streets' slots are
+    // >= 5 m apart (5.89 m the closest over 144 swept layouts,
+    // `veh3f_gate::no_two_kerb_slots_of_different_streets_are_within_five_metres`),
+    // one street's are 10 m across and 14 m along -- and two parked civilians'
+    // boxes cannot touch at 5 m. Measured on both islands, the guard never
+    // refused a slot; its mutation could not be made red, so it is gone.
     // How many cars already HAVE a day -- see `MAX_COMMUTERS`.
     let mut with_a_day = 0usize;
     // A car the player has touched is kept whatever the geometry did: it is not
@@ -1999,12 +2003,10 @@ fn derive_parked(world: &mut EcsWorld, stamp: u64) {
         let here = DVec2::new(p.x, p.z);
         if authored
             .iter()
-            .chain(lattice.iter())
             .any(|(c, r)| (here - *c).length() < r + reach + PARK_CLEAR_M)
         {
             continue;
         }
-        lattice.push((here, reach));
         // The record's own space is LIFTED to the car's ride height; the route
         // planner is handed the slot as it is on the ground (see `drive_path`).
         let at = DVec3::new(p.x, crate::vehicle::resting_origin_y(&def, p.y), p.z);

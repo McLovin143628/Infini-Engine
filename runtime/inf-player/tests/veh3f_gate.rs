@@ -1351,10 +1351,18 @@ fn island_sim(tmp: &std::path::Path) -> RuntimeSim {
 }
 
 /// How many island minutes the census runs: TEN in a release build off CI (the
-/// brief's number; 1.15 s of wall an island second on the machine that wrote
-/// it, so eleven minutes), ONE in a dev build or on a shared runner, where ten
-/// would be hours of debug stepping. `INF_VEH3F_ISLAND_MINUTES` overrides it.
-/// Printed either way.
+/// brief's number), ONE in a dev build or on a shared runner.
+/// `INF_VEH3F_ISLAND_MINUTES` overrides it. Printed either way.
+///
+/// **Audit (VEH3f): the wave's ten minutes were 88 of wall** -- not the
+/// traffic's cost but the crowd's: the CI island's residents set out on their
+/// morning commute and `character move` climbs from 5 to ~450 ms a step by
+/// island second 440 (a pre-existing mover cliff, island-progress §17900).
+/// This census is a TRAFFIC census, so it now runs with the crowd cleared
+/// (`crowd::set_population` with no records, which the society honours as a
+/// hand-installed population and stops deriving); the release ten minutes
+/// cost what the audit report measures, and the crowd's cliff is carried by
+/// name where it belongs.
 fn island_minutes() -> u64 {
     if let Some(m) = std::env::var("INF_VEH3F_ISLAND_MINUTES")
         .ok()
@@ -1459,17 +1467,24 @@ fn hitched_pairs(sim: &RuntimeSim) -> BTreeSet<(Uuid, Uuid)> {
 /// sea, plant, freight or trailer is ever a traffic car; no bus, cargo or
 /// utility truck is PARKED at a kerb.
 ///
-/// **VACUOUS against its mutations, measured and said.** The CI island holds
-/// eleven traffic cars and one authored one: the kerb draw given the circuit
-/// weights without its civilian filter, `authored_footprints` answering empty,
-/// `PARK_CLEAR_M` at -3 and the lattice's self-exclusion removed all leave it
-/// green (its eleven cars are circuit and commute days, and no two slots are
-/// close). It asserts the WORLD's state; the class weights are
-/// `traffic_draws_the_roster_by_class_weight`'s, which each of those reds.
+/// **VACUOUS against the lattice's guards, measured and said** -- and the
+/// guards are now armed elsewhere (audit). The CI island holds eleven traffic
+/// cars and one authored one, and no kerb slot comes near it, so the
+/// exclusion's mutations leave this arm green; the fixture street in
+/// `the_kerb_lattice_steps_around_an_authored_car_on_its_slot` puts an
+/// authored car ON a slot and reds on both (`authored_footprints` empty,
+/// `PARK_CLEAR_M` at -3); the civilian filter reds
+/// `traffic_draws_the_roster_by_class_weight`; the lattice's self-exclusion
+/// never fired on either island and was removed (its geometry is
+/// `no_two_kerb_slots_of_different_streets_are_within_five_metres`). This arm
+/// asserts the WORLD's state after its minutes.
 #[test]
 fn the_island_census_by_class_and_no_two_cars_in_one_place() {
     let tmp = tempfile::tempdir().expect("a temp dir");
     let mut sim = island_sim(tmp.path());
+    // A TRAFFIC census: the crowd (and its commute cliff) set aside -- see
+    // `island_minutes`.
+    inf_ecs::crowd::set_population(sim.world_mut(), BTreeMap::new());
     let minutes = island_minutes();
     let steps = minutes * 60 * HZ as u64;
     let hitched = hitched_pairs(&sim);
@@ -1695,11 +1710,11 @@ fn real_island_sim(content: &std::path::Path) -> RuntimeSim {
 /// steps); every parked chassis box against every other.
 ///
 /// **VACUOUS against the lattice's own guards, measured and said.** With
-/// `authored_footprints` answering empty, `PARK_CLEAR_M` at -3 and the
-/// lattice's self-exclusion removed, this arm and the census above both stay
-/// green: on today's island the resident Harbour City kerbs are 31.9 m from the
-/// nearest authored vehicle and never two to a space, so the exclusion that
-/// fixed the VEH3b audit's overlap does not bind here. What this arm asserts
+/// `authored_footprints` answering empty or `PARK_CLEAR_M` at -3 this arm
+/// stays green: the exclusion DOES refuse one Harbour City slot (at
+/// (-1652, 1935), 5.0 m from an ambulance -- the audit's probe), but a kerb
+/// saloon there would not touch the ambulance's box, so nothing here can see
+/// the guard; the fixture street arm is where it reds. What this arm asserts
 /// is the committed level's state -- no two parked vehicles share a space --
 /// and it prints the fleet's addresses for the demo loop. SKIPS with a printed
 /// reason when the island is not on this machine.
@@ -1775,6 +1790,192 @@ fn the_real_islands_kerbs_step_around_its_fleets() {
         overlapping.is_empty(),
         "parked vehicles share their space on the island: {overlapping:?}"
     );
+}
+
+/// A traffic record's parked box: `(guid, centre, rotation, half-extents)`.
+fn record_box(g: Uuid, r: &inf_ecs::traffic::TrafficRecord) -> ChassisBox {
+    (
+        g,
+        r.home,
+        DQuat::from_rotation_y(r.home_yaw_deg.to_radians()),
+        r.def.half_extents.to_dvec3(),
+    )
+}
+
+/// **THE KERB LATTICE STEPS AROUND AN AUTHORED CAR STANDING ON ITS SLOT**
+/// (audit, VEH3f -- the brief's (c′)).
+///
+/// The census and the real island could not falsify the lattice's exclusion:
+/// no kerb slot on either island comes within 31.9 m of an authored vehicle.
+/// So this fixture MAKES one bind. A 300 m street wide enough to park on; the
+/// lattice derived once with nothing authored (the control: which slots are
+/// occupied); then two authored saloons put where the lattice parks -- one
+/// exactly ON an occupied slot, one 3.0 m along the kerb from another (its
+/// footprint circle overlaps the slot car's by less than the 3 m the
+/// clearance mutation removes, and its box overlaps the slot car's by 1.6 m).
+/// Re-derived, every kerb car's box is tested against both authored boxes
+/// (SAT), and the two slots must be EMPTY.
+///
+/// **Mutation → red** (each run by the audit): `authored_footprints` answering
+/// empty (the car on its slot); `PARK_CLEAR_M` at -3 (the car 3 m along).
+///
+/// **The lattice's SELF-exclusion is not armed here because no street layout
+/// can bind it**: `kerb_slots` keeps a slot only if it stands
+/// `gap/2 + JUNCTION_CLEAR_M` >= 10 m from every OTHER street's segment, and a
+/// parking street's own slots stand 5 m from it, so two slots of different
+/// streets are >= 5 m apart by the triangle inequality -- and two parked
+/// civilians' boxes (reach <= 3.1 m, the widest half-width 1.1 m) cannot touch
+/// at 5 m. The audit removed that guard (it never fired: 0 slots on the CI
+/// island, 0 on the real island) and `no_two_kerb_slots_of_different_streets_are_within_five_metres`
+/// holds the geometry instead.
+#[test]
+fn the_kerb_lattice_steps_around_an_authored_car_on_its_slot() {
+    use inf_ecs::traffic::{self, Street, TrafficRes};
+    let streets = vec![Street {
+        a: glam::DVec2::new(0.0, 0.0),
+        b: glam::DVec2::new(300.0, 0.0),
+        y: 0.0,
+        gap_m: 24.0,
+    }];
+    let install = |world: &mut EcsWorld, stamp: u64| {
+        world.world_mut().insert_resource(TrafficRes {
+            lanes: traffic::carriageway(&streets),
+            streets: streets.clone(),
+            stamp,
+            derivations: 1,
+        });
+        traffic::sync_traffic(world);
+    };
+    // The control: what the lattice parks with nothing authored.
+    let mut world = EcsWorld::new();
+    install(&mut world, 1);
+    let control: Vec<(Uuid, ChassisBox)> = traffic::traffic_of(&world)
+        .expect("a population")
+        .records
+        .iter()
+        .map(|(g, r)| (*g, record_box(*g, r)))
+        .collect();
+    assert!(
+        control.len() >= 4,
+        "the fixture street parks only {} cars",
+        control.len()
+    );
+    // Two authored saloons where the lattice parks.
+    let saloon = *roster::roster().get("albany_washington").expect("a saloon");
+    let on = control[0].1;
+    let along = control[2].1;
+    let along_at = along.1 + along.2 * DVec3::Z * 3.0;
+    let mut world = EcsWorld::new();
+    let authored = [
+        (Uuid::from_u128(0x5E3F_A001), on.1, on.2),
+        (Uuid::from_u128(0x5E3F_A002), along_at, along.2),
+    ];
+    for (g, at, q) in authored {
+        let (yaw, _, _) = q.to_euler(glam::EulerRot::YXZ);
+        let at = DVec3::new(at.x, inf_ecs::vehicle::resting_origin_y(&saloon, 0.0), at.z);
+        spawn(&mut world, g, &saloon, at, yaw.to_degrees());
+    }
+    world.propagate();
+    install(&mut world, 2);
+    let records = &traffic::traffic_of(&world).expect("a population").records;
+    let auth_boxes: Vec<ChassisBox> = authored
+        .iter()
+        .map(|(g, at, q)| (*g, *at, *q, saloon.half_extents.to_dvec3()))
+        .collect();
+    let mut overlaps = Vec::new();
+    for (g, r) in records {
+        let b = record_box(*g, r);
+        for a in &auth_boxes {
+            if boxes_overlap(&b, a) {
+                overlaps.push(format!("kerb car {g} at {:.2} into authored {}", b.1, a.0));
+            }
+        }
+    }
+    let (on_kept, along_kept) = (
+        records.contains_key(&control[0].0),
+        records.contains_key(&control[2].0),
+    );
+    println!(
+        "THE LATTICE FIXTURE: {} kerb cars with nothing authored, {} with two authored saloons; the slot under one {}, the slot 3 m from the other {}; {} kerb/authored overlaps",
+        control.len(),
+        records.len(),
+        if on_kept { "KEPT its car" } else { "stood empty" },
+        if along_kept { "KEPT its car" } else { "stood empty" },
+        overlaps.len()
+    );
+    assert!(overlaps.is_empty(), "{}", overlaps.join("\n"));
+    assert!(
+        !on_kept && !along_kept,
+        "an authored car's slot kept its kerb car"
+    );
+    assert_eq!(
+        records.len() + 2,
+        control.len(),
+        "the exclusion emptied more than the two slots it binds"
+    );
+}
+
+/// **No two kerb slots of different streets are within five metres** -- the
+/// geometry that makes a lattice self-exclusion unnecessary (audit, VEH3f),
+/// swept over crossing, T, parallel and skew layouts of parking-width streets.
+///
+/// **Mutation → red**: `JUNCTION_CLEAR_M` at 0 in `clear_of_junctions`.
+#[test]
+fn no_two_kerb_slots_of_different_streets_are_within_five_metres() {
+    use inf_ecs::traffic::{kerb_slots, Street};
+    let st = |ax: f64, az: f64, bx: f64, bz: f64, gap: f64| Street {
+        a: glam::DVec2::new(ax, az),
+        b: glam::DVec2::new(bx, bz),
+        y: 0.0,
+        gap_m: gap,
+    };
+    let (mut worst, mut layouts, mut pairs) = (f64::MAX, 0usize, 0usize);
+    for gap in [16.0, 20.0, 24.0] {
+        for off in [0.0, 3.0, 7.0, 11.0, 13.0, 17.0, 21.0, 30.0] {
+            for angle in [0.0f64, 15.0, 30.0, 45.0, 60.0, 90.0] {
+                let (s, c) = (
+                    inf_math::psin64(angle.to_radians()),
+                    inf_math::pcos64(angle.to_radians()),
+                );
+                let a = st(0.0, 0.0, 200.0, 0.0, gap);
+                let b = st(
+                    100.0 - 100.0 * c,
+                    off - 100.0 * s,
+                    100.0 + 100.0 * c,
+                    off + 100.0 * s,
+                    gap,
+                );
+                let streets = [a, b];
+                let slots = kerb_slots(&streets);
+                let own = |p: DVec3| {
+                    // Which street a slot belongs to: the one it is 5 m from.
+                    let d = |s: &Street| {
+                        let (ax, az, bx, bz) = (s.a.x, s.a.y, s.b.x, s.b.y);
+                        let (dx, dz) = (bx - ax, bz - az);
+                        let t = (((p.x - ax) * dx + (p.z - az) * dz) / (dx * dx + dz * dz))
+                            .clamp(0.0, 1.0);
+                        ((p.x - ax - dx * t).powi(2) + (p.z - az - dz * t).powi(2)).sqrt()
+                    };
+                    usize::from(d(&streets[1]) < d(&streets[0]))
+                };
+                layouts += 1;
+                for i in 0..slots.len() {
+                    for j in i + 1..slots.len() {
+                        if own(slots[i].0) == own(slots[j].0) {
+                            continue;
+                        }
+                        pairs += 1;
+                        worst = worst.min((slots[i].0 - slots[j].0).length());
+                    }
+                }
+            }
+        }
+    }
+    println!(
+        "THE KERB GEOMETRY: {layouts} two-street layouts, {pairs} cross-street slot pairs, the closest {worst:.2} m"
+    );
+    assert!(pairs > 1_000, "only {pairs} cross-street pairs were tested");
+    assert!(worst >= 5.0, "two streets' kerb slots {worst:.2} m apart");
 }
 
 // ── 6. PIE == SHIPPING ──────────────────────────────────────────────────────
