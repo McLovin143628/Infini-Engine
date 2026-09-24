@@ -1859,7 +1859,7 @@ fn committed_clips() -> BTreeMap<Uuid, inf_audio::AudioAsset> {
 
 /// The shipped course rendered through the render-to-file door into `path`:
 /// `limited` is the shipped master track, `!limited` the measurement control.
-fn render_course(path: &Path, limited: bool) -> Vec<i16> {
+fn render_course(path: &Path, limited: bool) -> (Vec<i16>, Vec<Step>) {
     // The car's emitter at 2.4: a roster row's `AudioSource.volume` scales its
     // whole stack, and a loud row is exactly the case a ceiling exists for.
     // (At the default 1.0 this host's course peaks at 0.82 and never needs one.)
@@ -1887,7 +1887,10 @@ fn render_course(path: &Path, limited: bool) -> Vec<i16> {
     let steps = run(&mut host, course, DRIVE_STEPS);
     assert!(steps.len() > 900);
     drop(host);
-    wav_samples(&std::fs::read(path).expect("the capture"))
+    (
+        wav_samples(&std::fs::read(path).expect("the capture")),
+        steps,
+    )
 }
 
 /// **THE COURSE'S BYTES DO NOT CLIP** (VEH3e audit, carried 6 — the mix had no
@@ -1908,8 +1911,35 @@ fn render_course(path: &Path, limited: bool) -> Vec<i16> {
 #[test]
 fn the_course_render_does_not_clip() {
     let tmp = tempfile::tempdir().expect("a temp dir");
-    let raw = render_course(&tmp.path().join("raw.wav"), false);
-    let lim = render_course(&tmp.path().join("limited.wav"), true);
+    let (raw, _) = render_course(&tmp.path().join("raw.wav"), false);
+    let (lim, steps) = render_course(&tmp.path().join("limited.wav"), true);
+    // `VEH3E_AUDIT_DUMP=<dir>` keeps both renders and a per-step telemetry
+    // CSV for a listener's own tools (the audit re-derived its tables off
+    // these bytes). Off by default; nothing is asserted about it.
+    if let Some(dir) = std::env::var_os("VEH3E_AUDIT_DUMP") {
+        let dir = PathBuf::from(dir);
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::copy(tmp.path().join("raw.wav"), dir.join("course-raw.wav"));
+        let _ = std::fs::copy(tmp.path().join("limited.wav"), dir.join("course.wav"));
+        let mut csv =
+            String::from("step,phase,rpm,gear,throttle,boost,slip_f,slip_r,speed,surface_r\n");
+        for (i, st) in steps.iter().enumerate() {
+            let v = st.voice.unwrap_or_default();
+            csv.push_str(&format!(
+                "{i},{},{:.1},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:?}\n",
+                st.board.0.name(),
+                v.rpm,
+                v.gear,
+                v.throttle,
+                v.boost,
+                v.axles[0].slip,
+                v.axles[1].slip,
+                v.speed_mps,
+                v.axles[1].surface
+            ));
+        }
+        let _ = std::fs::write(dir.join("course.csv"), csv);
+    }
     let clipped = |x: &[i16]| x.iter().filter(|v| **v >= 32_767 || **v <= -32_767).count();
     let peak =
         |x: &[i16]| x.iter().map(|v| i32::from(*v).abs()).max().unwrap_or(0) as f64 / 32_767.0;

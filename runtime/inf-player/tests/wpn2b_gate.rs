@@ -2647,7 +2647,7 @@ fn the_hero_log_and_its_readme_agree() {
         "wheel_m",
         "pedal_m",
         "rim_deg",
-        // Wave VEH3e's ten.
+        // Wave VEH3e's eleven.
         "gear",
         "load",
         "slip_front",
