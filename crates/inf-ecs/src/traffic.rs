@@ -2411,28 +2411,10 @@ pub fn heading_of_yaw(yaw_deg: f64) -> DVec3 {
 /// ([`KERB_SLOT_M`] less a metre and a half of standing room) and belong to a
 /// wheeled, untowed family.
 pub fn catalogue_row(guid: Uuid) -> crate::vehicle::VehicleDef {
-    use crate::roster::{pick_row, RosterClass};
-    let circuit = matches!(
-        day_of(guid),
-        TrafficDay::DayCircuit | TrafficDay::NightCircuit
-    );
-    let unit = crate::crowd::agent_unit(guid, 0, SALT_CLASS);
-    let fits = |d: &crate::vehicle::VehicleDef| {
-        d.body.wheeled() && !d.body.towed() && 2.0 * d.half_extents.z <= KERB_SLOT_M - 1.5
-    };
-    let picked = if circuit {
-        pick_row(unit, RosterClass::circuit_weight, fits)
-    } else {
-        pick_row(
-            unit,
-            RosterClass::parked_weight,
-            |d: &crate::vehicle::VehicleDef| {
-                fits(d) && crate::vehicle::VehicleBody::CIVILIAN.contains(&d.body)
-            },
-        )
-    };
-    match picked {
-        Some((_, def)) => *def,
+    // ONE door (the VEH3f gate's mutation run found two): the row the census
+    // counts IS the row the world spawns, because this is that id, looked up.
+    match catalogue_row_id(guid).and_then(|id| crate::roster::roster().get(id)) {
+        Some(def) => *def,
         // Unreachable with the committed roster (every parked class has rows
         // that fit), and still a car rather than a panic: the default rig,
         // sprung to hold itself up.
@@ -2444,9 +2426,9 @@ pub fn catalogue_row(guid: Uuid) -> crate::vehicle::VehicleDef {
     }
 }
 
-/// **The roster row id a slot's car is** -- [`catalogue_row`]'s other half,
-/// for the census and the instruments (wave VEH3f). The same draw, answered as
-/// the row's id rather than its geometry.
+/// **The roster row id a slot's car is** (wave VEH3f) -- THE draw:
+/// [`catalogue_row`] is this id looked up, so the census and the instruments
+/// read exactly what the world spawns.
 pub fn catalogue_row_id(guid: Uuid) -> Option<&'static str> {
     use crate::roster::{pick_row, RosterClass};
     let circuit = matches!(
