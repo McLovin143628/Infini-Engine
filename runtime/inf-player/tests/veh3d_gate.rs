@@ -101,6 +101,7 @@ struct Yard {
 fn catalogue_def(id: &str) -> VehicleDef {
     *inf_editor_core::vehicle::island_vehicles()
         .get(id)
+        .or_else(|| inf_ecs::roster::roster().get(id))
         .unwrap_or_else(|| panic!("the catalogue has no `{id}` row"))
 }
 
@@ -204,12 +205,19 @@ impl Yard {
     /// A catalogue row settled on its wheels at the origin heading `+Z`, the
     /// hero at [`HERO_AT`] with the mannequin rig, and whatever `extra` adds.
     fn build(row: &str, extra: impl FnOnce(&mut EcsWorld)) -> Self {
+        Self::build_with_hero(row, HERO_AT, extra)
+    }
+
+    /// [`build`](Self::build) with the hero standing at `hero_at` (wave VEH3f:
+    /// a roster family's driver's door is not where a saloon's is, and
+    /// [`HERO_AT`] is the saloon's).
+    fn build_with_hero(row: &str, hero_at: DVec3, extra: impl FnOnce(&mut EcsWorld)) -> Self {
         let def = catalogue_def(row);
         let mut world = EcsWorld::default();
         ground(&mut world);
         let y = inf_ecs::vehicle::resting_origin_y(&def, 0.0) + 0.15;
         car(&mut world, CHASSIS, DVec3::new(0.0, y, 0.0), 0.0, &def);
-        stand(&mut world, HERO, "Hero", HERO_AT, 0.0, true);
+        stand(&mut world, HERO, "Hero", hero_at, 0.0, true);
         extra(&mut world);
         world.mark_dirty();
         world.propagate();
@@ -3905,7 +3913,14 @@ fn the_islands_hero_boards_drives_and_rolls_out() {
             .unwrap_or(0.3);
         cm.stand_half_height_m + r
     };
-    let beside = car.world(Vec3d::new(car.half.x + 1.6, 0.0, -1.2));
+    // Beside the DRIVER's seat (wave VEH3f): the nearest parked car is any
+    // roster row now, and a crew-cab's driver sits a metre further forward
+    // than a saloon's -- from the saloon's spot the seat was out of reach.
+    let beside = car.world(Vec3d::new(
+        car.half.x + 1.6,
+        0.0,
+        car.sockets.seat_r.z - 1.4,
+    ));
     let ground = sim.terrain_height_at(beside.x, beside.z);
     set_hero(
         &mut sim,
@@ -4148,7 +4163,11 @@ fn the_island_census_has_no_doubly_occupied_seat() {
                 .first()
                 .and_then(|(_, g)| d3::boarding::car_frame(sim.world(), sim.bridge3d(), *g, false))
             {
-                let beside = car.world(Vec3d::new(car.half.x + 1.6, 0.0, -1.2));
+                let beside = car.world(Vec3d::new(
+                    car.half.x + 1.6,
+                    0.0,
+                    car.sockets.seat_r.z - 1.4,
+                ));
                 let ground = sim.terrain_height_at(beside.x, beside.z);
                 let lift = {
                     let e = sim.world().entity_of(hero).unwrap();
@@ -4232,4 +4251,136 @@ fn the_island_census_has_no_doubly_occupied_seat() {
         "the hero reached the wheel {boarded} times in {attempts} attempts — the census measured no boarding"
     );
     assert!(worst <= 1, "a seat on the island held {worst} bodies");
+}
+
+/// **THE ROSTER'S FAMILIES SEAT THEIR DRIVER INSIDE, AND THE CAR STAYS ON ITS
+/// WHEELS** (wave VEH3f) -- `the_seat_is_inside_the_cabin_on_every_family`'s
+/// table over one row of each roster family a hero can board: crew-cab and
+/// single-cab pickups, the hatch, the wagon, the jeep, the bus (its driver over
+/// the front axle, by its folding door), the semi tractor (drawn with the
+/// construction pack's art where this machine has it) and the armoured car.
+///
+/// The second clause is the finding that made this arm: a Caracara 6x6's front
+/// wheel's outer contact ray stopped on the car's own open door (a VEH3c part
+/// BODY, which the wheel rays did not exclude), and the pickup climbed 0.92 m
+/// onto it and hung there with no wheel on the road -- the island's hero sat
+/// 1.65 m above its roof.
+///
+/// **Mutation → red**: the part-body exclusion in `d3::vehicle` deleted (the
+/// pickups rise 0.7-0.9 m).
+#[test]
+fn the_roster_families_seat_their_driver_inside_and_the_car_stays_on_its_wheels() {
+    println!("=== where a driver sits, per family (metres above the road) ===");
+    println!(
+        "  {:<8} {:>6} {:>8} {:>8} {:>8} {:>8} {:>9} {:>9} {:>8}",
+        "row", "half.y", "old seat", "floor", "cushion", "pelvis", "pelv-roof", "head-roof", "feet"
+    );
+    let mut rows = 0;
+    for row in [
+        "caracara_6x6",
+        "vapid_contender",
+        "dinka_sugoi",
+        "obey_tailgater_s",
+        "canis_terminus",
+        "brute_bus",
+        "mtl_packer",
+        "hvy_nightshark",
+    ] {
+        // Beside the DRIVER's seat, where HERO_AT stands beside a saloon's.
+        let def = catalogue_def(row);
+        let seat = def
+            .body
+            .parts()
+            .iter()
+            .find(|p| p.name == "seat_r")
+            .map(|p| {
+                (
+                    p.centre.x * def.half_extents.x,
+                    p.centre.z * def.half_extents.z,
+                )
+            })
+            .unwrap_or((0.0, 0.0));
+        let hero_at = DVec3::new(seat.0 + 2.2, 0.0, seat.1 - 1.8);
+        let mut y = Yard::build_with_hero(row, hero_at, |_| {});
+        let before = y.frame().world(Vec3d::ZERO).y;
+        y.board(HERO);
+        y.step(30);
+        let car = y.frame();
+        let up = |local: Vec3d| car.world(local).y;
+        let top = up(Vec3d::new(
+            car.offset.x,
+            car.offset.y + car.half.y,
+            car.offset.z,
+        ));
+        let floor = car
+            .world(car.sockets.seat_floor(SeatIndex::Driver, car.floor_y()))
+            .y;
+        let cushion = car.world(car.sockets.seat(SeatIndex::Driver));
+        let pelvis = y
+            .joint(
+                HERO,
+                inf_anim::BoneRoleKind::Pelvis,
+                inf_anim::BoneSide::Center,
+            )
+            .expect("a pelvis");
+        let head = y
+            .joint(
+                HERO,
+                inf_anim::BoneRoleKind::Head,
+                inf_anim::BoneSide::Center,
+            )
+            .expect("a head");
+        // The feet against the PEDALS the arm lays itself, at the inputs the
+        // car was given (VEH3d audit: this read the foot request's own target).
+        let feet = y.feet(HERO);
+        let (tp, bp) = {
+            let b = y.cm(HERO).runtime.boarding;
+            board::pedal_faces(&car.sockets, b.throttle_in, b.brake_in)
+        };
+        let foot_err = pair(feet, [car.world(bp), car.world(tp)]);
+        println!(
+            "  {:<8} {:>6.2} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>+9.3} {:>+9.3} {:>6.1}mm",
+            row,
+            car.half.y,
+            top,
+            floor,
+            cushion.y,
+            pelvis.y,
+            pelvis.y - top,
+            head.y - top,
+            foot_err * 1000.0
+        );
+        assert!(
+            (pelvis.y - cushion.y).abs() < 0.03,
+            "{row}: the pelvis joint is at {:.3} and the cushion at {:.3} — the body is not sitting on the seat",
+            pelvis.y,
+            cushion.y
+        );
+        assert!(
+            pelvis.y < top - 0.3,
+            "{row}: the pelvis is {:+.3} m from the roof — the driver is not inside the car",
+            pelvis.y - top
+        );
+        assert!(
+            head.y < top,
+            "{row}: the head joint is {:+.3} m above the roof — the driver's head is through it",
+            head.y - top
+        );
+        assert!(
+            foot_err <= 0.02,
+            "{row}: a foot is {:.1} mm from its pedal",
+            foot_err * 1000.0
+        );
+        // …and the car is still standing on its wheels (wave VEH3f): a crew-cab
+        // pickup's front wheel ray used to stop on its own OPEN DOOR, and the
+        // truck climbed 0.92 m onto it while its driver got in.
+        let after = y.frame().world(Vec3d::ZERO).y;
+        assert!(
+            (after - before).abs() < 0.08,
+            "{row}: the car rose {:.3} m while its driver got in",
+            after - before
+        );
+        rows += 1;
+    }
+    assert_eq!(rows, 8, "the table did not walk every roster family");
 }

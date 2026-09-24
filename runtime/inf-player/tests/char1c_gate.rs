@@ -1859,8 +1859,18 @@ fn the_camera_never_ends_inside_the_islands_geometry() {
     // eleven frames inside a **Traffic Car**, because the exclusion list had
     // "the vehicle every character is sitting in" and every traffic car has a
     // driver.
+    //
+    // **Re-blessed at wave VEH3f, with its cause.** The deep clip this arm read
+    // (> 0.1 m) was a PARKED CAR's: the kerb draw was one of the island's eleven
+    // rows, and the 2.4 m van it put on this street stood above the boom's
+    // height. The kerb now draws the roster by class weight, the street parks
+    // saloons and SUVs the boom passes over, and the facades alone keep it at
+    // 0.019 m worst (measured; the lattice exclusion disabled changes nothing,
+    // so it is the draw). What this half guards -- that the sweep is RUNNING
+    // against the island's colliders -- is a non-zero pull; the deep clip is
+    // the hostile-route arm's, which walks the hero into geometry on purpose.
     assert!(
-        worst_clip > 0.1,
+        worst_clip > 0.01,
         "the boom was never clipped over {walked:.2} m of Harbour City (worst \
          {worst_clip:.3} m) — the sweep is not seeing the city"
     );

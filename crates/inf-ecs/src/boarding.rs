@@ -476,6 +476,18 @@ impl VehicleSockets {
     }
 }
 
+/// **The furthest a seated driver's pedals are ahead of the cushion**, metres
+/// (wave VEH3f) -- see [`sockets_of`]. Measured with the island's MetaHuman on
+/// a 6.9 m crew-cab: at 0.90 m (the island van's own fraction) its feet ended
+/// 79 mm short; the saloon's 0.66 m it reaches exactly. 0.80 m is in the
+/// middle and costs the four longest island rows (van, ambulance, SWAT truck,
+/// launch) their last 0.04-0.16 m of pedal reach.
+pub const MAX_PEDAL_REACH_M: f64 = 0.80;
+
+/// **The furthest the wheel hub is ahead of the cushion**, metres (wave VEH3f)
+/// -- the island van's 0.60 m, and a hair.
+pub const MAX_HUB_REACH_M: f64 = 0.601;
+
 /// **DERIVE the eight sockets** from a chassis collider and the parts bolted to
 /// it. The one door; every consumer calls this rather than holding a field.
 ///
@@ -498,38 +510,28 @@ pub fn sockets_of(half: Vec3d, offset: Vec3d, parts: &[PartGeom]) -> VehicleSock
     let seat_rear = at(0.0, SEAT_CUSHION_FRAC_Y, SEAT_REAR_FRAC_Z);
     // The pedals and the hub belong to the DRIVER's side, whichever that is.
     let d = SEAT_LATERAL_FRAC_X;
-    let pedal_throttle = at(d * PEDAL_THROTTLE_FRAC_X, PEDAL_FRAC_Y, PEDAL_FRAC_Z);
-    let pedal_brake = at(d * PEDAL_BRAKE_FRAC_X, PEDAL_FRAC_Y, PEDAL_FRAC_Z);
-    let wheel_hub = at(d, WHEEL_HUB_FRAC_Y, WHEEL_HUB_FRAC_Z);
-    let mut out = VehicleSockets {
-        seat_l,
-        seat_r,
-        seat_rear,
-        door_handle_l: at(-1.0, HANDLE_FALLBACK_Y, HANDLE_FALLBACK_Z),
-        door_handle_r: at(1.0, HANDLE_FALLBACK_Y, HANDLE_FALLBACK_Z),
-        pedal_throttle,
-        pedal_brake,
-        wheel_hub,
-        wheel_rim_m: WHEEL_RIM_FRAC * hx,
-    };
-    // ── the SEAT RULE per silhouette (wave VEH3f) ───────────────────────────
+    let mut pedal_throttle = at(d * PEDAL_THROTTLE_FRAC_X, PEDAL_FRAC_Y, PEDAL_FRAC_Z);
+    let mut pedal_brake = at(d * PEDAL_BRAKE_FRAC_X, PEDAL_FRAC_Y, PEDAL_FRAC_Z);
+    let mut wheel_hub = at(d, WHEEL_HUB_FRAC_Y, WHEEL_HUB_FRAC_Z);
+    // **A leg and an arm are metres long, not fractions of a hull** (wave
+    // VEH3f): on the roster's long hulls -- a 6.9 m crew-cab pickup -- the
+    // fractions put the pedals 1.04 m ahead of the cushion and the island
+    // hero's feet ended 210 mm short of them. The reach is capped in metres:
+    // the hub at the island van's own 0.60 m (no island row moves), the pedals
+    // at 0.80 m (the four longest island rows' pedals come back by up to
+    // 0.16 m; see `MAX_PEDAL_REACH_M`).
+    // ── THE SEAT'S PLAN POSITION, off a drawn cushion (wave VEH3f) ──────────
     //
-    // A family that DRAWS its seats (`BodyPartKind::Seat`, a `seat*` part) is
-    // seated on them: the driver on the cushion furthest to `+X` (the centreline
-    // counts, for a dozer's or a forklift's one seat), the passenger on the
-    // cushion furthest to `-X`. The pedals and the wheel then follow the DRIVER
-    // in metres rather than the hull in fractions, because the reason for the
-    // rule is that a bus's driver sits over its front axle, eleven metres from
-    // where a fraction of the hull would put him, and the fractions would leave
-    // his pedals behind him. Every family that predates the roster draws no seat
-    // and keeps every number above, byte for byte.
-    let seat_top = |p: &PartGeom| {
-        Vec3d::new(
-            offset.x + p.centre_frac.x * hx,
-            offset.y + (p.centre_frac.y + p.half_frac.y.abs()) * hy,
-            offset.z + p.centre_frac.z * hz,
-        )
-    };
+    // A family that draws its seats (`BodyPartKind::Seat`, a `seat*` part)
+    // seats its driver on the cushion furthest to `+X` (the centreline counts,
+    // for a dozer's or a forklift's one seat) and its passenger on the one
+    // furthest to `-X` -- in PLAN only: `x` and `z` come off the cushion, the
+    // height stays the hull's fraction, because the seat step, the pelvis drop
+    // and the foot-well floor are one arithmetic of the hull's height (see
+    // `vehicle_families`' module note for the measurement). The pedals and the
+    // wheel keep their fraction-rule offsets FROM THE SEAT. A family with no
+    // seat part never enters this block, so every family that predates the
+    // roster keeps every socket byte for byte.
     let mut driver: Option<&PartGeom> = None;
     let mut passenger: Option<&PartGeom> = None;
     for p in parts.iter().filter(|p| p.kind == crate::vehicle::KIND_SEAT) {
@@ -541,25 +543,55 @@ pub fn sockets_of(half: Vec3d, offset: Vec3d, parts: &[PartGeom]) -> VehicleSock
             passenger = Some(p);
         }
     }
-    if let Some(d) = driver {
-        let c = seat_top(d);
-        out.seat_r = c;
-        out.pedal_throttle = Vec3d::new(
-            c.x + SEATED_PEDAL_M.0,
-            c.y + SEATED_PEDAL_M.1,
-            c.z + SEATED_PEDAL_M.2,
+    let (mut seat_r, mut seat_l) = (seat_r, seat_l);
+    if let Some(dp) = driver {
+        let x = offset.x + dp.centre_frac.x * hx;
+        let z = offset.z + dp.centre_frac.z * hz;
+        seat_r = Vec3d::new(x, seat_r.y, z);
+        let lateral = x - offset.x;
+        pedal_throttle = Vec3d::new(
+            offset.x + lateral * PEDAL_THROTTLE_FRAC_X,
+            pedal_throttle.y,
+            z + (PEDAL_FRAC_Z - SEAT_FRONT_FRAC_Z) * hz,
         );
-        out.pedal_brake = Vec3d::new(
-            c.x - SEATED_PEDAL_M.0,
-            c.y + SEATED_PEDAL_M.1,
-            c.z + SEATED_PEDAL_M.2,
+        pedal_brake = Vec3d::new(
+            offset.x + lateral * PEDAL_BRAKE_FRAC_X,
+            pedal_brake.y,
+            z + (PEDAL_FRAC_Z - SEAT_FRONT_FRAC_Z) * hz,
         );
-        out.wheel_hub = Vec3d::new(c.x, c.y + SEATED_HUB_M.0, c.z + SEATED_HUB_M.1);
-        out.wheel_rim_m = SEATED_RIM_M;
+        wheel_hub = Vec3d::new(
+            x,
+            wheel_hub.y,
+            z + (WHEEL_HUB_FRAC_Z - SEAT_FRONT_FRAC_Z) * hz,
+        );
     }
-    if let Some(p) = passenger {
-        out.seat_l = seat_top(p);
+    if let Some(pp) = passenger {
+        seat_l = Vec3d::new(
+            offset.x + pp.centre_frac.x * hx,
+            seat_l.y,
+            offset.z + pp.centre_frac.z * hz,
+        );
     }
+    let pedal_cap = seat_r.z + MAX_PEDAL_REACH_M;
+    if pedal_throttle.z > pedal_cap {
+        pedal_throttle.z = pedal_cap;
+        pedal_brake.z = pedal_cap;
+    }
+    let hub_cap = seat_r.z + MAX_HUB_REACH_M;
+    if wheel_hub.z > hub_cap {
+        wheel_hub.z = hub_cap;
+    }
+    let mut out = VehicleSockets {
+        seat_l,
+        seat_r,
+        seat_rear,
+        door_handle_l: at(-1.0, HANDLE_FALLBACK_Y, HANDLE_FALLBACK_Z),
+        door_handle_r: at(1.0, HANDLE_FALLBACK_Y, HANDLE_FALLBACK_Z),
+        pedal_throttle,
+        pedal_brake,
+        wheel_hub,
+        wheel_rim_m: WHEEL_RIM_FRAC * hx,
+    };
     // ── the handles, from the DOORS (VEH3c's own derivation) ────────────────
     //
     // The door's outer face just under its top edge, pushed out along the
@@ -727,20 +759,6 @@ pub fn inner_handle_in_door(
         (cushion.z + INNER_PULL_AHEAD_M - door_centre_m.z).clamp(-0.9 * hz, 0.9 * hz),
     )
 }
-
-/// **Where a seated driver's pedals are, from the cushion**, metres -- `(half the
-/// throttle/brake spread, down, forward)` (wave VEH3f). The SAE H-point-to-heel
-/// relationship of an upright seating position: a metre of leg, most of it
-/// forward.
-pub const SEATED_PEDAL_M: (f64, f64, f64) = (0.08, -0.30, 0.80);
-
-/// **Where a seated driver's wheel hub is, from the cushion**, metres -- `(up,
-/// forward)` (wave VEH3f).
-pub const SEATED_HUB_M: (f64, f64) = (0.40, 0.45);
-
-/// **The rim radius on a family with drawn seats**, metres (wave VEH3f) -- a
-/// real wheel, not a fraction of a hull that might be a bus.
-pub const SEATED_RIM_M: f64 = 0.19;
 
 /// How far AHEAD of the seat's H-point the inner pull is, metres — the front of
 /// the arm rest, under a seated elbow.

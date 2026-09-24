@@ -294,13 +294,72 @@ pub fn chassis_of(collider: Option<&Collider3D>, body: Option<&RigidBody3D>) -> 
 /// has built, and two spellings of "where the seat is" is the defect this file
 /// has paid for at four separate seams.
 pub fn seat_local_of(c: &Collider3D) -> Vec3d {
+    seat_local_with(c, &[])
+}
+
+/// [`seat_local_of`] for a chassis that DRAWS its seats (wave VEH3f): the
+/// driver's cushion gives the seat its plan position, through the one
+/// [`sockets_of`](crate::boarding::sockets_of) every other seat reader calls.
+/// `seats` is the chassis's `seat*` children as [`seat_geoms`] reads them;
+/// empty is [`seat_local_of`] exactly.
+pub fn seat_local_with(c: &Collider3D, seats: &[crate::boarding::PartGeom]) -> Vec3d {
     let half = chassis_half_extents(c);
-    let s = crate::boarding::sockets_of(half, c.offset, &[]);
+    let s = crate::boarding::sockets_of(half, c.offset, seats);
     s.seat_floor(
         crate::boarding::SeatIndex::Driver,
         c.offset.y + crate::boarding::SEAT_FLOOR_FRAC_Y * half.y,
     )
 }
+
+/// **A chassis's drawn seats** (wave VEH3f), as
+/// [`sockets_of`](crate::boarding::sockets_of) reads parts: every child whose
+/// name starts with [`SEAT_PART_PREFIX`] and that DRAWS something, its centre
+/// and half-size in fractions of the chassis collider's half-extents, read off
+/// its own `Transform` (the rig lays a part's centre at `centre * half` and its
+/// scale at `2 * half_frac * half`). `O(children)`.
+pub fn seat_geoms(
+    world: &EcsWorld,
+    chassis: bevy_ecs::entity::Entity,
+    collider: &Collider3D,
+) -> Vec<crate::boarding::PartGeom> {
+    let half = chassis_half_extents(collider);
+    let (hx, hy, hz) = (
+        half.x.abs().max(1e-9),
+        half.y.abs().max(1e-9),
+        half.z.abs().max(1e-9),
+    );
+    let w = world.world();
+    let mut out = Vec::new();
+    for child in world.children_of(chassis) {
+        let named = world
+            .name_of(child)
+            .is_some_and(|n| n.starts_with(SEAT_PART_PREFIX));
+        if !named || w.get::<crate::components::MeshRef>(child).is_none() {
+            continue;
+        }
+        let Some(t) = w.get::<Transform>(child) else {
+            continue;
+        };
+        out.push(crate::boarding::PartGeom {
+            kind: KIND_SEAT,
+            centre_frac: Vec3d::new(
+                (t.translation.x - collider.offset.x) / hx,
+                (t.translation.y - collider.offset.y) / hy,
+                (t.translation.z - collider.offset.z) / hz,
+            ),
+            half_frac: Vec3d::new(
+                0.5 * t.scale.x.abs() / hx,
+                0.5 * t.scale.y.abs() / hy,
+                0.5 * t.scale.z.abs() / hz,
+            ),
+        });
+    }
+    out
+}
+
+/// The name prefix a drawn seat part carries (wave VEH3f) -- `seat_r`,
+/// `seat_l`.
+pub const SEAT_PART_PREFIX: &str = "seat";
 
 /// **The box a chassis collider fills**, whatever shape it was authored as.
 ///
@@ -354,7 +413,14 @@ pub fn sockets_for(
 pub fn rig_of(world: &EcsWorld, chassis: Uuid) -> Option<VehicleRig> {
     let entity = world.entity_of(chassis)?;
     let w = world.world();
-    let seat_local = chassis_of(w.get::<Collider3D>(entity), w.get::<RigidBody3D>(entity))?;
+    let mut seat_local = chassis_of(w.get::<Collider3D>(entity), w.get::<RigidBody3D>(entity))?;
+    // A family that draws its seats is seated on them (wave VEH3f).
+    if let Some(c) = w.get::<Collider3D>(entity) {
+        let seats = seat_geoms(world, entity, c);
+        if !seats.is_empty() {
+            seat_local = seat_local_with(c, &seats);
+        }
+    }
     let mut wheels: Vec<WheelMount> = Vec::new();
     let mut parts: Vec<PartMount> = Vec::new();
     for child in world.children_of(entity) {
@@ -3768,6 +3834,23 @@ pub fn fifth_wheel_local(tractor: &VehicleDef) -> Option<Vec3d> {
     ))
 }
 
+/// **Where the hitch joins the tractor**, tractor chassis frame, metres: the
+/// fifth wheel's plan position ([`fifth_wheel_local`]) at the height the
+/// trailer's kingpin stands when the trailer rests level on its own wheels.
+///
+/// Measured, not assumed: a tractor that draws the construction pack's art
+/// took the ART's box, and the family's fifth-wheel fraction of it put the
+/// saddle 0.25 m under the box trailer's kingpin. The trailer was hitched with
+/// its rear struts driven onto their bump stops, and the rig climbed three
+/// metres off the slab in four seconds. The coupling height belongs to the
+/// PAIR, so it is derived from both rows' resting heights.
+pub fn coupling_local(tractor: &VehicleDef, trailer: &VehicleDef) -> Option<Vec3d> {
+    let fifth = fifth_wheel_local(tractor)?;
+    let pin = kingpin_local(trailer);
+    let y = resting_origin_y(trailer, 0.0) + pin.y - resting_origin_y(tractor, 0.0);
+    Some(Vec3d::new(fifth.x, y, fifth.z))
+}
+
 /// **The trailer's kingpin**, chassis frame, metres -- on its floor, at
 /// [`KINGPIN_Z_FRAC`] of its half-length ahead of centre.
 pub fn kingpin_local(trailer: &VehicleDef) -> Vec3d {
@@ -3799,7 +3882,7 @@ pub fn hitch_joint(
     if !trailer_def.body.towed() {
         return None;
     }
-    let fifth = fifth_wheel_local(tractor_def)?;
+    let fifth = coupling_local(tractor_def, trailer_def)?;
     Some(crate::components::Joint3D {
         other: crate::refs::EntityRef::new(tractor),
         kind: crate::components::JointKind3D::Spherical,
@@ -3819,7 +3902,7 @@ pub fn hitched_trailer_at(
     tractor_def: &VehicleDef,
     trailer_def: &VehicleDef,
 ) -> Option<DVec3> {
-    let fifth = fifth_wheel_local(tractor_def)?;
+    let fifth = coupling_local(tractor_def, trailer_def)?;
     let pin = kingpin_local(trailer_def);
     let d = Vec3d::new(fifth.x - pin.x, fifth.y - pin.y, fifth.z - pin.z);
     let r = yaw_deg.to_radians();

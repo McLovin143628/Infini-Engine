@@ -1269,6 +1269,19 @@ impl PhysicsBridge3D {
             // in it too — a second walk over 13 000 entities to learn that no
             // vehicle moved is the cost this shape exists to avoid.
             if let Some(seat) = inf_ecs::vehicle::chassis_of(col.as_ref(), rb.as_ref()) {
+                // …seated on its drawn cushion when the family draws one (wave
+                // VEH3f), through the same `seat_local_with` `rig_of` calls.
+                let seat = match col.as_ref() {
+                    Some(c) => {
+                        let seats = inf_ecs::vehicle::seat_geoms(world, entity.id(), c);
+                        if seats.is_empty() {
+                            seat
+                        } else {
+                            inf_ecs::vehicle::seat_local_with(c, &seats)
+                        }
+                    }
+                    None => seat,
+                };
                 chassis_seats.insert(
                     guid,
                     (

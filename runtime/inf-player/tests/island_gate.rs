@@ -8094,7 +8094,7 @@ fn pie_equals_shipping_at_rush_hour_with_cars_on_the_streets() {
             run.jack_digests.len()
         );
         println!(
-            "VEH3e {label}: THE TRAFFIC SINGS -- {} traffic car(s) addressed on their NEAR grain key over the {RUSH_STEPS}-step window; {} audio command(s), {:.2} a step, at most {} on one step; the 65 536 log holds {:.0} s at that rate; evicted over the window: {}",
+            "VEH3e {label}: THE TRAFFIC SINGS -- {} traffic car(s) addressed on their NEAR grain key over the {RUSH_STEPS}-step window; {} audio command(s), {:.2} a step, at most {} on one step; the audio log holds {:.0} s at that rate; evicted over the window: {}",
             run.near_singing,
             run.audio.len(),
             run.audio.len() as f64 / RUSH_STEPS as f64,

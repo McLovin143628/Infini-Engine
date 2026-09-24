@@ -143,7 +143,18 @@ pub fn car_frame(
     } else {
         Vec::new()
     };
-    let sockets = board::sockets_of(half, collider.offset, &parts);
+    // The drawn SEATS always reach the sockets (wave VEH3f), census or not, so
+    // the seat step, the posture pass and the residual read one seat -- the one
+    // the rig's `seat_local` is derived from (`seat_geoms`, off the children).
+    let sockets = if with_parts {
+        board::sockets_of(half, collider.offset, &parts)
+    } else {
+        let seats = world
+            .entity_of(chassis)
+            .map(|e| inf_ecs::vehicle::seat_geoms(world, e, &collider))
+            .unwrap_or_default();
+        board::sockets_of(half, collider.offset, &seats)
+    };
     Some(CarFrame {
         chassis,
         pos,

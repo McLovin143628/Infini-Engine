@@ -91,9 +91,18 @@ fn catalogue_def(id: &str) -> VehicleDef {
 /// **The course car**: the catalogue's sports row, re-voiced as a turbocharged
 /// cross-plane V8 — every change through `VehicleClass::set`, the door a roster
 /// row will use.
+///
+/// **First gear is pinned to 4.4** (wave VEH3f). VEH3f re-geared the island's
+/// sports row (4.4 -> 3.8) to bring its 0-100 under four seconds, and on that
+/// gearing this course's launch reaches 25.9 m/s by its lift: the handbrake
+/// slide then carries the car backwards at 2.49 m/s through the exit press,
+/// above `EXIT_ROLL_MPS`, so the driver ROLLS out and the door, the latch and
+/// the engine's switch-off this gate reads never happen. The course is about
+/// the voice, not the sprint, so it keeps the car it was written on.
 fn course_def() -> VehicleDef {
     let mut def = catalogue_def("sports");
     for (k, v) in [
+        ("gear_1_ratio", 4.4),
         ("cylinders", 8.0),
         ("engine_voice_kind", 0.0),
         ("firing_order_variant", 1.0),

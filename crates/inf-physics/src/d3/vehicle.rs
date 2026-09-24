@@ -286,6 +286,26 @@ fn step_one(
     if let Some(c) = bridge.collider_of(chassis) {
         exclude.insert(c);
     }
+    // **…and its own hinged parts** (wave VEH3f). A door, a bonnet and a boot
+    // lid are part BODIES (VEH3c), jointed to this chassis, and on a long
+    // four-door family -- a crew-cab pickup whose front door hangs over the
+    // front axle -- the front wheel's outer contact ray starts inside the door
+    // and stops on it: measured, a Caracara 6x6 climbed 0.92 m onto its own
+    // open door while its driver got in, and hung on the struts with no wheel
+    // on the road. No row before the roster put a door over a wheel, which is
+    // why the set was the chassis alone. `O(parts)` off the bodywork census; a
+    // part whose joint is gone (SHED) is road like any other thing lying in it.
+    if let Some(row) = inf_ecs::bodywork::damage_row(world, chassis) {
+        for part in row.parts.keys() {
+            if let Some(p) = bridge.part_body(*part) {
+                if p.chassis == chassis && p.joint.is_some() {
+                    if let Some(c) = p.collider {
+                        exclude.insert(c);
+                    }
+                }
+            }
+        }
+    }
 
     // ── 1. the rays. FOUR per wheel since wave VEH3a, `O(4 · wheels)`.
     //

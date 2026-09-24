@@ -27,12 +27,19 @@
 //! Every family that predates the roster seats its driver at fixed fractions of
 //! the hull (`inf_ecs::boarding::SEAT_FRONT_FRAC_Z` and its siblings), which is
 //! right for a saloon and wrong for a bus -- whose driver sits over the front
-//! axle, eleven metres from where a fraction of the hull would put him -- and
-//! for a semi tractor, whose cushion is a metre above a car's. So a roster
-//! family DRAWS its seats as [`BodyPartKind::Seat`] cushions, and
-//! `boarding::sockets_of` reads the driver's cushion off them; a family with no
-//! seat part keeps the fractions, which is every family that shipped before this
-//! wave, byte for byte.
+//! axle, eleven metres from where a fraction of the hull would put him. So a
+//! roster family DRAWS its seats as [`BodyPartKind::Seat`] cushions, and the
+//! driver's cushion gives the seat its PLAN position (`x`, `z`):
+//! `boarding::sockets_of` seats the driver there, puts the pedals and the wheel
+//! ahead of it by the hull's own fractions (capped in metres), and every
+//! seat-reading door -- the rig's `seat_local`, the physics bridge's, the
+//! posture pass -- reads the same cushion. The HEIGHTS stay the hull's
+//! fractions (every cushion's top face is at `SEAT_CUSHION_FRAC_Y`), because
+//! the seat step, the pelvis drop and the foot-well floor are one arithmetic
+//! of the hull height, and moving the cushion's height alone was measured to
+//! leave a crew-cab driver 0.21 m under it. A family with no seat part keeps
+//! the fractions, which is every family that shipped before this wave, byte
+//! for byte.
 //!
 //! The tables themselves are generated from a compact spec (the VEH3f scratch
 //! `gen_families.py`) that asserts, before it writes a line, the same three
@@ -207,12 +214,12 @@ pub(crate) const COUPE_PARTS: &[BodyPart] = &[
     ),
     seat(
         "seat_l",
-        Vec3d::new(-0.42, -0.6, -0.08),
+        Vec3d::new(-0.42, -0.59, -0.08),
         Vec3d::new(0.3, 0.14, 0.16),
     ),
     seat(
         "seat_r",
-        Vec3d::new(0.42, -0.6, -0.08),
+        Vec3d::new(0.42, -0.59, -0.08),
         Vec3d::new(0.3, 0.14, 0.16),
     ),
 ];
@@ -291,12 +298,12 @@ pub(crate) const HATCH_PARTS: &[BodyPart] = &[
     ),
     seat(
         "seat_l",
-        Vec3d::new(-0.42, -0.6, 0.02),
+        Vec3d::new(-0.42, -0.59, 0.02),
         Vec3d::new(0.3, 0.14, 0.16),
     ),
     seat(
         "seat_r",
-        Vec3d::new(0.42, -0.6, 0.02),
+        Vec3d::new(0.42, -0.59, 0.02),
         Vec3d::new(0.3, 0.14, 0.16),
     ),
 ];
@@ -385,12 +392,12 @@ pub(crate) const WAGON_PARTS: &[BodyPart] = &[
     ),
     seat(
         "seat_l",
-        Vec3d::new(-0.42, -0.6, 0.0),
+        Vec3d::new(-0.42, -0.59, 0.0),
         Vec3d::new(0.3, 0.14, 0.16),
     ),
     seat(
         "seat_r",
-        Vec3d::new(0.42, -0.6, 0.0),
+        Vec3d::new(0.42, -0.59, 0.0),
         Vec3d::new(0.3, 0.14, 0.16),
     ),
 ];
@@ -484,12 +491,12 @@ pub(crate) const PICKUP4_PARTS: &[BodyPart] = &[
     ),
     seat(
         "seat_l",
-        Vec3d::new(-0.42, -0.36, 0.34),
+        Vec3d::new(-0.42, -0.57, 0.34),
         Vec3d::new(0.3, 0.12, 0.14),
     ),
     seat(
         "seat_r",
-        Vec3d::new(0.42, -0.36, 0.34),
+        Vec3d::new(0.42, -0.57, 0.34),
         Vec3d::new(0.3, 0.12, 0.14),
     ),
 ];
@@ -573,12 +580,12 @@ pub(crate) const JEEP_PARTS: &[BodyPart] = &[
     ),
     seat(
         "seat_l",
-        Vec3d::new(-0.42, -0.48, 0.02),
+        Vec3d::new(-0.42, -0.57, 0.02),
         Vec3d::new(0.3, 0.12, 0.16),
     ),
     seat(
         "seat_r",
-        Vec3d::new(0.42, -0.48, 0.02),
+        Vec3d::new(0.42, -0.57, 0.02),
         Vec3d::new(0.3, 0.12, 0.16),
     ),
 ];
@@ -657,12 +664,12 @@ pub(crate) const HUMMER_PARTS: &[BodyPart] = &[
     ),
     seat(
         "seat_l",
-        Vec3d::new(-0.42, -0.3, 0.04),
+        Vec3d::new(-0.42, -0.57, 0.04),
         Vec3d::new(0.3, 0.12, 0.16),
     ),
     seat(
         "seat_r",
-        Vec3d::new(0.42, -0.3, 0.04),
+        Vec3d::new(0.42, -0.57, 0.04),
         Vec3d::new(0.3, 0.12, 0.16),
     ),
 ];
@@ -731,7 +738,7 @@ pub(crate) const BUS_PARTS: &[BodyPart] = &[
     ),
     seat(
         "seat_r",
-        Vec3d::new(0.5, -0.48, 0.8),
+        Vec3d::new(0.5, -0.53, 0.8),
         Vec3d::new(0.22, 0.08, 0.08),
     ),
 ];
@@ -845,12 +852,12 @@ pub(crate) const SEMI_TRACTOR_PARTS: &[BodyPart] = &[
     ),
     seat(
         "seat_l",
-        Vec3d::new(-0.45, -0.02, 0.12),
+        Vec3d::new(-0.45, -0.51, 0.12),
         Vec3d::new(0.22, 0.06, 0.1),
     ),
     seat(
         "seat_r",
-        Vec3d::new(0.45, -0.02, 0.12),
+        Vec3d::new(0.45, -0.51, 0.12),
         Vec3d::new(0.22, 0.06, 0.1),
     ),
 ];
@@ -978,7 +985,7 @@ pub(crate) const FLATBED_PARTS: &[BodyPart] = &[
     ),
     seat(
         "seat_r",
-        Vec3d::new(0.45, -0.05, 0.72),
+        Vec3d::new(0.45, -0.5, 0.72),
         Vec3d::new(0.22, 0.05, 0.1),
     ),
 ];
@@ -1062,7 +1069,7 @@ pub(crate) const TANKER_PARTS: &[BodyPart] = &[
     ),
     seat(
         "seat_r",
-        Vec3d::new(0.45, -0.1, 0.72),
+        Vec3d::new(0.45, -0.5, 0.72),
         Vec3d::new(0.22, 0.05, 0.1),
     ),
 ];
@@ -1136,7 +1143,7 @@ pub(crate) const APC_PARTS: &[BodyPart] = &[
     ),
     seat(
         "seat_r",
-        Vec3d::new(0.4, -0.2, 0.55),
+        Vec3d::new(0.4, -0.51, 0.55),
         Vec3d::new(0.22, 0.06, 0.1),
     ),
 ];
@@ -1210,7 +1217,7 @@ pub(crate) const DOZER_PARTS: &[BodyPart] = &[
     ),
     seat(
         "seat_r",
-        Vec3d::new(0.0, 0.08, -0.4),
+        Vec3d::new(0.0, -0.5, -0.4),
         Vec3d::new(0.2, 0.05, 0.12),
     ),
 ];
@@ -1294,7 +1301,7 @@ pub(crate) const FORKLIFT_PARTS: &[BodyPart] = &[
     ),
     seat(
         "seat_r",
-        Vec3d::new(0.0, -0.02, -0.1),
+        Vec3d::new(0.0, -0.51, -0.1),
         Vec3d::new(0.35, 0.06, 0.18),
     ),
 ];
@@ -1383,7 +1390,7 @@ pub(crate) const TOW_TRUCK_PARTS: &[BodyPart] = &[
     ),
     seat(
         "seat_r",
-        Vec3d::new(0.45, -0.1, 0.5),
+        Vec3d::new(0.45, -0.5, 0.5),
         Vec3d::new(0.22, 0.05, 0.1),
     ),
 ];
@@ -1437,7 +1444,7 @@ pub(crate) const AIRCRAFT_PARTS: &[BodyPart] = &[
     ),
     seat(
         "seat_r",
-        Vec3d::new(0.0, -0.05, 0.35),
+        Vec3d::new(0.0, -0.48, 0.35),
         Vec3d::new(0.08, 0.03, 0.08),
     ),
 ];

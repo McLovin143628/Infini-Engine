@@ -220,7 +220,18 @@ impl AudioCommand {
 /// ceiling in 18 minutes and stays there. That is the honest price of a log the
 /// gates read, and the alternative — a small ring in the player and a large one
 /// in a test — would mean the gates were not reading what ships.
-pub const AUDIO_LOG_CAPACITY: usize = 65_536;
+///
+/// # Doubled at wave VEH3f, with its population named
+///
+/// The roster put the doc's classes on the road, and a kerb or circuit car is
+/// now any of 108 rows -- most of them turbocharged, whistling and voiced
+/// through VEH3e's near stack -- where it had been one of eleven. Measured on
+/// `ems2_dispatch_gate`'s 15 000-step fixture: the traffic's own voice keys
+/// went from **35 419** commands (VEH3e's audit) to **59 696**, and with the
+/// three sirens on top the 65 536 ring evicted 32 768. 131 072 is the next
+/// power of two; its ceiling is **19 MiB** at the 152-byte command, reached
+/// only by a session that issues that many.
+pub const AUDIO_LOG_CAPACITY: usize = 131_072;
 
 /// A tiny ordered queue of [`AudioCommand`]s. The sim pushes; the host drains.
 /// Deterministic by construction (a `Vec`, drained in order).
