@@ -1098,7 +1098,19 @@ fn the_road_rolls_by_speed_on_its_surface() {
     for (s, st) in steps.iter().zip(&states) {
         let Some(v) = s.voice else { continue };
         let Some(q) = st.get(&roll) else { continue };
-        let (wv, wp) = va::roll_voice(&v);
+        // The curve WRITTEN HERE, not `va::roll_voice` (an arm that graded
+        // the planner with the planner's own function stayed green under both
+        // of its mutations): 0.35 x (0.35 + 0.65 x), x = |v| / 30 m/s, silent
+        // under 0.5 m/s or with no wheel down; pitch 0.8 + 0.45 x.
+        let speed = v.speed_mps.abs();
+        let x = (speed / 30.0).clamp(0.0, 1.0);
+        let down = v.axles.iter().any(|a| a.grounded);
+        let wv = if down && speed >= 0.5 {
+            0.35 * x * (0.35 + 0.65 * x)
+        } else {
+            0.0
+        };
+        let wp = 0.8 + 0.45 * x;
         let wv = if wv >= va::VOICE_FLOOR { wv } else { 0.0 };
         worst = worst.max((q.volume - wv).abs());
         if wv > 0.0 {
@@ -1112,14 +1124,17 @@ fn the_road_rolls_by_speed_on_its_surface() {
             quiet_stopped += 1;
         }
     }
+    // The gravel roll by the GENERATOR's name for it, not the planner's.
+    let gravel_clip = va::vehicle_clip(
+        inf_audio::vehicle_synth::VEHICLE_CLIP_NAMES
+            .iter()
+            .position(|n| *n == "Roll_Gravel")
+            .expect("a gravel roll") as u8,
+    );
     let gravel: Vec<usize> = steps
         .iter()
         .enumerate()
-        .filter(|(_, s)| {
-            plays_on(s, roll)
-                .iter()
-                .any(|p| p.clip == va::roll_clip(SurfaceVoice::Loose))
-        })
+        .filter(|(_, s)| plays_on(s, roll).iter().any(|p| p.clip == gravel_clip))
         .map(|(i, _)| i)
         .collect();
     println!(
