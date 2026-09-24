@@ -1875,7 +1875,7 @@ pub const ROSTER_LOTS: &[(&str, &[&str])] = &[
             "hvy_dump_truck",
             "hvy_mixer",
             "hvy_forklift",
-            "hvy_flatbed",
+            "vapid_bucket_truck",
         ],
     ),
     (

@@ -344,6 +344,176 @@ pub fn write_vehicle_bodies(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+// ── the ART FALLBACK (wave VEH3f) ───────────────────────────────────────────
+
+/// The committed folder the art fallbacks live in, under `samples/`.
+pub const VEHICLE_ART_FOLDER: &str = "vehicle-art";
+
+/// Transform a baked mesh's vertices by a scale and a translation (and, for a
+/// tyre, a quarter turn about `Z` that lays the cylinder's axis on `X`).
+fn placed(
+    asset: &inf_mesh::MeshAsset,
+    scale: [f64; 3],
+    at: [f64; 3],
+    axle_x: bool,
+) -> Vec<inf_mesh::SubMesh> {
+    asset
+        .submeshes
+        .iter()
+        .map(|sm| {
+            let mut sm = sm.clone();
+            for v in sm.vertices.iter_mut() {
+                let mut p = [
+                    v.position[0] as f64,
+                    v.position[1] as f64,
+                    v.position[2] as f64,
+                ];
+                let mut n = [v.normal[0] as f64, v.normal[1] as f64, v.normal[2] as f64];
+                if axle_x {
+                    // (x, y, z) -> (y, -x, z): the cylinder's +Y axis onto +X.
+                    p = [p[1], -p[0], p[2]];
+                    n = [n[1], -n[0], n[2]];
+                }
+                v.position = [
+                    (p[0] * scale[0] + at[0]) as f32,
+                    (p[1] * scale[1] + at[1]) as f32,
+                    (p[2] * scale[2] + at[2]) as f32,
+                ];
+                v.normal = [n[0] as f32, n[1] as f32, n[2] as f32];
+            }
+            sm.material_slot = None;
+            sm
+        })
+        .collect()
+}
+
+fn merged(
+    template: &inf_mesh::MeshAsset,
+    submeshes: Vec<inf_mesh::SubMesh>,
+) -> inf_mesh::MeshAsset {
+    // One submesh: a fallback draws in its part's one material.
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    for sm in submeshes {
+        let base = vertices.len() as u32;
+        vertices.extend(sm.vertices);
+        indices.extend(sm.indices.into_iter().map(|i| i + base));
+    }
+    let bounds = inf_mesh::Aabb::from_points(vertices.iter().map(|v| v.position));
+    inf_mesh::MeshAsset {
+        submeshes: vec![inf_mesh::SubMesh {
+            name: "fallback".to_string(),
+            vertices,
+            indices,
+            material_slot: None,
+            skin: Vec::new(),
+        }],
+        bounds,
+        material_slots: Vec::new(),
+        material_slot_assets: Vec::new(),
+        ..template.clone()
+    }
+}
+
+/// **The committed fallback of every roster machine** (wave VEH3f): its body
+/// as the FAMILY's own parts (every part but the seats) baked into one mesh in
+/// chassis metres, and its four tyres as DCC cylinders on `X` -- at the GUIDs
+/// the art rows name (`inf_ecs::roster::art_body_guid` / `art_wheel_guid`).
+///
+/// This is what a checkout without the Unreal art draws, and it is the
+/// primitive silhouette the row would have drawn anyway: `inf-import
+/// --vehicles` overwrites these identities in a LOCAL project with the
+/// machine's real art, and nothing from Unreal ever reaches this folder.
+pub fn art_fallback_meshes() -> Vec<HeroMesh> {
+    let opts = ExportOptions {
+        normals: NormalPolicy::Recompute,
+        optimize: false,
+    };
+    let (unit, _) = to_mesh_asset(&inf_dcc::cube(1.0), &opts);
+    let mut out = Vec::new();
+    for key in inf_ecs::roster::ArtKey::ALL {
+        let Some((_, def)) = inf_ecs::roster::roster()
+            .0
+            .iter()
+            .find(|(_, d)| d.art == Some(key))
+        else {
+            continue;
+        };
+        let h = def.half_extents;
+        let parts: Vec<inf_mesh::SubMesh> = def
+            .body
+            .parts()
+            .iter()
+            .filter(|p| p.kind != inf_ecs::vehicle::BodyPartKind::Seat)
+            .flat_map(|p| {
+                placed(
+                    &unit,
+                    [
+                        2.0 * p.half.x * h.x,
+                        2.0 * p.half.y * h.y,
+                        2.0 * p.half.z * h.z,
+                    ],
+                    [p.centre.x * h.x, p.centre.y * h.y, p.centre.z * h.z],
+                    false,
+                )
+            })
+            .collect();
+        out.push(HeroMesh {
+            file: format!("{}_body.inf_mesh", key.name()),
+            guid: inf_ecs::roster::art_body_guid(key),
+            asset: merged(&unit, parts),
+        });
+        let r = def.wheel_radius_m;
+        let (tyre, _) = to_mesh_asset(
+            &inf_dcc::cylinder(r, 2.0 * r * inf_ecs::vehicle::TYRE_WIDTH_FRAC, 20),
+            &opts,
+        );
+        for i in 0..4 {
+            out.push(HeroMesh {
+                file: format!("{}_wheel{i}.inf_mesh", key.name()),
+                guid: inf_ecs::roster::art_wheel_guid(key, i),
+                asset: merged(&tyre, placed(&tyre, [1.0, 1.0, 1.0], [0.0; 3], true)),
+            });
+        }
+    }
+    out
+}
+
+/// Every file the art fallback writes, sorted.
+pub fn art_fallback_files() -> Vec<String> {
+    let mut v: Vec<String> = art_fallback_meshes()
+        .into_iter()
+        .flat_map(|m| [m.file.clone(), format!("{}.toml", m.file)])
+        .collect();
+    v.sort();
+    v
+}
+
+/// The committed art-fallback folder.
+pub fn vehicle_art_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../samples")
+        .join(VEHICLE_ART_FOLDER)
+}
+
+/// **Write the art fallback** -- every mesh and its sidecar.
+pub fn write_vehicle_art_fallback(dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    for m in art_fallback_meshes() {
+        let bytes = inf_asset::encode(&m.asset).map_err(|e| format!("encode {}: {e}", m.file))?;
+        let path = dir.join(&m.file);
+        std::fs::write(&path, &bytes).map_err(|e| format!("write {}: {e}", path.display()))?;
+        inf_asset::AssetSidecar::new(
+            inf_asset::AssetId(m.guid),
+            inf_asset::AssetKind::Mesh,
+            inf_asset::ContentHash::of(&bytes),
+        )
+        .save(&path)
+        .map_err(|e| format!("write the sidecar for {}: {e}", m.file))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

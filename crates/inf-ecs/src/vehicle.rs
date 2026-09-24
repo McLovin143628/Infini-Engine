@@ -3153,6 +3153,10 @@ pub const CHASSIS_FRICTION: f64 = 0.5;
 /// was not already paying for a body panel.
 pub const GLASS_COLOR: crate::math::Color = crate::math::Color::new(0.07, 0.09, 0.12, 1.0);
 
+/// **The part an imported body's mesh hangs on** (wave VEH3f) -- a panel by the
+/// naming rule (`BodyPartKind::of`), so the bodywork treats it as the body.
+pub const ART_BODY_PART: &str = "art_body";
+
 /// **What a seat cushion is covered in** (wave VEH3f) -- charcoal cloth.
 pub const SEAT_COLOR: crate::math::Color = crate::math::Color::new(0.09, 0.09, 0.1, 1.0);
 
@@ -3413,10 +3417,20 @@ pub fn rig_nodes_at(
     // `RigidBody3D`, no `Collider3D` and no joint, so the vehicle phase never
     // sees one and a thousand parked cars cost exactly what they cost before
     // (`a_thousand_parked_cars_with_parts_cost_what_they_cost_without_them`).
-    let body_parts = def.body.parts().iter().map(|p| {
-        let paint = spawn.livery.and_then(|l| l.part(p.name));
-        (*p, paint)
-    });
+    // **An imported body draws itself** (wave VEH3f): a row with `art` keeps
+    // only its SEATS of the family's parts (the boarding sockets read them) and
+    // hangs the machine's own mesh on one `art_body` part below. Its doors,
+    // bonnet and glass are fused into the art, so there is nothing a box proxy
+    // over them would honestly be.
+    let body_parts = def
+        .body
+        .parts()
+        .iter()
+        .filter(|p| def.art.is_none() || p.kind == BodyPartKind::Seat)
+        .map(|p| {
+            let paint = spawn.livery.and_then(|l| l.part(p.name));
+            (*p, paint)
+        });
     let livery_parts = spawn
         .livery
         .map(|l| l.extra)
@@ -3498,6 +3512,33 @@ pub fn rig_nodes_at(
                     .map(|base| hero_part_mesh_guid(base, part.name)),
             }),
             material: Some(material),
+            class: None,
+            audio: None,
+            buoyancy: None,
+        });
+    }
+
+    if let Some(key) = def.art {
+        out.push(RigNode {
+            guid: part_guid(ART_BODY_PART),
+            name: ART_BODY_PART.to_string(),
+            parent: Some(chassis),
+            // The mesh is in METRES and centred on the chassis collider, which
+            // is what the importer (and the committed fallback) write -- so the
+            // part is the identity.
+            transform: Transform::IDENTITY,
+            body: None,
+            collider: None,
+            mesh: Some(MeshRef {
+                primitive: Primitive::Cube,
+                asset: Some(crate::roster::art_body_guid(key)),
+            }),
+            material: Some(Material {
+                base_color: spawn.paint,
+                metallic: 0.35,
+                roughness: 0.42,
+                ..Default::default()
+            }),
             class: None,
             audio: None,
             buoyancy: None,
@@ -3604,20 +3645,29 @@ pub fn rig_nodes_at(
         // The tyre is a child of the wheel because `step_vehicles` writes the
         // wheel's rotation every step as euler `(spin, steer, 0)` — there is no
         // roll slot left to lay a `+Y`-axis cylinder on its side with.
+        //
+        // **An imported machine's wheel is its own mesh** (wave VEH3f), already
+        // hub-centred with its axle on `X` in the chassis frame -- so its tyre
+        // is the identity and the wheel's spin and steer turn it as they are.
+        let art_wheel = def.art.map(|k| crate::roster::art_wheel_guid(k, i));
         out.push(RigNode {
             guid: part_guid(&format!("tyre{i}")),
             name: "Tyre".to_string(),
             parent: Some(wheel),
-            transform: Transform {
-                translation: Vec3d::ZERO,
-                rotation: Vec3d::new(0.0, 0.0, TYRE_ROLL_DEG),
-                scale: Vec3d::new(2.0 * r, 2.0 * r * TYRE_WIDTH_FRAC, 2.0 * r),
+            transform: if art_wheel.is_some() {
+                Transform::IDENTITY
+            } else {
+                Transform {
+                    translation: Vec3d::ZERO,
+                    rotation: Vec3d::new(0.0, 0.0, TYRE_ROLL_DEG),
+                    scale: Vec3d::new(2.0 * r, 2.0 * r * TYRE_WIDTH_FRAC, 2.0 * r),
+                }
             },
             body: None,
             collider: None,
             mesh: Some(MeshRef {
                 primitive: Primitive::Cylinder,
-                asset: None,
+                asset: art_wheel,
             }),
             material: Some(Material {
                 base_color: TYRE_COLOR,
@@ -4343,6 +4393,10 @@ pub struct VehicleDef {
     /// chassis emitter, and `vehicle_audio`'s planner plays it in place of the
     /// family's three load grains -- the per-row clip override.
     pub engine_clip: Option<Uuid>,
+    /// **The imported body this row draws** (wave VEH3f), or `None` for a row
+    /// drawn in its family's parts. See [`crate::roster::ArtKey`] for the
+    /// one-identity-two-payloads rule that keeps the art out of the repository.
+    pub art: Option<crate::roster::ArtKey>,
 }
 
 /// **How much of its frontal BOX a body presents to the air** (wave VEH3f) --
@@ -4385,6 +4439,7 @@ impl Default for VehicleDef {
             wheel_offset_z_m: 0.0,
             body_mesh: None,
             engine_clip: None,
+            art: None,
         }
     }
 }
@@ -4633,6 +4688,16 @@ impl VehicleDef {
             };
             def.class.front_torque_split = split;
         }
+        // **The imported body** (wave VEH3f): a machine key, refused by name.
+        if let Some(a) = table.get("art") {
+            let name = a
+                .as_str()
+                .ok_or_else(|| "`art` must be a string".to_string())?;
+            def.art = Some(
+                crate::roster::ArtKey::from_name(name)
+                    .ok_or_else(|| format!("unknown vehicle art `{name}`"))?,
+            );
+        }
         // **The two asset keys** (wave VEH3f): a hero body's base guid and a
         // per-row engine clip, each a `Uuid` string. A malformed one is a
         // refusal by name, as a malformed number is.
@@ -4652,7 +4717,13 @@ impl VehicleDef {
         for (k, v) in table {
             if matches!(
                 k.as_str(),
-                "body" | "drivetrain" | "differential" | "class" | "body_mesh" | "engine_clip"
+                "body"
+                    | "drivetrain"
+                    | "differential"
+                    | "class"
+                    | "body_mesh"
+                    | "engine_clip"
+                    | "art"
             ) {
                 continue;
             }

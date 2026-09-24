@@ -87,6 +87,10 @@ pub struct UeImportOptions {
     /// Import meshes as well as materials. Meshes are the slow half and a
     /// materials-only run is the common one.
     pub meshes: bool,
+    /// **Split every roster machine into a chassis and four wheels** (wave
+    /// VEH3f) at the GUIDs the committed rows name -- see
+    /// [`super::ue_vehicles`].
+    pub vehicles: bool,
     /// How many LOD rungs of a **character** to store (wave CHAR1a).
     ///
     /// Three, and the number is a consequence rather than a taste: a skinned
@@ -186,6 +190,7 @@ impl Default for UeImportOptions {
             dest: "UE".to_string(),
             rebinds: Vec::new(),
             meshes: true,
+            vehicles: false,
             character_lods: 3,
             retarget_to: None,
             rebind_meshes: Vec::new(),
@@ -221,6 +226,9 @@ pub struct UeImportReport {
     pub skeletal: Vec<(String, AssetId, Option<AssetId>, usize, usize, usize)>,
     /// `(manifest key, clip asset, tracks after retarget)` per clip imported.
     pub clips: Vec<(String, AssetId, usize)>,
+    /// `(machine key, measured catalogue geometry)` per vehicle split (wave
+    /// VEH3f).
+    pub vehicles: Vec<(String, std::collections::BTreeMap<&'static str, f64>)>,
     /// **The per-pack licence positions this import relied on**, carried out of
     /// the manifest so a caller can write them into its own ledger rather than
     /// re-deriving them: `(pack, licence text, may-ship)`.
@@ -406,8 +414,28 @@ struct Clip {
 struct Mesh {
     key: String,
     pack: String,
+    /// The `/Game/...` object path (wave VEH3f -- the vehicle split keys a
+    /// machine off its source mesh's name).
+    source: String,
     lods: Vec<Lod>,
     material_slots: Vec<Option<String>>,
+    /// **The bounds the exporter measured**, Unreal centimetres (wave VEH3f --
+    /// the bridge's G5: written since ASSET0 and dropped by this reader until
+    /// now). Read by the vehicle split's report as a cross-check on the
+    /// imported geometry.
+    bounds_cm: BoundsCm,
+    /// **The static-mesh sockets**, as the exporter wrote them (wave VEH3f).
+    /// Zero on every machine of the construction pack; carried so a pack that
+    /// has them is not silently read as one that does not.
+    sockets: Vec<serde_json::Value>,
+}
+
+/// An exporter bounds record, Unreal centimetres.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+struct BoundsCm {
+    min: [f64; 3],
+    max: [f64; 3],
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -626,6 +654,98 @@ pub fn import_manifest(
                 .map(|m| m.triangle_count())
                 .unwrap_or(0);
             record_rungs(project, id, mesh, &mut report);
+            // **THE VEHICLE SPLIT** (wave VEH3f): a machine the roster draws
+            // is written a second time as a chassis and four wheels at the
+            // GUIDs the committed rows name, with its measured geometry beside
+            // them. `--vehicles` only; a plain import is unchanged.
+            if opts.vehicles {
+                let name = mesh.source.rsplit('/').next().unwrap_or("");
+                let stem = name.split('.').next().unwrap_or("");
+                if let Some(key) = inf_ecs::roster::ArtKey::ALL
+                    .into_iter()
+                    .find(|k| k.source_mesh() == stem)
+                {
+                    let payload: inf_mesh::MeshAsset = project.load_payload(id)?;
+                    let licence = m
+                        .packs
+                        .iter()
+                        .find(|p| p.name == mesh.pack)
+                        .map(|p| p.license.clone())
+                        .unwrap_or_default();
+                    match super::ue_vehicles::split_vehicle(&payload, key, &mesh.material_slots) {
+                        Ok(split) => {
+                            let deps: Vec<AssetId> = {
+                                let mut out: Vec<AssetId> = Vec::new();
+                                for a in payload.material_slot_assets.iter().flatten() {
+                                    if !out.contains(a) {
+                                        out.push(*a);
+                                    }
+                                }
+                                out
+                            };
+                            let dir = dest.join("Vehicles").join(key.name());
+                            std::fs::create_dir_all(&dir)?;
+                            let body = AssetId(inf_ecs::roster::art_body_guid(key));
+                            project.write_asset_at_with_id(
+                                &dir.join(format!("{}_body.inf_mesh", key.name())),
+                                &split.body,
+                                body,
+                                deps.clone(),
+                                None,
+                            )?;
+                            report.asset_packs.push((body, mesh.pack.clone()));
+                            for (i, w) in split.wheels.iter().enumerate() {
+                                let wid = AssetId(inf_ecs::roster::art_wheel_guid(key, i));
+                                project.write_asset_at_with_id(
+                                    &dir.join(format!("{}_wheel{i}.inf_mesh", key.name())),
+                                    w,
+                                    wid,
+                                    deps.clone(),
+                                    None,
+                                )?;
+                                report.asset_packs.push((wid, mesh.pack.clone()));
+                            }
+                            if split.wheels.is_empty() {
+                                let hidden = super::ue_vehicles::hidden_wheel(&split.body);
+                                for i in 0..4 {
+                                    let wid = AssetId(inf_ecs::roster::art_wheel_guid(key, i));
+                                    project.write_asset_at_with_id(
+                                        &dir.join(format!("{}_wheel{i}.inf_mesh", key.name())),
+                                        &hidden,
+                                        wid,
+                                        Vec::new(),
+                                        None,
+                                    )?;
+                                    report.asset_packs.push((wid, mesh.pack.clone()));
+                                }
+                            }
+                            let toml =
+                                super::ue_vehicles::body_toml(&split, &mesh.source, &licence);
+                            std::fs::write(dir.join(format!("{}.vehicle.toml", key.name())), toml)?;
+                            let b = &mesh.bounds_cm;
+                            report.advisories.push(format!(
+                                "vehicle: {} -> {} ({} tris, {} wheel pieces, {} rig wheels, {} sockets); half-extents {:.2} x {:.2} x {:.2} m against the exporter's box {:.2} x {:.2} x {:.2} m",
+                                mesh.key,
+                                key.name(),
+                                split.triangles,
+                                split.pieces,
+                                split.wheels.len(),
+                                mesh.sockets.len(),
+                                split.half_extents.x,
+                                split.half_extents.y,
+                                split.half_extents.z,
+                                0.005 * (b.max[0] - b.min[0]),
+                                0.005 * (b.max[2] - b.min[2]),
+                                0.005 * (b.max[1] - b.min[1]),
+                            ));
+                            report
+                                .vehicles
+                                .push((key.name().to_string(), split.geometry()));
+                        }
+                        Err(e) => report.advisories.push(format!("vehicle: {e}")),
+                    }
+                }
+            }
             for a in dependency_closure(project, &[&[id][..], &produced].concat()) {
                 report.asset_packs.push((a, mesh.pack.clone()));
             }

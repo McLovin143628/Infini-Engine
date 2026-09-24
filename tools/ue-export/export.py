@@ -226,6 +226,49 @@ PACKS = [
              "limit": 4},
         ],
     },
+    # ── wave VEH3f: THE CONSTRUCTION PACK ─────────────────────────────────
+    #
+    # The only vehicle art on this machine (`veh3f-vehicle-asset-scout.md`):
+    # thirty static meshes, twenty-four machines, every one a single Nanite
+    # mesh with its wheels and tracks FUSED in and told apart only by their
+    # material slot. Seven EXACT selectors -- the machines the roster's
+    # construction and freight rows draw when the art is here (`inf_ecs::
+    # roster::art_of`) -- and no pose variant (`_Loaded`, `_Folded`,
+    # `_Extended`, `_ArmExtended` are separate meshes, not articulations).
+    # The importer (`inf-import --vehicles`) splits the wheels off by slot and
+    # by connected piece. LOCAL-ONLY, and the licence is the USER's to confirm.
+    {
+        "name": "ConstructionVehiclesPack1",
+        "license": "Fab Standard -- user to confirm before ship. Acquired "
+                   "through the Fab library (listings_v1.db row 'Construction "
+                   "Vehicles Pack 1'); no licence text on disk and the tier "
+                   "(Personal/Professional) is not recorded in the cache. "
+                   "LOCAL-ONLY: never committed to the engine repository.",
+        "ship": False,
+        "select": [
+            {"prefix": "/Game/ConstructionVehiclesPack1/Assets/Excavator",
+             "classes": ["StaticMesh"], "match": r"(?i)^SM_ExcavatorTracks$",
+             "limit": 1},
+            {"prefix": "/Game/ConstructionVehiclesPack1/Assets/TrackLoader",
+             "classes": ["StaticMesh"], "match": r"(?i)^SM_TrackLoader$",
+             "limit": 1},
+            {"prefix": "/Game/ConstructionVehiclesPack1/Assets/DumpTruck",
+             "classes": ["StaticMesh"], "match": r"(?i)^SM_AmericanDumpTruck$",
+             "limit": 1},
+            {"prefix": "/Game/ConstructionVehiclesPack1/Assets/MixerTruck",
+             "classes": ["StaticMesh"], "match": r"(?i)^SM_AmericanMixerTruck$",
+             "limit": 1},
+            {"prefix": "/Game/ConstructionVehiclesPack1/Assets/Forklift",
+             "classes": ["StaticMesh"], "match": r"(?i)^SM_Forklift$",
+             "limit": 1},
+            {"prefix": "/Game/ConstructionVehiclesPack1/Assets/MobileCrane",
+             "classes": ["StaticMesh"], "match": r"(?i)^SM_MobileCrane$",
+             "limit": 1},
+            {"prefix": "/Game/ConstructionVehiclesPack1/Assets/AmericanTruck",
+             "classes": ["StaticMesh"], "match": r"(?i)^SM_AmericanTruck$",
+             "limit": 1},
+        ],
+    },
     {
         "name": "AdvancedRealisticGlass",
         "license": "unknown - Unreal Marketplace / Fab pack in this project. "

@@ -52,8 +52,9 @@ hero.csv          t,frame,x,y,z,mode,speed,camera_clip,aim_yaw,head_yaw,head_pit
                   car_health,engine_scale,flats,panes_broken,parts_shed,
                   board,seat,hand_m,hinge_deg,wheel_m,pedal_m,rim_deg,
                   gear,load,slip_front,slip_rear,voice_surface,grain_pitch,
-                  whine_pitch,squeal_front,squeal_rear,voice_cmds,thumps
-                  — SEVENTY-TWO columns, four rows a second, and NO header line:
+                  whine_pitch,squeal_front,squeal_rear,voice_cmds,thumps,
+                  roster_class,roster_row,body_kind,hitch_deg,track_yaw
+                  — SEVENTY-SEVEN columns, four rows a second, and NO header line:
                   every consumer filters on `^[0-9]`, and the `#` lines are the
                   driver's own notes. Columns are only ever APPENDED, so every
                   index a script already reads keeps its meaning: 14-17 are wave
@@ -173,7 +174,17 @@ hero.csv          t,frame,x,y,z,mode,speed,camera_clip,aim_yaw,head_yaw,head_pit
                   `slip_rear` is `$c[64]`, `voice_surface` is `$c[65]`,
                   `grain_pitch` is `$c[66]`, `whine_pitch` is `$c[67]`,
                   `squeal_front` is `$c[68]`, `squeal_rear` is `$c[69]`,
-                  `voice_cmds` is `$c[70]` and `thumps` is `$c[71]`.
+                  `voice_cmds` is `$c[70]` and `thumps` is `$c[71]`. 72-76 are
+                  VEH3f's, read off the WORLD for the car the hero sits in:
+                  `roster_class` (`$c[72]`, the doc class -- `coupe`, `bus`,
+                  `freight` -- or `-` for a car that is not a roster row),
+                  `roster_row` (`$c[73]`, the lore id), `body_kind` (`$c[74]`,
+                  `primitive`, `dcc` or `imported`, from the chassis's own
+                  children), `hitch_deg` (`$c[75]`, the tractor's heading less
+                  its trailer's, empty when nothing is hitched) and `track_yaw`
+                  (`$c[76]`, the chassis yaw rate in rad/s when the car steers
+                  by skid, `0` otherwise) -- the columns a line-up, a trailer
+                  through a slalom and a dozer pivoting are triggered on.
 demo.log          every step the driver took, with timings
 ```
 

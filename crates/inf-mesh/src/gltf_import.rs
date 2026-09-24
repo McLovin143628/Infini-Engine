@@ -173,6 +173,51 @@ pub fn import_gltf(path: &Path) -> Result<GltfImport, MeshError> {
         }
     }
 
+    // **THE NODE TRANSFORM of a rigid mesh** (wave VEH3f, the bridge's G6).
+    //
+    // This importer walks `doc.meshes()`, so a mesh landed in its OWN space and
+    // the node that places it was never read: a multi-node glTF (a body with
+    // four wheel nodes, a Blueprint's parts) imported every part at the origin.
+    // Each rigid mesh now takes the WORLD transform of the first node (in node
+    // index order, so the answer does not depend on a hash) that draws it. A
+    // skinned mesh keeps its bind space, which is what its inverse-bind
+    // matrices are relative to. Measured on the Unreal exporter's static-mesh
+    // files: one node, no transform -- so every mesh this bridge has imported
+    // before is byte-identical, and the path costs one identity test.
+    let mut mesh_world: HashMap<usize, glam::Mat4> = HashMap::new();
+    {
+        let mut parent: HashMap<usize, usize> = HashMap::new();
+        for node in doc.nodes() {
+            for child in node.children() {
+                parent.insert(child.index(), node.index());
+            }
+        }
+        let locals: Vec<glam::Mat4> = doc
+            .nodes()
+            .map(|n| glam::Mat4::from_cols_array_2d(&n.transform().matrix()))
+            .collect();
+        for node in doc.nodes() {
+            let Some(mesh) = node.mesh() else {
+                continue;
+            };
+            if node.skin().is_some() || mesh_world.contains_key(&mesh.index()) {
+                continue;
+            }
+            let mut m = locals[node.index()];
+            let mut at = node.index();
+            let mut depth = 0usize;
+            while let Some(p) = parent.get(&at) {
+                m = locals[*p] * m;
+                at = *p;
+                depth += 1;
+                if depth > 256 {
+                    break;
+                }
+            }
+            mesh_world.insert(mesh.index(), m);
+        }
+    }
+
     // Animations → clips (P11.1).
     for anim in doc.animations() {
         let mut tracks_by_joint: BTreeMap<u16, JointTrack> = BTreeMap::new();
@@ -460,6 +505,23 @@ pub fn import_gltf(path: &Path) -> Result<GltfImport, MeshError> {
                 _ => Vec::new(),
             };
 
+            let mut verts = verts;
+            if skin.is_empty() {
+                if let Some(m) = mesh_world
+                    .get(&mesh.index())
+                    .filter(|m| **m != glam::Mat4::IDENTITY)
+                {
+                    let n = glam::Mat3::from_mat4(*m).inverse().transpose();
+                    for v in verts.iter_mut() {
+                        v.position = m.transform_point3(glam::Vec3::from(v.position)).into();
+                        v.normal = (n * glam::Vec3::from(v.normal)).normalize_or_zero().into();
+                        let t = glam::Mat3::from_mat4(*m)
+                            * glam::Vec3::new(v.tangent[0], v.tangent[1], v.tangent[2]);
+                        let t = t.normalize_or_zero();
+                        v.tangent = [t.x, t.y, t.z, v.tangent[3]];
+                    }
+                }
+            }
             let material_slot = prim.material().index().map(|i| i as u32);
             let sub = if skin.is_empty() {
                 // Rigid submesh: the meshopt weld/cache/fetch pass reorders verts.

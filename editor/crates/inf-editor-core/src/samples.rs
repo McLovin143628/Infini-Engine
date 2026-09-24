@@ -11623,6 +11623,14 @@ mod tests {
                 &crate::vehicle_bodies::vehicle_bodies_dir(),
             )
             .expect("regenerate the hero bodies");
+            // …and the construction machines' committed FALLBACK (wave VEH3f):
+            // seven art rows name these GUIDs, a local `inf-import --vehicles`
+            // overwrites them with the machines' real art, and a checkout
+            // without that art draws these.
+            crate::vehicle_bodies::write_vehicle_art_fallback(
+                &crate::vehicle_bodies::vehicle_art_dir(),
+            )
+            .expect("regenerate the vehicle art fallback");
             write_city().expect("regenerate the island city");
             write_gameplay().expect("regenerate the island gameplay fixture");
             crate::heist::write_heist().expect("regenerate the harbour heist mission");
@@ -12586,6 +12594,38 @@ mod tests {
             }
         } else {
             eprintln!("SKIP: the hero bodies have not been blessed yet");
+        }
+
+        // **The art fallback (wave VEH3f)**, on the hero bodies' terms.
+        let adir = crate::vehicle_bodies::vehicle_art_dir();
+        if adir.join("excavator_body.inf_mesh").exists() {
+            let mut have: Vec<String> = std::fs::read_dir(&adir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            have.sort();
+            assert_eq!(
+                have,
+                crate::vehicle_bodies::art_fallback_files(),
+                "the committed art fallback is not the file SET the generator writes"
+            );
+            for m in crate::vehicle_bodies::art_fallback_meshes() {
+                let p = adir.join(&m.file);
+                let want = inf_asset::encode(&m.asset).expect("the mesh encodes");
+                assert_eq!(
+                    std::fs::read(&p).unwrap(),
+                    want,
+                    "committed {} drifted from the generator",
+                    p.display()
+                );
+                let side = inf_asset::AssetSidecar::load(&p)
+                    .unwrap_or_else(|e| panic!("{} has no sidecar: {e}", p.display()));
+                assert_eq!(side.guid.0, m.guid, "{}'s committed GUID", m.file);
+            }
+        } else {
+            eprintln!("SKIP: the vehicle art fallback has not been blessed yet");
         }
 
         // **The settlement zone library (wave I8a).** Every file, and the file

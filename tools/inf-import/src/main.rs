@@ -16,6 +16,8 @@
 //!            [--only <key substring>]…    import only meshes whose key matches
 //!            [--wear-cloth <guid>]        put that `.inf_cloth` on every level's pawn
 //!            [--wearable <m|f>:<outfit|hair>:<key>[:<joint>]]…  wear it
+//!            [--vehicles]                split every roster machine into a chassis
+//!                                        and four wheels at its committed GUIDs (VEH3f)
 //!            [--dry-run]                 read the manifest, write nothing
 //! ```
 //!
@@ -133,6 +135,7 @@ fn run(args: &[String]) -> Result<(), String> {
                 opts.rebind_meshes.push((stem.to_string(), key.to_string()));
             }
             "--no-meshes" => opts.meshes = false,
+            "--vehicles" => opts.vehicles = true,
             "--character-lods" => {
                 let v = take(&mut i)?;
                 opts.character_lods = v
@@ -263,6 +266,13 @@ fn run(args: &[String]) -> Result<(), String> {
             "inf-import: LICENCE  {pack} [{}] {licence}",
             if *ship { "MAY SHIP" } else { "LOCAL ONLY" }
         );
+    }
+    for (key, geometry) in &report.vehicles {
+        let row: Vec<String> = geometry
+            .iter()
+            .map(|(k, v)| format!("{k} = {v:.4}"))
+            .collect();
+        println!("inf-import: VEHICLE {key}: {}", row.join(", "));
     }
     for (stem, id) in &report.rebinds {
         println!("inf-import: REBOUND  {stem} -> {id}");

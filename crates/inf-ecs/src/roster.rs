@@ -437,21 +437,233 @@ pub fn spawn_defined(
     Some(guid)
 }
 
-/// **Which construction-pack body a roster row draws when its art is on this
-/// machine** (wave VEH3f) -- the machine key the UE bridge imports under
-/// `Content/UE/Vehicles/<key>` and the per-body TOML sidecar names. `None` for
-/// every row that has no art anywhere (all of them but seven).
-pub fn art_of(id: &str) -> Option<&'static str> {
-    Some(match id {
-        "hvy_dozer" => "dozer",
-        "hvy_cutter" => "excavator",
-        "hvy_dump_truck" => "dump_truck",
-        "hvy_mixer" => "mixer",
-        "hvy_forklift" => "forklift",
-        "hvy_flatbed" => "crane_truck",
-        "mtl_packer" => "freight_tractor",
-        _ => return None,
-    })
+/// **An imported vehicle body** (wave VEH3f) -- one machine of the
+/// `ConstructionVehiclesPack1` the UE bridge carries, by the key its files and
+/// its GUIDs are derived from.
+///
+/// # THE ART RULE: one committed identity, two possible payloads
+///
+/// A row that names `art = "excavator"` draws ONE body mesh
+/// ([`art_body_guid`]) on an `art_body` part and one wheel mesh per rig wheel
+/// ([`art_wheel_guid`]) on its tyres -- never the family's panels. What sits
+/// at those GUIDs depends on the machine: the engine repository commits a
+/// FALLBACK (the family's own panels baked into one mesh, and a tyre -- ours,
+/// generated, `samples/vehicle-art/`), and `inf-import --vehicles` overwrites
+/// them in a LOCAL project with the machine's real art, split off the fused
+/// Unreal mesh by material slot and connected piece. The starter character's
+/// arrangement (a committed body at the MetaHuman's GUIDs), one content kind
+/// over -- so CI, which never has the art, draws the fallback, and nothing from
+/// Unreal is ever committed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ArtKey {
+    /// `SM_ExcavatorTracks`.
+    Excavator,
+    /// `SM_TrackLoader` -- the pack has no bulldozer; the track loader is the
+    /// nearest machine.
+    Dozer,
+    /// `SM_AmericanDumpTruck`.
+    DumpTruck,
+    /// `SM_AmericanMixerTruck`.
+    Mixer,
+    /// `SM_Forklift`.
+    Forklift,
+    /// `SM_MobileCrane`.
+    CraneTruck,
+    /// `SM_AmericanTruck` -- a tractor unit.
+    FreightTractor,
+}
+
+impl ArtKey {
+    /// Every machine, in key order.
+    pub const ALL: [ArtKey; 7] = [
+        ArtKey::Excavator,
+        ArtKey::Dozer,
+        ArtKey::DumpTruck,
+        ArtKey::Mixer,
+        ArtKey::Forklift,
+        ArtKey::CraneTruck,
+        ArtKey::FreightTractor,
+    ];
+
+    /// The stable key a row's `art = "..."` spells and the files are named by.
+    pub fn name(self) -> &'static str {
+        match self {
+            ArtKey::Excavator => "excavator",
+            ArtKey::Dozer => "dozer",
+            ArtKey::DumpTruck => "dump_truck",
+            ArtKey::Mixer => "mixer",
+            ArtKey::Forklift => "forklift",
+            ArtKey::CraneTruck => "crane_truck",
+            ArtKey::FreightTractor => "freight_tractor",
+        }
+    }
+
+    /// The key a name means, or `None`.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|k| k.name() == name)
+    }
+
+    /// The Unreal static mesh this key is split from.
+    pub fn source_mesh(self) -> &'static str {
+        match self {
+            ArtKey::Excavator => "SM_ExcavatorTracks",
+            ArtKey::Dozer => "SM_TrackLoader",
+            ArtKey::DumpTruck => "SM_AmericanDumpTruck",
+            ArtKey::Mixer => "SM_AmericanMixerTruck",
+            ArtKey::Forklift => "SM_Forklift",
+            ArtKey::CraneTruck => "SM_MobileCrane",
+            ArtKey::FreightTractor => "SM_AmericanTruck",
+        }
+    }
+
+    /// Whether the machine runs on tracks -- its "wheels" are track frames,
+    /// which stay in the body mesh and do not spin.
+    pub fn tracked(self) -> bool {
+        matches!(self, ArtKey::Excavator | ArtKey::Dozer)
+    }
+}
+
+/// The salt of the art guids -- `"VEH3FARTBODYMESH"` in ASCII.
+const ART_SALT: u128 = 0x5645_4833_4641_5254_424f_4459_4d45_5348;
+
+fn art_guid(key: ArtKey, part: &str) -> uuid::Uuid {
+    let mut x = ART_SALT;
+    for b in key
+        .name()
+        .as_bytes()
+        .iter()
+        .chain(b"/")
+        .chain(part.as_bytes())
+    {
+        x = x.rotate_left(7) ^ (*b as u128).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    }
+    x = x.rotate_left(33) ^ x.wrapping_mul(0xff51_afd7_ed55_8ccd_c4ce_b9fe_1a85_ec53);
+    uuid::Builder::from_random_bytes(x.to_be_bytes()).into_uuid()
+}
+
+/// **The body mesh a machine's rows draw**, a pure function of its key.
+pub fn art_body_guid(key: ArtKey) -> uuid::Uuid {
+    art_guid(key, "body")
+}
+
+/// **The mesh rig wheel `i` of a machine draws** (front left, front right,
+/// rear left, rear right -- `VehicleDef::wheel_mounts`' order).
+pub fn art_wheel_guid(key: ArtKey, i: usize) -> uuid::Uuid {
+    art_guid(key, &format!("wheel{i}"))
+}
+
+/// **Which construction-pack body a roster row draws** (wave VEH3f), or `None`
+/// for every row that has no art anywhere (all of them but seven).
+pub fn art_of(id: &str) -> Option<ArtKey> {
+    roster().get(id).and_then(|d| d.art)
+}
+
+// ── the instruments' questions (wave VEH3f) ─────────────────────────────────
+
+/// **The HUD's roster row** for the car a player sits in: its class, its lore
+/// name, what its body is drawn with, its hitch angle when it tows and its yaw
+/// rate when it skids -- or empty for a car that is neither a roster row nor
+/// wears an authored body (the row would say nothing a driver needs).
+pub fn roster_readout(
+    world: &crate::world::EcsWorld,
+    chassis: uuid::Uuid,
+    track_yaw_rad_s: Option<f64>,
+) -> String {
+    let row = row_of(world, chassis);
+    let body = body_kind(world, chassis);
+    if row.is_none() && body == "primitive" {
+        return String::new();
+    }
+    let def = row.and_then(|id| roster().get(id));
+    let mut s = format!(
+        "ROSTER {} {} [{}]",
+        def.and_then(|d| d.roster_class)
+            .map(|c| c.name())
+            .unwrap_or("-"),
+        row.and_then(roster_label).unwrap_or("-"),
+        body
+    );
+    if let Some(a) = hitch_angle_deg(world, chassis) {
+        s.push_str(&format!("  HITCH {a:+.1} deg"));
+    }
+    if let Some(w) = track_yaw_rad_s {
+        s.push_str(&format!("  TRACKS {w:+.2} rad/s"));
+    }
+    s
+}
+
+/// **Which roster row a chassis in the world is**, read off the WORLD: a
+/// traffic car by its own record's guid (`traffic::catalogue_row_id`, the draw
+/// that built it), anything else by the lore label its entity is named (every
+/// roster spawn names its chassis so). `None` for a vehicle that is not a
+/// roster row -- the eleven island rows that predate it, a sample's car.
+pub fn row_of(world: &crate::world::EcsWorld, chassis: uuid::Uuid) -> Option<&'static str> {
+    if crate::traffic::traffic_of(world).is_some_and(|t| t.records.contains_key(&chassis)) {
+        return crate::traffic::catalogue_row_id(chassis);
+    }
+    let name = world.name_of(world.entity_of(chassis)?)?;
+    roster()
+        .0
+        .keys()
+        .find(|id| roster_label(id) == Some(name))
+        .map(String::as_str)
+}
+
+/// **What a chassis is drawn with** (wave VEH3f): `"imported"` when it hangs a
+/// machine's art body (`art_body` -- the pack's art where this project has it,
+/// the committed fallback where not), `"dcc"` when any of its panels hangs a
+/// DCC hero mesh, `"primitive"` otherwise. Read off the chassis's own children,
+/// never off a table.
+pub fn body_kind(world: &crate::world::EcsWorld, chassis: uuid::Uuid) -> &'static str {
+    let Some(e) = world.entity_of(chassis) else {
+        return "-";
+    };
+    let mut kind = "primitive";
+    for child in world.children_of(e) {
+        let Some(m) = world.world().get::<crate::components::MeshRef>(child) else {
+            continue;
+        };
+        if m.asset.is_none() {
+            continue;
+        }
+        if world.name_of(child) == Some(crate::vehicle::ART_BODY_PART) {
+            return "imported";
+        }
+        if world.name_of(child) != Some("Tyre") {
+            kind = "dcc";
+        }
+    }
+    kind
+}
+
+/// **The hitch angle** of an articulated rig, degrees: the tractor's heading
+/// less its trailer's, for the chassis `tractor` (or `None` when nothing is
+/// hitched to it). Read off the two chassis' own transforms and the trailer's
+/// `Joint3D` -- `O(entities)`, for an instrument that ticks a few times a
+/// second, never the step.
+pub fn hitch_angle_deg(world: &crate::world::EcsWorld, tractor: uuid::Uuid) -> Option<f64> {
+    let heading = |e: bevy_ecs::entity::Entity| -> Option<f64> {
+        let t = world.world().get::<crate::components::Transform>(e)?;
+        let f = t.quat() * glam::DVec3::Z;
+        Some(inf_math::patan2_64(f.x, f.z).to_degrees())
+    };
+    let te = world.entity_of(tractor)?;
+    for e in world.world().iter_entities() {
+        let Some(j) = e.get::<crate::components::Joint3D>() else {
+            continue;
+        };
+        if j.other.get() != Some(tractor)
+            || j.kind != crate::components::JointKind3D::Spherical
+            || e.get::<crate::components::VehicleClass>().is_none()
+        {
+            continue;
+        }
+        let a = heading(te)? - heading(e.id())?;
+        // Wrapped into (-180, 180].
+        let w = a - 360.0 * ((a + 180.0) / 360.0).floor();
+        return Some(if w == -180.0 { 180.0 } else { w });
+    }
+    None
 }
 
 #[cfg(test)]

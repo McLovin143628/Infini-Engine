@@ -2604,6 +2604,14 @@ impl SimSession {
 }
 
 impl SimSession {
+    /// **The 3D bridge, mutably** (wave VEH3f) -- the MIRROR of
+    /// `RuntimeSim::bridge3d_mut`, so a gate can hand a vehicle the same
+    /// controls in both hosts (`vehicle_mut(..).control(..)`) and compare what
+    /// they did with them. Nothing in the step reads through it.
+    pub fn bridge3d_mut(&mut self) -> &mut inf_physics::d3::PhysicsBridge3D {
+        &mut self.bridge3d
+    }
+
     /// The accumulated audio command stream (P12.3): the deterministic play/stop/
     /// set sequence drained across every step. The headless command-stream test
     /// asserts against this rather than device output.
