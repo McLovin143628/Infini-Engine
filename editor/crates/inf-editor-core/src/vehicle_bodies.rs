@@ -560,6 +560,205 @@ mod tests {
         assert_eq!(n, 18, "five sets, eighteen panels");
     }
 
+    /// **What a hero body IS, measured** (audit, VEH3f) -- the brief's (b').
+    ///
+    /// A set is three or four closed lofted PANELS (a rounded lower slab, a
+    /// raked greenhouse, a bonnet and a boot) each filling the unit box of the
+    /// box-family part it replaces; the doors, glass, bumpers and wheels stay
+    /// the VEH3c primitives. It is NOT a car shell: no wheel arches, no
+    /// glasshouse apertures, no shut lines. This arm measures, per set: the
+    /// baked vertex count, whether every panel is CLOSED (every welded edge on
+    /// exactly two triangles), and the projected-outline difference of the
+    /// panels against their boxes and of the whole drawn car against the
+    /// all-box car (side, top and front, on a 1 cm raster; symmetric
+    /// difference over union).
+    ///
+    /// **Mutation -> red**: a panel lofted as the plain unit cube (the panel
+    /// outline difference falls to 0); a cap face dropped (not closed).
+    #[test]
+    fn a_hero_body_is_closed_panels_on_the_box_family_measured() {
+        type Tri = [[f64; 3]; 3];
+        // Rasterise triangles projected onto two axes, on a grid.
+        fn raster(
+            tris: &[Tri],
+            ax: (usize, usize),
+            lo: [f64; 2],
+            n: [usize; 2],
+            cell: f64,
+        ) -> Vec<bool> {
+            let mut g = vec![false; n[0] * n[1]];
+            for t in tris {
+                let p: Vec<[f64; 2]> = t.iter().map(|v| [v[ax.0], v[ax.1]]).collect();
+                let (mut a0, mut a1, mut b0, mut b1) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+                for q in &p {
+                    a0 = a0.min(q[0]);
+                    a1 = a1.max(q[0]);
+                    b0 = b0.min(q[1]);
+                    b1 = b1.max(q[1]);
+                }
+                let area = (p[1][0] - p[0][0]) * (p[2][1] - p[0][1])
+                    - (p[2][0] - p[0][0]) * (p[1][1] - p[0][1]);
+                if area.abs() < 1e-12 {
+                    continue;
+                }
+                let i0 = ((a0 - lo[0]) / cell).floor().max(0.0) as usize;
+                let i1 = (((a1 - lo[0]) / cell).ceil() as usize).min(n[0]);
+                let j0 = ((b0 - lo[1]) / cell).floor().max(0.0) as usize;
+                let j1 = (((b1 - lo[1]) / cell).ceil() as usize).min(n[1]);
+                for i in i0..i1 {
+                    for j in j0..j1 {
+                        let (x, y) = (
+                            lo[0] + (i as f64 + 0.5) * cell,
+                            lo[1] + (j as f64 + 0.5) * cell,
+                        );
+                        let e = |a: [f64; 2], b: [f64; 2]| {
+                            (b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0])
+                        };
+                        let (e0, e1, e2) = (e(p[0], p[1]), e(p[1], p[2]), e(p[2], p[0]));
+                        if (e0 >= 0.0 && e1 >= 0.0 && e2 >= 0.0)
+                            || (e0 <= 0.0 && e1 <= 0.0 && e2 <= 0.0)
+                        {
+                            g[i * n[1] + j] = true;
+                        }
+                    }
+                }
+            }
+            g
+        }
+        // A part's box as twelve triangles, in chassis metres.
+        fn box_tris(c: [f64; 3], h: [f64; 3]) -> Vec<Tri> {
+            let mut out = Vec::new();
+            for (a, b) in [(0usize, 1usize), (1, 2), (0, 2)] {
+                let other = 3 - a - b;
+                for s in [-1.0, 1.0] {
+                    let mut k = [[0.0; 3]; 4];
+                    for (i, (u, w)) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
+                        .into_iter()
+                        .enumerate()
+                    {
+                        let mut sgn = [0.0; 3];
+                        sgn[a] = u;
+                        sgn[b] = w;
+                        sgn[other] = s;
+                        k[i] = [
+                            c[0] + sgn[0] * h[0],
+                            c[1] + sgn[1] * h[1],
+                            c[2] + sgn[2] * h[2],
+                        ];
+                    }
+                    out.push([k[0], k[1], k[2]]);
+                    out.push([k[0], k[2], k[3]]);
+                }
+            }
+            out
+        }
+        let diff = |a: &[bool], b: &[bool]| {
+            let x = a.iter().zip(b).filter(|(p, q)| p != q).count() as f64;
+            let u = a.iter().zip(b).filter(|(p, q)| **p || **q).count() as f64;
+            if u > 0.0 {
+                x / u
+            } else {
+                0.0
+            }
+        };
+        let defs = crate::vehicle::island_vehicles();
+        let meshes = hero_meshes();
+        let mut min_panel = f64::MAX;
+        for set in HeroSet::ALL {
+            let def = defs.get(set.row()).expect("the row");
+            let h = [def.half_extents.x, def.half_extents.y, def.half_extents.z];
+            let (mut boxes_all, mut hero_all) = (Vec::new(), Vec::new());
+            let (mut boxes_hero, mut hero_only) = (Vec::new(), Vec::new());
+            let (mut verts, mut closed) = (0usize, 0usize);
+            let names = inf_ecs::vehicle::hero_parts(set.family());
+            for p in def.body.parts() {
+                if p.kind == inf_ecs::vehicle::BodyPartKind::Seat {
+                    continue;
+                }
+                let c = [p.centre.x * h[0], p.centre.y * h[1], p.centre.z * h[2]];
+                let hh = [p.half.x * h[0], p.half.y * h[1], p.half.z * h[2]];
+                let bt = box_tris(c, hh);
+                boxes_all.extend(bt.iter().copied());
+                if !names.contains(&p.name) {
+                    hero_all.extend(bt);
+                    continue;
+                }
+                boxes_hero.extend(bt);
+                let guid = inf_ecs::vehicle::hero_part_mesh_guid(set.base(), p.name);
+                let m = meshes
+                    .iter()
+                    .find(|m| m.guid == guid)
+                    .expect("the panel's mesh");
+                let mut edges: std::collections::BTreeMap<([u32; 3], [u32; 3]), usize> =
+                    Default::default();
+                for sm in &m.asset.submeshes {
+                    verts += sm.vertices.len();
+                    let key = |i: u32| sm.vertices[i as usize].position.map(f32::to_bits);
+                    for t in sm.indices.chunks(3) {
+                        let w = |i: u32| {
+                            let q = sm.vertices[i as usize].position;
+                            [
+                                c[0] + q[0] as f64 * 2.0 * hh[0],
+                                c[1] + q[1] as f64 * 2.0 * hh[1],
+                                c[2] + q[2] as f64 * 2.0 * hh[2],
+                            ]
+                        };
+                        let tri = [w(t[0]), w(t[1]), w(t[2])];
+                        hero_all.push(tri);
+                        hero_only.push(tri);
+                        for k in 0..3 {
+                            let (a, b) = (key(t[k]), key(t[(k + 1) % 3]));
+                            *edges.entry((a.min(b), a.max(b))).or_default() += 1;
+                        }
+                    }
+                }
+                if !edges.is_empty() && edges.values().all(|n| *n == 2) {
+                    closed += 1;
+                }
+            }
+            let cell = 0.01;
+            let lo = [-h[0] * 1.2, -h[1] * 1.2, -h[2] * 1.2];
+            let n = [
+                (h[0] * 2.4 / cell) as usize,
+                (h[1] * 2.4 / cell) as usize,
+                (h[2] * 2.4 / cell) as usize,
+            ];
+            let mut report = Vec::new();
+            let mut panel_side = 0.0;
+            for (label, ax) in [("side", (2usize, 1usize)), ("top", (0, 2)), ("front", (0, 1))] {
+                let (l, nn) = ([lo[ax.0], lo[ax.1]], [n[ax.0], n[ax.1]]);
+                let d_panel = diff(
+                    &raster(&boxes_hero, ax, l, nn, cell),
+                    &raster(&hero_only, ax, l, nn, cell),
+                );
+                let d_car = diff(
+                    &raster(&boxes_all, ax, l, nn, cell),
+                    &raster(&hero_all, ax, l, nn, cell),
+                );
+                if label == "side" {
+                    panel_side = d_panel;
+                }
+                report.push(format!(
+                    "{label} panels {:.1} % / car {:.1} %",
+                    100.0 * d_panel,
+                    100.0 * d_car
+                ));
+            }
+            println!(
+                "HERO {:?}: {} panels, {verts} baked vertices, {closed} closed; outline vs the box family: {}",
+                set,
+                names.len(),
+                report.join(", ")
+            );
+            assert_eq!(closed, names.len(), "{set:?}: a panel is open");
+            min_panel = min_panel.min(panel_side);
+        }
+        assert!(
+            min_panel > 0.05,
+            "a hero set's panels outline their boxes ({min_panel:.3})"
+        );
+    }
+
     /// The guids are the Ring-0 rule's, distinct, and the rows that name the
     /// sets name them.
     #[test]
