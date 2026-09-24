@@ -1965,7 +1965,6 @@ fn a_traffic_car_sings_the_near_stack_on_its_own_cadence() {
     );
     world.world_mut().insert_resource(pop);
     world.propagate();
-    let family = GrainFamily::P8Cross;
     let mut mem = VoiceMemory::new();
     let tk = |l: VoiceLayer| va::voice_key(va::entity_key(TRAFFIC), l);
     let traffic_keys: BTreeSet<u64> = VoiceLayer::ALL.iter().map(|l| tk(*l)).collect();
@@ -2001,7 +2000,9 @@ fn a_traffic_car_sings_the_near_stack_on_its_own_cadence() {
                 }
                 if let va::VoiceCue::Pitch { pitch, .. } = c {
                     if k == tk(VoiceLayer::GrainMid) {
-                        let want = va::grain_pitch(&t, family);
+                        // Written here: a V8 grain baked at 2 400 rpm, an
+                        // eight-cylinder engine -- the pitch is rpm / 2400.
+                        let want = t.rpm / 2_400.0;
                         assert!((pitch - want).abs() < 1e-12, "step {i}: {pitch} vs {want}");
                         pitches_checked += 1;
                     }
