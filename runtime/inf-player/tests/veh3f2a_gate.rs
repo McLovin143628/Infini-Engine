@@ -22,6 +22,7 @@
 //! | `the_import_is_deterministic` (local) | two imports of the calibration pack, 920 files; 0 of this wave's differ, 26 residue of the generic glTF door | n/a | `import_path_guid` -> `AssetId::new()` -> red |
 //! | `sixty_four_imported_cars_cost_what_they_cost` (release) | the player projector over 64 art cars vs 64 box cars (CI: the fallback DAGs) | n/a (COST) | print-only in dev/CI (the house conditioning) |
 //! | `this_wave_moved_no_schema` | the three constants | n/a | n/a |
+//! | `the_islands_play_payload_fits_its_frame` (local) | the island project's level through `build_scene_payload` with the project's resolvers: 60 textures, 164.1 MB, a 171.3 MB payload under `MAX_FRAME_LEN` (921.2 MB of textures before the budget) | n/a | the budget's guard removed -> red |
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -1981,10 +1982,11 @@ fn clock_is_asserted(what: &str) -> bool {
 
 /// **Sixty-four imported cars cost what they cost** (wave VEH3f.2a) -- the
 /// player projector over 64 calibration cars against 64 box cars of the same
-/// hull, with the FALLBACK's DAGs (the geometry CI has; the local art's draw
-/// cost is the report's release number off the shipped host). Min of five;
-/// asserted only in release off CI: the art cars' projection stays under
-/// [`ART_PROJECTION_BUDGET_MS`].
+/// hull, with the FALLBACK's DAGs (the geometry CI has) and, LOCAL, over the
+/// island's real art (sections and all, with the LOD-0 triangle bill it
+/// submits). Min of five; asserted only in release off CI: the fallback
+/// cars' projection stays under [`ART_PROJECTION_BUDGET_MS`]. The GPU half of
+/// the draw is the shipped host's frame time, in the report.
 #[test]
 fn sixty_four_imported_cars_cost_what_they_cost() {
     let committed = committed_guids("vehicle-art");
@@ -2045,9 +2047,56 @@ fn sixty_four_imported_cars_cost_what_they_cost() {
     let (ta, na) = time(&sa, &ra);
     let (tb, nb) = time(&sb, &rb);
     println!(
-        "64 art cars: {ta:.3} ms, {na} instances; 64 box cars: {tb:.3} ms, {nb} instances ({:.2}x)",
+        "64 art cars (the committed fallback): {ta:.3} ms, {na} instances; 64 box cars: {tb:.3} ms, {nb} instances ({:.2}x)",
         ta / tb
     );
+    // LOCAL: the same 64 cars over the island project's REAL art -- every
+    // mesh in the calibration car's folder, sections included, so the
+    // projector draws what the shipped host draws. Printed (the report's
+    // row); the instance count and the LOD-0 triangle bill are the draw's size.
+    if let Some(content) = island_content().filter(|_| local_art("the real-art cost row").is_some())
+    {
+        let dir = content.join("UE/Vehicles").join(CALIBRATION_ART);
+        let mut reg = inf_player::vmesh::VmeshRegistry::new();
+        let mut tris = BTreeMap::new();
+        for e in std::fs::read_dir(&dir).unwrap().flatten() {
+            let p = e.path();
+            if p.extension().and_then(|x| x.to_str()) != Some("inf_mesh") {
+                continue;
+            }
+            let guid = inf_asset::AssetSidecar::load(&p).unwrap().guid.0;
+            let mesh: inf_mesh::MeshAsset = inf_asset::decode(&std::fs::read(&p).unwrap()).unwrap();
+            if mesh.triangle_count() == 0 {
+                continue;
+            }
+            tris.insert(
+                inf_player::vmesh::derived_vmesh_id(guid).as_u128(),
+                mesh.triangle_count(),
+            );
+            reg.insert_mesh(inf_player::vmesh::derived_vmesh_id(guid), &dag(&mesh))
+                .unwrap();
+        }
+        let (sc, _) = build(&def);
+        let (tc, nc) = time(&sc, &reg);
+        let mut scene = inf_render::RenderScene::default();
+        inf_player::render::project_scene_with_skinned(
+            &mut scene,
+            &sc,
+            1.0,
+            &reg,
+            &inf_player::skinned::SkinnedRegistry::new(),
+            &inf_voxel::VoxelVolumes::default(),
+        );
+        let bill: usize = scene
+            .vgeom_instances
+            .iter()
+            .filter_map(|i| tris.get(&i.asset))
+            .sum();
+        println!(
+            "64 art cars (the island's REAL art): {tc:.3} ms, {nc} instances, {bill} LOD-0 triangles submitted ({:.0} per car; the meshlet DAG culls and cuts from there)",
+            bill as f64 / 64.0
+        );
+    }
     assert!(na >= 64 * 10, "the art cars drew only {na} instances");
     if clock_is_asserted("64 imported cars") {
         assert!(
@@ -2214,5 +2263,89 @@ fn the_island_body_kind_census() {
     assert_eq!(
         resident_drawn, resident_art,
         "a resident art chassis draws something else"
+    );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// (9) PLAY
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// **The island's Play payload fits its frame with the art present** (wave
+/// VEH3f.2a). LOCAL: the island project's own level, built into a
+/// `ScenePayload` through `build_scene_payload` with the project's own
+/// resolvers -- the call the editor's Play button makes.
+///
+/// Measured before the budget: 103 textures, 921.2 MB, against a
+/// `MAX_FRAME_LEN` of 268.4 MB -- Play refused the frame after minutes of
+/// building it, and the editor's WebView died of the commit limit on the way.
+/// With `PIE_TEXTURE_BUDGET_BYTES`: 60 textures, 164.1 MB, a 171.3 MB payload.
+///
+/// **Mutation**: the budget's guard removed -> red (928.4 MB).
+#[test]
+fn the_islands_play_payload_fits_its_frame() {
+    let Some(content) = local_art("the Play-payload arm") else {
+        return;
+    };
+    let project =
+        inf_editor_core::assets::AssetProject::open(&content).expect("the island project");
+    let doc = inf_editor_core::scene::serialize::load(&content.join("VancouverIsland.inf_lvl"))
+        .expect("the island level");
+    use inf_asset::AssetKind as K;
+    let read = |id: Uuid, kinds: &[K]| -> Option<Vec<u8>> {
+        let e = project.db().get(inf_asset::AssetId(id))?;
+        kinds
+            .contains(&e.kind())
+            .then(|| std::fs::read(&e.path).ok())
+            .flatten()
+    };
+    let p = inf_editor_core::pie::build_scene_payload(
+        &doc,
+        |_| None,
+        |g| read(g, &[K::Pcg]),
+        |_| None,
+        |_| None,
+        |_| None,
+        |_| None,
+        |g| read(g, &[K::Mesh]),
+        |g| read(g, &[K::Cloth, K::Hair, K::Material, K::Texture, K::Audio]),
+        |g| {
+            use inf_editor_core::assets::vmesh::DerivedVmesh;
+            match inf_editor_core::assets::vmesh::derived_vmesh(&project, inf_asset::AssetId(g)) {
+                DerivedVmesh::Current(p) => Some(inf_editor_core::pie::VmeshRef::Path(p)),
+                DerivedVmesh::Stale(_) => Some(inf_editor_core::pie::VmeshRef::Stale),
+                DerivedVmesh::Absent => None,
+            }
+        },
+        60,
+        true,
+    )
+    .expect("the payload builds");
+    let sum = |v: &Vec<(Uuid, Vec<u8>)>| v.iter().map(|x| x.1.len()).sum::<usize>();
+    let tex = sum(&p.textures);
+    let total = tex
+        + sum(&p.materials)
+        + sum(&p.meshes)
+        + sum(&p.clips)
+        + sum(&p.skeletons)
+        + p.level_bytes.len();
+    println!(
+        "the island's Play payload: {} textures ({:.1} MB), {} vmesh paths, {:.1} MB of bytes against MAX_FRAME_LEN {:.1} MB",
+        p.textures.len(),
+        tex as f64 / 1e6,
+        p.vmesh_paths.len(),
+        total as f64 / 1e6,
+        inf_runtime::pie::MAX_FRAME_LEN as f64 / 1e6
+    );
+    assert!(
+        tex <= inf_editor_core::pie::PIE_TEXTURE_BUDGET_BYTES,
+        "the textures overran the budget"
+    );
+    assert!(
+        total < inf_runtime::pie::MAX_FRAME_LEN,
+        "the payload does not fit its frame"
+    );
+    assert!(
+        p.textures.len() >= 20,
+        "the budget shipped almost no texture at all"
     );
 }
