@@ -98,25 +98,28 @@ pub const HULL_PANELS: f64 = 4.0;
 ///   in open air. Compared to the same 4 500 it never breaks, and an open door
 ///   would be indestructible by anything smaller than the car it is on.
 ///
-/// So a hinge tears at a SPEED: four metres a second of the part's own momentum,
-/// which is a door that hits something at walking-to-jogging pace and loses.
+/// So a hinge tears at a SPEED of the part's own momentum.
 ///
-/// **Those are the WHOLE step's impulses** (VEH3g audit). Until then
-/// `PhysicsWorld3D::joint_impulse` read one substep of four, so the numbers this
-/// constant was sized beside were quarters (515 and 2 at VEH3c) and the hinge
-/// really let go at sixteen metres a second of momentum, not four. The read is
-/// corrected and this constant is NOT: four is what the sentence above claims,
-/// and it is now what the world does. The lamp post still tears the door (2 060
-/// against 88 for a 22 kg door), open air still does not (9), and cornering at
-/// half a g -- VEH3c's quarter-read 1.8 N.s, so about 7 -- keeps a margin of
-/// about twelve to one rather than the fifty the quarter-read claimed. The
-/// CRASH path (`J = m·|dv|`) never read a joint and did not move: 30 / 4 056 /
-/// 9 308 / 17 730 / 28 606 N.s at 15-90 km/h, to the newton-second.
+/// **SIXTEEN metres a second, and it always was** (VEH3g audit). Until then
+/// `PhysicsWorld3D::joint_impulse` read one substep of four, so this constant
+/// was sized beside quarters (515 and 2 at VEH3c) and the sentence it carried --
+/// "four metres a second, a door that hits something at walking-to-jogging
+/// pace" -- was never what the world did: against the quarter read, 4 acted as
+/// 16. The read is corrected and the constant re-sized to what every gate since
+/// VEH3c was built on, so every tear decision is BIT-IDENTICAL (x4 on both
+/// sides is exact in binary). Kept at 4 against the whole read, doors tore in
+/// the EMS town that never had (a 31.5 kg door at 183 N.s, a 167.6 kg tailgate
+/// at 2 555) and a unit never came home (`ems2_dispatch_gate`: 2 returns of 4).
+/// Sixteen m/s -- 58 km/h -- is an open door caught by a post at road speed,
+/// not a jog: the lamp post at 68 km/h still tears a 22 kg door (2 060 N.s
+/// against 352), open air does not (9), cornering at half a g (~7) is fifty to
+/// one. The CRASH path (`J = m·|dv|`) never read a joint: 30 / 4 056 / 9 308 /
+/// 17 730 / 28 606 N.s at 15-90 km/h, unchanged.
 ///
 /// **The tuning still governs it.** [`hinge_tear_ns`] scales this by the row's
 /// own `part_break_impulse_ns` against the default, so a car tuned UNBREAKABLE
 /// is unbreakable on both paths and a car tuned fragile loses its doors on both.
-pub const HINGE_TEAR_MPS: f64 = 4.0;
+pub const HINGE_TEAR_MPS: f64 = 16.0;
 
 /// **What one part's hinge lets go at**, newton-seconds — see
 /// [`HINGE_TEAR_MPS`].

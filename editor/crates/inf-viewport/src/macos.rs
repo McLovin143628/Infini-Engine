@@ -93,6 +93,9 @@ enum Cmd {
     FocusSelection,
     /// Frame the level's player start (wave EDIT1, clause 2).
     FrameStart,
+    /// Stand the 3D camera at `eye` looking at `target` (VEH3g audit) -- the
+    /// Windows pump's preview door, mirrored.
+    LookAt(glam::DVec3, glam::DVec3),
     SetViewMode(ViewMode),
     /// Point terrain streaming at a project's content root (P16.4a).
     SetContentRoot(Option<std::path::PathBuf>),
@@ -256,9 +259,11 @@ impl ViewportHandle {
     }
 
     /// Stand the camera at `eye` looking at `target` (VEH3g audit) -- the
-    /// Windows viewport's preview door. macOS input and its camera commands are
-    /// not wired yet (see `set_view_mode`), so this is a no-op here, stated.
-    pub fn look_at(&self, _eye: glam::DVec3, _target: glam::DVec3) {}
+    /// Windows viewport's preview door, mirrored (a jump cut needs no input
+    /// pump).
+    pub fn look_at(&self, eye: glam::DVec3, target: glam::DVec3) {
+        let _ = self.tx.send(Cmd::LookAt(eye, target));
+    }
 
     /// Set the shading view mode (Lit / Unlit / Wireframe) (R-P2). macOS input
     /// isn't wired yet, but the mode still drives the renderer (it's not input).
@@ -475,6 +480,19 @@ fn thread_main(
                 Ok(Cmd::FocusSelection) => {
                     // No focus animation on this platform yet (no input pump to
                     // advance it); accepted so the two pumps stay mirrored.
+                }
+                Ok(Cmd::LookAt(eye, target)) => {
+                    // The Windows pump's arithmetic: forward is
+                    // `(sin yaw, 0, -cos yaw)` tilted by `pitch`.
+                    let d = target - eye;
+                    let flat = (d.x * d.x + d.z * d.z).sqrt();
+                    if d.length() > 1e-6 && eye.is_finite() && target.is_finite() {
+                        camera.set_pose(crate::camera::CameraPose {
+                            pos: eye,
+                            yaw: inf_math::patan2_64(d.x, -d.z) as f32,
+                            pitch: inf_math::patan2_64(d.y, flat) as f32,
+                        });
+                    }
                 }
                 Ok(Cmd::FrameStart) => {
                     // Same: accepted and inert. A jump cut needs no pump, but it

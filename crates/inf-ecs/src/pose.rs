@@ -2087,13 +2087,8 @@ pub fn step_pose_evaluation<'c>(
                         // `None`, and a weight of zero never reaches the map at
                         // all because the writer removes the entry instead.
                         if let Some(rp) = bridge.ragdoll_pose.get(&guid) {
-                            corrected |= apply_ragdoll_pose(
-                                asset,
-                                &mut pose,
-                                rp,
-                                to_world,
-                                getup_prev.get(&guid),
-                            );
+                            let pv = getup_prev.get(&guid);
+                            corrected |= apply_ragdoll_pose(asset, &mut pose, rp, to_world, pv);
                         }
                         if corrected {
                             let n = redrive(asset, &mut pose);

@@ -41186,8 +41186,10 @@ Take-off flaps (+0.5 CL, 1.5 deg earlier stall, +0.02 CD0; set on the gear,
 up past 1.3 Vs): to 35 ft Duster 415, Dodo 492, Luxor 1 370, Titan 1 237,
 Jetliner 1 289 m -- asserted with a tenth in hand of the 1 700 m strip.
 `joint_impulse` reads the whole step (it read 0.2500 of m g dt on all three
-kinds; one `solver_substeps` door with the winch; the hinge tear's 4 m/s is
-now what the world does, the crash table unmoved). Every sound-keying salt
+kinds; one `solver_substeps` door with the winch); `HINGE_TEAR_MPS` re-sized
+4 -> 16 m/s with it, so every tear decision is bit-identical -- the "4 m/s,
+walking pace" sentence had never been true (kept at 4, the EMS town tore two
+doors that never tore and a unit never came home); the crash table unmoved. Every sound-keying salt
 spread (73 728 fixture clashes -> 0; RNG seeds kept). The police heli ORBITS
 on scene (127 deg in 10 s). An editor look-at door (`viewport_look_at`,
 `lookat.mjs`, `demo.ps1 -EditorLookAt`): the airfield and its four parked

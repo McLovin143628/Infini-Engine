@@ -1168,7 +1168,7 @@ impl PhysicsWorld3D {
     /// still off a fixed, a revolute and a spherical joint read **40.875 N.s
     /// against its m·g·dt of 163.500 -- 0.2500, to four places, on all three**.
     /// VEH3c's hinge tear (`inf_ecs::bodywork::HINGE_TEAR_MPS`) was sized
-    /// against the quarter. [`solver_substeps`](Self::solver_substeps) is the one
+    /// against the quarter and is re-sized x4 with it (4 -> 16 m/s). [`solver_substeps`](Self::solver_substeps) is the one
     /// factor, shared with [`rope_impulse_ns`](Self::rope_impulse_ns).
     pub fn joint_impulse(&self, joint: JointId3D) -> Option<super::joint::JointImpulse3D> {
         let j = self.impulse_joints.get(joint.0)?;
