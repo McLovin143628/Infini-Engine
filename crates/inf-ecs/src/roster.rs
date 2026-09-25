@@ -163,17 +163,18 @@ impl RosterClass {
         )
     }
 
-    /// **What is dormant about this class until VEH3g**, or `None`.
+    /// **What is still dormant about this class**, or `None` (re-read at wave
+    /// VEH3g, which woke the air and sea rows: the wing, the winch, planing,
+    /// the sail and the craft voices all run now -- what is left is what that
+    /// wave's report carries).
     pub fn dormant(self) -> Option<&'static str> {
         match self {
             RosterClass::Airplane => {
-                Some("no lift, stall or control surfaces: rolls on its gear (VEH3g)")
+                Some("no flaps, ground effect, spin or density lapse (carried by VEH3g)")
             }
-            RosterClass::Helicopter => Some(
-                "flies on VEH2c's RotorVehicle; the winch and the blade-slap voice are VEH3g's",
-            ),
+            RosterClass::Helicopter => Some("the air lane has no orbit (carried by VEH3g)"),
             RosterClass::Marine => {
-                Some("floats on VEH2c's HullVehicle; planing, sail and hull voices are VEH3g's")
+                Some("the superyacht and the cruise ship have no authored route (carried by VEH3g)")
             }
             _ => None,
         }

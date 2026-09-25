@@ -2783,6 +2783,123 @@ fn the_roster_families_board_at_their_sockets_on_the_shipped_host() {
     assert!(bad.is_empty(), "{}", bad.join("\n"));
 }
 
+/// **AN AEROPLANE, A HELICOPTER AND A BOAT BOARD AT THEIR SOCKETS ON THE
+/// SHIPPED HOST** (wave VEH3g) -- the air and sea families' cockpit and helm
+/// seats. Only the Maverick has a cabin door: the Dodo wears the biplane family
+/// (an open cockpit) and the Jetmax is a speedboat, so neither has a handle to
+/// reach and their `outer` column is honestly EMPTY, not zero.
+///
+/// The same measurement as the roster arm above: the POSED joints against the
+/// LIVE sockets (`RuntimeSim::boarding_residuals`), worst at full weight, the
+/// hero boarding, sitting at the controls and getting back out. The boat stands
+/// on the slab rather than floating: the sockets and the IK are a function of
+/// the chassis's pose, not of what holds it up, and a hero walking on water is
+/// not what this arm is about.
+#[test]
+fn the_air_and_sea_families_board_at_their_sockets_on_the_shipped_host() {
+    use inf_ecs::movement::actions::INTERACT;
+    use inf_player::runtime_sim::{RuntimeInput, RuntimeSim};
+    println!("=== the air and sea families on the shipped host: POSED joints against LIVE sockets (mm, worst at weight 1) ===");
+    let mut bad = Vec::<String>::new();
+    for row in ["mammoth_dodo", "buckingham_maverick", "shitzu_jetmax"] {
+        let def = catalogue_def(row);
+        let seat = def
+            .body
+            .parts()
+            .iter()
+            .find(|p| p.name == "seat_r")
+            .map(|p| p.centre.z * def.half_extents.z)
+            .unwrap_or(0.0);
+        // Beside the seat on the door side, clear of a wing: the Dodo's span is
+        // eleven metres, so the hero walks up under it to the cabin door.
+        let x = if def.half_extents.x > 3.0 {
+            1.6
+        } else {
+            def.half_extents.x + 1.1
+        };
+        let hero_at = DVec3::new(x, 0.0, seat - 0.6);
+        let mut sim = rigged_runtime_sim_for(row, hero_at);
+        let phase = |sim: &RuntimeSim| {
+            let e = sim.world().entity_of(HERO).unwrap();
+            let cm = sim.world().world().get::<CharacterMovement>(e).unwrap();
+            (cm.runtime.boarding.phase, cm.runtime.seat.is_seated())
+        };
+        let (mut outer, mut rim, mut pedal) = (Vec::new(), Vec::new(), Vec::new());
+        let mut driving_at: Option<u32> = None;
+        let (mut exited, mut seated_ever) = (false, false);
+        for i in 0..3000u32 {
+            let (p, seated) = phase(&sim);
+            seated_ever |= seated;
+            let mut input = RuntimeInput::default();
+            if i == 60 {
+                input = input.press(INTERACT);
+            }
+            if let Some(d) = driving_at {
+                if i - d == 300 {
+                    input = input.press(INTERACT);
+                }
+            } else if p == BoardPhase::Driving || (p == BoardPhase::Idle && seated) {
+                driving_at = Some(i);
+            }
+            sim.step_once(input);
+            let (p, seated) = phase(&sim);
+            if driving_at.is_some() && p == BoardPhase::Idle && !seated {
+                exited = true;
+                break;
+            }
+            let Some(r) = sim.boarding_residuals(HERO) else {
+                continue;
+            };
+            match r.sockets.phase {
+                BoardPhase::OpeningDoor if r.sockets.handle_weight >= 0.999 => {
+                    outer.extend(r.handle_m)
+                }
+                BoardPhase::Driving => {
+                    if r.sockets.hand_weight >= 0.999 {
+                        rim.extend(r.grips_m);
+                    }
+                    pedal.extend(r.feet_m);
+                }
+                _ => {}
+            }
+        }
+        let worst = |v: &[f64]| v.iter().copied().fold(0.0f64, f64::max) * 1000.0;
+        println!(
+            "  {:<22} outer {:>6.2} ({:>3})  controls {:>6.2} ({:>3})  pedals {:>6.2} ({:>3})  seated {seated_ever}  exited {exited}",
+            row,
+            worst(&outer),
+            outer.len(),
+            worst(&rim),
+            rim.len(),
+            worst(&pedal),
+            pedal.len()
+        );
+        if !seated_ever {
+            bad.push(format!("{row}: the hero never sat down"));
+        }
+        if !exited {
+            bad.push(format!("{row}: the hero never got back out"));
+        }
+        for (what, v) in [("controls", &rim), ("pedals", &pedal)] {
+            if v.len() < 3 {
+                bad.push(format!("{row}: only {} rows held the {what}", v.len()));
+            } else if worst(v) > 20.0 {
+                bad.push(format!(
+                    "{row}: the posed joint was {:.2} mm off the {what}",
+                    worst(v)
+                ));
+            }
+        }
+        if !outer.is_empty() && worst(&outer) > 20.0 {
+            bad.push(format!(
+                "{row}: the posed hand was {:.2} mm off the door handle",
+                worst(&outer)
+            ));
+        }
+    }
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+}
+
 /// **THE PREVIEW DOORS HOLD A BEAT AND SEE THROUGH THE CAR, AND TOUCH NO
 /// STEP** (VEH3d audit, priorities a' and b') — `pie_drive::BoardHold`
 /// (`INF_PIE_BOARD_HOLD`) and `pie_drive::Cutaway` (`INF_PIE_CUTAWAY`), driven
