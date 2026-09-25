@@ -587,6 +587,12 @@ pub enum VmeshRef {
     Stale,
 }
 
+/// **The texture bytes one Play payload may carry** (wave VEH3f.2a): 160 MiB,
+/// leaving the rest of [`inf_runtime::pie::MAX_FRAME_LEN`]'s 256 MiB to the
+/// level, its meshes and everything else the envelope holds. See the budget's
+/// note in [`build_scene_payload`]'s material walk.
+pub const PIE_TEXTURE_BUDGET_BYTES: usize = 160 * 1024 * 1024;
+
 /// Build the [`ScenePayload`] handed to the player from the **live** document:
 /// the v3 `.inf_lvl` bytes of the current (unsaved-included) doc, plus the bound
 /// blueprint classes. Bindings resolve like [`crate::samples::bound_actors`]:
@@ -1364,6 +1370,19 @@ where
     let mut textures: Vec<(Uuid, Vec<u8>)> = Vec::new();
     let mut seen_material: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
     let mut seen_texture: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+    // **THE TEXTURE BUDGET** (wave VEH3f.2a). Textures ride as BYTES, and the
+    // island with the imported vehicle and weapon packs present names 921.2 MB
+    // of them -- 3.4 frames of `MAX_FRAME_LEN` -- so Play refused the frame and
+    // the editor spent minutes and gigabytes building one it could not send.
+    // Past [`PIE_TEXTURE_BUDGET_BYTES`] a texture's record is not shipped: that
+    // surface previews at its material's scalars while the COOKED build, which
+    // packs through its own closure, draws it textured. The document's own
+    // bindings come first in the walk, so a level's roads and characters keep
+    // theirs and the engine-spawned art (traffic's bodies) is what goes plain.
+    // The fix is `texture_paths` on the envelope -- `terrain_paths`' and
+    // `vmesh_paths`' reason exactly -- a payload rung this wave may not take.
+    let mut texture_bytes = 0usize;
+    let mut over_budget: Vec<Uuid> = Vec::new();
     // TER2a: the bindings a level names are its `Material.asset`s AND its
     // terrains' four splat layers, through the one door
     // `Terrain::layer_materials` — because `want_floor` is a pure function of
@@ -1441,7 +1460,13 @@ where
             let g = tex.uuid();
             if seen_texture.insert(g) {
                 match resolve_bytes(g) {
-                    Some(bytes) => textures.push((g, bytes)),
+                    Some(bytes) if texture_bytes + bytes.len() > PIE_TEXTURE_BUDGET_BYTES => {
+                        over_budget.push(g);
+                    }
+                    Some(bytes) => {
+                        texture_bytes += bytes.len();
+                        textures.push((g, bytes));
+                    }
                     // Reported, not discarded (P26.3b audit — the same doctrine
                     // the material decode ten lines up already follows, and the
                     // hazard the `ScenePayload::textures` doc names in so many
@@ -1465,6 +1490,15 @@ where
             inf_asset::derived_material_id(inf_asset::AssetId(asset)).uuid(),
             encoded,
         ));
+    }
+
+    if !over_budget.is_empty() {
+        tracing::warn!(
+            "pie: {} texture(s) past the {} MiB preview budget are not in this payload ({:.1} MB shipped); those surfaces preview at their material's scalars, and the cooked build draws them textured",
+            over_budget.len(),
+            PIE_TEXTURE_BUDGET_BYTES / (1024 * 1024),
+            texture_bytes as f64 / 1e6
+        );
     }
 
     let mut fractures: Vec<(Uuid, Vec<u8>)> = Vec::new();
