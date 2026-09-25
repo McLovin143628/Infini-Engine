@@ -8771,14 +8771,6 @@ impl Vehicle for RaycastVehicle {
         if controls.vertical > 0.0 {
             self.controls.handbrake = false;
         }
-        // **A PARKED AEROPLANE HAS ITS PARKING BRAKE ON** (VEH3g audit). With
-        // nobody at the controls the gear used to roll free, so the island's
-        // wind moved the parked aeroplanes: an untended Dodo weathervaned 26
-        // degrees in 15 s onto the apron (the wave's second session) and one
-        // standing tail to the wind rolled backwards (its fourth).
-        if !controls.occupied {
-            self.controls.handbrake = true;
-        }
         self.solve_ground(chassis, dt, out);
         self.controls = controls;
         self.engine_scale = scale;

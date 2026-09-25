@@ -4679,9 +4679,10 @@ fn the_roster_families_seat_their_driver_inside_and_the_car_stays_on_its_wheels(
 ///
 /// * **the wind up the tail** (8 m/s, the island's is 6.3): the elevator's
 ///   attitude command read the reversed flow as 180 deg of angle of attack
-///   and pitched at it, and the gear crept BACKWARDS (-0.63 m/s) -- a parked
-///   aeroplane with nobody in it now stands on its parking brake, and the
-///   control surfaces need the air from the nose;
+///   and pitched at it, and the gear crept BACKWARDS (-0.63 m/s) -- the
+///   control surfaces now need the air from the nose (a parking brake was
+///   tried too and removed: with the flow fixed a parked Dodo creeps 0.000
+///   m/s without it, so no arm could see it);
 /// * **W while rolling back**: `VehicleControls::from_intent` read a forward
 ///   stick while rolling backwards as the BRAKE (a car driver's rule), so the
 ///   engine never spooled -- on a wing W is the power lever;
@@ -4689,8 +4690,8 @@ fn the_roster_families_seat_their_driver_inside_and_the_car_stays_on_its_wheels(
 ///   island's own wind (6.3 m/s, 18 deg off the runway) keeps it within a few
 ///   degrees to 30 m/s, into wind and down it.
 ///
-/// Mutations that red it: `as_power_lever` not applied (the spool from a
-/// backward roll); the parking brake line removed (the parked creep).
+/// Mutation that reds it: `as_power_lever` not applied (the spool from a
+/// backward roll: 176 steps, not 38).
 #[test]
 fn a_shipped_pilot_spools_and_holds_the_dodo_in_the_islands_wind() {
     use inf_ecs::movement::actions::{INTERACT, MOVE_X, MOVE_Y};
@@ -4708,6 +4709,7 @@ fn a_shipped_pilot_spools_and_holds_the_dodo_in_the_islands_wind() {
         ("tail wind 8 m/s", (0.0f32, 8.0f32), true),
         ("island wind into it", (2.0, -6.0), false),
         ("island wind down it", (2.0, 6.0), false),
+        ("quartering 8 m/s", (5.66, -5.66), false),
     ];
     let mut bad = Vec::new();
     for (name, wind, push_back) in cases {
@@ -4736,7 +4738,8 @@ fn a_shipped_pilot_spools_and_holds_the_dodo_in_the_islands_wind() {
                 inf_math::patan2_64(fz.x, fz.z).to_degrees(),
             )
         };
-        let (mut creep, mut worst) = (0.0f64, 0.0f64);
+        let (mut creep, mut worst, mut parked_turn) = (0.0f64, 0.0f64, 0.0f64);
+        let mut parked_from = 0.0f64;
         let (mut driving_at, mut spooled_at) = (None::<u32>, None::<u32>);
         let mut lifted = false;
         for i in 0..2100u32 {
@@ -4768,6 +4771,12 @@ fn a_shipped_pilot_spools_and_holds_the_dodo_in_the_islands_wind() {
             if driving_at.is_none() && (240..360).contains(&i) {
                 creep = creep.max(fwd.abs());
             }
+            if i == 240 {
+                parked_from = h;
+            }
+            if driving_at.is_none() && (240..360).contains(&i) {
+                parked_turn = parked_turn.max((h - parked_from).abs());
+            }
             if let Some(d) = driving_at {
                 if i > d + 5 {
                     input = input
@@ -4793,19 +4802,27 @@ fn a_shipped_pilot_spools_and_holds_the_dodo_in_the_islands_wind() {
             }
         }
         println!(
-            "  {name:22} parked creep {creep:.3} m/s; spool 0.8 after {} steps of W{}; heading worst {worst:.1} deg to 30 m/s",
+            "  {name:22} parked creep {creep:.3} m/s, turned {parked_turn:.2} deg; spool 0.8 after {} steps of W{}; heading worst {worst:.1} deg to 30 m/s",
             spooled_at.map(|s| s.to_string()).unwrap_or("NEVER".into()),
             if push_back { " (rolling back 3 m/s)" } else { "" }
         );
         if creep > 0.1 {
             bad.push(format!("{name}: the parked Dodo crept {creep:.2} m/s"));
         }
+        if parked_turn > 1.0 {
+            bad.push(format!(
+                "{name}: the parked Dodo weathervaned {parked_turn:.1} deg"
+            ));
+        }
         if spooled_at.is_none_or(|s| s > 90) {
             bad.push(format!(
                 "{name}: W did not spool the engine inside 1.5 s ({spooled_at:?})"
             ));
         }
-        if !push_back && worst > 10.0 {
+        // The island's own wind at 10 deg; a quartering 8 m/s (15.5 kt, a
+        // light aeroplane's demonstrated crosswind) at 15.
+        let limit = if wind.0.abs() > 4.0 { 15.0 } else { 10.0 };
+        if !push_back && worst > limit {
             bad.push(format!(
                 "{name}: the pilot was {worst:.1} deg off the heading"
             ));
