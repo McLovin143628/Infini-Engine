@@ -1169,6 +1169,28 @@ impl PhysicsWorld3D {
         })
     }
 
+    /// **What a ROPE carried on the last step**, newton-seconds (wave VEH3g) --
+    /// its distance LIMIT's impulse, or `None` for a dead handle.
+    ///
+    /// [`joint_impulse`](Self::joint_impulse) reads a joint's LOCKED axes, and a
+    /// rope has none: rapier builds it as three coupled linear axes with a limit
+    /// at `max_distance`, and the solver writes the impulse that enforced the
+    /// limit into `limits[LinX]`. Measured: the Cargobob's cable read **0 N**
+    /// through `joint_impulse` while it held a 1.9-tonne car eight metres under
+    /// the hook. Divided by the step, this is the cable's TENSION.
+    ///
+    /// **Times the solver's substeps.** The limit's stored impulse is the LAST
+    /// substep's, and rapier solves `num_solver_iterations` (4) of them a step:
+    /// read raw, the same cable held that car at **4 660 N against its
+    /// 18 639 N weight -- a quarter, to the newton**. The same holds for
+    /// `joint_impulse`, which VEH3c's breakable hinges read (carried in the
+    /// wave's ledger rather than re-tuned under them here).
+    pub fn rope_impulse_ns(&self, joint: JointId3D) -> Option<f64> {
+        let j = self.impulse_joints.get(joint.0)?;
+        let substeps = self.integration_parameters.num_solver_iterations.max(1) as f64;
+        Some(j.data.limits[0].impulse.abs() * substeps)
+    }
+
     /// **Re-aim a revolute's position motor**, radians (wave VEH3c's audit).
     ///
     /// The other half of a joint that is DRIVEN rather than merely constrained:

@@ -4042,6 +4042,83 @@ pub fn hitch(
     true
 }
 
+// ── the winch (wave VEH3g) ───────────────────────────────────────────────────
+
+/// **A winch cable** from a helicopter's hook to a load's roof (wave VEH3g) --
+/// the Cargobob's, the P12 rope joint: a `Distance` joint that keeps the two
+/// anchors within `rope_m` and lets them come closer, which is what a cable
+/// does. `None` for a rope with no length.
+///
+/// The hook is the heavy lifter's hull FLOOR on its centreline (the tandem
+/// family draws it there, `vehicle_families::TANDEM_PARTS`'s `hook`); the load's
+/// anchor is its own roof centre, so a car hangs level under the hook rather than
+/// by a corner. Written on the LOAD (the hitch's own convention: the towed body
+/// carries the joint), with the lifter as `other` -- so a joint between two
+/// chassis runs with its contacts off (`PhysicsBridge3D::reconcile_joint`'s
+/// derived hitch rule), and a car hauled up against the airframe does not fight
+/// it.
+pub fn winch_joint(
+    lifter: Uuid,
+    lifter_def: &VehicleDef,
+    load_def: &VehicleDef,
+    rope_m: f64,
+) -> Option<crate::components::Joint3D> {
+    if !(rope_m.is_finite() && rope_m > 0.0) {
+        return None;
+    }
+    Some(crate::components::Joint3D {
+        other: crate::refs::EntityRef::new(lifter),
+        kind: crate::components::JointKind3D::Distance,
+        local_anchor: Vec3d::new(0.0, load_def.half_extents.y, 0.0),
+        other_anchor: Vec3d::new(0.0, -lifter_def.half_extents.y, 0.0),
+        max_distance: rope_m,
+        ..Default::default()
+    })
+}
+
+/// **Hook a load onto a lifter's winch** that are both already in a world --
+/// the runtime door, [`hitch`]'s shape. Returns whether the cable was written.
+pub fn winch(
+    world: &mut EcsWorld,
+    lifter: Uuid,
+    lifter_def: &VehicleDef,
+    load: Uuid,
+    load_def: &VehicleDef,
+    rope_m: f64,
+) -> bool {
+    let Some(joint) = winch_joint(lifter, lifter_def, load_def, rope_m) else {
+        return false;
+    };
+    let Some(e) = world.entity_of(load) else {
+        return false;
+    };
+    world.world_mut().entity_mut(e).insert(joint);
+    world.mark_dirty();
+    true
+}
+
+/// **Let the load go** (wave VEH3g): removes a `Distance` joint from `load` --
+/// and only that kind, so releasing a winch can never un-hitch a trailer.
+/// Returns whether a cable was cut.
+pub fn release_winch(world: &mut EcsWorld, load: Uuid) -> bool {
+    let Some(e) = world.entity_of(load) else {
+        return false;
+    };
+    let is_cable = world
+        .world()
+        .get::<crate::components::Joint3D>(e)
+        .is_some_and(|j| j.kind == crate::components::JointKind3D::Distance);
+    if !is_cable {
+        return false;
+    }
+    world
+        .world_mut()
+        .entity_mut(e)
+        .remove::<crate::components::Joint3D>();
+    world.mark_dirty();
+    true
+}
+
 /// **Take a rig back out of a world** — the other half of [`spawn_rig`], and
 /// the door a traffic car's `Dormant` tier goes through.
 ///
