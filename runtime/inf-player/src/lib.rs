@@ -1163,13 +1163,29 @@ pub fn materials_from_payload(payload: &ScenePayload) -> MaterialContent {
             ),
         }
     }
+    let mut textures: std::collections::HashMap<uuid::Uuid, VtTextureBytes> = payload
+        .textures
+        .iter()
+        .map(|(g, b)| (*g, VtTextureBytes::owned(b.clone())))
+        .collect();
+    // **v14 (the VEH3f.2a audit): the textures that ride BY PATH** -- the same
+    // `.inf_tex` file the editor would have copied into the frame, read here, on
+    // `terrain_paths`' and `vmesh_paths`' terms. A file that does not read is
+    // reported and skipped, never fatal: its surfaces render off their scalar
+    // attributes, which is the permanent no-texture path.
+    for (g, path) in &payload.texture_paths {
+        match std::fs::read(path) {
+            Ok(bytes) => {
+                textures.insert(*g, VtTextureBytes::owned(bytes));
+            }
+            Err(e) => tracing::warn!(
+                "inf-player: texture {g} at {path} did not read, so every surface naming it previews off its scalar attributes: {e}"
+            ),
+        }
+    }
     MaterialContent {
         materials,
-        textures: payload
-            .textures
-            .iter()
-            .map(|(g, b)| (*g, VtTextureBytes::owned(b.clone())))
-            .collect(),
+        textures,
     }
 }
 

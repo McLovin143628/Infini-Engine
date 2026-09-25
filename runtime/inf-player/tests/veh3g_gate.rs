@@ -2433,7 +2433,9 @@ fn no_std_trig_on_the_air_and_sea_paths() {
 #[test]
 fn this_wave_moved_no_schema() {
     assert_eq!(inf_scene::SCHEMA_VERSION, 28);
-    assert_eq!(inf_runtime::pie::SCENE_PAYLOAD_VERSION, 13);
+    // The PIE IPC envelope moved 13 -> 14 in the VEH3f.2a audit (`texture_paths`,
+    // Play draws what the cook draws); the SCENE wire above did not.
+    assert_eq!(inf_runtime::pie::SCENE_PAYLOAD_VERSION, 14);
     assert_eq!(
         inf_ecs::vehicle::VehicleTuning::names().len(),
         100,

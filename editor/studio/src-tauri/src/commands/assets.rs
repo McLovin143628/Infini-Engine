@@ -424,6 +424,21 @@ impl AssetState {
         Some(entry.path.clone())
     }
 
+    /// Where a texture's `.inf_tex` lives on disk (`ScenePayload` v14, the
+    /// VEH3f.2a audit) -- [`terrain_path`](Self::terrain_path)'s door for the
+    /// Play payload's `texture_paths`, with the kind checked here so a binding
+    /// that names something else resolves to `None` and never to a file.
+    pub fn texture_path(&self, id: AssetId) -> Option<std::path::PathBuf> {
+        let guard = self.inner.lock().ok()?;
+        let inner = guard.as_ref()?;
+        let proj = inner.project.lock().ok()?;
+        let entry = proj.db().get(id)?;
+        if entry.kind() != inf_asset::AssetKind::Texture {
+            return None;
+        }
+        Some(entry.path.clone())
+    }
+
     /// Where a mesh's **derived** `.inf_vmesh` is and whether it is current (wave
     /// FIX2), for the PIE payload's `vmesh_paths` route.
     ///

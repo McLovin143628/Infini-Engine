@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use inf_editor_core::pie::{
-    build_scene_payload, find_player_bin, PieSession, SessionHealth, TerrainRef,
+    build_scene_payload_with_texture_paths, find_player_bin, PieSession, SessionHealth, TerrainRef,
 };
 use inf_runtime::pie::PlayerToEditor;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -177,7 +177,7 @@ pub async fn pie_start(
     // Build the payload from the live scene (embedded/window are both windowed).
     let payload = {
         let doc = scene.doc.lock().map_err(|_| "scene lock poisoned")?;
-        build_scene_payload(
+        build_scene_payload_with_texture_paths(
             &doc,
             |guid| assets.load_blueprint_class(inf_asset::AssetId(guid)),
             |guid| assets.load_pcg_bytes(inf_asset::AssetId(guid)),
@@ -233,6 +233,11 @@ pub async fn pie_start(
                     Some(DerivedVmesh::Absent) | None => None,
                 }
             },
+            // `ScenePayload` v14 (the VEH3f.2a audit): where each texture's
+            // `.inf_tex` is. BY PATH, on `terrain_path`'s terms, so Play draws
+            // every surface the cooked build draws instead of the 160 MiB the
+            // bytes route could carry (921.2 MB of the island's textures).
+            |guid| assets.texture_path(inf_asset::AssetId(guid)),
             PIE_TICK_HZ,
             true,
         )

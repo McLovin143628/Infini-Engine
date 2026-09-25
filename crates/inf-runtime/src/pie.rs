@@ -261,7 +261,29 @@ pub const PIE_FRAME_VERSION: u16 = 1;
 ///   into the pack, so a cooked build played both and the preview played neither.
 ///   (The island's venue is a **different** defect and this field does not close
 ///   it — see the field's own doc.)
-pub const SCENE_PAYLOAD_VERSION: u32 = 13;
+///
+/// * **v14** — the VEH3f.2a audit:
+///   [`texture_paths`](ScenePayload::texture_paths), the third rung to carry a
+///   PATH, and for the reason v12 and v13 each gave in turn.
+///
+///   Wave VEH3f.2a imported four Fab packs onto the island and the level's
+///   texture closure grew to **103 `.inf_tex` containers, 921.2 MB** — 3.4
+///   frames of [`MAX_FRAME_LEN`]. Play spent minutes building a frame it could
+///   not send, and the wave's answer was a 160 MiB *preview budget*: past it a
+///   texture was not shipped, so **43 surfaces previewed untextured while the
+///   cooked build drew them** — PIE != shipping, by construction, on exactly the
+///   content the wave existed to show. The container bytes are the same file the
+///   editor just read, the player is its child on the same machine, and the
+///   player reads it through the same `VtTileSource` door, so the file route is
+///   the honest one. `textures` keeps carrying the bytes for a caller that has no
+///   file (the in-memory fixtures), under the budget that now bounds only them.
+///
+///   **The IPC envelope, not the scene wire**: `level_bytes` is still scene
+///   schema v28 and `EXPECTED_LEVELS` is unmoved; what moved is what a Play frame
+///   holds. A v13 player handed a v14 frame refuses it by `check_version`, which
+///   is the downgrade this rung is blessed with (editor and player are built
+///   together; there is no v13 decode path to keep, as there never was).
+pub const SCENE_PAYLOAD_VERSION: u32 = 14;
 
 /// Upper bound on a single frame; anything larger means a desynced or
 /// corrupt stream and is treated as an error rather than an allocation. A
@@ -618,6 +640,20 @@ pub struct ScenePayload {
     /// payload arm asserts an exact expected count.
     #[serde(default)]
     pub audio: Vec<(Uuid, Vec<u8>)>,
+    /// Referenced textures **by path** (v14, the VEH3f.2a audit): `(texture
+    /// asset guid, absolute `.inf_tex` path)` — the [`textures`](Self::textures)
+    /// twin, on [`terrain_paths`](Self::terrain_paths)' terms exactly: a texture
+    /// appears in exactly ONE of the two vectors, the editor emits a path when it
+    /// has a file and bytes when it does not, and the player reads the file into
+    /// the same `VtTileSource` the bytes route feeds.
+    ///
+    /// **What it costs, stated rather than discovered later** — the sentence the
+    /// two path fields above carry: a file named here is read *later*, so a
+    /// texture re-imported between the payload being built and the player opening
+    /// it previews the newer bytes. Bounded by process startup; the alternative is
+    /// a PIE preview that draws less than the build it previews.
+    #[serde(default)]
+    pub texture_paths: Vec<(Uuid, String)>,
 }
 
 impl ScenePayload {
@@ -655,6 +691,7 @@ impl ScenePayload {
             terrain_paths: Vec::new(),
             vmesh_paths: Vec::new(),
             audio: Vec::new(),
+            texture_paths: Vec::new(),
         }
     }
 
@@ -745,6 +782,14 @@ impl ScenePayload {
     /// exactly like [`with_pcgs`](Self::with_pcgs).
     pub fn with_audio_clips(mut self, audio: Vec<(Uuid, Vec<u8>)>) -> Self {
         self.audio = audio;
+        self
+    }
+
+    /// Attach the referenced `.inf_tex` containers **by path** (v14) — see
+    /// [`texture_paths`](Self::texture_paths). Builder-style, exactly like
+    /// [`with_terrain_paths`](Self::with_terrain_paths).
+    pub fn with_texture_paths(mut self, texture_paths: Vec<(Uuid, String)>) -> Self {
+        self.texture_paths = texture_paths;
         self
     }
 
@@ -1357,6 +1402,11 @@ mod tests {
         )])
         // v13(b) — non-empty, and a length no other tail field uses.
         .with_audio_clips(vec![(Uuid::from_u128(0xF1_23_01), vec![0x55; 136])])
+        // v14 — non-empty, and a string length no field above uses.
+        .with_texture_paths(vec![(
+            Uuid::from_u128(0xF3_2A_01),
+            "/t".repeat(79), // 158 bytes: unique among the tail
+        )])
     }
 
     /// **The round trip the v5 fields never had.** Every earlier envelope test
@@ -1393,7 +1443,7 @@ mod tests {
     }
 
     /// **The WHOLE wire order is pinned, every field of it** (P24.1 audit M5;
-    /// twenty-three of them since v13).
+    /// twenty-four of them since v14).
     ///
     /// The stale-reader test below models a *pre-v5* build and therefore stops at
     /// `windowed` — correctly, that is its whole point. But it left the four tail
@@ -1450,6 +1500,8 @@ mod tests {
             // v13: the audio clips. A byte field like every one above it, and
             // pinned by a length none of them uses.
             audio: Vec<(Uuid, Vec<u8>)>,
+            // v14: the texture PATHS, pinned like the two path fields above.
+            texture_paths: Vec<(Uuid, String)>,
         }
 
         let want = payload_with_assets();
@@ -1476,6 +1528,7 @@ mod tests {
             .into_iter()
             .chain(std::iter::once(want.terrain_paths[0].1.len()))
             .chain(std::iter::once(want.vmesh_paths[0].1.len()))
+            .chain(std::iter::once(want.texture_paths[0].1.len()))
             .collect();
         let mut uniq = tail_lens.clone();
         uniq.sort_unstable();
@@ -1490,12 +1543,15 @@ mod tests {
         let bytes = bincode::serde::encode_to_vec(&want, bincode::config::standard()).unwrap();
         let (wire, consumed): (WireOrder, usize) =
             bincode::serde::decode_from_slice(&bytes, bincode::config::standard())
-                .expect("the canonical 23-field order decodes the wire");
+                .expect("the canonical 24-field order decodes the wire");
         assert_eq!(
             consumed,
             bytes.len(),
-            "the encoding carries bytes the pinned 23-field order does not account \
-             for — a field was added to `ScenePayload` without extending this pin"
+            "{}",
+            concat!(
+                "the encoding carries bytes the pinned 24-field order does not account ",
+                "for — a field was added to `ScenePayload` without extending this pin"
+            )
         );
 
         assert_eq!(wire.schema_version, SCENE_PAYLOAD_VERSION);
@@ -1542,6 +1598,10 @@ mod tests {
             "`vmesh_paths` is not wire field 22"
         );
         assert_eq!(wire.audio, want.audio, "`audio` is not wire field 23");
+        assert_eq!(
+            wire.texture_paths, want.texture_paths,
+            "`texture_paths` is not wire field 24"
+        );
         // ANTI-VACUITY for the one-byte field: the fixture must not carry the
         // DEFAULT, or a pin that read a stray zero from anywhere would pass.
         assert_ne!(want.blend_mode, 0, "the fixture blend mode is the default");

@@ -20,7 +20,7 @@
 //! cook) calls the `vehicle.define` Blueprint node, which is `item.define`'s
 //! shape exactly -- the TOML rides the class's `.inf_act` bytes into Simulate, a
 //! PIE payload and a cooked pack with no scene or payload move -- and merges it
-//! into the world's [`VehicleDefsRes`]. Scene v28, payload 13.
+//! into the world's [`VehicleDefsRes`]. Scene v28, payload 14 (13 -> 14: the VEH3f.2a audit's `texture_paths`).
 //!
 //! # The class DEFAULTS are the doc's handling-profile table
 //!

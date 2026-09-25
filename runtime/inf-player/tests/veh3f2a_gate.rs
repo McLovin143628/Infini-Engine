@@ -2094,11 +2094,15 @@ fn sixty_four_imported_cars_cost_what_they_cost() {
 /// The projector's ceiling for 64 imported cars (release, min of five), ms.
 const ART_PROJECTION_BUDGET_MS: f64 = 2.0;
 
-/// **This wave moved no schema** (wave VEH3f.2a).
+/// **This wave moved no SCENE schema** (wave VEH3f.2a): v28. Its audit moved the
+/// PIE IPC envelope 13 -> 14 (`ScenePayload::texture_paths`), the one wire it was
+/// licensed to move.
 #[test]
 fn this_wave_moved_no_schema() {
     assert_eq!(inf_scene::SCHEMA_VERSION, 28);
-    assert_eq!(inf_runtime::pie::SCENE_PAYLOAD_VERSION, 13);
+    // The PIE IPC envelope moved 13 -> 14 in the VEH3f.2a audit (`texture_paths`,
+    // Play draws what the cook draws); the SCENE wire above did not.
+    assert_eq!(inf_runtime::pie::SCENE_PAYLOAD_VERSION, 14);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -2333,4 +2337,137 @@ fn the_islands_play_payload_fits_its_frame() {
         p.textures.len() >= 20,
         "the budget shipped almost no texture at all"
     );
+}
+
+/// **Play draws every texture the cook draws** (the VEH3f.2a audit's (c'),
+/// `ScenePayload` v14). LOCAL: the island project's level through
+/// `build_scene_payload_with_texture_paths` with the project's own resolvers --
+/// the Play button's call since v14 -- and the PLAYER's own door over it,
+/// `inf_player::materials_from_payload`.
+///
+/// The wave's budget left 43 of the island's 103 textures out of Play (they
+/// previewed at their material's scalars while the cooked build drew them). By
+/// path, every texture every carried material names is in the player's
+/// `MaterialContent` with the bytes of its file, NO texture bytes cross the
+/// pipe, and the frame is the level and its meshes. With `INF_ISLAND_PACK`
+/// naming a cook of the same project, every one of those textures is also
+/// compared byte for byte against the PACK's own `material_content` -- the
+/// bytes the shipped renderer samples.
+///
+/// **Mutation**: the player ignoring `texture_paths` -> red (103 textures
+/// unresolved); the Play button's resolver back to `|_| None` -> red (the bytes
+/// route, 43 past the budget).
+#[test]
+fn play_draws_every_texture_the_cook_draws() {
+    let Some(content) = local_art("the Play-texture arm") else {
+        return;
+    };
+    let project =
+        inf_editor_core::assets::AssetProject::open(&content).expect("the island project");
+    let doc = inf_editor_core::scene::serialize::load(&content.join("VancouverIsland.inf_lvl"))
+        .expect("the island level");
+    use inf_asset::AssetKind as K;
+    let read = |id: Uuid, kinds: &[K]| -> Option<Vec<u8>> {
+        let e = project.db().get(inf_asset::AssetId(id))?;
+        kinds
+            .contains(&e.kind())
+            .then(|| std::fs::read(&e.path).ok())
+            .flatten()
+    };
+    let p = inf_editor_core::pie::build_scene_payload_with_texture_paths(
+        &doc,
+        |_| None,
+        |g| read(g, &[K::Pcg]),
+        |_| None,
+        |_| None,
+        |_| None,
+        |_| None,
+        |g| read(g, &[K::Mesh]),
+        |g| read(g, &[K::Cloth, K::Hair, K::Material, K::Texture, K::Audio]),
+        |g| {
+            use inf_editor_core::assets::vmesh::DerivedVmesh;
+            match inf_editor_core::assets::vmesh::derived_vmesh(&project, inf_asset::AssetId(g)) {
+                DerivedVmesh::Current(p) => Some(inf_editor_core::pie::VmeshRef::Path(p)),
+                DerivedVmesh::Stale(_) => Some(inf_editor_core::pie::VmeshRef::Stale),
+                DerivedVmesh::Absent => None,
+            }
+        },
+        |g| {
+            let e = project.db().get(inf_asset::AssetId(g))?;
+            (e.kind() == K::Texture).then(|| e.path.clone())
+        },
+        60,
+        true,
+    )
+    .expect("the payload builds");
+    // Every texture the carried materials name -- the closure the cook packs.
+    let mut wanted: BTreeSet<Uuid> = BTreeSet::new();
+    for (_, bytes) in &p.materials {
+        let rec: inf_asset::DerivedMaterial = inf_asset::decode(bytes).expect("a derived record");
+        wanted.extend(rec.texture_dependencies().into_iter().map(|t| t.uuid()));
+    }
+    let pie = inf_player::materials_from_payload(&p);
+    let file_bytes: u64 = p
+        .texture_paths
+        .iter()
+        .map(|(_, path)| std::fs::metadata(path).map(|m| m.len()).unwrap_or(0))
+        .sum();
+    let missing: Vec<&Uuid> = wanted
+        .iter()
+        .filter(|g| !pie.textures.contains_key(*g))
+        .collect();
+    println!(
+        "Play v14: {} materials name {} textures; {} ride by path ({:.1} MB on disk), {} as bytes; the player resolved {}; missing {}",
+        p.materials.len(),
+        wanted.len(),
+        p.texture_paths.len(),
+        file_bytes as f64 / 1e6,
+        p.textures.len(),
+        pie.textures.len(),
+        missing.len()
+    );
+    assert!(
+        wanted.len() >= 60,
+        "only {} textures named -- is the art present?",
+        wanted.len()
+    );
+    assert!(missing.is_empty(), "Play resolves no bytes for {missing:?}");
+    assert!(
+        p.textures.is_empty(),
+        "{} textures still crossed the pipe as bytes",
+        p.textures.len()
+    );
+    for (g, path) in &p.texture_paths {
+        let disk = std::fs::read(path).expect("the texture file reads");
+        assert!(
+            pie.textures
+                .get(g)
+                .is_some_and(|t| t.bytes() == disk.as_slice()),
+            "texture {g} differs from its file"
+        );
+    }
+    // …and against the COOK, when one is named.
+    if let Some(pack) = std::env::var_os("INF_ISLAND_PACK").map(PathBuf::from) {
+        let source = inf_player::level::PackLevelSource::open(&pack).expect("the pack opens");
+        let shipped = source.material_content();
+        let mut compared = 0usize;
+        for g in &wanted {
+            let s = shipped
+                .textures
+                .get(g)
+                .unwrap_or_else(|| panic!("the cook does not carry texture {g}"));
+            assert!(
+                pie.textures.get(g).is_some_and(|t| t.bytes() == s.bytes()),
+                "texture {g}: Play's bytes are not the cook's"
+            );
+            compared += 1;
+        }
+        println!(
+            "  compared against the cook at {}: {compared} of {} byte-identical",
+            pack.display(),
+            wanted.len()
+        );
+    } else {
+        eprintln!("(INF_ISLAND_PACK unset: the cook half of this arm did not run)");
+    }
 }

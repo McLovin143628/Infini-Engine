@@ -666,7 +666,7 @@ pub const PIE_TEXTURE_BUDGET_BYTES: usize = 160 * 1024 * 1024;
 /// re-derive before the preview, and where it has not yet, the preview says so
 /// rather than lying.
 #[allow(clippy::too_many_arguments)]
-pub fn build_scene_payload<F, G, H, B, V, T, M, A, X>(
+pub fn build_scene_payload_with_texture_paths<F, G, H, B, V, T, M, A, X, P>(
     doc: &SceneDoc,
     mut resolve: F,
     mut resolve_pcg: G,
@@ -692,6 +692,10 @@ pub fn build_scene_payload<F, G, H, B, V, T, M, A, X>(
     // signature has always done and a reader comparing two call sites across a
     // wave should not have to count.
     mut resolve_vmesh: X,
+    // `ScenePayload` v14 (the VEH3f.2a audit): where a texture's `.inf_tex` is
+    // on disk. A texture with a file rides BY PATH and counts against no budget;
+    // `None` falls back to `resolve_bytes` under [`PIE_TEXTURE_BUDGET_BYTES`].
+    mut resolve_texture_path: P,
     tick_hz: u32,
     windowed: bool,
 ) -> Result<ScenePayload, PieError>
@@ -705,6 +709,7 @@ where
     M: FnMut(Uuid) -> Option<Vec<u8>>,
     A: FnMut(Uuid) -> Option<Vec<u8>>,
     X: FnMut(Uuid) -> Option<VmeshRef>,
+    P: FnMut(Uuid) -> Option<std::path::PathBuf>,
 {
     let level_bytes = serialize::encode(&serialize::to_scene_file(doc))
         .map_err(|e| PieError::Protocol(format!("encode scene: {e}")))?;
@@ -1368,6 +1373,8 @@ where
     // comparison between two such worlds passes (the P21.4 hazard).
     let mut materials: Vec<(Uuid, Vec<u8>)> = Vec::new();
     let mut textures: Vec<(Uuid, Vec<u8>)> = Vec::new();
+    // v14: the textures that ride BY PATH -- every one with a file on disk.
+    let mut texture_paths: Vec<(Uuid, String)> = Vec::new();
     let mut seen_material: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
     let mut seen_texture: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
     // **THE TEXTURE BUDGET** (wave VEH3f.2a). Textures ride as BYTES, and the
@@ -1379,8 +1386,11 @@ where
     // packs through its own closure, draws it textured. The document's own
     // bindings come first in the walk, so a level's roads and characters keep
     // theirs and the engine-spawned art (traffic's bodies) is what goes plain.
-    // The fix is `texture_paths` on the envelope -- `terrain_paths`' and
-    // `vmesh_paths`' reason exactly -- a payload rung this wave may not take.
+    // **The VEH3f.2a audit took that rung** (`ScenePayload` v14): a texture with
+    // a file rides as its PATH (`resolve_texture_path`), the player reads the
+    // same file through the same `VtTileSource` door, and nothing counts against
+    // the budget -- which now bounds only the bytes route, i.e. a caller with no
+    // file behind a texture (the in-memory fixtures).
     let mut texture_bytes = 0usize;
     let mut over_budget: Vec<Uuid> = Vec::new();
     // TER2a: the bindings a level names are its `Material.asset`s AND its
@@ -1459,6 +1469,18 @@ where
         for tex in derived.texture_dependencies() {
             let g = tex.uuid();
             if seen_texture.insert(g) {
+                // v14: BY PATH when the texture has a file -- a UTF-8 one, the
+                // `terrain_paths` rule; anything else falls through to bytes.
+                if let Some(path) = resolve_texture_path(g) {
+                    if let Some(s) = path.to_str() {
+                        texture_paths.push((g, s.to_string()));
+                        continue;
+                    }
+                    tracing::warn!(
+                        "pie: texture {g}'s path {} is not UTF-8, so it rides as bytes",
+                        path.display()
+                    );
+                }
                 match resolve_bytes(g) {
                     Some(bytes) if texture_bytes + bytes.len() > PIE_TEXTURE_BUDGET_BYTES => {
                         over_budget.push(g);
@@ -1569,7 +1591,55 @@ where
             .with_meshes(meshes)
             .with_garments(cloths, hairs)
             .with_materials(materials, textures)
+            .with_texture_paths(texture_paths)
             .with_blend_mode(blend_mode),
+    )
+}
+
+/// [`build_scene_payload_with_texture_paths`] with no texture file resolver:
+/// every texture rides as BYTES under [`PIE_TEXTURE_BUDGET_BYTES`] -- the
+/// in-memory callers (fixtures, gates) that have no file behind a texture.
+/// The editor's Play button resolves paths (`ScenePayload` v14).
+#[allow(clippy::too_many_arguments)]
+pub fn build_scene_payload<F, G, H, B, V, T, M, A, X>(
+    doc: &SceneDoc,
+    resolve: F,
+    resolve_pcg: G,
+    resolve_anim: H,
+    resolve_biome_set: B,
+    resolve_voxel: V,
+    resolve_terrain: T,
+    resolve_mesh: M,
+    resolve_bytes: A,
+    resolve_vmesh: X,
+    tick_hz: u32,
+    windowed: bool,
+) -> Result<ScenePayload, PieError>
+where
+    F: FnMut(Uuid) -> Option<BlueprintClass>,
+    G: FnMut(Uuid) -> Option<Vec<u8>>,
+    H: FnMut(Uuid) -> Option<Vec<u8>>,
+    B: FnMut(Uuid) -> Option<Vec<u8>>,
+    V: FnMut(Uuid) -> Option<Vec<u8>>,
+    T: FnMut(Uuid) -> Option<TerrainRef>,
+    M: FnMut(Uuid) -> Option<Vec<u8>>,
+    A: FnMut(Uuid) -> Option<Vec<u8>>,
+    X: FnMut(Uuid) -> Option<VmeshRef>,
+{
+    build_scene_payload_with_texture_paths(
+        doc,
+        resolve,
+        resolve_pcg,
+        resolve_anim,
+        resolve_biome_set,
+        resolve_voxel,
+        resolve_terrain,
+        resolve_mesh,
+        resolve_bytes,
+        resolve_vmesh,
+        |_| None,
+        tick_hz,
+        windowed,
     )
 }
 
