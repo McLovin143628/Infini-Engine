@@ -101,6 +101,38 @@ corridor is cut is a road nobody has built. Measured: **8.11 % of stretches over
 the ceiling before, 0.29 % after.** The seven that remain are places two routes
 cross at different elevations, which this generator does not grade-separate.
 
+## The airfield (wave VEH3g)
+
+Harbour City has a runway. It is two `[[airstrips]]` tables in `island.toml`,
+not geometry: the **Harbour City Runway** (centred at x −250, z 2 560, heading
+090, **1 700 × 45 m**) and the **Harbour City Apron** north of it (500 × 160 m,
+`apron = true`), both at **13.0 m**. The carve levels each one to a plateau at
+its stated elevation, with a smoothstep batter (60 m for the runway, 40 m for
+the apron) back into the survey ground, and applies the strips LAST, so a road
+corridor that crosses one cannot re-grade it. The detail pass leaves the paved
+area alone. Measured on the built island: **1 023 samples under the paving,
+every one at 13.000 m, the steepest 5 m step along the centreline 0.0000 %**;
+the refresh log reports 415 700 heightfield samples inside a strip.
+
+The level carries what stands on it: the runway paved in seven segments of at
+most 250 m (the apron in two), each a slab 0.25 m deep sitting 5 cm proud of the
+plateau, with a collider sized in metres (the bridge ignores `Transform.scale`,
+and the first cut's unit-box collider let a Dodo fall through the tarmac); the
+Dodo, the Luxor, the Titan and the Jetliner parked on the apron; and **Air One**,
+the police helicopter's pad (the Maverick, two slots), which the dispatcher flies
+from along its air lane rather than down a road.
+
+Why that length: the longest ground roll in the roster is the Titan's
+**1 348 m** (the take-off table in `veh3g_gate.rs`, sea-level air, rotating at
+1.1 Vs). The distance to **35 ft** is longer, and for two rows it is longer than
+the runway: the Luxor's 1 827 m (Bombardier publishes 1 768 m for the aeroplane
+it is modelled on) and the Jetliner's 1 727 m. The Jetliner is a taxiing
+landmark; the Luxor clears the far threshold low. Both are carried rather than
+fixed by stretching the strip.
+
+The island's `.inf_lvl` moved for this (243 287 → 274 519 B); nothing else in
+the committed tree did.
+
 ## The surfaces, and the order the bridge runs in (wave ASSET0)
 
 This folder commits **synthesised** materials: five ground sets and, since

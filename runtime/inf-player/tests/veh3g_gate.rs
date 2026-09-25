@@ -650,6 +650,100 @@ fn every_aeroplane_lifts_off_inside_the_islands_runway() {
     );
 }
 
+/// **THE DODO IS A FLOATPLANE: it floats, runs on the water and flies off it**
+/// -- the handover at the waterline, read off its world position.
+///
+/// On the water no wheel has anything to touch (the lake is not a collider; the
+/// suspension rays find nothing), so what carries the weight at rest is
+/// P20.2's Archimedes on the row's `buoyancy_density_kg_m3`; the wing model
+/// runs the whole time and takes the weight over as the airspeed builds. The arm
+/// reads: the hull settled with its bottom BELOW the surface and no wheel in
+/// contact (afloat, not on its gear), the water run to the last step the hull's
+/// bottom was wet, and the altitude over the surface a minute later.
+///
+/// **Mutation → red**: the row's `buoyancy_density_kg_m3` 0 (it sinks: no
+/// Archimedes, no floats).
+#[test]
+fn the_dodo_floats_and_flies_off_the_water() {
+    let def = row("mammoth_dodo");
+    let vs = stall_speed(&def);
+    let rotate = rotate_attitude_deg(&def, 1.1);
+    let mut sim = sea_sim(&def, (0.0, 0.0), 0.0);
+    for _ in 0..(3.0 * HZ) as usize {
+        command(&mut sim, CRAFT, VehicleControls::default());
+    }
+    let (p0, _, _) = body_state(&sim, CRAFT);
+    let mut settle_dy = 0.0f64;
+    for _ in 0..(2.0 * HZ) as usize {
+        command(&mut sim, CRAFT, VehicleControls::default());
+        settle_dy = settle_dy.max((body_state(&sim, CRAFT).0.y - p0.y).abs());
+    }
+    let rest_draught = draught(&sim, &def);
+    let wheels_at_rest = grounded(&sim, CRAFT);
+    let start_z = body_state(&sim, CRAFT).0.z;
+    let mut rows = Vec::new();
+    let mut last_wet_z = None;
+    let mut peak_alt = f64::NEG_INFINITY;
+    let mut lowest_bottom = f64::INFINITY;
+    for i in 0..(60.0 * HZ) as usize {
+        let (p, r, v) = body_state(&sim, CRAFT);
+        let f = flight(&sim, CRAFT);
+        let bottom = p.y - def.half_extents.y;
+        lowest_bottom = lowest_bottom.min(bottom);
+        if bottom < 0.0 {
+            last_wet_z = Some(p.z - start_z);
+        }
+        peak_alt = peak_alt.max(bottom);
+        let mut c = VehicleControls {
+            throttle: 1.0,
+            ..Default::default()
+        };
+        if f.airspeed_mps >= vs * 1.1 {
+            c.vertical = pitch_hold(rotate, pitch_deg(r));
+        }
+        rows.push(format!(
+            "{:.4},{:.3},{:.4},{:.3},{:.3},{:.3},{:.4}",
+            i as f64 * DT,
+            p.z - start_z,
+            bottom,
+            v.y,
+            f.airspeed_mps,
+            f.alpha_deg,
+            f.cl
+        ));
+        command(&mut sim, CRAFT, c);
+    }
+    write_csv(
+        "dodo_water",
+        "t,dist_m,hull_bottom_m,vs,ias,alpha,cl",
+        &rows,
+    );
+    println!(
+        "THE FLOATPLANE: afloat with its hull bottom {rest_draught:.3} m under the surface, {} wheel(s) \
+         in contact, settled to {:.1} mm; water run {:.0} m; the hull bottom {:.1} m over the surface at \
+         its highest in 60 s",
+        wheels_at_rest,
+        settle_dy * 1000.0,
+        last_wet_z.unwrap_or(f64::NAN),
+        peak_alt
+    );
+    assert!(
+        rest_draught > 0.0 && wheels_at_rest == 0,
+        "the Dodo is not afloat (draught {rest_draught:.3} m, {wheels_at_rest} wheels touching)"
+    );
+    assert!(
+        settle_dy < 0.05,
+        "the Dodo is still moving {:.1} mm on the water",
+        settle_dy * 1000.0
+    );
+    let run = last_wet_z.expect("the hull was never wet");
+    assert!(run > 50.0, "a {run:.0} m water run is not a take-off");
+    assert!(
+        peak_alt > SCREEN_HEIGHT_M,
+        "it never left the water: {peak_alt:.1} m at best (lowest {lowest_bottom:.2} m)"
+    );
+}
+
 /// **THE STALL**: level at 300 m and 40 m/s, power off, full back stick. The
 /// force log's angle of attack passes `stall_deg`, the lift coefficient
 /// COLLAPSES (it falls below 80 % of its pre-stall peak once alpha is past the
@@ -698,8 +792,15 @@ fn the_stall_collapses_the_lift_and_drops_the_nose() {
             if s.alpha > stall {
                 first_stall.get_or_insert(i);
             }
-            if first_stall.is_some() {
+            // The collapse is read ONLY on steps past the stall angle: read
+            // over every step after it, the dive the nose-drop starts brings
+            // CL down on its own, and a wing with NO collapse passed this arm
+            // (measured: `POST_STALL_CL_FRAC` 1.0 + `STALL_BREAK_DEG` 90 stayed
+            // green under the first cut).
+            if first_stall.is_some() && s.alpha > stall {
                 cl_after = cl_after.min(s.cl);
+            }
+            if first_stall.is_some() {
                 pitch_after = pitch_after.min(s.pitch);
             }
         }
@@ -715,7 +816,7 @@ fn the_stall_collapses_the_lift_and_drops_the_nose() {
     let alt_loss = trace[at_stall].alt - lowest;
     println!(
         "THE STALL (stall_deg {stall}): alpha passed it {:.2} s after the stick came back, at \
-         {:.1} m/s; CL {cl_peak:.3} -> {cl_after:.3} past it ({:.0} %); pitch {pitch_peak:.1} -> \
+         {:.1} m/s; CL {cl_peak:.3} -> {cl_after:.3} while past it ({:.0} %); pitch {pitch_peak:.1} -> \
          {pitch_after:.1} deg; {alt_loss:.1} m lost",
         (at_stall - 120) as f64 * DT,
         trace[at_stall].ias,
@@ -1280,8 +1381,16 @@ fn the_big_hulls_float_where_archimedes_puts_them() {
 /// the WIND is turned a quarter round with the yacht still on the beam heading,
 /// which puts it head to wind, and it goes nowhere.
 ///
+/// PINCHING, 20 deg off the wind, it makes no way either, and close-hauled at
+/// 45 deg it makes way. Head to wind alone could not see the no-go zone: lift is
+/// square to the apparent wind and drag along it, so NO sail drives straight
+/// into the wind, filled or not (measured: the fill removed, the first cut's
+/// three headings stayed green). Twenty degrees is where a filled sail WOULD
+/// pull a boat forward (lift's forward share sin 20 against drag's cos 20) and
+/// only the no-go zone stops it.
+///
 /// **Mutation → red**: `ChassisState::wind` fed zero by the door (nothing
-/// sails); the sail's no-go fill removed (it sails into the wind).
+/// sails); the sail's no-go fill removed (it sails 20 deg off the wind).
 #[test]
 fn the_sail_drives_across_the_wind_and_not_into_it() {
     let def = row("dundreary_marquis");
@@ -1332,12 +1441,16 @@ fn the_sail_drives_across_the_wind_and_not_into_it() {
     let into = run(north, 180.0, "into");
     let beam = run(north, 90.0, "beam");
     let runs = run(north, 0.0, "run");
+    let pinch = run(north, 160.0, "pinch_20");
+    let close = run(north, 135.0, "close_hauled_45");
     // The same beam heading with the wind turned a quarter: from the east,
     // blowing toward -X, head to wind for a boat pointing +X.
     let turned = run((-8.0, 0.0), 90.0, "beam_wind_turned");
     println!("THE SAIL (8 m/s wind, engine off, 60 s):");
     for (name, (v, heel, app)) in [
         ("head to wind", into),
+        ("pinching, 20 off the wind", pinch),
+        ("close-hauled, 45 off", close),
         ("beam reach", beam),
         ("dead run", runs),
         ("beam heading, wind turned 90", turned),
@@ -1345,6 +1458,16 @@ fn the_sail_drives_across_the_wind_and_not_into_it() {
         println!("  {name:30} {v:6.2} m/s  heel {heel:4.1} deg  apparent {app:5.1} deg");
     }
     assert!(into.0 < 0.2, "head to wind it made {:.2} m/s", into.0);
+    assert!(
+        pinch.0 < 0.2,
+        "20 deg off the wind it made {:.2} m/s -- inside the no-go zone",
+        pinch.0
+    );
+    // Makes WAY -- the same 0.2 m/s the no-way rows are held under. Slow
+    // (0.49 m/s measured, the apparent wind 35 deg, five past the no-go edge
+    // and a third of the way up the fill ramp): carried as the close-hauled
+    // performance, not asserted as a speed.
+    assert!(close.0 > 0.2, "close-hauled it made {:.2} m/s", close.0);
     assert!(beam.0 > 3.0, "on the beam it made {:.2} m/s", beam.0);
     assert!(runs.0 > 1.5, "running it made {:.2} m/s", runs.0);
     assert!(beam.0 > runs.0, "a reach is the fast point of sail");
