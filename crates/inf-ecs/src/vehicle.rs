@@ -9800,7 +9800,12 @@ pub const RUDDER_WASH_GAIN: f64 = 0.35;
 /// roughly constant in hull lengths however fast it is going. It is also why
 /// this could be sized once, against a measurement: the launch fixture's steady
 /// circle is **37.25 m** for a 4 m hull — about nine and a third lengths, and
-/// the same to four decimal places at either helm.
+/// the same to four decimal places at either helm. (**37.52 m** since wave
+/// VEH3g's hull dashpot, 9.4 lengths, re-measured by its audit.) The island's
+/// own `launch` row is a DIFFERENT boat -- 6.4 m, 6.8 t -- and turns a **60.6 m**
+/// radius at 7.7 m/s (0.127 rad/s, `veh2c_harbour_gate`): **9.5 lengths**, the
+/// same ratio. The "61 m against the doc's 37" that wave VEH3g carried compared
+/// two hulls, not a model with its doc.
 ///
 /// *That figure was **10.6 m** here and in wave VEH2c's ledger, and it was not a
 /// radius.* The arm that produced it took the mean semi-axis of the box its
