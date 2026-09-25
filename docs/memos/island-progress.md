@@ -41137,3 +41137,79 @@ at hand-off step 8 (982 mm). The pop is the get-up's, the perturbation is
 this wave's; not re-tuned under CHAR1b's arm. Air One moved to pad slot 4 (at
 2 it overlapped VEH3f's Harbour City tractor-trailer).
 
+## WAVE VEH3g — THE AUDIT (2026-09-24)
+
+Range `a9b5ffc1..` over the wave's eighteen commits; report
+`campaign-briefs/veh3g-audit-report.md`; frames `AUDIT-VEH3g-FINAL/`. No
+schema move (v28 / 13 / 24); goldens 66, none re-blessed; `Cargo.lock`
+unchanged; the island level not moved by the audit.
+
+### audit: the battery's red was the get-up's
+
+`char1b_gate`'s ragdoll arm (the wave's one red): the get-up slerped every
+LOCAL rotation from the bodies' to the clip's. `upperarm_r`'s shortest arc
+swapped sides mid-blend -- 129.0 deg in one step at weight 0.606 -- and
+`middle_03_bulge_r` moved 981.9 mm; with the flip held, the ragdoll's
+unlimited spherical joints (local gaps of 160-173 deg at `spine_03/04`,
+`neck_01`) still whipped the left hand 307 mm a step. Body joints now blend
+in MODEL space and keep the arc nearer the last drawn pose: the blend's
+largest step 120.91 mm against the ragdoll's own p99 127.89 (asserted at
+x1.25); a unit arm sweeps a clip 300 deg past a frozen rotation (short arc
+179.0 deg in a step, held 1.0).
+
+### audit: what the shipped host showed
+
+* **The pilot dropped from 50 m.** The first real-editor flight rolled,
+  lifted off (HUD: IAS 28.0, AOA 12.8, CL 1.60, THR 100 %) and climbed to
+  37.5 m over the strip -- then the Dodo was DESPAWNED at x -251: its birth
+  cell (the apron's) left the want set, and the cell re-home only handed a
+  mover to a cell with content. Every wanted cell may now hold a mover (the
+  island's own Dodo moved 900 m off the apron stays; before: gone at step
+  1331, x -255.5).
+* **Run 4's dead spool, diagnosed**: a tail wind read by the elevator as 180
+  deg of angle of attack rolled the seated Dodo BACKWARDS (2.467 m/s at 8 m/s
+  of wind), and `from_intent` then read W as the brake. The restoring
+  stiffnesses fade out with reversed flow (0.325 m/s of free-wheel roll left)
+  and on a wing W is the power lever (spool 0.8 in 38 steps rolling back).
+* **Ground steering**: no roll servo on the gear, a rudder in the air; D
+  turns the aeroplane the same way on the strip (+17.3 deg) and aloft (+5.7,
+  the +X wing down 22.4). In the island's wind a heading-holding pilot keeps
+  within 3.9 deg into it and 8.5 down it. The demo leg's steer sign was
+  backwards and its triggers read the clean stall.
+* **Three of four sessions on the final build never began the boarding** at
+  the leg's placement; the same placement boards on the player's own loader
+  and input door (new local arm) -- the key's delivery, carried.
+
+### audit: built, not carried
+
+Take-off flaps (+0.5 CL, 1.5 deg earlier stall, +0.02 CD0; set on the gear,
+up past 1.3 Vs): to 35 ft Duster 415, Dodo 492, Luxor 1 370, Titan 1 237,
+Jetliner 1 289 m -- asserted with a tenth in hand of the 1 700 m strip.
+`joint_impulse` reads the whole step (it read 0.2500 of m g dt on all three
+kinds; one `solver_substeps` door with the winch; the hinge tear's 4 m/s is
+now what the world does, the crash table unmoved). Every sound-keying salt
+spread (73 728 fixture clashes -> 0; RNG seeds kept). The police heli ORBITS
+on scene (127 deg in 10 s). An editor look-at door (`viewport_look_at`,
+`lookat.mjs`, `demo.ps1 -EditorLookAt`): the airfield and its four parked
+aeroplanes in the relaunched editor's frame. Streaming at 120 m/s on the REAL
+island: 0 blocking loads, closest arrival 252.0 m.
+
+### judged
+
+The 61 m launch and the 37 m doc are two boats (6.4 m / 6.8 t vs the 4 m
+fixture; 9.5 and 9.4 hull lengths). The two vacuous arms armed: the sail's
+no-go fill is read as the pinching heel (0.1 vs 2.24 deg), `STALL_PITCH_BREAK`
+as the stall's depth (32.2 vs 50.3 deg). 24 backslash continuations the wave
+said were 0, joined.
+
+### carried, by name
+
+The 288 ms step when two cells activate at 120 m/s (release); the ragdoll
+falls through the world from a 50 m drop (it went to -2 734 m); the PIE
+window's lost E presses; sea and rotor frames (the island places no roster
+boat, no Cargobob, no car under a winch -- a level add); ship routes for the
+superyacht and cruise ship (not placed on the island either); flaps are
+automatic (no key), no ground effect, spin or density lapse; hull speed (the
+beam reach makes 5.97 m/s on a 12 m hull, above a displacement hull's 4.3);
+the drawn gear leg and mast; the unlimited spherical ragdoll joints.
+
