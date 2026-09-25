@@ -769,6 +769,7 @@ fn the_stall_collapses_the_lift_and_drops_the_nose() {
     let mut cl_peak = 0.0f64;
     let mut first_stall: Option<usize> = None;
     let mut cl_after = f64::INFINITY;
+    let (mut band_worst, mut band_n) = (f64::MIN, 0usize);
     let mut pitch_peak = f64::MIN;
     let mut pitch_after = f64::INFINITY;
     for i in 0..(60 * 20) {
@@ -792,11 +793,19 @@ fn the_stall_collapses_the_lift_and_drops_the_nose() {
             if s.alpha > stall {
                 first_stall.get_or_insert(i);
             }
-            // The collapse is read ONLY on steps past the stall angle: read
-            // over every step after it, the dive the nose-drop starts brings
-            // CL down on its own, and a wing with NO collapse passed this arm
-            // (measured: `POST_STALL_CL_FRAC` 1.0 + `STALL_BREAK_DEG` 90 stayed
-            // green under the first cut).
+            // The collapse is read in the BREAK BAND only -- 3 to 8 degrees
+            // past the stall, where a wing that does not collapse still holds
+            // ~90 % of its peak. Read over every later step (the first cut),
+            // the dive brought CL down by itself; read over every step past
+            // the stall angle (the second), the deep-alpha fade toward 90 deg
+            // did (32 deg is reached, where a straight line to zero at 90 is
+            // already 78 %). Both stayed green with `POST_STALL_CL_FRAC` 1.0 +
+            // `STALL_BREAK_DEG` 90; this one does not. The WORST (highest) CL
+            // in the band is the one held under the ceiling.
+            if first_stall.is_some() && s.alpha > stall + 3.0 && s.alpha <= stall + 8.0 {
+                band_worst = band_worst.max(s.cl);
+                band_n += 1;
+            }
             if first_stall.is_some() && s.alpha > stall {
                 cl_after = cl_after.min(s.cl);
             }
@@ -817,16 +826,19 @@ fn the_stall_collapses_the_lift_and_drops_the_nose() {
     println!(
         "THE STALL (stall_deg {stall}): alpha passed it {:.2} s after the stick came back, at \
          {:.1} m/s; CL {cl_peak:.3} -> {cl_after:.3} while past it ({:.0} %); pitch {pitch_peak:.1} -> \
-         {pitch_after:.1} deg; {alt_loss:.1} m lost",
+         {pitch_after:.1} deg; {alt_loss:.1} m lost; in the break band (stall +3..+8 deg, {band_n} \
+         steps) CL at most {band_worst:.3} ({:.0} % of the peak)",
         (at_stall - 120) as f64 * DT,
         trace[at_stall].ias,
-        cl_after / cl_peak * 100.0
+        cl_after / cl_peak * 100.0,
+        band_worst / cl_peak * 100.0
     );
     let stalled_steps = trace.iter().filter(|s| s.stalled).count();
     assert!(stalled_steps > 10, "only {stalled_steps} stalled steps");
+    assert!(band_n >= 5, "only {band_n} steps in the break band");
     assert!(
-        cl_after < 0.8 * cl_peak,
-        "the lift did not collapse: {cl_after:.3} against a peak of {cl_peak:.3}"
+        band_worst < 0.8 * cl_peak,
+        "the lift did not collapse: {band_worst:.3} in the break band against a peak of {cl_peak:.3}"
     );
     assert!(
         pitch_peak - pitch_after > 10.0,
@@ -1382,15 +1394,15 @@ fn the_big_hulls_float_where_archimedes_puts_them() {
 /// which puts it head to wind, and it goes nowhere.
 ///
 /// PINCHING, 20 deg off the wind, it makes no way either, and close-hauled at
-/// 45 deg it makes way. Head to wind alone could not see the no-go zone: lift is
-/// square to the apparent wind and drag along it, so NO sail drives straight
-/// into the wind, filled or not (measured: the fill removed, the first cut's
-/// three headings stayed green). Twenty degrees is where a filled sail WOULD
-/// pull a boat forward (lift's forward share sin 20 against drag's cos 20) and
-/// only the no-go zone stops it.
+/// 45 deg it makes way. Head to wind alone reads no sail: lift is square to
+/// the apparent wind and drag along it, so NO sail drives straight into the
+/// wind, filled or not.
 ///
 /// **Mutation → red**: `ChassisState::wind` fed zero by the door (nothing
-/// sails); the sail's no-go fill removed (it sails 20 deg off the wind).
+/// sails). **Mutation → GREEN, said**: the no-go fill removed (a full sail
+/// at 20 deg still makes no way: the polar's drag rising off the close reach
+/// and the hull's own drag out-pull lift's sin-20 share). The fill SHAPES the
+/// close-hauled band; the no-go edge is the force geometry's, not the fill's.
 #[test]
 fn the_sail_drives_across_the_wind_and_not_into_it() {
     let def = row("dundreary_marquis");
