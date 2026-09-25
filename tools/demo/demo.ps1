@@ -1461,18 +1461,23 @@ function Invoke-Veh3gLeg {
     Wait-ForHero -Csv $heroCsv -What "airborne (10 m over the runway)" -TimeoutS 20.0 `
         -Predicate { param($c) (& $isRow $c) -and ([double]$c[77] -gt $rest + 10.0) } `
         -Out (Join-Path $OutDir "142-veh3g-takeoff.png") | Out-Null
-    [InfInput]::Up(0x39)
-    Wait-ForHero -Csv $heroCsv -What "the climb (40 m over the runway)" -TimeoutS 30.0 `
-        -Predicate { param($c) (& $isRow $c) -and ([double]$c[77] -gt $rest + 40.0) } `
+    # The stick stays back through the climb (VEH3g audit): let go at 10 m, the
+    # audit's first session levelled at 37.5 m and the 40 m trigger never came.
+    Wait-ForHero -Csv $heroCsv -What "the climb (30 m over the runway)" -TimeoutS 30.0 `
+        -Predicate { param($c) (& $isRow $c) -and ([double]$c[77] -gt $rest + 30.0) } `
         -Out (Join-Path $OutDir "143-veh3g-climb.png") | Out-Null
+    [InfInput]::Up(0x39)
     # THE STALL: power off, the stick held back until the wing passes 16 deg.
     [InfInput]::Up(0x11)
     [InfInput]::Down(0x39)
-    Wait-ForHero -Csv $heroCsv -What "the stall (alpha past 16 deg)" -TimeoutS 25.0 `
-        -Predicate { param($c) (& $isRow $c) -and ([double]$c[79] -gt 16.5) } `
+    # The take-off flap is still out (it retracts past 1.3 x the clean Vs,
+    # 36.5 m/s, which a climbing Dodo does not reach), so the wing stalls at
+    # 14.5 deg and its flapped peak CL is ~1.75 (VEH3g audit).
+    Wait-ForHero -Csv $heroCsv -What "the stall (alpha past 15 deg)" -TimeoutS 25.0 `
+        -Predicate { param($c) (& $isRow $c) -and ([double]$c[79] -gt 15.0) } `
         -Out (Join-Path $OutDir "144-veh3g-stall.png") | Out-Null
-    Wait-ForHero -Csv $heroCsv -What "the lift collapsed (CL under 0.9, alpha still past 16)" -TimeoutS 6.0 `
-        -Predicate { param($c) (& $isRow $c) -and ([double]$c[79] -gt 16.0) -and ([double]$c[80] -lt 0.9) } `
+    Wait-ForHero -Csv $heroCsv -What "the lift collapsed (CL under 1.2, alpha still past 15)" -TimeoutS 8.0 `
+        -Predicate { param($c) (& $isRow $c) -and ([double]$c[79] -gt 15.0) -and ([double]$c[80] -lt 1.2) } `
         -Out (Join-Path $OutDir "145-veh3g-stall-break.png") | Out-Null
     [InfInput]::Up(0x39)
     [InfInput]::Down(0x11)
