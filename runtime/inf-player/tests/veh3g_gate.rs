@@ -484,8 +484,7 @@ fn the_dodo_takes_off_climbs_and_lands_on_a_strip() {
     );
     write_csv("dodo_circuit", TRACE_HEADER, &trace_rows(&rep.trace));
     println!(
-        "THE DODO: stall {vs:.1} m/s; lift-off after {:.1} m at {:.1} m/s; climb {:.2} m/s; \
-         peak {:.1} m; touchdown at {:.2} m/s down; roll-out {:.1} m; {} samples",
+        "THE DODO: stall {vs:.1} m/s; lift-off after {:.1} m at {:.1} m/s; climb {:.2} m/s; peak {:.1} m; touchdown at {:.2} m/s down; roll-out {:.1} m; {} samples",
         rep.liftoff_roll_m.unwrap_or(f64::NAN),
         rep.liftoff_ias,
         rep.climb_rate,
@@ -592,8 +591,7 @@ fn a_wing_with_no_area_never_leaves_the_ground() {
         .and_then(|v| v.flight())
         .is_some();
     println!(
-        "NO WING: 60 s at full power moved it {travelled:.1} m and lifted it {peak:.3} m; \
-         a flight state: {flying}"
+        "NO WING: 60 s at full power moved it {travelled:.1} m and lifted it {peak:.3} m; a flight state: {flying}"
     );
     assert!(peak < 0.5, "a wingless Dodo rose {peak:.2} m");
     assert!(!flying, "a class with no wing area has a flight state");
@@ -624,8 +622,7 @@ fn every_aeroplane_lifts_off_inside_the_islands_runway() {
         .find(|a| !a.apron)
         .expect("the island has a runway");
     println!(
-        "THE TAKE-OFF TABLE (flat lab, sea-level air, full power, rotate at 1.1 Vs to the \
-         attitude that flies there) against the {:.0} m {}:",
+        "THE TAKE-OFF TABLE (flat lab, sea-level air, full power, rotate at 1.1 Vs to the attitude that flies there) against the {:.0} m {}:",
         runway.length_m, runway.name
     );
     println!(
@@ -772,9 +769,7 @@ fn the_dodo_floats_and_flies_off_the_water() {
         &rows,
     );
     println!(
-        "THE FLOATPLANE: afloat with its hull bottom {rest_draught:.3} m under the surface, {} wheel(s) \
-         in contact, settled to {:.1} mm; water run {:.0} m; the hull bottom {:.1} m over the surface at \
-         its highest in 60 s",
+        "THE FLOATPLANE: afloat with its hull bottom {rest_draught:.3} m under the surface, {} wheel(s) in contact, settled to {:.1} mm; water run {:.0} m; the hull bottom {:.1} m over the surface at its highest in 60 s",
         wheels_at_rest,
         settle_dy * 1000.0,
         last_wet_z.unwrap_or(f64::NAN),
@@ -877,10 +872,7 @@ fn the_stall_collapses_the_lift_and_drops_the_nose() {
         .fold(f64::MAX, f64::min);
     let alt_loss = trace[at_stall].alt - lowest;
     println!(
-        "THE STALL (stall_deg {stall}): alpha passed it {:.2} s after the stick came back, at \
-         {:.1} m/s; CL {cl_peak:.3} -> {cl_after:.3} while past it ({:.0} %); pitch {pitch_peak:.1} -> \
-         {pitch_after:.1} deg; {alt_loss:.1} m lost; in the break band (stall +3..+8 deg, {band_n} \
-         steps) CL at most {band_worst:.3} ({:.0} % of the peak)",
+        "THE STALL (stall_deg {stall}): alpha passed it {:.2} s after the stick came back, at {:.1} m/s; CL {cl_peak:.3} -> {cl_after:.3} while past it ({:.0} %); pitch {pitch_peak:.1} -> {pitch_after:.1} deg; {alt_loss:.1} m lost; in the break band (stall +3..+8 deg, {band_n} steps) CL at most {band_worst:.3} ({:.0} % of the peak)",
         (at_stall - 120) as f64 * DT,
         trace[at_stall].ias,
         cl_after / cl_peak * 100.0,
@@ -1062,9 +1054,7 @@ fn the_cargobob_winch_lifts_a_car_and_lets_it_go() {
     let tension = hover_tension.expect("no cable on the hook at the hover");
     let released = released_at.expect("released");
     println!(
-        "THE WINCH: the car rose to {car_top:.1} m (from {:.2}); tension at the hover {tension:.0} N \
-         against its {weight:.0} N weight ({:+.2} %); released at {released:.1} m, fell to \
-         {car_after:.1} m",
+        "THE WINCH: the car rose to {car_top:.1} m (from {:.2}); tension at the hover {tension:.0} N against its {weight:.0} N weight ({:+.2} %); released at {released:.1} m, fell to {car_after:.1} m",
         car_at.y,
         (tension / weight - 1.0) * 100.0
     );
@@ -1318,9 +1308,7 @@ fn the_police_helicopter_flies_its_air_lane_and_never_the_road() {
     }
     write_csv("air_lane", "t,x,y,z,state", &rows);
     println!(
-        "THE AIR LANE: {steps_out} steps out, {path_steps} of them holding a road route; lowest \
-         {lowest:.1} m over the lane, worst {worst_off:.1} m off the straight line; on scene after \
-         {on_scene:?} s; the cruiser drove a route: {cruiser_routed}"
+        "THE AIR LANE: {steps_out} steps out, {path_steps} of them holding a road route; lowest {lowest:.1} m over the lane, worst {worst_off:.1} m off the straight line; on scene after {on_scene:?} s; the cruiser drove a route: {cruiser_routed}"
     );
     assert!(
         steps_out > 600,
@@ -1658,8 +1646,7 @@ fn the_titan_ramp_swings_down_on_its_hinge() {
     let len = (closed - hinge_of(&def)).length();
     let angle = inf_math::patan2_64(closed.y - open.y, len).to_degrees();
     println!(
-        "THE RAMP: {opened} hinged part(s) opened; the ramp at {angle:.1} deg; its rear edge \
-         {closed:?} -> {open:?} ({:+.2} m)",
+        "THE RAMP: {opened} hinged part(s) opened; the ramp at {angle:.1} deg; its rear edge {closed:?} -> {open:?} ({:+.2} m)",
         open.y - closed.y
     );
     assert!(opened >= 1, "no hinged part opened");
@@ -1946,8 +1933,7 @@ fn pie_equals_shipping_for_a_plane_a_helicopter_and_a_boat() {
         plane_peak = plane_peak.max(body_state(&shipped, PLANE).0.y);
     }
     println!(
-        "PIE == SHIPPING: 1 800 steps, 5 craft bit-identical; the Dodo reached {plane_peak:.1} m, \
-         the winched car moved {:.1} m, the jetski {:.1} m, the yacht {:.1} m",
+        "PIE == SHIPPING: 1 800 steps, 5 craft bit-identical; the Dodo reached {plane_peak:.1} m, the winched car moved {:.1} m, the jetski {:.1} m, the yacht {:.1} m",
         moved[&CAR], moved[&SKI], moved[&YACHT]
     );
     let rest = craft[0].2.y;
@@ -2097,9 +2083,7 @@ fn the_craft_voices_reach_the_command_stream_on_both_hosts() {
         .map(|v| v.craft.rotor_hz / va::ROTOR_REF_HZ)
         .unwrap_or(f64::NAN);
     println!(
-        "THE CRAFT VOICES: {} commands on each host, identical; Plays: rotor {}, prop {}, jet {}, \
-         slap {}, spray {}; the rotor's last pitch {rotor_pitch:.4} against its blade-pass ratio \
-         {ratio:.4}",
+        "THE CRAFT VOICES: {} commands on each host, identical; Plays: rotor {}, prop {}, jet {}, slap {}, spray {}; the rotor's last pitch {rotor_pitch:.4} against its blade-pass ratio {ratio:.4}",
         a.len(),
         played.get(&va::rotor_clip()).copied().unwrap_or(0),
         played.get(&va::prop_clip()).copied().unwrap_or(0),
@@ -2228,8 +2212,7 @@ fn eighteen_air_and_sea_craft_cost_what_they_print() {
     let control = window(&["albany_washington"; 18]);
     let measured = window(&CRAFT_ROWS);
     println!(
-        "THE AIR AND SEA STEP: 18 craft {measured:.4} ms against 18 sedans {control:.4} ms \
-         ({:.2}x); {:.2} us a craft; the budget is {} ms at {} cars",
+        "THE AIR AND SEA STEP: 18 craft {measured:.4} ms against 18 sedans {control:.4} ms ({:.2}x); {:.2} us a craft; the budget is {} ms at {} cars",
         measured / control,
         measured * 1000.0 / 18.0,
         inf_player::budget::VEHICLE_STEP_BUDGET_MS,
@@ -2420,8 +2403,7 @@ fn the_real_islands_runway_is_flat_and_the_dodo_leaves_it() {
         s += 5.0;
     }
     println!(
-        "THE REAL RUNWAY: {n} samples under the paving at {lo:.3}..{hi:.3} m against the stated \
-         {} m; steepest 5 m slope along the centreline {:.4} %",
+        "THE REAL RUNWAY: {n} samples under the paving at {lo:.3}..{hi:.3} m against the stated {} m; steepest 5 m slope along the centreline {:.4} %",
         runway.elevation_m,
         max_slope * 100.0
     );
@@ -2512,8 +2494,7 @@ fn the_real_islands_runway_is_flat_and_the_dodo_leaves_it() {
     }
     let roll = lifted.expect("the Dodo never left the real runway");
     println!(
-        "THE REAL RUNWAY: {paved} paved segments; the Dodo was 2 m up {roll:.0} m from its \
-         start, {:.0} m before the far threshold",
+        "THE REAL RUNWAY: {paved} paved segments; the Dodo was 2 m up {roll:.0} m from its start, {:.0} m before the far threshold",
         runway.length_m - 40.0 - roll
     );
     assert!(

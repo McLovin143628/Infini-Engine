@@ -9619,8 +9619,7 @@ fn streaming_holds_at_aircraft_speed_and_the_table_says_what_it_costs() {
     for r in &rows {
         assert!(
             r.closest_arrival_m > 0.0,
-            "at {:.0} m/s a cell arrived {:.1} m from the source -- the ground \
-             popped in under it",
+            "at {:.0} m/s a cell arrived {:.1} m from the source -- the ground popped in under it",
             r.speed,
             r.closest_arrival_m
         );

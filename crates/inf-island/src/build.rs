@@ -502,8 +502,7 @@ pub fn build_island(
     say(
         BuildStep::Carve,
         format!(
-            "{} samples, {} on land, {} pad, {} corridor, {} strip, {} nodata; \
-             {:.1}..{:.1} m, land {:.3} km2, shore {:.2} km",
+            "{} samples, {} on land, {} pad, {} corridor, {} strip, {} nodata; {:.1}..{:.1} m, land {:.3} km2, shore {:.2} km",
             st.samples,
             st.land,
             st.pad,

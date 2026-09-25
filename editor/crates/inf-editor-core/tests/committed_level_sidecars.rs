@@ -364,8 +364,7 @@ fn the_islands_only_wheel_less_vehicles_are_the_ones_it_placed() {
     assert_eq!(
         craft.len(),
         3,
-        "the island ships {} wheel-less craft, not the launch, the helicopter \
-         and Air One:\n  {}",
+        "the island ships {} wheel-less craft, not the launch, the helicopter and Air One:\n  {}",
         craft.len(),
         craft.join("\n  ")
     );

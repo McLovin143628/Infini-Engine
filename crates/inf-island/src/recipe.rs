@@ -726,8 +726,7 @@ impl IslandRecipe {
                 || a.batter_m < 0.0
             {
                 return Err(IslandError::Settings(format!(
-                    "[[airstrips]] {:?} needs a finite centre, heading and \
-                     elevation and a positive length and width",
+                    "[[airstrips]] {:?} needs a finite centre, heading and elevation and a positive length and width",
                     a.name
                 )));
             }

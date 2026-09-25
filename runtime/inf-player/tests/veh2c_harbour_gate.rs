@@ -890,8 +890,7 @@ fn the_launchs_engine_is_heard_where_the_launch_is() {
         .map(|p| (*p - hull).length())
         .fold(0.0f64, f64::max);
     println!(
-        "THE LAUNCH'S VOICES: {} Play(s) over {} layer key(s), {} SetPosition(s) spanning \
-         {boat_spread:.1} m; the furthest last position is {worst:.4} m from the hull",
+        "THE LAUNCH'S VOICES: {} Play(s) over {} layer key(s), {} SetPosition(s) spanning {boat_spread:.1} m; the furthest last position is {worst:.4} m from the hull",
         plays_of(&boat_keys),
         last.len(),
         boat_moves.len()
