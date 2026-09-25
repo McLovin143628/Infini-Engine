@@ -2750,26 +2750,70 @@ impl EngineHost {
                 .flatten();
             match vgeom {
                 Some(loaded) => {
-                    if vgeom_seen.insert(loaded.id) {
-                        // The scene carries the PAGED source, not a decoded DAG
-                        // (P18.2): the render node's streamer decides what of it is
-                        // resident from the camera's own screen-error wants.
-                        self.scene
-                            .vgeom_assets
-                            .push(inf_render::VgeomAsset::new(loaded.id, loaded.source));
+                    // **A SECTIONED mesh draws one instance per section** (wave
+                    // VEH3f.2a). MIRROR of the player's `project_scene_full`
+                    // branch: the same computed section ids, each section's own
+                    // surface and virtual textures, the entity's surface for a
+                    // section with no material record, one shared pick id.
+                    let sections = mesh_ref
+                        .asset
+                        .map(|m| self.render_assets.resolve_sections(m))
+                        .unwrap_or_default();
+                    if !sections.is_empty() {
+                        for (sid, mat, section) in sections {
+                            live_render_assets.insert(sid);
+                            if vgeom_seen.insert(section.id) {
+                                self.scene.vgeom_assets.push(inf_render::VgeomAsset::new(
+                                    section.id,
+                                    section.source,
+                                ));
+                            }
+                            let (c, m, r, e, v) = match derived_surface(mats, mat) {
+                                Some(d) => (
+                                    d.0,
+                                    d.1,
+                                    d.2,
+                                    d.3,
+                                    inf_render::vt_set_for(vt_lib, Some(mat)),
+                                ),
+                                None => (color, metallic, roughness, emissive, vt),
+                            };
+                            self.scene.vgeom_instances.push(inf_render::VgeomInstance {
+                                vt: v,
+                                asset: section.id,
+                                translation,
+                                rotation: rot.as_quat(),
+                                scale: scale.as_vec3(),
+                                color: c,
+                                metallic: m,
+                                roughness: r,
+                                emissive: e,
+                                id,
+                            });
+                        }
+                    } else {
+                        if vgeom_seen.insert(loaded.id) {
+                            // The scene carries the PAGED source, not a decoded
+                            // DAG (P18.2): the render node's streamer decides what
+                            // of it is resident from the camera's own
+                            // screen-error wants.
+                            self.scene
+                                .vgeom_assets
+                                .push(inf_render::VgeomAsset::new(loaded.id, loaded.source));
+                        }
+                        self.scene.vgeom_instances.push(inf_render::VgeomInstance {
+                            vt,
+                            asset: loaded.id,
+                            translation,
+                            rotation: rot.as_quat(),
+                            scale: scale.as_vec3(),
+                            color,
+                            metallic,
+                            roughness,
+                            emissive,
+                            id,
+                        });
                     }
-                    self.scene.vgeom_instances.push(inf_render::VgeomInstance {
-                        vt,
-                        asset: loaded.id,
-                        translation,
-                        rotation: rot.as_quat(),
-                        scale: scale.as_vec3(),
-                        color,
-                        metallic,
-                        roughness,
-                        emissive,
-                        id,
-                    });
                 }
                 // A broken destructible has already pushed its chunks.
                 None if fractured => {}

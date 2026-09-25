@@ -918,13 +918,14 @@ fn weapon_muzzle(world: &EcsWorld, guid: Uuid) -> Option<DVec3> {
     // The socket has to exist on the rig AND have been resolved, or the
     // attachment is sitting at the character's own origin.
     inf_ecs::pose::evaluated_pose(world, guid)?.socket(WEAPON_SOCKET)?;
-    let (_, def) = equipped_weapon(world, guid)?;
+    let (id, def) = equipped_weapon(world, guid)?;
     let e = world.entity_of(equipped_weapon_guid(guid))?;
     let g = world.world().get::<GlobalTransform>(e)?.0;
-    let forward = def
-        .muzzle_forward_m
-        .clamp(0.0, weapon::MAX_MUZZLE_FORWARD_M);
-    let at = g.transform_point3(DVec3::new(0.0, 0.0, forward));
+    // **The art's own muzzle** (wave VEH3f.2a): a Modern Weapons body carries
+    // the pack's measured `muzzle` socket, and every other weapon the
+    // `muzzle_forward_m` down its barrel it always had -- one door,
+    // `inf_ecs::weapon::muzzle_local`.
+    let at = g.transform_point3(weapon::muzzle_local(&id, &def));
     at.is_finite().then_some(at)
 }
 
@@ -1106,6 +1107,50 @@ fn step_accessories(world: &mut EcsWorld, owner: Uuid, weapon_guid: Uuid, barrel
         None => Vec::new(),
     };
     let mut want: BTreeSet<Uuid> = BTreeSet::new();
+    // **THE MAGAZINE** (wave VEH3f.2a): a Modern Weapons body's own magazine
+    // mesh rides the weapon at the pack's `Magazine_joint`, and on the reload
+    // beat it is OUT -- hung [`MAG_DROP_M`] below its seat from the moment a
+    // reload starts until its last [`MAG_SEAT_S`], when it is seated again. A
+    // derived guid and the accessory's own marker, so it leaves with the weapon.
+    let reload_left = world
+        .world()
+        .get::<weapon::WeaponState>(entity)
+        .map(|s| s.reload_left_s)
+        .unwrap_or(0.0);
+    if let Some((mesh, seat)) = equipped_weapon(world, owner)
+        .and_then(|(id, def)| inf_ecs::weapon::magazine_of(&id, &def))
+    {
+        let g = magazine_guid(weapon_guid);
+        want.insert(g);
+        let out = reload_left > MAG_SEAT_S;
+        let offset = inf_ecs::math::Vec3d::new(
+            seat.x,
+            seat.y - if out { MAG_DROP_M } else { 0.0 },
+            seat.z,
+        );
+        let e = match world.entity_of(g) {
+            Some(e) => e,
+            None => world.spawn_with_guid(g, "Magazine", None),
+        };
+        let mut t = world
+            .world()
+            .get::<Transform>(e)
+            .copied()
+            .unwrap_or_default();
+        t.scale = inf_ecs::math::Vec3d::ONE;
+        world.world_mut().entity_mut(e).insert((
+            t,
+            MeshRef {
+                primitive: Primitive::Cube,
+                asset: Some(mesh),
+            },
+            Visibility::default(),
+            AttachedTo::new(weapon_guid, "", offset),
+            inf_ecs::weapon::AccessoryMark {
+                weapon: weapon_guid,
+            },
+        ));
+    }
     for (slot, kind) in &art {
         let Some(asset) = inf_ecs::weapon::attachment_mesh_guid(*kind) else {
             continue;
@@ -1150,6 +1195,20 @@ fn step_accessories(world: &mut EcsWorld, owner: Uuid, weapon_guid: Uuid, barrel
             }
         }
     }
+}
+
+/// How far below its seat a magazine hangs while a reload runs, metres (wave
+/// VEH3f.2a) -- out of the well and in the off hand's reach.
+pub const MAG_DROP_M: f64 = 0.16;
+
+/// The last seconds of a reload in which the magazine is seated again.
+pub const MAG_SEAT_S: f64 = 0.35;
+
+/// **The magazine's guid on a weapon** -- a pure function of the weapon's, the
+/// accessory guids' construction on its own salt.
+pub fn magazine_guid(weapon_guid: Uuid) -> Uuid {
+    let x = weapon_guid.as_u128() ^ 0x4d41_475a_494e_4556_4548_3346_3241_0001;
+    uuid::Builder::from_random_bytes(x.rotate_left(17).to_be_bytes()).into_uuid()
 }
 
 /// Every accessory currently drawn on this weapon, in `Guid` order.

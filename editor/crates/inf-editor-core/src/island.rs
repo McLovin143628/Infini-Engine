@@ -2181,6 +2181,22 @@ pub const ROSTER_LOTS: &[(&str, &[&str])] = &[
             "jobuilt_hauler+mtl_tanker_trailer",
         ],
     ),
+    // **The imported-art lot** (wave VEH3f.2a): the calibration sedan (the Karin
+    // Asterope GZ draws the Drivable Cars sedan) and one row of each other
+    // imported class, AUTHORED, so the editor can select one and a session can
+    // walk to them. Each draws the pack's art where the local project has it and
+    // the committed fallback where it does not.
+    (
+        "Harbour City",
+        &[
+            "karin_asterope_gz",
+            "cheval_fugitive",
+            "obey_rocoto",
+            "declasse_burrito",
+            "declasse_yosemite_rancher",
+            "pfister_comet_s2",
+        ],
+    ),
 ];
 
 /// How far along the road from a settlement's nearest route vertex a lot

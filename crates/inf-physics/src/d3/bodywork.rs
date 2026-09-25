@@ -825,6 +825,9 @@ fn kind_of_state(s: &PartState) -> BodyPartKind {
         // cut: the Titan's ramp re-read as a PANEL, which has no hinge, so
         // `set_part_open` refused it and the ramp never moved (measured 0.00 m).
         inf_ecs::vehicle::KIND_RAMP => "ramp",
+        // Wave VEH3f.2a's drawn steering wheel -- added with the kind, not after
+        // the ramp's lesson.
+        inf_ecs::vehicle::KIND_HUB => "hub",
         _ => "panel",
     };
     BodyPartKind::of(name, s.centre_frac, s.half_frac)

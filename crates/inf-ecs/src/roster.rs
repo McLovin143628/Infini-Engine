@@ -440,119 +440,34 @@ pub fn spawn_defined(
     Some(guid)
 }
 
-/// **An imported vehicle body** (wave VEH3f) -- one machine of the
-/// `ConstructionVehiclesPack1` the UE bridge carries, by the key its files and
-/// its GUIDs are derived from.
+/// **An imported vehicle body** (wave VEH3f) -- since wave VEH3f.2a an index
+/// into the committed ART TABLE rather than a closed enum; see
+/// [`crate::vehicle_art`] for the table and for the one-identity-two-payloads
+/// rule (a committed fallback at the art's GUIDs, the pack's art over it in a
+/// LOCAL project) that keeps every byte of Unreal content out of the repository.
+pub use crate::vehicle_art::{art_body_guid, art_part_guid, art_wheel_guid, ArtKey};
+
+/// **Every art mesh the ENGINE may spawn** (wave VEH3f.2a) -- the body, the
+/// four wheels and every part mesh of each art body some roster row names,
+/// sorted and deduplicated.
 ///
-/// # THE ART RULE: one committed identity, two possible payloads
-///
-/// A row that names `art = "excavator"` draws ONE body mesh
-/// ([`art_body_guid`]) on an `art_body` part and one wheel mesh per rig wheel
-/// ([`art_wheel_guid`]) on its tyres -- never the family's panels. What sits
-/// at those GUIDs depends on the machine: the engine repository commits a
-/// FALLBACK (the family's own panels baked into one mesh, and a tyre -- ours,
-/// generated, `samples/vehicle-art/`), and `inf-import --vehicles` overwrites
-/// them in a LOCAL project with the machine's real art, split off the fused
-/// Unreal mesh by material slot and connected piece. The starter character's
-/// arrangement (a committed body at the MetaHuman's GUIDs), one content kind
-/// over -- so CI, which never has the art, draws the fallback, and nothing from
-/// Unreal is ever committed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum ArtKey {
-    /// `SM_ExcavatorTracks`.
-    Excavator,
-    /// `SM_TrackLoader` -- the pack has no bulldozer; the track loader is the
-    /// nearest machine.
-    Dozer,
-    /// `SM_AmericanDumpTruck`.
-    DumpTruck,
-    /// `SM_AmericanMixerTruck`.
-    Mixer,
-    /// `SM_Forklift`.
-    Forklift,
-    /// `SM_MobileCrane`.
-    CraneTruck,
-    /// `SM_AmericanTruck` -- a tractor unit.
-    FreightTractor,
-}
-
-impl ArtKey {
-    /// Every machine, in key order.
-    pub const ALL: [ArtKey; 7] = [
-        ArtKey::Excavator,
-        ArtKey::Dozer,
-        ArtKey::DumpTruck,
-        ArtKey::Mixer,
-        ArtKey::Forklift,
-        ArtKey::CraneTruck,
-        ArtKey::FreightTractor,
-    ];
-
-    /// The stable key a row's `art = "..."` spells and the files are named by.
-    pub fn name(self) -> &'static str {
-        match self {
-            ArtKey::Excavator => "excavator",
-            ArtKey::Dozer => "dozer",
-            ArtKey::DumpTruck => "dump_truck",
-            ArtKey::Mixer => "mixer",
-            ArtKey::Forklift => "forklift",
-            ArtKey::CraneTruck => "crane_truck",
-            ArtKey::FreightTractor => "freight_tractor",
-        }
+/// `inf_ecs::weapon::engine_spawned_meshes`' twin, for its reason: traffic
+/// builds a roster car at runtime on a derived guid, so an imported body it
+/// draws is named by no level entity -- and a cook that closes over what levels
+/// name would ship none of it, while PIE (which walks the same list) drew it.
+/// A mesh the project does not hold is simply not in the closure.
+pub fn engine_spawned_art_meshes() -> Vec<uuid::Uuid> {
+    let keys: std::collections::BTreeSet<ArtKey> =
+        roster().0.values().filter_map(|d| d.art).collect();
+    let mut out = Vec::new();
+    for k in keys {
+        out.push(art_body_guid(k));
+        out.extend((0..4).map(|i| art_wheel_guid(k, i)));
+        out.extend(k.parts().iter().map(|p| art_part_guid(k, p.name)));
     }
-
-    /// The key a name means, or `None`.
-    pub fn from_name(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|k| k.name() == name)
-    }
-
-    /// The Unreal static mesh this key is split from.
-    pub fn source_mesh(self) -> &'static str {
-        match self {
-            ArtKey::Excavator => "SM_ExcavatorTracks",
-            ArtKey::Dozer => "SM_TrackLoader",
-            ArtKey::DumpTruck => "SM_AmericanDumpTruck",
-            ArtKey::Mixer => "SM_AmericanMixerTruck",
-            ArtKey::Forklift => "SM_Forklift",
-            ArtKey::CraneTruck => "SM_MobileCrane",
-            ArtKey::FreightTractor => "SM_AmericanTruck",
-        }
-    }
-
-    /// Whether the machine runs on tracks -- its "wheels" are track frames,
-    /// which stay in the body mesh and do not spin.
-    pub fn tracked(self) -> bool {
-        matches!(self, ArtKey::Excavator | ArtKey::Dozer)
-    }
-}
-
-/// The salt of the art guids -- `"VEH3FARTBODYMESH"` in ASCII.
-const ART_SALT: u128 = 0x5645_4833_4641_5254_424f_4459_4d45_5348;
-
-fn art_guid(key: ArtKey, part: &str) -> uuid::Uuid {
-    let mut x = ART_SALT;
-    for b in key
-        .name()
-        .as_bytes()
-        .iter()
-        .chain(b"/")
-        .chain(part.as_bytes())
-    {
-        x = x.rotate_left(7) ^ (*b as u128).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-    }
-    x = x.rotate_left(33) ^ x.wrapping_mul(0xff51_afd7_ed55_8ccd_c4ce_b9fe_1a85_ec53);
-    uuid::Builder::from_random_bytes(x.to_be_bytes()).into_uuid()
-}
-
-/// **The body mesh a machine's rows draw**, a pure function of its key.
-pub fn art_body_guid(key: ArtKey) -> uuid::Uuid {
-    art_guid(key, "body")
-}
-
-/// **The mesh rig wheel `i` of a machine draws** (front left, front right,
-/// rear left, rear right -- `VehicleDef::wheel_mounts`' order).
-pub fn art_wheel_guid(key: ArtKey, i: usize) -> uuid::Uuid {
-    art_guid(key, &format!("wheel{i}"))
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// **Which construction-pack body a roster row draws** (wave VEH3f), or `None`

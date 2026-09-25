@@ -1222,6 +1222,37 @@ pub fn weapon_mesh_key(id: &str, def: &WeaponDef) -> Option<&'static str> {
         "galil", "sks",
     ];
     const VAL: &[&str] = &["as_val", "asval", "vss", "vintorez", "vsk_94", "sr_3"];
+    // **The Modern Weapons pack** (wave VEH3f.2a) -- the classes WPN2d left
+    // drawing a primitive (shotgun, launcher) and the pistol it drew as a
+    // stated SMG substitution, each on the pack model nearest its silhouette:
+    // pump actions on the two pump guns, the break-action on the double, the
+    // box-fed on the magazine shotguns, the long tube on every shoulder
+    // launcher, and the two revolvers.
+    const MW: &[(&str, &str)] = &[
+        ("remington_870", "SM_MW_SHOTGUN_01"),
+        ("spas_12", "SM_MW_SHOTGUN_01"),
+        ("fn_slp", "SM_MW_SHOTGUN_01"),
+        ("mossberg_590", "SM_MW_SHOTGUN_02"),
+        ("benelli_m4", "SM_MW_SHOTGUN_02"),
+        ("ksg_12", "SM_MW_SHOTGUN_02"),
+        ("double_barrel", "SM_MW_SHOTGUN_03"),
+        ("aa_12", "SM_MW_SHOTGUN_04"),
+        ("saiga_12", "SM_MW_SHOTGUN_04"),
+        ("origin_12", "SM_MW_SHOTGUN_04"),
+        ("sw_model_500", "SM_MW_REVOLVER_01"),
+        ("taurus_judge", "SM_MW_REVOLVER_02"),
+        ("glock", "SM_MW_PISTOL_01"),
+        ("fn_five_seven", "SM_MW_PISTOL_01"),
+        ("sig_p320", "SM_MW_PISTOL_02"),
+        ("cz_75", "SM_MW_PISTOL_02"),
+        ("beretta", "SM_MW_PISTOL_03"),
+        ("walther", "SM_MW_PISTOL_03"),
+        ("colt_m1911", "SM_MW_PISTOL_04"),
+        ("desert_eagle", "SM_MW_PISTOL_04"),
+    ];
+    if let Some((_, k)) = MW.iter().find(|(p, _)| id.starts_with(p)) {
+        return Some(k);
+    }
     if AK_SHORT.iter().any(|p| id.starts_with(p)) {
         return Some("SM_KA74U");
     }
@@ -1234,12 +1265,15 @@ pub fn weapon_mesh_key(id: &str, def: &WeaponDef) -> Option<&'static str> {
     match def.audio_class() {
         WeaponClass::Ar => Some("SM_AR4"),
         WeaponClass::Smg => Some("SM_SMG11"),
-        // The two stated substitutions.
-        WeaponClass::Pistol => Some("SM_SMG11_NOSTOCK"),
+        // A pistol the name table does not know draws the pack's first pistol
+        // (wave VEH3f.2a); WPN2d's SMG substitution is retired.
+        WeaponClass::Pistol => Some("SM_MW_PISTOL_01"),
         WeaponClass::Dmr => Some("SM_KA_VAL"),
         WeaponClass::Sniper => Some("SM_KA_VAL_Y"),
-        // The two classes with no art. `None` is what draws the primitive.
-        WeaponClass::Shotgun | WeaponClass::Launcher => None,
+        // ...and a shotgun or a launcher the table does not name draws the
+        // pack's pump gun and its long tube, so no class draws a primitive.
+        WeaponClass::Shotgun => Some("SM_MW_SHOTGUN_01"),
+        WeaponClass::Launcher => Some("SM_MW_LAUNCHER_01"),
     }
 }
 
@@ -1254,9 +1288,75 @@ pub const WEAPON_MESH_KEYS: &[&str] = &[
     "SM_KA_VAL",
     "SM_KA_VAL_Y",
     "SM_M9_KNIFE",
+    "SM_MW_LAUNCHER_01",
+    "SM_MW_PISTOL_01",
+    "SM_MW_PISTOL_02",
+    "SM_MW_PISTOL_03",
+    "SM_MW_PISTOL_04",
+    "SM_MW_REVOLVER_01",
+    "SM_MW_REVOLVER_02",
+    "SM_MW_SHOTGUN_01",
+    "SM_MW_SHOTGUN_02",
+    "SM_MW_SHOTGUN_03",
+    "SM_MW_SHOTGUN_04",
     "SM_SMG11",
     "SM_SMG11_NOSTOCK",
 ];
+
+/// One Modern Weapons body's measured numbers: `(key, muzzle, bounds min,
+/// bounds max, magazine seat)`, metres, the weapon's frame.
+pub type MwWeaponArt = (&'static str, [f64; 3], [f64; 3], [f64; 3], Option<[f64; 3]>);
+
+/// **The Modern Weapons pack's own numbers** (wave VEH3f.2a), measured by the
+/// VEH3f.2a importer off each weapon's skeletal twin (`muzzle` is the pack's
+/// `muzzle` socket composed with its bone's rest pose; the magazine seat is the
+/// `Magazine_joint`'s rest position) and off the rigid mesh's own bounds -- in
+/// the weapon's frame (`+Z` down the barrel, `+Y` up, origin at the pack's
+/// pivot, which is the grip), metres. NUMBERS only: the meshes are LOCAL and
+/// never committed, and `samples/weapon-art/` commits a box of these bounds at
+/// each identity so a checkout without the art still draws the weapon's size.
+pub const MW_WEAPON_ART: &[MwWeaponArt] = &[
+    ("SM_MW_LAUNCHER_01", [0.0, 0.0933, 0.1953], [-0.0714, -0.0467, -0.7634], [0.0714, 0.1675, 0.6201], None),
+    ("SM_MW_PISTOL_01", [0.0, 0.0713, 0.1652], [-0.0114, -0.0561, -0.0491], [0.0116, 0.0863, 0.1625], Some([0.0, -0.0244, -0.0142])),
+    ("SM_MW_PISTOL_02", [0.0, 0.0791, 0.1740], [-0.0123, -0.0436, -0.0433], [0.0123, 0.0923, 0.1717], Some([0.0, -0.0244, -0.0142])),
+    ("SM_MW_PISTOL_03", [0.0, 0.0695, 0.1393], [-0.0145, -0.0396, -0.0402], [0.0145, 0.0827, 0.1382], Some([0.0, -0.0244, -0.0142])),
+    ("SM_MW_PISTOL_04", [0.0, 0.0797, 0.1907], [-0.0169, -0.0524, -0.0547], [0.0169, 0.0962, 0.1888], Some([0.0, -0.0244, -0.0142])),
+    ("SM_MW_REVOLVER_01", [0.0, 0.0974, 0.2811], [-0.0225, -0.0331, -0.0545], [0.0225, 0.1197, 0.2800], None),
+    ("SM_MW_REVOLVER_02", [0.0, 0.0971, 0.2037], [-0.0225, -0.0331, -0.0545], [0.0225, 0.1197, 0.2024], None),
+    ("SM_MW_SHOTGUN_01", [0.0, 0.0699, 0.7551], [-0.0241, -0.0889, -0.2181], [0.0241, 0.0955, 0.7535], None),
+    ("SM_MW_SHOTGUN_02", [0.0, 0.0945, 0.6855], [-0.0349, -0.0442, -0.2439], [0.0349, 0.1222, 0.6835], None),
+    ("SM_MW_SHOTGUN_03", [0.0, 0.0832, 0.6724], [-0.0184, -0.0938, -0.2206], [0.0184, 0.0956, 0.6704], None),
+    ("SM_MW_SHOTGUN_04", [0.0, 0.0916, 0.4533], [-0.0882, -0.0855, -0.2210], [0.0882, 0.1735, 0.4513], Some([0.0, -0.0015, 0.1261])),
+];
+
+/// **Where a weapon's muzzle is in its own frame** (wave VEH3f.2a): the art's
+/// measured socket where the class table draws a Modern Weapons mesh, else
+/// `muzzle_forward_m` down `+Z` -- the rule every weapon had before. The one
+/// door the shot, the flash and the casing read their origin through.
+pub fn muzzle_local(id: &str, def: &WeaponDef) -> glam::DVec3 {
+    weapon_mesh_key(id, def)
+        .and_then(|k| MW_WEAPON_ART.iter().find(|a| a.0 == k))
+        .map(|a| glam::DVec3::from_array(a.1))
+        .unwrap_or_else(|| {
+            glam::DVec3::new(
+                0.0,
+                0.0,
+                def.muzzle_forward_m.clamp(0.0, MAX_MUZZLE_FORWARD_M),
+            )
+        })
+}
+
+/// **The magazine a weapon's art carries**, as `(mesh identity, seat)` in the
+/// weapon's frame (wave VEH3f.2a) -- `None` for a weapon whose art has no
+/// separate magazine.
+pub fn magazine_of(id: &str, def: &WeaponDef) -> Option<(Uuid, glam::DVec3)> {
+    let key = weapon_mesh_key(id, def)?;
+    let seat = MW_WEAPON_ART.iter().find(|a| a.0 == key)?.4?;
+    Some((
+        weapon_mesh_guid(&format!("{key}_MAG")),
+        glam::DVec3::from_array(seat),
+    ))
+}
 
 /// **The salt the weapon-mesh identities are derived against.**
 ///
@@ -1328,6 +1428,10 @@ pub fn engine_spawned_meshes() -> Vec<Uuid> {
         .iter()
         .map(|k| weapon_mesh_guid(k))
         .collect();
+    // ...and the Modern Weapons magazines (wave VEH3f.2a), drawn on the reload.
+    for a in MW_WEAPON_ART.iter().filter(|a| a.4.is_some()) {
+        out.push(weapon_mesh_guid(&format!("{}_MAG", a.0)));
+    }
     for art in crate::attachment::AttachmentArt::ALL {
         if let Some(id) = attachment_mesh_guid(art) {
             out.push(id);

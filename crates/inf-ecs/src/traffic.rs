@@ -2438,8 +2438,25 @@ pub fn catalogue_row_id(guid: Uuid) -> Option<&'static str> {
         TrafficDay::DayCircuit | TrafficDay::NightCircuit
     );
     let unit = crate::crowd::agent_unit(guid, 0, SALT_CLASS);
-    let fits = |d: &crate::vehicle::VehicleDef| {
+    let fits_slot = |d: &crate::vehicle::VehicleDef| {
         d.body.wheeled() && !d.body.towed() && 2.0 * d.half_extents.z <= KERB_SLOT_M - 1.5
+    };
+    // **A class with imported bodies draws ONLY those** (wave VEH3f.2a): the
+    // class draw (and so every class weight) is untouched, and inside a class
+    // that has an art row the row is one of its art rows -- so every traffic
+    // car of an imported class wears the imported art where this project has
+    // it and the committed fallback where it does not. A class with no art row
+    // draws every row, as it always did.
+    let art_classes: std::collections::BTreeSet<crate::roster::RosterClass> =
+        crate::roster::roster()
+            .0
+            .values()
+            .filter(|d| d.art.is_some() && fits_slot(d))
+            .filter_map(|d| d.roster_class)
+            .collect();
+    let fits = |d: &crate::vehicle::VehicleDef| {
+        fits_slot(d)
+            && (d.art.is_some() || !d.roster_class.is_some_and(|c| art_classes.contains(&c)))
     };
     let picked = if circuit {
         pick_row(unit, RosterClass::circuit_weight, fits)

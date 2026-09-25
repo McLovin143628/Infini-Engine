@@ -283,6 +283,17 @@ fn build_world(args: &Args) -> Result<(BuiltWorld, TerrainContent), String> {
 /// surfaces off their scalar attributes, exactly as every pre-v22 level does.
 /// The two paths that *matter* for "PIE == shipping" — a cooked pack and a
 /// streamed payload — both have the record.
+/// **The section materials of one mesh that a store holds** (wave VEH3f.2a),
+/// slot order: every `inf_mesh::section_material_id(mesh, s)` for which
+/// `contains` answers -- the one probe both the pack walk and the dev-dir walk
+/// use. Empty for a mesh drawn whole.
+pub fn section_materials(contains: impl Fn(uuid::Uuid) -> bool, mesh: uuid::Uuid) -> Vec<uuid::Uuid> {
+    (0..inf_mesh::MAX_SECTIONS)
+        .map(|s| inf_mesh::section_material_id(inf_asset::AssetId(mesh), s).uuid())
+        .filter(|id| contains(*id))
+        .collect()
+}
+
 pub fn material_content_for_world(content: &TerrainContent) -> MaterialContent {
     match content {
         TerrainContent::Pack(source) => source.material_content(),

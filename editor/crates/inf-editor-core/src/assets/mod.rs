@@ -19,6 +19,7 @@ pub mod sprite_sheet;
 pub mod table_import;
 pub mod terrain_import;
 pub mod ue_import;
+pub mod ue_skel_vehicles;
 // VEH3f: the vehicle split -- a fused machine into a chassis and four wheels.
 pub mod ue_vehicles;
 pub mod vmesh;

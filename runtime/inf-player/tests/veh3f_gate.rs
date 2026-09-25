@@ -1152,7 +1152,7 @@ fn the_construction_rows_draw_their_art_or_their_fallback() {
     let local = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../../island-build/project/Content/UE/Vehicles");
     let (mut drove, mut local_art) = (0usize, 0usize);
-    for key in roster::ArtKey::ALL {
+    for key in roster::ArtKey::machines() {
         let (id, def) = roster::roster()
             .0
             .iter()

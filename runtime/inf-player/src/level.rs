@@ -2540,6 +2540,13 @@ impl PackLevelSource {
                         bound.extend(m.material_slot_assets.iter().flatten().map(|a| a.uuid()));
                     }
                 }
+                // **AND A SECTIONED RIGID MESH'S SECTION MATERIALS** (wave
+                // VEH3f.2a) -- named by computed id, not by any component, the
+                // skinned slots' reason one mesh kind over. Mirrored by the PIE
+                // payload builder and the editor viewport's walk.
+                if let Some(mesh) = e.mesh.as_ref().and_then(|m| m.asset) {
+                    bound.extend(crate::section_materials(|id| self.reader.contains(AssetId(id)), mesh));
+                }
             }
         };
         if let Some(lvl) = LevelSource::level_bytes(self)
@@ -2590,6 +2597,11 @@ impl PackLevelSource {
             }
         }
 
+        // …and the section materials of every mesh the ENGINE spawns (traffic's
+        // imported bodies, wave VEH3f.2a), which no level entity names.
+        for mesh in inf_ecs::roster::engine_spawned_art_meshes() {
+            bound.extend(crate::section_materials(|id| self.reader.contains(AssetId(id)), mesh));
+        }
         let mut materials = HashMap::new();
         for mat in &bound {
             let derived = inf_asset::derived_material_id(AssetId(*mat));

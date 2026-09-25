@@ -1,0 +1,769 @@
+# THE ART TABLE (wave VEH3f.2a) -- every imported vehicle body a roster row can name.
+#
+# NUMBERS ONLY: each row is what the VEH3f/VEH3f.2a importer MEASURED off a local
+# Fab pack (its `<key>.vehicle.toml`), transcribed. No vertex, texel or texture of
+# any pack is in this repository; the art lives in a LOCAL project at the GUIDs the
+# key derives, and `samples/vehicle-art/` commits our own fallback geometry at the
+# same GUIDs. Licence of every pack below: Fab Standard -- user to confirm tier
+# before ship; local reference until then.
+#
+# `parts` are in fractions of `half_extents_m` (the art's own collider box); a
+# part's NAME decides its kind by the one naming rule (`door*`, `glass*`, `seat*`,
+# `hub*`). A door's box is chosen so its front edge and lateral centre sit on the
+# pack's hinge bone, which is where the world puts every door's axis.
+
+# ── ConstructionVehiclesPack1 (wave VEH3f; faces UE +Y) ─────────────────────────
+[[art]]
+key = "excavator"
+source = "SM_ExcavatorTracks"
+pack = "ConstructionVehiclesPack1"
+facing = "+Y"
+tracked = true
+
+[[art]]
+key = "dozer"
+source = "SM_TrackLoader"
+pack = "ConstructionVehiclesPack1"
+facing = "+Y"
+tracked = true
+
+[[art]]
+key = "dump_truck"
+source = "SM_AmericanDumpTruck"
+pack = "ConstructionVehiclesPack1"
+facing = "+Y"
+
+[[art]]
+key = "mixer"
+source = "SM_AmericanMixerTruck"
+pack = "ConstructionVehiclesPack1"
+facing = "+Y"
+
+[[art]]
+key = "forklift"
+source = "SM_Forklift"
+pack = "ConstructionVehiclesPack1"
+facing = "+Y"
+
+[[art]]
+key = "crane_truck"
+source = "SM_MobileCrane"
+pack = "ConstructionVehiclesPack1"
+facing = "+Y"
+
+[[art]]
+key = "freight_tractor"
+source = "SM_AmericanTruck"
+pack = "ConstructionVehiclesPack1"
+facing = "+Y"
+
+# ── the car packs (wave VEH3f.2a; face UE +X) ──────────────────────────────────────────
+
+# dd_sedan -> roster row `karin_asterope_gz`
+# 120329 triangles in (720 hidden), 4 wheels, 9 parts; pack LODs [(0, 120329), (1, 30169), (2, 6108), (3, 2866)] (the engine draws a meshlet DAG per section)
+# wheel radius: geometry 0.3510 m, the pack's Chaos wheel 0.3500 m
+# steering column: the pack's rake -20.49 deg (the families' constant is 22.0 deg)
+[[art]]
+key = "dd_sedan"
+pack = "DrivableCarsBasicVehicleS"
+facing = "+X"
+half_extents_m = [1.0612, 0.6238, 2.4844]
+pack_lods = 4
+camera_m = [0.4332, 0.3977, 0.0061]
+hub_rake_deg = -20.490
+[[art.parts]]
+name = "door_l"
+centre = [0.8010, 0.0236, 0.0804]
+half = [0.0471, 0.9003, 0.2610]
+[[art.parts]]
+name = "door_r"
+centre = [-0.8010, 0.0236, 0.0804]
+half = [0.0471, 0.9003, 0.2610]
+[[art.parts]]
+name = "glass_0"
+centre = [0.0000, 0.6188, 0.2745]
+half = [0.7188, 0.2959, 0.1887]
+[[art.parts]]
+name = "glass_1"
+centre = [-0.6759, 0.5846, -0.3070]
+half = [0.0928, 0.3280, 0.1780]
+[[art.parts]]
+name = "glass_2"
+centre = [0.6759, 0.5846, -0.3070]
+half = [0.0928, 0.3280, 0.1780]
+[[art.parts]]
+name = "glass_3"
+centre = [-0.0000, 0.6622, -0.6603]
+half = [0.6302, 0.2202, 0.1331]
+[[art.parts]]
+name = "hub"
+centre = [0.3742, 0.1331, 0.1801]
+half = [0.1804, 0.3068, 0.1012]
+[[art.parts]]
+name = "seat_r"
+centre = [0.3947, -0.4500, 0.0611]
+half = [0.2262, 0.0962, 0.1006]
+[[art.parts]]
+name = "seat_l"
+centre = [-0.3947, -0.4500, 0.0611]
+half = [0.2262, 0.0962, 0.1006]
+
+# dd_hatch -> roster row `dinka_sugoi`
+# 118518 triangles in (940 hidden), 4 wheels, 13 parts; pack LODs [(0, 118518), (1, 29088), (2, 6650), (3, 2476)] (the engine draws a meshlet DAG per section)
+# wheel radius: geometry 0.3512 m, the pack's Chaos wheel 0.3450 m
+# steering column: the pack's rake -22.98 deg (the families' constant is 22.0 deg)
+[[art]]
+key = "dd_hatch"
+pack = "DrivableCarsBasicVehicleS"
+facing = "+X"
+half_extents_m = [0.9849, 0.6567, 2.2060]
+pack_lods = 4
+camera_m = [0.3864, 0.4217, -0.0401]
+hub_rake_deg = -22.978
+[[art.parts]]
+name = "door_r"
+centre = [-0.9007, 0.0175, 0.0271]
+half = [0.0508, 0.8707, 0.3229]
+[[art.parts]]
+name = "door_l"
+centre = [0.9031, 0.0175, 0.0271]
+half = [0.0508, 0.8707, 0.3229]
+[[art.parts]]
+name = "glass_0"
+centre = [0.0000, 0.5507, 0.3022]
+half = [0.7810, 0.3064, 0.1980]
+[[art.parts]]
+name = "glass_1"
+centre = [0.0000, 0.5445, 0.3012]
+half = [0.7776, 0.3053, 0.1980]
+[[art.parts]]
+name = "glass_2"
+centre = [-0.7066, 0.5842, -0.4807]
+half = [0.1100, 0.2892, 0.1967]
+[[art.parts]]
+name = "glass_3"
+centre = [0.7066, 0.5842, -0.4807]
+half = [0.1100, 0.2892, 0.1967]
+[[art.parts]]
+name = "glass_4"
+centre = [-0.7110, 0.5878, -0.4807]
+half = [0.1104, 0.2904, 0.1967]
+[[art.parts]]
+name = "glass_5"
+centre = [0.7110, 0.5878, -0.4807]
+half = [0.1104, 0.2904, 0.1967]
+[[art.parts]]
+name = "glass_6"
+centre = [0.0000, 0.6739, -0.8167]
+half = [0.6432, 0.2143, 0.1063]
+[[art.parts]]
+name = "glass_7"
+centre = [0.0000, 0.6804, -0.8178]
+half = [0.6442, 0.2147, 0.1066]
+[[art.parts]]
+name = "hub"
+centre = [0.4032, 0.1436, 0.1919]
+half = [0.1861, 0.2792, 0.1210]
+[[art.parts]]
+name = "seat_r"
+centre = [0.4265, -0.4500, 0.0430]
+half = [0.2437, 0.0914, 0.1133]
+[[art.parts]]
+name = "seat_l"
+centre = [-0.4265, -0.4500, 0.0430]
+half = [0.2437, 0.0914, 0.1133]
+
+# dd_suv -> roster row `obey_rocoto`
+# 120586 triangles in (672 hidden), 4 wheels, 11 parts; pack LODs [(0, 120586), (1, 29972), (2, 4962), (3, 2384)] (the engine draws a meshlet DAG per section)
+# wheel radius: geometry 0.4024 m, the pack's Chaos wheel 0.4000 m
+# steering column: the pack's rake -19.70 deg (the families' constant is 22.0 deg)
+[[art]]
+key = "dd_suv"
+pack = "DrivableCarsBasicVehicleS"
+facing = "+X"
+half_extents_m = [1.1325, 0.7158, 2.3198]
+pack_lods = 4
+camera_m = [0.4753, 0.4328, -0.0147]
+hub_rake_deg = -19.696
+[[art.parts]]
+name = "door_r"
+centre = [-0.8728, 0.0445, 0.1062]
+half = [0.0442, 0.8499, 0.2743]
+[[art.parts]]
+name = "door_l"
+centre = [0.8711, 0.0445, 0.1055]
+half = [0.0442, 0.8499, 0.2735]
+[[art.parts]]
+name = "glass_0"
+centre = [-0.0000, 0.4963, 0.2991]
+half = [0.7159, 0.2806, 0.1442]
+[[art.parts]]
+name = "glass_1"
+centre = [0.7130, 0.5675, -0.3492]
+half = [0.0918, 0.3278, 0.1683]
+[[art.parts]]
+name = "glass_2"
+centre = [-0.7130, 0.5675, -0.3492]
+half = [0.0918, 0.3278, 0.1683]
+[[art.parts]]
+name = "glass_3"
+centre = [0.7053, 0.5939, -0.6120]
+half = [0.0875, 0.2853, 0.0926]
+[[art.parts]]
+name = "glass_4"
+centre = [-0.7053, 0.5939, -0.6120]
+half = [0.0875, 0.2853, 0.0926]
+[[art.parts]]
+name = "glass_5"
+centre = [0.0000, 0.5761, -0.8741]
+half = [0.6364, 0.1922, 0.0644]
+[[art.parts]]
+name = "hub"
+centre = [0.3900, 0.1782, 0.1963]
+half = [0.1612, 0.2550, 0.0505]
+[[art.parts]]
+name = "seat_r"
+centre = [0.4052, -0.4500, 0.0615]
+half = [0.2119, 0.0838, 0.1078]
+[[art.parts]]
+name = "seat_l"
+centre = [-0.4052, -0.4500, 0.0615]
+half = [0.2119, 0.0838, 0.1078]
+
+# vvp2_sedan -> roster row `cheval_fugitive`
+# 129893 triangles in (0 hidden), 4 wheels, 13 parts; pack LODs [(0, 129893)] (the engine draws a meshlet DAG per section)
+# wheel radius: geometry 0.3156 m, the pack's Chaos wheel 0.3100 m
+# steering column: the pack's rake -27.26 deg (the families' constant is 22.0 deg)
+[[art]]
+key = "vvp2_sedan"
+pack = "VehicleVarietyPackVolume2"
+facing = "+X"
+half_extents_m = [1.0754, 0.6332, 2.4640]
+pack_lods = 1
+door_proxy = true
+hub_rake_deg = -27.255
+[[art.parts]]
+name = "glass_0"
+centre = [0.0000, 0.5545, 0.3106]
+half = [0.7249, 0.3283, 0.1586]
+[[art.parts]]
+name = "glass_1"
+centre = [-0.6929, 0.5204, 0.1397]
+half = [0.1035, 0.3683, 0.2309]
+[[art.parts]]
+name = "glass_2"
+centre = [0.6929, 0.5204, 0.1397]
+half = [0.1035, 0.3683, 0.2309]
+[[art.parts]]
+name = "glass_3"
+centre = [0.0000, 0.9689, -0.0015]
+half = [0.4201, 0.0215, 0.0943]
+[[art.parts]]
+name = "glass_4"
+centre = [-0.6886, 0.5374, -0.2685]
+half = [0.1026, 0.3531, 0.2045]
+[[art.parts]]
+name = "glass_5"
+centre = [0.6886, 0.5374, -0.2685]
+half = [0.1026, 0.3531, 0.2045]
+[[art.parts]]
+name = "glass_6"
+centre = [0.0000, 0.6209, -0.5594]
+half = [0.6996, 0.2781, 0.1490]
+[[art.parts]]
+name = "glass_7"
+centre = [0.6382, 0.0109, -0.8332]
+half = [0.2173, 0.1464, 0.0612]
+[[art.parts]]
+name = "hub"
+centre = [0.3618, 0.0871, 0.2183]
+half = [0.1986, 0.3372, 0.0302]
+[[art.parts]]
+name = "seat_r"
+centre = [0.3618, -0.4500, 0.0032]
+half = [0.2232, 0.0948, 0.1015]
+[[art.parts]]
+name = "seat_l"
+centre = [-0.3618, -0.4500, 0.0032]
+half = [0.2232, 0.0948, 0.1015]
+[[art.parts]]
+name = "door_l"
+centre = [0.9628, -0.1500, 0.0235]
+half = [0.0372, 0.4500, 0.2029]
+[[art.parts]]
+name = "door_r"
+centre = [-0.9628, -0.1500, 0.0235]
+half = [0.0372, 0.4500, 0.2029]
+
+# vvp2_suv -> roster row `bravado_gresley`
+# 66393 triangles in (0 hidden), 4 wheels, 13 parts; pack LODs [(0, 66393)] (the engine draws a meshlet DAG per section)
+# wheel radius: geometry 0.3701 m, the pack's Chaos wheel 0.3600 m
+# steering column: the pack's rake -19.39 deg (the families' constant is 22.0 deg)
+[[art]]
+key = "vvp2_suv"
+pack = "VehicleVarietyPackVolume2"
+facing = "+X"
+half_extents_m = [1.1929, 0.7778, 2.5552]
+pack_lods = 1
+door_proxy = true
+hub_rake_deg = -19.391
+[[art.parts]]
+name = "glass_0"
+centre = [-0.0000, 0.5188, 0.3598]
+half = [0.7428, 0.3366, 0.1658]
+[[art.parts]]
+name = "glass_1"
+centre = [-0.6577, 0.5075, 0.1343]
+half = [0.0778, 0.3172, 0.1679]
+[[art.parts]]
+name = "glass_2"
+centre = [0.6574, 0.5075, 0.1343]
+half = [0.0778, 0.3172, 0.1679]
+[[art.parts]]
+name = "glass_3"
+centre = [0.6562, 0.5015, -0.2390]
+half = [0.0902, 0.3314, 0.1382]
+[[art.parts]]
+name = "glass_4"
+centre = [-0.6565, 0.5015, -0.2390]
+half = [0.0902, 0.3314, 0.1382]
+[[art.parts]]
+name = "glass_5"
+centre = [-0.6304, 0.5152, -0.6260]
+half = [0.1016, 0.3448, 0.1663]
+[[art.parts]]
+name = "glass_6"
+centre = [0.6301, 0.5152, -0.6260]
+half = [0.1016, 0.3448, 0.1663]
+[[art.parts]]
+name = "glass_7"
+centre = [-0.0002, 0.5298, -0.7987]
+half = [0.5578, 0.3618, 0.1021]
+[[art.parts]]
+name = "hub"
+centre = [0.3138, 0.1003, 0.2165]
+half = [0.1854, 0.2843, 0.0416]
+[[art.parts]]
+name = "seat_r"
+centre = [0.3138, -0.4500, 0.0091]
+half = [0.2012, 0.0771, 0.0978]
+[[art.parts]]
+name = "seat_l"
+centre = [-0.3138, -0.4500, 0.0091]
+half = [0.2012, 0.0771, 0.0978]
+[[art.parts]]
+name = "door_l"
+centre = [0.9665, -0.1500, 0.0287]
+half = [0.0335, 0.4500, 0.1957]
+[[art.parts]]
+name = "door_r"
+centre = [-0.9665, -0.1500, 0.0287]
+half = [0.0335, 0.4500, 0.1957]
+
+# vvp2_camper -> roster row `declasse_burrito`
+# 125126 triangles in (0 hidden), 4 wheels, 13 parts; pack LODs [(0, 125126)] (the engine draws a meshlet DAG per section)
+# wheel radius: geometry 0.3898 m, the pack's Chaos wheel 0.3900 m
+# steering column: the pack's rake -31.73 deg (the families' constant is 22.0 deg)
+[[art]]
+key = "vvp2_camper"
+pack = "VehicleVarietyPackVolume2"
+facing = "+X"
+half_extents_m = [1.2998, 1.3092, 2.9879]
+pack_lods = 1
+door_proxy = true
+hub_rake_deg = -31.726
+[[art.parts]]
+name = "glass_0"
+centre = [0.0000, 0.0466, 0.7056]
+half = [0.6873, 0.1955, 0.0985]
+[[art.parts]]
+name = "glass_1"
+centre = [-0.6616, 0.0338, 0.5363]
+half = [0.0283, 0.1773, 0.1618]
+[[art.parts]]
+name = "glass_2"
+centre = [0.6616, 0.0338, 0.5363]
+half = [0.0283, 0.1773, 0.1618]
+[[art.parts]]
+name = "glass_3"
+centre = [-0.8074, 0.5808, 0.5335]
+half = [0.0038, 0.1705, 0.1446]
+[[art.parts]]
+name = "glass_4"
+centre = [0.8074, 0.5926, 0.5335]
+half = [0.0038, 0.1823, 0.1446]
+[[art.parts]]
+name = "glass_5"
+centre = [-0.8030, 0.2172, -0.4302]
+half = [0.0038, 0.2476, 0.0982]
+[[art.parts]]
+name = "glass_6"
+centre = [0.8030, 0.2172, -0.4302]
+half = [0.0038, 0.2476, 0.0982]
+[[art.parts]]
+name = "glass_7"
+centre = [-0.7979, 0.2172, -0.6217]
+half = [0.0038, 0.2476, 0.0918]
+[[art.parts]]
+name = "hub"
+centre = [0.3781, -0.1714, 0.6210]
+half = [0.1418, 0.1407, 0.0299]
+[[art.parts]]
+name = "seat_r"
+centre = [0.3781, -0.4500, 0.4436]
+half = [0.1846, 0.0458, 0.0837]
+[[art.parts]]
+name = "seat_l"
+centre = [-0.3781, -0.4500, 0.4436]
+half = [0.1846, 0.0458, 0.0837]
+[[art.parts]]
+name = "door_l"
+centre = [0.9692, -0.1500, 0.4603]
+half = [0.0308, 0.4500, 0.1673]
+[[art.parts]]
+name = "door_r"
+centre = [-0.9692, -0.1500, 0.4603]
+half = [0.0308, 0.4500, 0.1673]
+
+# vvp2_box_truck -> roster row `vapid_speedo`
+# 113090 triangles in (0 hidden), 4 wheels, 12 parts; pack LODs [(0, 113090)] (the engine draws a meshlet DAG per section)
+# wheel radius: geometry 0.4489 m, the pack's Chaos wheel 0.4400 m
+[[art]]
+key = "vvp2_box_truck"
+pack = "VehicleVarietyPackVolume2"
+facing = "+X"
+half_extents_m = [1.3550, 1.2843, 2.7349]
+pack_lods = 1
+door_proxy = true
+[[art.parts]]
+name = "glass_0"
+centre = [-0.4162, 0.4738, 0.6775]
+half = [0.3820, 0.2895, 0.0478]
+[[art.parts]]
+name = "glass_1"
+centre = [0.4162, 0.4738, 0.6775]
+half = [0.3820, 0.2895, 0.0478]
+[[art.parts]]
+name = "glass_2"
+centre = [-0.4162, 0.4729, 0.6763]
+half = [0.3820, 0.2895, 0.0478]
+[[art.parts]]
+name = "glass_3"
+centre = [0.4162, 0.4729, 0.6763]
+half = [0.3820, 0.2895, 0.0478]
+[[art.parts]]
+name = "glass_4"
+centre = [-0.4830, 0.1377, 0.1024]
+half = [0.1852, 0.7857, 0.0018]
+[[art.parts]]
+name = "glass_5"
+centre = [0.4830, 0.1377, 0.1024]
+half = [0.1852, 0.7857, 0.0018]
+[[art.parts]]
+name = "glass_6"
+centre = [-0.4830, 0.1377, 0.1010]
+half = [0.1852, 0.7857, 0.0018]
+[[art.parts]]
+name = "glass_7"
+centre = [0.4830, 0.1377, 0.1010]
+half = [0.1852, 0.7857, 0.0018]
+[[art.parts]]
+name = "seat_r"
+centre = [0.4200, -0.4500, 0.1000]
+half = [0.1771, 0.0467, 0.0914]
+[[art.parts]]
+name = "seat_l"
+centre = [-0.4200, -0.4500, 0.1000]
+half = [0.1771, 0.0467, 0.0914]
+[[art.parts]]
+name = "door_l"
+centre = [0.9705, -0.1500, 0.1183]
+half = [0.0295, 0.4500, 0.1828]
+[[art.parts]]
+name = "door_r"
+centre = [-0.9705, -0.1500, 0.1183]
+half = [0.0295, 0.4500, 0.1828]
+
+# vvp1_hatch -> roster row `declasse_asea`
+# 49959 triangles in (0 hidden), 4 wheels, 11 parts; pack LODs [(0, 49959)] (the engine draws a meshlet DAG per section)
+[[art]]
+key = "vvp1_hatch"
+pack = "VehicleVarietyPack"
+facing = "+X"
+half_extents_m = [0.9005, 0.5430, 1.9711]
+pack_lods = 1
+door_proxy = true
+[[art.parts]]
+name = "glass_0"
+centre = [0.0034, 0.6040, 0.2563]
+half = [0.7496, 0.3226, 0.1904]
+[[art.parts]]
+name = "glass_1"
+centre = [-0.6707, 0.5411, 0.0549]
+half = [0.1084, 0.2697, 0.3044]
+[[art.parts]]
+name = "glass_2"
+centre = [0.6776, 0.5411, 0.0549]
+half = [0.1084, 0.2697, 0.3044]
+[[art.parts]]
+name = "glass_3"
+centre = [0.0035, 0.9437, -0.1483]
+half = [0.3882, 0.0426, 0.0861]
+[[art.parts]]
+name = "glass_4"
+centre = [-0.6530, 0.5213, -0.4139]
+half = [0.0991, 0.2428, 0.1354]
+[[art.parts]]
+name = "glass_5"
+centre = [0.6599, 0.5213, -0.4139]
+half = [0.0991, 0.2428, 0.1354]
+[[art.parts]]
+name = "glass_6"
+centre = [0.0035, 0.5467, -0.5390]
+half = [0.6848, 0.2873, 0.1975]
+[[art.parts]]
+name = "seat_r"
+centre = [0.4200, -0.4500, 0.1000]
+half = [0.2665, 0.1105, 0.1268]
+[[art.parts]]
+name = "seat_l"
+centre = [-0.4200, -0.4500, 0.1000]
+half = [0.2665, 0.1105, 0.1268]
+[[art.parts]]
+name = "door_l"
+centre = [0.9556, -0.1500, 0.1254]
+half = [0.0444, 0.4500, 0.2537]
+[[art.parts]]
+name = "door_r"
+centre = [-0.9556, -0.1500, 0.1254]
+half = [0.0444, 0.4500, 0.2537]
+
+# vvp1_pickup -> roster row `declasse_yosemite_rancher`
+# 58740 triangles in (0 hidden), 4 wheels, 12 parts; pack LODs [(0, 58740)] (the engine draws a meshlet DAG per section)
+[[art]]
+key = "vvp1_pickup"
+pack = "VehicleVarietyPack"
+facing = "+X"
+half_extents_m = [0.9557, 0.6291, 2.1451]
+pack_lods = 1
+door_proxy = true
+[[art.parts]]
+name = "glass_0"
+centre = [0.0000, 0.5696, 0.3654]
+half = [0.7582, 0.3472, 0.1648]
+[[art.parts]]
+name = "glass_1"
+centre = [0.0000, 0.5650, 0.3645]
+half = [0.7560, 0.3468, 0.1646]
+[[art.parts]]
+name = "glass_2"
+centre = [-0.6800, 0.5512, 0.1406]
+half = [0.0808, 0.3263, 0.1667]
+[[art.parts]]
+name = "glass_3"
+centre = [0.6800, 0.5512, 0.1406]
+half = [0.0808, 0.3263, 0.1667]
+[[art.parts]]
+name = "glass_4"
+centre = [-0.6837, 0.5534, 0.1406]
+half = [0.0809, 0.3269, 0.1667]
+[[art.parts]]
+name = "glass_5"
+centre = [0.6837, 0.5534, 0.1406]
+half = [0.0809, 0.3269, 0.1667]
+[[art.parts]]
+name = "glass_6"
+centre = [0.0003, 0.5972, -0.0993]
+half = [0.6932, 0.3118, 0.0131]
+[[art.parts]]
+name = "glass_7"
+centre = [0.0003, 0.5980, -0.1011]
+half = [0.6932, 0.3117, 0.0131]
+[[art.parts]]
+name = "seat_r"
+centre = [0.4200, -0.4500, 0.1000]
+half = [0.2511, 0.0954, 0.1165]
+[[art.parts]]
+name = "seat_l"
+centre = [-0.4200, -0.4500, 0.1000]
+half = [0.2511, 0.0954, 0.1165]
+[[art.parts]]
+name = "door_l"
+centre = [0.9581, -0.1500, 0.1233]
+half = [0.0419, 0.4500, 0.2331]
+[[art.parts]]
+name = "door_r"
+centre = [-0.9581, -0.1500, 0.1233]
+half = [0.0419, 0.4500, 0.2331]
+
+# vvp1_sports -> roster row `pfister_comet_s2`
+# 94137 triangles in (0 hidden), 4 wheels, 7 parts; pack LODs [(0, 94137)] (the engine draws a meshlet DAG per section)
+[[art]]
+key = "vvp1_sports"
+pack = "VehicleVarietyPack"
+facing = "+X"
+half_extents_m = [1.1209, 0.4910, 2.1804]
+pack_lods = 1
+door_proxy = true
+[[art.parts]]
+name = "glass_0"
+centre = [0.0000, 0.5718, 0.3246]
+half = [0.6843, 0.3379, 0.2003]
+[[art.parts]]
+name = "glass_1"
+centre = [-0.6126, 0.6084, 0.1287]
+half = [0.1555, 0.3271, 0.3061]
+[[art.parts]]
+name = "glass_2"
+centre = [0.6126, 0.6084, 0.1287]
+half = [0.1555, 0.3271, 0.3061]
+[[art.parts]]
+name = "seat_r"
+centre = [0.4200, -0.4500, 0.1000]
+half = [0.2141, 0.1222, 0.1147]
+[[art.parts]]
+name = "seat_l"
+centre = [-0.4200, -0.4500, 0.1000]
+half = [0.2141, 0.1222, 0.1147]
+[[art.parts]]
+name = "door_l"
+centre = [0.9643, -0.1500, 0.1229]
+half = [0.0357, 0.4500, 0.2293]
+[[art.parts]]
+name = "door_r"
+centre = [-0.9643, -0.1500, 0.1229]
+half = [0.0357, 0.4500, 0.2293]
+
+# vvp1_suv -> roster row `vapid_radius`
+# 106173 triangles in (0 hidden), 4 wheels, 10 parts; pack LODs [(0, 106173)] (the engine draws a meshlet DAG per section)
+[[art]]
+key = "vvp1_suv"
+pack = "VehicleVarietyPack"
+facing = "+X"
+half_extents_m = [0.9825, 0.7344, 2.1061]
+pack_lods = 1
+door_proxy = true
+[[art.parts]]
+name = "glass_0"
+centre = [0.0000, 0.6158, 0.2655]
+half = [0.7544, 0.2569, 0.1121]
+[[art.parts]]
+name = "glass_1"
+centre = [-0.7443, 0.5173, 0.0747]
+half = [0.0463, 0.2651, 0.1978]
+[[art.parts]]
+name = "glass_2"
+centre = [0.7443, 0.5173, 0.0747]
+half = [0.0463, 0.2651, 0.1978]
+[[art.parts]]
+name = "glass_3"
+centre = [-0.7458, 0.5275, -0.3520]
+half = [0.0442, 0.2522, 0.1075]
+[[art.parts]]
+name = "glass_4"
+centre = [0.7458, 0.5275, -0.3520]
+half = [0.0442, 0.2522, 0.1075]
+[[art.parts]]
+name = "glass_5"
+centre = [0.0000, 0.5382, -0.8590]
+half = [0.7042, 0.2467, 0.0501]
+[[art.parts]]
+name = "seat_r"
+centre = [0.4200, -0.4500, 0.1000]
+half = [0.2443, 0.0817, 0.1187]
+[[art.parts]]
+name = "seat_l"
+centre = [-0.4200, -0.4500, 0.1000]
+half = [0.2443, 0.0817, 0.1187]
+[[art.parts]]
+name = "door_l"
+centre = [0.9593, -0.1500, 0.1237]
+half = [0.0407, 0.4500, 0.2374]
+[[art.parts]]
+name = "door_r"
+centre = [-0.9593, -0.1500, 0.1237]
+half = [0.0407, 0.4500, 0.2374]
+
+# vvp1_box_truck -> roster row `brute_boxville`
+# 49691 triangles in (0 hidden), 4 wheels, 8 parts; pack LODs [(0, 49691)] (the engine draws a meshlet DAG per section)
+[[art]]
+key = "vvp1_box_truck"
+pack = "VehicleVarietyPack"
+facing = "+X"
+half_extents_m = [1.5317, 1.5204, 3.6607]
+pack_lods = 1
+door_proxy = true
+[[art.parts]]
+name = "glass_0"
+centre = [0.0036, 0.1632, 0.9000]
+half = [0.6321, 0.2861, 0.0665]
+[[art.parts]]
+name = "glass_1"
+centre = [0.6488, 0.0890, 0.7341]
+half = [0.0225, 0.2975, 0.1520]
+[[art.parts]]
+name = "glass_2"
+centre = [-0.6497, 0.0890, 0.7328]
+half = [0.0225, 0.2975, 0.1520]
+[[art.parts]]
+name = "glass_3"
+centre = [0.0035, 0.2344, 0.5071]
+half = [0.2706, 0.1122, 0.0014]
+[[art.parts]]
+name = "seat_r"
+centre = [0.4200, -0.4500, 0.1000]
+half = [0.1567, 0.0395, 0.0683]
+[[art.parts]]
+name = "seat_l"
+centre = [-0.4200, -0.4500, 0.1000]
+half = [0.1567, 0.0395, 0.0683]
+[[art.parts]]
+name = "door_l"
+centre = [0.9739, -0.1500, 0.1137]
+half = [0.0261, 0.4500, 0.1366]
+[[art.parts]]
+name = "door_r"
+centre = [-0.9739, -0.1500, 0.1137]
+half = [0.0261, 0.4500, 0.1366]
+
+# vvp1_cab_chassis -> roster row `hvy_flatbed`
+# 48777 triangles in (0 hidden), 4 wheels, 8 parts; pack LODs [(0, 48777)] (the engine draws a meshlet DAG per section)
+[[art]]
+key = "vvp1_cab_chassis"
+pack = "VehicleVarietyPack"
+facing = "+X"
+half_extents_m = [1.5317, 1.1079, 3.3485]
+pack_lods = 1
+door_proxy = true
+[[art.parts]]
+name = "glass_0"
+centre = [0.0036, 0.5570, 0.8907]
+half = [0.6321, 0.3926, 0.0726]
+[[art.parts]]
+name = "glass_1"
+centre = [0.6488, 0.4552, 0.7093]
+half = [0.0225, 0.4082, 0.1662]
+[[art.parts]]
+name = "glass_2"
+centre = [-0.6497, 0.4552, 0.7078]
+half = [0.0225, 0.4082, 0.1662]
+[[art.parts]]
+name = "glass_3"
+centre = [0.0035, 0.6547, 0.4611]
+half = [0.2706, 0.1540, 0.0015]
+[[art.parts]]
+name = "seat_r"
+centre = [0.4200, -0.4500, 0.1000]
+half = [0.1567, 0.0542, 0.0747]
+[[art.parts]]
+name = "seat_l"
+centre = [-0.4200, -0.4500, 0.1000]
+half = [0.1567, 0.0542, 0.0747]
+[[art.parts]]
+name = "door_l"
+centre = [0.9739, -0.1500, 0.1149]
+half = [0.0261, 0.4500, 0.1493]
+[[art.parts]]
+name = "door_r"
+centre = [-0.9739, -0.1500, 0.1149]
+half = [0.0261, 0.4500, 0.1493]

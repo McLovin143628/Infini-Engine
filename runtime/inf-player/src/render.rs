@@ -1554,24 +1554,61 @@ pub fn project_scene_full(
             if fractured {
                 // Its chunks are already in the scene; nothing else to push.
             } else if let Some((asset_id, source)) = vgeom {
-                if vgeom_seen.insert(asset_id) {
-                    // The scene carries the PAGED source, not a decoded DAG
-                    // (P18.2): the render node's streamer decides what of it is
-                    // resident from the camera's own screen-error wants.
-                    scene.vgeom_assets.push(VgeomAsset::new(asset_id, source));
+                // **A SECTIONED mesh draws one instance per section** (wave
+                // VEH3f.2a) -- each with its slot's own surface and virtual
+                // textures (`inf_mesh::section_material_id`), and a section with
+                // no material record (a car's paint) with the entity's. All share
+                // the entity's pick id. A mesh with no sections -- every mesh
+                // but an importer's multi-material art -- draws whole, below.
+                let sections = mesh_ref
+                    .asset
+                    .map(|m| vmeshes.sections(m))
+                    .unwrap_or_default();
+                if let (false, Some(mesh_id)) = (sections.is_empty(), mesh_ref.asset) {
+                    for (slot, sid, src) in sections {
+                        if vgeom_seen.insert(sid) {
+                            scene.vgeom_assets.push(VgeomAsset::new(sid, src));
+                        }
+                        let mat = inf_mesh::section_material_id(inf_asset::AssetId(mesh_id), slot)
+                            .uuid()
+                            .as_u128();
+                        let (c, m, r, e, v) = match derived_surface(materials, mat) {
+                            Some(d) => (d.0, d.1, d.2, d.3, inf_render::vt_set_for(vt_lib, Some(mat))),
+                            None => (color, metallic, roughness, emissive, vt),
+                        };
+                        scene.vgeom_instances.push(VgeomInstance {
+                            vt: v,
+                            asset: sid,
+                            translation,
+                            rotation: rot.as_quat(),
+                            scale: scale.as_vec3(),
+                            color: c,
+                            metallic: m,
+                            roughness: r,
+                            emissive: e,
+                            id: next_id,
+                        });
+                    }
+                } else {
+                    if vgeom_seen.insert(asset_id) {
+                        // The scene carries the PAGED source, not a decoded DAG
+                        // (P18.2): the render node's streamer decides what of it
+                        // is resident from the camera's own screen-error wants.
+                        scene.vgeom_assets.push(VgeomAsset::new(asset_id, source));
+                    }
+                    scene.vgeom_instances.push(VgeomInstance {
+                        vt,
+                        asset: asset_id,
+                        translation,
+                        rotation: rot.as_quat(),
+                        scale: scale.as_vec3(),
+                        color,
+                        metallic,
+                        roughness,
+                        emissive,
+                        id: next_id,
+                    });
                 }
-                scene.vgeom_instances.push(VgeomInstance {
-                    vt,
-                    asset: asset_id,
-                    translation,
-                    rotation: rot.as_quat(),
-                    scale: scale.as_vec3(),
-                    color,
-                    metallic,
-                    roughness,
-                    emissive,
-                    id: next_id,
-                });
             } else if mesh_ref.asset.is_some() {
                 // **Wave FIX2: a bound mesh with no DAG draws NOTHING.**
                 //

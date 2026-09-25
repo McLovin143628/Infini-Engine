@@ -433,7 +433,7 @@ pub fn art_fallback_meshes() -> Vec<HeroMesh> {
     };
     let (unit, _) = to_mesh_asset(&inf_dcc::cube(1.0), &opts);
     let mut out = Vec::new();
-    for key in inf_ecs::roster::ArtKey::ALL {
+    for key in inf_ecs::roster::ArtKey::all() {
         let Some((_, def)) = inf_ecs::roster::roster()
             .0
             .iter()
@@ -442,11 +442,23 @@ pub fn art_fallback_meshes() -> Vec<HeroMesh> {
             continue;
         };
         let h = def.half_extents;
+        // An art body with parts of its own (wave VEH3f.2a) draws its doors,
+        // panes, seats and steering wheel as PARTS, each at its own GUID below
+        // -- so its body fallback is the family's panels without those kinds.
+        let own_parts = !key.parts().is_empty();
         let parts: Vec<inf_mesh::SubMesh> = def
             .body
             .parts()
             .iter()
             .filter(|p| p.kind != inf_ecs::vehicle::BodyPartKind::Seat)
+            .filter(|p| {
+                !own_parts
+                    || !matches!(
+                        p.kind,
+                        inf_ecs::vehicle::BodyPartKind::Door { .. }
+                            | inf_ecs::vehicle::BodyPartKind::Glass
+                    )
+            })
             .flat_map(|p| {
                 placed(
                     &unit,
@@ -477,8 +489,116 @@ pub fn art_fallback_meshes() -> Vec<HeroMesh> {
                 asset: merged(&tyre, placed(&tyre, [1.0, 1.0, 1.0], [0.0; 3], true)),
             });
         }
+        // **The art's own parts** (wave VEH3f.2a), each in its UNIT box (the
+        // part's scale is its size): a door, a pane or a cushion is the DCC
+        // cube; the steering wheel a DCC disc on its column (local +Z).
+        let (disc, _) = to_mesh_asset(&inf_dcc::cylinder(0.5, 0.25, 24), &opts);
+        for p in key.parts() {
+            let asset = if p.kind == inf_ecs::vehicle::BodyPartKind::Hub {
+                let mut subs = placed(&disc, [1.0, 1.0, 1.0], [0.0; 3], false);
+                for sm in subs.iter_mut() {
+                    for v in sm.vertices.iter_mut() {
+                        // The cylinder's +Y axis onto +Z: a quarter turn about X.
+                        let (y, z) = (v.position[1], v.position[2]);
+                        v.position[1] = -z;
+                        v.position[2] = y;
+                        let (ny, nz) = (v.normal[1], v.normal[2]);
+                        v.normal[1] = -nz;
+                        v.normal[2] = ny;
+                    }
+                }
+                merged(&disc, subs)
+            } else {
+                merged(&unit, placed(&unit, [1.0, 1.0, 1.0], [0.0; 3], false))
+            };
+            out.push(HeroMesh {
+                file: format!("{}_{}.inf_mesh", key.name(), p.name),
+                guid: inf_ecs::roster::art_part_guid(key, p.name),
+                asset,
+            });
+        }
     }
     out
+}
+
+// ── the WEAPON ART FALLBACK (wave VEH3f.2a) ─────────────────────────────────
+
+/// The committed folder the weapon fallbacks live in, under `samples/`.
+pub const WEAPON_ART_FOLDER: &str = "weapon-art";
+
+/// **The committed fallback of every Modern Weapons body** (wave VEH3f.2a): a
+/// DCC box at each weapon's measured bounds (`inf_ecs::weapon::MW_WEAPON_ART`),
+/// and one at its magazine's seat, at the identities the class table names --
+/// ours, generated from NUMBERS, never a vertex of the pack. A local
+/// `inf-import --weapons` writes the pack's own mesh over each one in place.
+pub fn weapon_art_fallback_meshes() -> Vec<HeroMesh> {
+    let opts = ExportOptions {
+        normals: NormalPolicy::Recompute,
+        optimize: false,
+    };
+    let (unit, _) = to_mesh_asset(&inf_dcc::cube(1.0), &opts);
+    let mut out = Vec::new();
+    for (key, _, lo, hi, seat) in inf_ecs::weapon::MW_WEAPON_ART {
+        let size = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+        let mid = [
+            0.5 * (hi[0] + lo[0]),
+            0.5 * (hi[1] + lo[1]),
+            0.5 * (hi[2] + lo[2]),
+        ];
+        out.push(HeroMesh {
+            file: format!("{key}.inf_mesh"),
+            guid: inf_ecs::weapon::weapon_mesh_guid(key),
+            asset: merged(&unit, placed(&unit, size, mid, false)),
+        });
+        if seat.is_some() {
+            // A magazine is modelled at its seat, so its box is centred on the
+            // origin: 2 cm wide, 10 cm tall, 3 cm deep -- a pistol magazine.
+            out.push(HeroMesh {
+                file: format!("{key}_MAG.inf_mesh"),
+                guid: inf_ecs::weapon::weapon_mesh_guid(&format!("{key}_MAG")),
+                asset: merged(
+                    &unit,
+                    placed(&unit, [0.02, 0.10, 0.03], [0.0, 0.05, 0.0], false),
+                ),
+            });
+        }
+    }
+    out
+}
+
+/// Every file the weapon fallback writes, sorted.
+pub fn weapon_art_fallback_files() -> Vec<String> {
+    let mut v: Vec<String> = weapon_art_fallback_meshes()
+        .into_iter()
+        .flat_map(|m| [m.file.clone(), format!("{}.toml", m.file)])
+        .collect();
+    v.sort();
+    v
+}
+
+/// The committed weapon-fallback folder.
+pub fn weapon_art_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../samples")
+        .join(WEAPON_ART_FOLDER)
+}
+
+/// **Write the weapon fallback** -- every mesh and its sidecar.
+pub fn write_weapon_art_fallback(dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    for m in weapon_art_fallback_meshes() {
+        let bytes = inf_asset::encode(&m.asset).map_err(|e| format!("encode {}: {e}", m.file))?;
+        let path = dir.join(&m.file);
+        std::fs::write(&path, &bytes).map_err(|e| format!("write {}: {e}", path.display()))?;
+        inf_asset::AssetSidecar::new(
+            inf_asset::AssetId(m.guid),
+            inf_asset::AssetKind::Mesh,
+            inf_asset::ContentHash::of(&bytes),
+        )
+        .save(&path)
+        .map_err(|e| format!("write the sidecar for {}: {e}", m.file))?;
+    }
+    Ok(())
 }
 
 /// Every file the art fallback writes, sorted.

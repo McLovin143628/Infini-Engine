@@ -197,6 +197,7 @@ pub fn handle_world(
         kind: st.kind,
         centre_frac: st.centre_frac,
         half_frac: st.half_frac,
+        rake_deg: 0.0,
     };
     let (centre, half_m) = board::door_metres(car.half, Vec3d::ZERO, &geom);
     let off = if inner {

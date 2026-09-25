@@ -117,6 +117,7 @@ pub mod vehicle_audio;
 // VEH3f: the roster's sixteen body families, in the fractions-of-the-hull
 // convention, and the roster itself (the 153 lore rows + class defaults).
 pub mod roster;
+pub mod vehicle_art;
 pub mod vehicle_families;
 // I6: weapons and the health they spend. Both measured in JOULES — see the
 // module header for why a hit-point would put back the conversion table

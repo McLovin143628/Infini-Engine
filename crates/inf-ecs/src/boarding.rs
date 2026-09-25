@@ -343,6 +343,10 @@ pub struct PartGeom {
     pub centre_frac: Vec3d,
     /// Its half-extents, same units.
     pub half_frac: Vec3d,
+    /// **A drawn steering wheel's column rake**, degrees -- its rest pitch in
+    /// `hub_rim_euler`'s convention (wave VEH3f.2a); `0` for every other kind,
+    /// which nothing reads.
+    pub rake_deg: f64,
 }
 
 /// **The eight sockets**, in the chassis frame, metres — DERIVED, never
@@ -368,6 +372,12 @@ pub struct VehicleSockets {
     /// The rim radius, metres — not a socket, but the number a hand on the rim
     /// is placed with, and it is derived from the same half-extents.
     pub wheel_rim_m: f64,
+    /// **The rim plane's rake, as an offset from [`WHEEL_RAKE_DEG`]**, degrees
+    /// (wave VEH3f.2a): zero for every family, and the drawn wheel's own rake
+    /// less the constant for a body that draws one -- so the grips sit on the
+    /// rim that is drawn. An offset rather than the rake itself so a
+    /// `Default` socket set keeps the constant.
+    pub wheel_rake_offset_deg: f64,
 }
 
 impl VehicleSockets {
@@ -614,6 +624,25 @@ pub fn sockets_of(half: Vec3d, offset: Vec3d, parts: &[PartGeom]) -> VehicleSock
     if wheel_hub.y > rise_cap {
         wheel_hub.y = rise_cap;
     }
+    // ── THE DRAWN WHEEL WINS (wave VEH3f.2a) ─────────────────────────────────
+    //
+    // A body that DRAWS its steering wheel (`BodyPartKind::Hub`, an imported
+    // car's own wheel on its column) puts the hub on that wheel and the rim at
+    // its drawn radius: the hands grip what is drawn, and a fraction of the hull
+    // would put them on air a hand's width from it. Every family without a
+    // `hub*` part never enters this block and keeps every socket byte for byte.
+    let mut wheel_rim_m = (WHEEL_RIM_FRAC * hx).min(MAX_RIM_M);
+    let mut wheel_rake_offset_deg = 0.0;
+    if let Some(h) = parts.iter().find(|p| p.kind == crate::vehicle::KIND_HUB) {
+        if h.rake_deg.is_finite() {
+            wheel_rake_offset_deg = h.rake_deg - WHEEL_RAKE_DEG;
+        }
+        wheel_hub = at(h.centre_frac.x, h.centre_frac.y, h.centre_frac.z);
+        let r = (h.half_frac.x * hx).abs();
+        if r.is_finite() && r > 0.05 {
+            wheel_rim_m = r.min(MAX_RIM_M);
+        }
+    }
     let mut out = VehicleSockets {
         seat_l,
         seat_r,
@@ -623,7 +652,8 @@ pub fn sockets_of(half: Vec3d, offset: Vec3d, parts: &[PartGeom]) -> VehicleSock
         pedal_throttle,
         pedal_brake,
         wheel_hub,
-        wheel_rim_m: (WHEEL_RIM_FRAC * hx).min(MAX_RIM_M),
+        wheel_rim_m,
+        wheel_rake_offset_deg,
     };
     // ── the handles, from the DOORS (VEH3c's own derivation) ────────────────
     //
@@ -659,12 +689,23 @@ pub fn part_geoms(world: &EcsWorld, chassis: Uuid) -> Vec<PartGeom> {
         return Vec::new();
     };
     row.parts
-        .values()
-        .filter(|s| s.latch.attached())
-        .map(|s| PartGeom {
+        .iter()
+        .filter(|(_, s)| s.latch.attached())
+        .map(|(guid, s)| PartGeom {
             kind: s.kind,
             centre_frac: s.centre_frac,
             half_frac: s.half_frac,
+            // A drawn wheel's rake is its own transform's pitch (wave
+            // VEH3f.2a): the vehicle step rolls it and never re-pitches it.
+            rake_deg: if s.kind == crate::vehicle::KIND_HUB {
+                world
+                    .entity_of(*guid)
+                    .and_then(|e| world.world().get::<crate::components::Transform>(e))
+                    .map(|t| t.rotation.x)
+                    .unwrap_or(WHEEL_RAKE_DEG)
+            } else {
+                0.0
+            },
         })
         .collect()
 }
@@ -965,7 +1006,7 @@ pub const RIM_RIDE_DEG: f64 = 50.0;
 /// right turn does. Portable trig ([`inf_math::psin64`] / `pcos64`): these
 /// points become IK goals, the goals become a pose, and the pose is folded.
 pub fn wheel_grips(sockets: &VehicleSockets, rim_deg: f64) -> [Vec3d; 2] {
-    let rake = WHEEL_RAKE_DEG.to_radians();
+    let rake = (WHEEL_RAKE_DEG + sockets.wheel_rake_offset_deg).to_radians();
     // In-plane axes: `u` is lateral, `v` is the rim's "up", tilted toward the
     // driver (`-Z`) by the rake.
     let (sr, cr) = (inf_math::psin64(rake), inf_math::pcos64(rake));
@@ -1697,16 +1738,19 @@ mod tests {
                 kind: crate::vehicle::KIND_DOOR,
                 centre_frac: Vec3d::new(-0.955, -0.4, 0.3),
                 half_frac: Vec3d::new(0.045, 0.36, 0.26),
+                rake_deg: 0.0,
             },
             PartGeom {
                 kind: crate::vehicle::KIND_DOOR,
                 centre_frac: Vec3d::new(0.955, -0.4, 0.3),
                 half_frac: Vec3d::new(0.045, 0.36, 0.26),
+                rake_deg: 0.0,
             },
             PartGeom {
                 kind: crate::vehicle::KIND_DOOR,
                 centre_frac: Vec3d::new(0.955, -0.4, -0.22),
                 half_frac: Vec3d::new(0.045, 0.34, 0.22),
+                rake_deg: 0.0,
             },
         ]
     }

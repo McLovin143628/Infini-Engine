@@ -577,6 +577,48 @@ fn step_one(
     //    rig with no wheel meshes simulates identically to one with them.
     let rest = bridge.vehicle_of(chassis)?.suspension_rest_m();
     let mut moved = false;
+    // ── 4a. the drawn steering wheel (wave VEH3f.2a), turned by the rack: the
+    //    mean steer of the wheels that steer, through the ONE rim rule the
+    //    hands' grips turn by (`inf_ecs::boarding::rim_angle_deg`), so a hand on
+    //    the rim and the rim it is on cannot disagree. Visual only, like the
+    //    wheels; a body that draws no `hub*` part pays one child walk.
+    let rim_deg = {
+        let (mut sum, mut n) = (0.0f64, 0usize);
+        for (_, _, _, steer, _) in &poses {
+            if steer.abs() > 1e-9 {
+                sum += *steer;
+                n += 1;
+            }
+        }
+        let max = world
+            .entity_of(chassis)
+            .and_then(|e| world.world().get::<inf_ecs::components::VehicleClass>(e))
+            .map(|c| c.max_steer_deg)
+            .unwrap_or(0.0);
+        if n == 0 {
+            0.0
+        } else {
+            inf_ecs::boarding::rim_angle_deg(sum / n as f64, max)
+        }
+    };
+    if let Some(ce) = world.entity_of(chassis) {
+        let hubs: Vec<_> = world
+            .children_of(ce)
+            .into_iter()
+            .filter(|c| {
+                world
+                    .name_of(*c)
+                    .is_some_and(|n| n.starts_with(inf_ecs::vehicle::HUB_PART_PREFIX))
+            })
+            .collect();
+        for h in hubs {
+            if let Some(mut t) = world.world_mut().get_mut::<Transform>(h) {
+                // The rake is the part's own rest pitch; only the roll moves.
+                t.rotation = inf_ecs::vehicle::hub_rim_euler(t.rotation.x, rim_deg);
+                moved = true;
+            }
+        }
+    }
     for (guid, mount_local, length, steer, spin) in poses {
         let Some(entity) = world.entity_of(guid) else {
             continue;

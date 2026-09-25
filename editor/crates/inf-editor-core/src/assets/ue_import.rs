@@ -89,8 +89,15 @@ pub struct UeImportOptions {
     pub meshes: bool,
     /// **Split every roster machine into a chassis and four wheels** (wave
     /// VEH3f) at the GUIDs the committed rows name -- see
-    /// [`super::ue_vehicles`].
+    /// [`super::ue_vehicles`] -- and (wave VEH3f.2a) every SKINNED car of a v3
+    /// manifest's `vehicles` section into its chassis, wheels, doors, panes and
+    /// steering wheel ([`super::ue_skel_vehicles`]).
     pub vehicles: bool,
+    /// **Write every v3 `weapons` row at its committed identity** (wave
+    /// VEH3f.2a): the rigid mesh at `inf_ecs::weapon::weapon_mesh_guid(art)` and
+    /// its magazine at the `_MAG` key, with the muzzle measured off the skeletal
+    /// twin's socket.
+    pub weapons: bool,
     /// How many LOD rungs of a **character** to store (wave CHAR1a).
     ///
     /// Three, and the number is a consequence rather than a taste: a skinned
@@ -191,6 +198,7 @@ impl Default for UeImportOptions {
             rebinds: Vec::new(),
             meshes: true,
             vehicles: false,
+            weapons: false,
             character_lods: 3,
             retarget_to: None,
             rebind_meshes: Vec::new(),
@@ -350,6 +358,88 @@ struct Manifest {
     materials: Vec<Material>,
     textures: Vec<Texture>,
     fixtures: Vec<Fixture>,
+    /// v3 (wave VEH3f.2a): the skinned cars, each naming its skeletal record
+    /// and carrying its Blueprint's defaults.
+    vehicles: Vec<ManifestVehicle>,
+    /// v3 (wave VEH3f.2a): the weapon pack's rows.
+    weapons: Vec<ManifestWeapon>,
+}
+
+/// One skinned car (manifest v3).
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+struct ManifestVehicle {
+    art: String,
+    pack: String,
+    /// How the pack faces in UE's frame: `+X` (every car pack) or `+Y`.
+    forward: String,
+    /// The skeletal record's key.
+    skeletal: String,
+    blueprint: Option<ManifestBlueprint>,
+}
+
+/// A vehicle Blueprint's defaults (manifest v3).
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+struct ManifestBlueprint {
+    components: Vec<BpComponent>,
+    wheels: Vec<BpWheel>,
+    movement: BTreeMap<String, f64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+struct BpComponent {
+    name: String,
+    class: String,
+    /// A static mesh the component draws, as a manifest mesh key.
+    mesh: Option<String>,
+    /// Composed down to the actor root: UE cm and a UE `[x, y, z, w]`.
+    root_location_cm: [f64; 3],
+    root_rotation_quat: [f64; 4],
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+struct BpWheel {
+    bone: String,
+    wheel_radius: f64,
+    wheel_width: f64,
+    max_steer_angle: f64,
+}
+
+/// One weapon (manifest v3).
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+struct ManifestWeapon {
+    /// The committed art key the engine derives the weapon's identity from.
+    art: String,
+    pack: String,
+    class: String,
+    /// The rigid mesh's key, its magazine's, and the skeletal twin's.
+    mesh: String,
+    magazine: Option<String>,
+    skeletal: Option<String>,
+}
+
+/// A skin joint read back off the glTF (manifest v3), glTF frame.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+struct ManifestJoint {
+    name: String,
+    parent: Option<String>,
+    world_m: [f64; 3],
+    world_rotation: [f64; 4],
+}
+
+/// A skeletal socket, raw (manifest v3): the bone it hangs off and its offset
+/// in that bone's frame, UE cm.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+struct ManifestSocket {
+    name: String,
+    bone: String,
+    location_cm: [f64; 3],
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -357,6 +447,8 @@ struct Manifest {
 struct Pack {
     name: String,
     license: String,
+    /// v3: the pack's Fab listing, carried into every licence row.
+    fab_url: String,
     /// v2: whether this pack's licence permits SHIPPING the content, as opposed
     /// to using it as a local reference. Recorded per pack because the three
     /// character packs differ: ALS is MIT (ship), the mannequins are Epic's
@@ -375,6 +467,10 @@ struct SkeletalMesh {
     bones: u32,
     lods: Vec<SkelLod>,
     material_slots: Vec<Option<String>>,
+    /// v3: the joints, read back off LOD 0's glTF.
+    joints: Vec<ManifestJoint>,
+    /// v3: the skeleton's sockets, raw.
+    sockets: Vec<ManifestSocket>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -505,7 +601,12 @@ struct FixtureMesh {
 /// having imported no character at all. So the version gates the container and
 /// a reader that grows an arm keys it on the version, which is the same law
 /// `.ipack`'s header carries.
-pub const MANIFEST_SCHEMA_VERSION: u32 = 2;
+///
+/// **v3 (wave VEH3f.2a)**: `vehicles` and `weapons` sections, a skeletal
+/// record's `joints` and `sockets`, a pack's `fab_url` and `forward`. The
+/// version is bumped for v2's reason: a v2 reader handed a v3 manifest would
+/// import the meshes, ignore every car and report success.
+pub const MANIFEST_SCHEMA_VERSION: u32 = 3;
 
 /// **Import one manifest.**
 pub fn import_manifest(
@@ -661,7 +762,7 @@ pub fn import_manifest(
             if opts.vehicles {
                 let name = mesh.source.rsplit('/').next().unwrap_or("");
                 let stem = name.split('.').next().unwrap_or("");
-                if let Some(key) = inf_ecs::roster::ArtKey::ALL
+                if let Some(key) = inf_ecs::roster::ArtKey::machines()
                     .into_iter()
                     .find(|k| k.source_mesh() == stem)
                 {
@@ -824,8 +925,17 @@ pub fn import_manifest(
     let mut skeletons_by_source: BTreeMap<String, (AssetId, inf_anim::SkeletonAsset)> =
         BTreeMap::new();
     if opts.meshes {
+        // A car's or a weapon's skinned record crosses through ITS OWN loop
+        // below (wave VEH3f.2a) -- as rigid parts, never as a character with a
+        // rig nobody animates.
+        let claimed: std::collections::BTreeSet<&str> = m
+            .vehicles
+            .iter()
+            .map(|v| v.skeletal.as_str())
+            .chain(m.weapons.iter().filter_map(|w| w.skeletal.as_deref()))
+            .collect();
         for sk in &m.skeletal_meshes {
-            if !wanted(&sk.pack) || !only(&sk.key) {
+            if !wanted(&sk.pack) || !only(&sk.key) || claimed.contains(sk.key.as_str()) {
                 continue;
             }
             let mut rungs: Vec<(u32, AssetId, usize)> = Vec::new();
@@ -964,6 +1074,24 @@ pub fn import_manifest(
             report
                 .skeletal
                 .push((sk.key.clone(), lod0, skel_id, rungs.len(), tris0, joints));
+        }
+        // ── 2c. THE SKINNED CARS (wave VEH3f.2a) ─────────────────────────────
+        if opts.vehicles {
+            for v in &m.vehicles {
+                if !wanted(&v.pack) || !only(&v.art) {
+                    continue;
+                }
+                import_skel_vehicle(project, &base, &dest, &m, v, &mat_ids, &mut report)?;
+            }
+        }
+        // ── 2d. THE WEAPONS (wave VEH3f.2a) ─────────────────────────────────
+        if opts.weapons {
+            for w in &m.weapons {
+                if !wanted(&w.pack) || !only(&w.art) {
+                    continue;
+                }
+                import_weapon(project, &m, w, &mut report)?;
+            }
         }
         // ── THE WEARABLES (wave OUTFIT1) ───────────────────────────────────
         //
@@ -4588,6 +4716,541 @@ fn short_name(key: &str) -> String {
         h = h.wrapping_mul(0x0100_0193);
     }
     format!("{clean}_{:04x}", (h ^ (h >> 16)) & 0xffff)
+}
+
+// ── wave VEH3f.2a: THE SKINNED CARS AND THE WEAPONS ─────────────────────────
+
+/// UE centimetres into the glTF frame the exporter writes -- `(x, z, y) / 100`,
+/// MEASURED on the sedan's wheel bones (see `ue_skel_vehicles`). Note that
+/// [`ue_cm_to_world_m`] negates `y`: that is the fixtures' convention, and it
+/// is not what UE's glTF exporter does to geometry.
+fn ue_cm_to_gltf_m(c: [f64; 3]) -> glam::DVec3 {
+    glam::DVec3::new(c[0], c[2], c[1]) / 100.0
+}
+
+/// A UE `[x, y, z, w]` rotation into the glTF frame: the swap is a MIRROR, so
+/// the axis swaps and the sense of rotation flips (the vector part negates).
+fn ue_quat_to_gltf(q: [f64; 4]) -> glam::DQuat {
+    glam::DQuat::from_xyzw(-q[0], -q[2], -q[1], q[3]).normalize()
+}
+
+/// What a manifest material slot becomes in the engine (wave VEH3f.2a).
+fn slot_role(m: &Manifest, key: Option<&str>) -> super::ue_skel_vehicles::SlotRole {
+    use super::ue_skel_vehicles::SlotRole;
+    let Some(k) = key else {
+        return SlotRole::Plain;
+    };
+    let lk = k.to_ascii_lowercase();
+    let blend = m
+        .materials
+        .iter()
+        .find(|x| x.key == k)
+        .map(|x| x.blend.as_str())
+        .unwrap_or("opaque");
+    if lk.contains("carpaint") || lk.contains("car_paint") {
+        SlotRole::Paint
+    } else if blend == "blend" {
+        if lk.contains("glass") && !lk.contains("light") {
+            SlotRole::Glass
+        } else {
+            SlotRole::Hidden
+        }
+    } else {
+        SlotRole::Plain
+    }
+}
+
+/// **The engine's glass, as a material** -- `inf_ecs::vehicle::GLASS_COLOR`
+/// and the pane parts' own metallic/roughness, so a door's window drawn as a
+/// section reads as the same glass as a windscreen drawn as a VEH3c pane.
+fn engine_glass() -> MaterialAsset {
+    let g = inf_ecs::vehicle::GLASS_COLOR;
+    MaterialAsset {
+        base_color: [g.r, g.g, g.b, 1.0],
+        metallic: 0.10,
+        roughness: 0.08,
+        ..MaterialAsset::default()
+    }
+}
+
+/// **Write a mesh drawn in SECTIONS** (wave VEH3f.2a) -- the parent at `guid`,
+/// one single-slot mesh per slot at `inf_mesh::section_mesh_id`, and each
+/// slot's material at `inf_mesh::section_material_id` (none for paint: that
+/// section wears the entity's own surface). See `inf_mesh::section`.
+///
+/// Returns how many sections were written.
+#[allow(clippy::too_many_arguments)]
+fn write_sectioned(
+    project: &mut AssetProject,
+    dir: &Path,
+    stem: &str,
+    guid: AssetId,
+    mesh: &inf_mesh::MeshAsset,
+    slot_keys: &[Option<String>],
+    roles: &[super::ue_skel_vehicles::SlotRole],
+    mat_ids: &BTreeMap<String, AssetId>,
+    pack: &str,
+    report: &mut UeImportReport,
+) -> Result<usize> {
+    use super::ue_skel_vehicles::SlotRole;
+    let mut slots: Vec<u32> = mesh
+        .submeshes
+        .iter()
+        .filter(|s| !s.indices.is_empty())
+        .map(|s| s.material_slot.unwrap_or(0))
+        .collect();
+    slots.sort();
+    slots.dedup();
+    let mut deps: Vec<AssetId> = Vec::new();
+    for s in &slots {
+        let subs: Vec<inf_mesh::SubMesh> = mesh
+            .submeshes
+            .iter()
+            .filter(|x| x.material_slot.unwrap_or(0) == *s && !x.indices.is_empty())
+            .map(|x| inf_mesh::SubMesh {
+                material_slot: Some(0),
+                ..x.clone()
+            })
+            .collect();
+        let name = mesh
+            .material_slots
+            .get(*s as usize)
+            .cloned()
+            .unwrap_or_else(|| format!("slot{s}"));
+        let section = inf_mesh::MeshAsset::new(subs, vec![name]);
+        let sid = inf_mesh::section_mesh_id(guid, *s);
+        project.write_asset_at_with_id(
+            &dir.join(format!("{stem}__s{s:02}.inf_mesh")),
+            &section,
+            sid,
+            Vec::new(),
+            None,
+        )?;
+        report.asset_packs.push((sid, pack.to_string()));
+        deps.push(sid);
+        let role = roles.get(*s as usize).copied().unwrap_or(SlotRole::Plain);
+        let mat: Option<(MaterialAsset, Vec<AssetId>)> = match role {
+            SlotRole::Paint | SlotRole::Hidden => None,
+            SlotRole::Glass => Some((engine_glass(), Vec::new())),
+            SlotRole::Plain => slot_keys
+                .get(*s as usize)
+                .cloned()
+                .flatten()
+                .and_then(|k| mat_ids.get(&k).copied())
+                .and_then(|id| project.load_payload::<MaterialAsset>(id).ok())
+                .map(|m| {
+                    let t = m.texture_dependencies();
+                    (m, t)
+                }),
+        };
+        if let Some((mat, tex)) = mat {
+            let mid = inf_mesh::section_material_id(guid, *s);
+            project.write_asset_at_with_id(
+                &dir.join(format!("{stem}__s{s:02}.inf_mat")),
+                &mat,
+                mid,
+                tex,
+                None,
+            )?;
+            report.asset_packs.push((mid, pack.to_string()));
+            deps.push(mid);
+        }
+    }
+    for a in mesh.material_slot_assets.iter().flatten() {
+        if !deps.contains(a) {
+            deps.push(*a);
+        }
+    }
+    project.write_asset_at_with_id(
+        &dir.join(format!("{stem}.inf_mesh")),
+        mesh,
+        guid,
+        deps,
+        None,
+    )?;
+    report.asset_packs.push((guid, pack.to_string()));
+    Ok(slots.len())
+}
+
+/// A mesh's glTF LOD-0 file, off a manifest mesh record.
+fn mesh_lod0<'a>(m: &'a Manifest, key: &str) -> Option<(&'a Mesh, &'a str)> {
+    let mesh = m.meshes.iter().find(|x| x.key == key)?;
+    let f = mesh.lods.iter().find(|l| l.level == 0)?.file.as_deref()?;
+    Some((mesh, f))
+}
+
+/// **Import one skinned car** (wave VEH3f.2a) -- split it and write every part
+/// at the GUIDs `inf_ecs::vehicle_art` derives from its key, plus the measured
+/// numbers beside them. See `ue_skel_vehicles`.
+#[allow(clippy::too_many_arguments)]
+fn import_skel_vehicle(
+    project: &mut AssetProject,
+    base: &Path,
+    dest: &Path,
+    m: &Manifest,
+    v: &ManifestVehicle,
+    mat_ids: &BTreeMap<String, AssetId>,
+    report: &mut UeImportReport,
+) -> Result<()> {
+    use super::ue_skel_vehicles::{
+        skel_body_toml, split_skel_vehicle, SkelVehicleIn, SlotRole, SteeringMesh,
+    };
+    use inf_ecs::vehicle_art::{art_guid_named, Facing};
+    let Some(sk) = m.skeletal_meshes.iter().find(|s| s.key == v.skeletal) else {
+        report
+            .advisories
+            .push(format!("vehicle {}: no skeletal record {}", v.art, v.skeletal));
+        return Ok(());
+    };
+    let Some(file) = sk
+        .lods
+        .iter()
+        .find(|l| l.level == 0)
+        .and_then(|l| l.file.as_deref())
+    else {
+        report
+            .advisories
+            .push(format!("vehicle {}: LOD 0 exported no file", v.art));
+        return Ok(());
+    };
+    let t0 = std::time::Instant::now();
+    let g = inf_mesh::import_gltf(&base.join(file))
+        .map_err(|e| AssetError::Import(format!("vehicle {}: {e}", v.art)))?;
+    let Some(im) = g.meshes.iter().find(|x| x.skin.is_some()) else {
+        report
+            .advisories
+            .push(format!("vehicle {}: the glTF has no skinned mesh", v.art));
+        return Ok(());
+    };
+    let skel = &g.skeletons[im.skin.unwrap_or(0)].skeleton;
+    // The joints in the SKIN's order, world positions from the manifest's
+    // read-back by name (the one measured source of rest poses).
+    let joints: Vec<(String, glam::DVec3)> = skel
+        .joints()
+        .iter()
+        .map(|j| {
+            let w = sk
+                .joints
+                .iter()
+                .find(|mj| mj.name == j.name)
+                .map(|mj| glam::DVec3::from_array(mj.world_m))
+                .unwrap_or(glam::DVec3::ZERO);
+            (j.name.clone(), w)
+        })
+        .collect();
+    let facing = if v.forward.trim() == "+Y" {
+        Facing::PlusY
+    } else {
+        Facing::PlusX
+    };
+    let roles: Vec<SlotRole> = sk
+        .material_slots
+        .iter()
+        .map(|k| slot_role(m, k.as_deref()))
+        .collect();
+    let comp = |needle: &str| -> Option<&BpComponent> {
+        v.blueprint
+            .as_ref()?
+            .components
+            .iter()
+            .find(|c| c.name.to_ascii_lowercase().starts_with(needle))
+    };
+    let seat = comp("driver").map(|c| ue_cm_to_gltf_m(c.root_location_cm));
+    let camera = comp("camera_incar").map(|c| ue_cm_to_gltf_m(c.root_location_cm));
+    // The pack's separate steering-wheel mesh, placed by its component.
+    let mut steer_keys: Vec<Option<String>> = Vec::new();
+    let mut steer_roles: Vec<SlotRole> = Vec::new();
+    let steering = match comp("steering_wheel").and_then(|c| c.mesh.as_deref().map(|k| (c, k))) {
+        Some((c, key)) => match mesh_lod0(m, key) {
+            Some((rec, f)) => {
+                let sg = inf_mesh::import_gltf(&base.join(f))
+                    .map_err(|e| AssetError::Import(format!("steering {key}: {e}")))?;
+                steer_keys = rec.material_slots.clone();
+                steer_roles = steer_keys.iter().map(|k| slot_role(m, k.as_deref())).collect();
+                sg.meshes.first().map(|x| SteeringMesh {
+                    mesh: x.mesh.clone(),
+                    rotation: ue_quat_to_gltf(c.root_rotation_quat),
+                    translation: ue_cm_to_gltf_m(c.root_location_cm),
+                })
+            }
+            None => None,
+        },
+        None => None,
+    };
+    let door_proxy = !joints
+        .iter()
+        .any(|(n, _)| n.to_ascii_lowercase().contains("door"));
+    let split = split_skel_vehicle(&SkelVehicleIn {
+        art: &v.art,
+        facing,
+        mesh: &im.mesh,
+        joints: &joints,
+        roles: &roles,
+        steering,
+        seat,
+        camera,
+        door_proxy,
+    })
+    .map_err(AssetError::Import)?;
+    let dir = dest.join("Vehicles").join(&v.art);
+    std::fs::create_dir_all(&dir)?;
+    let guid = |part: &str| AssetId(art_guid_named(&v.art, part));
+    let mut sections = write_sectioned(
+        project,
+        &dir,
+        &format!("{}_body", v.art),
+        guid("body"),
+        &split.body,
+        &sk.material_slots,
+        &roles,
+        mat_ids,
+        &v.pack,
+        report,
+    )?;
+    for (i, w) in split.wheels.iter().enumerate() {
+        sections += write_sectioned(
+            project,
+            &dir,
+            &format!("{}_wheel{i}", v.art),
+            guid(&format!("wheel{i}")),
+            w,
+            &sk.material_slots,
+            &roles,
+            mat_ids,
+            &v.pack,
+            report,
+        )?;
+    }
+    let sliver = super::ue_vehicles::hidden_wheel(&split.body);
+    for p in &split.parts {
+        let id = guid(&p.name);
+        let stem = format!("{}_{}", v.art, p.name);
+        match &p.mesh {
+            // A pane is ONE glass surface and wears the rig's own glass: no
+            // sections.
+            Some(mesh) if p.name.starts_with("glass") => {
+                project.write_asset_at_with_id(
+                    &dir.join(format!("{stem}.inf_mesh")),
+                    mesh,
+                    id,
+                    Vec::new(),
+                    None,
+                )?;
+                report.asset_packs.push((id, v.pack.clone()));
+            }
+            Some(mesh) if p.name.starts_with("hub") && !steer_keys.is_empty() => {
+                sections += write_sectioned(
+                    project,
+                    &dir,
+                    &stem,
+                    id,
+                    mesh,
+                    &steer_keys,
+                    &steer_roles,
+                    mat_ids,
+                    &v.pack,
+                    report,
+                )?;
+            }
+            Some(mesh) => {
+                sections += write_sectioned(
+                    project,
+                    &dir,
+                    &stem,
+                    id,
+                    mesh,
+                    &sk.material_slots,
+                    &roles,
+                    mat_ids,
+                    &v.pack,
+                    report,
+                )?;
+            }
+            // A seat (the pack's own seats are drawn in the body) or a door
+            // proxy over fused art: a hidden sliver at the part's GUID, so
+            // nothing is drawn over the art and the committed fallback's box is
+            // not either.
+            None => {
+                project.write_asset_at_with_id(
+                    &dir.join(format!("{stem}.inf_mesh")),
+                    &sliver,
+                    id,
+                    Vec::new(),
+                    None,
+                )?;
+                report.asset_packs.push((id, v.pack.clone()));
+            }
+        }
+    }
+    let pack = m.packs.iter().find(|p| p.name == v.pack);
+    let licence = pack.map(|p| p.license.clone()).unwrap_or_default();
+    let fab = pack.map(|p| p.fab_url.clone()).unwrap_or_default();
+    let lods: Vec<(u32, u32)> = sk.lods.iter().map(|l| (l.level, l.triangles)).collect();
+    let bp_r = v
+        .blueprint
+        .as_ref()
+        .and_then(|b| b.wheels.first())
+        .map(|w| w.wheel_radius / 100.0);
+    let slot_names: Vec<(String, SlotRole)> = sk
+        .material_slots
+        .iter()
+        .zip(&roles)
+        .map(|(k, r)| (short_name(k.as_deref().unwrap_or("none")), *r))
+        .collect();
+    let toml = skel_body_toml(
+        &split,
+        &v.art,
+        sk.source.rsplit('.').next().unwrap_or(&sk.source),
+        &v.pack,
+        &v.forward,
+        &licence,
+        &fab,
+        &lods,
+        &slot_names,
+        bp_r,
+        door_proxy,
+    );
+    std::fs::write(dir.join(format!("{}.vehicle.toml", v.art)), toml)?;
+    // The recipe copies the committed FALLBACK into the content root at these
+    // same GUIDs; two files claiming one GUID is a registry that answers
+    // either, so the art replaces the copy (the VEH3f rule).
+    let mut dropped = 0usize;
+    let mut stems = vec![format!("{}_body", v.art)];
+    stems.extend((0..4).map(|i| format!("{}_wheel{i}", v.art)));
+    stems.extend(split.parts.iter().map(|p| format!("{}_{}", v.art, p.name)));
+    for stem in stems {
+        for ext in ["inf_mesh", "inf_mesh.toml"] {
+            let copy = project.root().join(format!("{stem}.{ext}"));
+            if copy.is_file() {
+                std::fs::remove_file(&copy)?;
+                dropped += 1;
+            }
+        }
+    }
+    report.advisories.push(format!(
+        "vehicle: {} <- {} ({} tris, {} hidden, {} wheels r {:.3} m, {} parts, {} sections, {} fallback files replaced) half-extents {:.3} x {:.3} x {:.3} m in {:.1} s",
+        v.art,
+        sk.key,
+        split.triangles,
+        split.hidden_triangles,
+        split.wheels.len(),
+        split.wheel_radius,
+        split.parts.len(),
+        sections,
+        dropped,
+        split.half_extents.x,
+        split.half_extents.y,
+        split.half_extents.z,
+        t0.elapsed().as_secs_f64(),
+    ));
+    report.vehicles.push((v.art.clone(), split.geometry()));
+    Ok(())
+}
+
+/// **Import one weapon at its committed identity** (wave VEH3f.2a) -- the
+/// rigid mesh at `weapon_mesh_guid(art)`, its magazine at `<art>_MAG`, and the
+/// MUZZLE and magazine seat measured off the skeletal twin (the rigid mesh
+/// carries no sockets; its skeleton's `muzzle` does), written beside them.
+fn import_weapon(
+    project: &mut AssetProject,
+    m: &Manifest,
+    w: &ManifestWeapon,
+    report: &mut UeImportReport,
+) -> Result<()> {
+    let find = |key: &str| report.meshes.iter().find(|x| x.0 == key).map(|x| x.1);
+    if find(&w.mesh).is_none() {
+        report
+            .advisories
+            .push(format!("weapon {}: mesh {} was not imported", w.art, w.mesh));
+        return Ok(());
+    }
+    let mut written = Vec::new();
+    for (key, stem) in [
+        (Some(w.mesh.clone()), w.art.clone()),
+        (w.magazine.clone(), format!("{}_MAG", w.art)),
+    ] {
+        let Some(key) = key else {
+            continue;
+        };
+        let Some(src) = find(&key) else {
+            continue;
+        };
+        let payload: inf_mesh::MeshAsset = project.load_payload(src)?;
+        let want = AssetId(inf_ecs::weapon::weapon_mesh_guid(&stem));
+        let deps: Vec<AssetId> = {
+            let mut out: Vec<AssetId> = Vec::new();
+            for a in payload.material_slot_assets.iter().flatten() {
+                if !out.contains(a) {
+                    out.push(*a);
+                }
+            }
+            out
+        };
+        let path = project.root().join(format!("{stem}.inf_mesh"));
+        project.write_asset_at_with_id(&path, &payload, want, deps, None)?;
+        report.rebinds.push((format!("{stem}.inf_mesh"), want));
+        report.asset_packs.push((want, w.pack.clone()));
+        written.push((stem, payload.triangle_count(), payload.bounds));
+    }
+    // The muzzle: the socket's offset composed with its bone's rest pose, in
+    // the weapon's own frame (the glTF's: length on +Z, up on +Y -- this
+    // engine's weapon frame, measured: the shotgun's muzzle end at z 0.7535).
+    let sk = w
+        .skeletal
+        .as_deref()
+        .and_then(|k| m.skeletal_meshes.iter().find(|s| s.key == k));
+    let joint = |name: &str| sk.and_then(|s| s.joints.iter().find(|j| j.name == name));
+    let muzzle = sk
+        .and_then(|s| {
+            s.sockets
+                .iter()
+                .find(|x| x.name.eq_ignore_ascii_case("muzzle"))
+        })
+        .and_then(|sock| {
+            let b = joint(&sock.bone)?;
+            let q = glam::DQuat::from_array(b.world_rotation).normalize();
+            Some(glam::DVec3::from_array(b.world_m) + q * ue_cm_to_gltf_m(sock.location_cm))
+        });
+    let magazine = sk
+        .and_then(|s| {
+            s.joints
+                .iter()
+                .find(|j| j.name.to_ascii_lowercase().starts_with("magazine"))
+        })
+        .map(|j| glam::DVec3::from_array(j.world_m));
+    let mut toml = format!(
+        "# {} -- the VEH3f.2a weapon bridge ({}); licence: {}\n",
+        w.art,
+        w.pack,
+        m.packs
+            .iter()
+            .find(|p| p.name == w.pack)
+            .map(|p| p.license.as_str())
+            .unwrap_or("")
+    );
+    for (stem, tris, b) in &written {
+        toml.push_str(&format!(
+            "# {stem}: {tris} triangles, bounds [{:.4}, {:.4}, {:.4}] .. [{:.4}, {:.4}, {:.4}] m\n",
+            b.min[0], b.min[1], b.min[2], b.max[0], b.max[1], b.max[2]
+        ));
+    }
+    toml.push_str(&format!("class = \"{}\"\n", w.class));
+    if let Some(p) = muzzle {
+        toml.push_str(&format!("muzzle_m = [{:.4}, {:.4}, {:.4}]\n", p.x, p.y, p.z));
+    }
+    if let Some(p) = magazine {
+        toml.push_str(&format!("magazine_m = [{:.4}, {:.4}, {:.4}]\n", p.x, p.y, p.z));
+    }
+    std::fs::write(project.root().join(format!("{}.weapon.toml", w.art)), toml)?;
+    report.advisories.push(format!(
+        "weapon: {} -> {} mesh(es), muzzle {}",
+        w.art,
+        written.len(),
+        muzzle
+            .map(|p| format!("({:.3}, {:.3}, {:.3}) m", p.x, p.y, p.z))
+            .unwrap_or_else(|| "NOT FOUND".to_string())
+    ));
+    Ok(())
 }
 
 impl Material {

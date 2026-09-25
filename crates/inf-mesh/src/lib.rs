@@ -21,6 +21,7 @@ pub mod gltf_import;
 pub mod obj_import;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod optimize;
+pub mod section;
 pub mod validate;
 
 pub use asset::{
@@ -28,6 +29,7 @@ pub use asset::{
     TANGENT_PLACEHOLDER,
 };
 pub use error::MeshError;
+pub use section::{section_material_id, section_mesh_id, MAX_SECTIONS};
 pub use fracture::{
     clamp_chunk_count, derived_fracture_id, fracture_mesh, ChunkSection, FractureAsset,
     FractureChunk, FractureParams, FractureSkip, DEFAULT_CHUNK_COUNT, FRACTURE_ID_SALT,

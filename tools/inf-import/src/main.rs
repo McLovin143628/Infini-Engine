@@ -17,7 +17,11 @@
 //!            [--wear-cloth <guid>]        put that `.inf_cloth` on every level's pawn
 //!            [--wearable <m|f>:<outfit|hair>:<key>[:<joint>]]…  wear it
 //!            [--vehicles]                split every roster machine into a chassis
-//!                                        and four wheels at its committed GUIDs (VEH3f)
+//!                                        and four wheels at its committed GUIDs (VEH3f),
+//!                                        and every skinned car of a v3 manifest into its
+//!                                        body, wheels, doors, panes and hub (VEH3f.2a)
+//!            [--weapons]                 write every v3 weapon at its committed identity,
+//!                                        with the muzzle off its skeleton's socket (VEH3f.2a)
 //!            [--dry-run]                 read the manifest, write nothing
 //! ```
 //!
@@ -136,6 +140,7 @@ fn run(args: &[String]) -> Result<(), String> {
             }
             "--no-meshes" => opts.meshes = false,
             "--vehicles" => opts.vehicles = true,
+            "--weapons" => opts.weapons = true,
             "--character-lods" => {
                 let v = take(&mut i)?;
                 opts.character_lods = v

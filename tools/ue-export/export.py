@@ -1411,7 +1411,105 @@ def skeletal_lod_count(sm):
     return 1, "assumed"
 
 
-def add_skeletal_mesh(path, pack):
+def skeletal_sockets(sm):
+    """A skeletal mesh's SOCKETS, raw (wave VEH3f.2a, gap B2).
+
+    `SkeletalMesh.get_socket_by_index` answers in a commandlet; a transient
+    `SkeletalMeshComponent` does NOT -- measured: every bone reads a zero
+    transform there, because an unregistered component has no pose. So a socket
+    crosses as what the asset stores: the BONE it hangs off and its offset in
+    that bone's own frame, UE centimetres and degrees. The importer composes it
+    with the bone's rest pose read off the glTF, which is the one measured
+    source of bone poses this bridge has.
+    """
+    out = []
+    try:
+        for i in range(sm.num_sockets()):
+            s = sm.get_socket_by_index(i)
+            loc = s.get_editor_property("relative_location")
+            rot = s.get_editor_property("relative_rotation")
+            out.append({
+                "name": str(s.get_editor_property("socket_name")),
+                "bone": str(s.get_editor_property("bone_name")),
+                "location_cm": [float(loc.x), float(loc.y), float(loc.z)],
+                "rotation_deg": [float(rot.roll), float(rot.pitch), float(rot.yaw)],
+            })
+    except Exception as e:
+        ERRORS.append("skeletal sockets on %s: %s" % (sm.get_path_name(), e))
+    return out
+
+
+def qmul(a, b):
+    """Hamilton product, glTF `[x, y, z, w]` order."""
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return [aw * bx + ax * bw + ay * bz - az * by,
+            aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw,
+            aw * bw - ax * bx - ay * by - az * bz]
+
+
+def qrot(q, v):
+    """`v` rotated by unit quaternion `q` (glTF order)."""
+    x, y, z, w = q
+    p = qmul(qmul(q, [v[0], v[1], v[2], 0.0]), [-x, -y, -z, w])
+    return p[:3]
+
+
+def bones_from_gltf(dst):
+    """The skin's joints as the written glTF carries them (wave VEH3f.2a, B2):
+    name, parent, local TRS and the WORLD translation/rotation composed down the
+    joint chain -- in the glTF frame, metres, read back off the artifact rather
+    than asked of an API that answers zeros in a commandlet."""
+    try:
+        with open(dst, "r", encoding="utf-8") as f:
+            j = json.load(f)
+    except Exception as e:
+        ERRORS.append("bones of %s: %s" % (dst, e))
+        return []
+    nodes = j.get("nodes", [])
+    skins = j.get("skins", [])
+    if not skins:
+        return []
+    joints = skins[0].get("joints", [])
+    parent_of = {}
+    for i, n in enumerate(nodes):
+        for c in n.get("children", []):
+            parent_of[c] = i
+    world = {}
+
+    def world_of(i, depth=0):
+        if i in world:
+            return world[i]
+        n = nodes[i]
+        t = n.get("translation", [0.0, 0.0, 0.0])
+        r = n.get("rotation", [0.0, 0.0, 0.0, 1.0])
+        p = parent_of.get(i)
+        if p is None or depth > 256:
+            world[i] = (list(t), list(r))
+        else:
+            pt, pr = world_of(p, depth + 1)
+            rt = qrot(pr, t)
+            world[i] = ([pt[0] + rt[0], pt[1] + rt[1], pt[2] + rt[2]], qmul(pr, r))
+        return world[i]
+
+    out = []
+    for i in joints:
+        n = nodes[i]
+        p = parent_of.get(i)
+        wt, wr = world_of(i)
+        out.append({
+            "name": n.get("name", ""),
+            "parent": nodes[p].get("name") if (p is not None and p in joints) else None,
+            "translation_m": n.get("translation", [0.0, 0.0, 0.0]),
+            "rotation": n.get("rotation", [0.0, 0.0, 0.0, 1.0]),
+            "world_m": wt,
+            "world_rotation": wr,
+        })
+    return out
+
+
+def add_skeletal_mesh(path, pack, lod_limit=None):
     if path in SKELETAL:
         return SKELETAL[path]["key"]
     sm = unreal.load_asset(path)
@@ -1420,8 +1518,13 @@ def add_skeletal_mesh(path, pack):
         return None
     k = key_of(path)
     nlods, via = skeletal_lod_count(sm)
+    if lod_limit is not None:
+        nlods = min(nlods, lod_limit)
     rec = {"key": k, "source": path, "pack": pack, "lods": [],
-           "material_slots": [], "lod_count_via": via}
+           "material_slots": [], "lod_count_via": via,
+           # wave VEH3f.2a (manifest v3): the skeleton's own sockets, raw, and
+           # the joints read back off LOD 0's glTF below.
+           "sockets": skeletal_sockets(sm), "joints": []}
     SKELETAL[path] = rec
     try:
         sk = sm.get_editor_property("skeleton")
@@ -1456,6 +1559,8 @@ def add_skeletal_mesh(path, pack):
             if ok and os.path.isfile(dst):
                 entry["file"] = name
                 entry.update(gltf_facts(dst))
+                if lod == 0:
+                    rec["joints"] = bones_from_gltf(dst)
             else:
                 ERRORS.append("skeletal gltf %s LOD%d did not write" % (path, lod))
         rec["lods"].append(entry)
@@ -1771,6 +1876,289 @@ def run_characters():
     return packs
 
 
+# ── THE VEHICLE + WEAPON PACKS (wave VEH3f.2a) ───────────────────────────────
+#
+# Three car packs and one weapon pack, each LOCAL-ONLY: Fab content whose
+# licence tier the user has not yet confirmed, so every row says so and every
+# row's `ship` is False. Nothing this writes may enter the engine repository
+# (`engine_checkout_above` refuses the destination; the importer refuses its
+# own). Epic's CitySampleVehicles and MilitaryWeapDark are NOT here: UE-only
+# content is reference for proportions, never an import.
+#
+# A pack names the uproject it lives in only as a note -- `-run=pythonscript`
+# runs against whichever `.uproject` is on the command line, and a pack whose
+# content is not mounted in that project simply finds nothing (its rows log
+# "not loaded" and the manifest says so). `forward` is the axis the pack's
+# vehicles face IN UNREAL'S OWN FRAME: every car here faces UE +X; the
+# construction pack VEH3f imported faces +Y. The importer turns +X into this
+# engine's forward, so a car is never imported facing sideways by assumption.
+
+LICENCE_FAB = "Fab Standard -- user to confirm tier before ship"
+
+VEHICLE_PACKS = [
+    {
+        "name": "DrivableCarsBasicVehicleS",
+        "project": "DrivableCarsBasicVehicleS",
+        "fab_url": "https://www.fab.com/listings/990042be-cdea-4411-b052-e994bfded322",
+        "license": LICENCE_FAB,
+        "ship": False,
+        "forward": "+X",
+        "vehicles": [
+            {"art": "dd_sedan",
+             "skeletal": "/Game/DD_Vehicles_Basic/Meshes/sedane/SK_sedane_LOD0.SK_sedane_LOD0",
+             "blueprint": "/Game/DD_Vehicles_Basic/Blueprints/Vehicles/BP_Sedan_Child.BP_Sedan_Child"},
+            {"art": "dd_hatch",
+             "skeletal": "/Game/DD_Vehicles_Basic/Meshes/Hatchback/SK_hatchback_LOD0.SK_hatchback_LOD0",
+             "blueprint": "/Game/DD_Vehicles_Basic/Blueprints/Vehicles/BP_Hatchback_Child.BP_Hatchback_Child"},
+            {"art": "dd_suv",
+             "skeletal": "/Game/DD_Vehicles_Basic/Meshes/SUV/SK_SUV_LOD0.SK_SUV_LOD0",
+             "blueprint": "/Game/DD_Vehicles_Basic/Blueprints/Vehicles/BP_SUV_Child.BP_SUV_Child"},
+        ],
+    },
+    {
+        "name": "VehicleVarietyPackVolume2",
+        "project": "VehicleVarietyPackVolume2",
+        "fab_url": "https://www.fab.com/listings/591e3b3f-9d49-4cd2-8e28-d471c1a10cab",
+        "license": LICENCE_FAB,
+        "ship": False,
+        "forward": "+X",
+        "vehicles": [
+            {"art": "vvp2_sedan",
+             "skeletal": "/Game/VehicleVarietyVol2/Skeletons/SK_Sedan_01a.SK_Sedan_01a",
+             "blueprint": "/Game/VehicleVarietyVol2/Blueprints/Sedan/BP_Sedan_Chaos.BP_Sedan_Chaos"},
+            {"art": "vvp2_suv",
+             "skeletal": "/Game/VehicleVarietyVol2/Skeletons/SK_SUV_01a.SK_SUV_01a",
+             "blueprint": "/Game/VehicleVarietyVol2/Blueprints/SUV/BP_SUV_Chaos.BP_SUV_Chaos"},
+            {"art": "vvp2_camper",
+             "skeletal": "/Game/VehicleVarietyVol2/Skeletons/SK_CamperVan_01a.SK_CamperVan_01a",
+             "blueprint": "/Game/VehicleVarietyVol2/Blueprints/Campervan/BP_Campervan_Chaos.BP_Campervan_Chaos"},
+            {"art": "vvp2_box_truck",
+             "skeletal": "/Game/VehicleVarietyVol2/Skeletons/SK_BoxTruck_01a.SK_BoxTruck_01a",
+             "blueprint": "/Game/VehicleVarietyVol2/Blueprints/BoxTruck/BP_BoxTruck_Chaos.BP_BoxTruck_Chaos"},
+        ],
+    },
+    {
+        # Vol.1's Blueprints parent `/Script/PhysXVehicles`, a module UE5 does not
+        # have, so they are not read; its meshes load and cross.
+        "name": "VehicleVarietyPack",
+        "project": "OpenWorld_Project 5.8",
+        "fab_url": "https://www.fab.com/listings/dc1ada50-2523-44b1-b0e2-a72d14076fb4",
+        "license": LICENCE_FAB,
+        "ship": False,
+        "forward": "+X",
+        "vehicles": [
+            {"art": "vvp1_hatch",
+             "skeletal": "/Game/VehicleVarietyPack/Skeletons/SK_Hatchback.SK_Hatchback"},
+            {"art": "vvp1_pickup",
+             "skeletal": "/Game/VehicleVarietyPack/Skeletons/SK_Pickup.SK_Pickup"},
+            {"art": "vvp1_sports",
+             "skeletal": "/Game/VehicleVarietyPack/Skeletons/SK_SportsCar.SK_SportsCar"},
+            {"art": "vvp1_suv",
+             "skeletal": "/Game/VehicleVarietyPack/Skeletons/SK_SUV.SK_SUV"},
+            {"art": "vvp1_box_truck",
+             "skeletal": "/Game/VehicleVarietyPack/Skeletons/SK_Truck_Box.SK_Truck_Box"},
+            {"art": "vvp1_cab_chassis",
+             "skeletal": "/Game/VehicleVarietyPack/Skeletons/SK_Truck_Chassis.SK_Truck_Chassis"},
+        ],
+    },
+]
+
+MW = "/Game/MarketplaceBlockout/Modern/Weapons/Assets"
+
+WEAPON_PACKS = [
+    {
+        "name": "MarketplaceBlockout",
+        "project": "OpenWorld_Project 5.8",
+        "fab_url": "https://www.fab.com/listings/b6e3d970-e841-4bc7-ad23-c4d07126eb1f",
+        "license": LICENCE_FAB,
+        "ship": False,
+        # The classes WPN2d left drawing primitives (shotgun, launcher) and the
+        # pistol it substituted an SMG for, plus the revolvers.
+        "weapons": [("Shotguns", "Shotgun", n) for n in ("01", "02", "03", "04")]
+                   + [("Launchers", "Launcher", n) for n in ("01", "02", "03")]
+                   + [("Pistols", "Pistol", n) for n in ("01", "02", "03", "04")]
+                   + [("Revolvers", "Revolver", n) for n in ("01", "02")],
+    },
+]
+
+VEHICLES = []   # the manifest's `vehicles` section
+WEAPONS = []    # the manifest's `weapons` section
+
+
+def ue_rot_quat(t):
+    """A UE transform's rotation as `[x, y, z, w]`, UE's own frame."""
+    q = t.rotation
+    return [float(q.x), float(q.y), float(q.z), float(q.w)]
+
+
+def blueprint_defaults(bp_path, pack):
+    """A vehicle Blueprint's COMPONENT DEFAULTS and its wheel setup (wave
+    VEH3f.2a, gaps B10/B11) -- the seat, the steering wheel, the hand-grip IK
+    targets, the in-car camera, the Chaos wheel radius.
+
+    A child Blueprint's overrides live in its `InheritableComponentHandler`,
+    which is protected; the gather below returns the PARENT's templates for an
+    inherited component (measured: `BP_Sedan_Child`'s Driver read the base car's
+    (12.77, ...) where the child sets (15.37, ...)). The override template is an
+    object named after the component under the generated class, and
+    `find_object` answers it -- so each component is read from the override
+    when there is one and the SCS template otherwise, and the row says which.
+
+    Every transform is recorded twice: relative to its SCS parent, raw, and
+    composed down to the actor ROOT (`MathLibrary.compose_transforms`), UE
+    centimetres. A component with a static mesh names it, and the mesh crosses
+    through `add_mesh` (the steering wheel is a separate mesh in one pack).
+    """
+    bp = unreal.load_asset(bp_path)
+    if bp is None:
+        ERRORS.append("blueprint not loaded: %s" % bp_path)
+        return None
+    out = {"source": bp_path, "components": [], "wheels": [], "movement": {}}
+    try:
+        gen = bp.generated_class()
+        gp = gen.get_path_name()
+        sub = unreal.get_engine_subsystem(unreal.SubobjectDataSubsystem)
+        handles = sub.k2_gather_subobject_data_for_blueprint(bp)
+        rel = {}
+        parent = {}
+        order = []
+        seen = set()
+        for h in handles:
+            d = unreal.SubobjectDataBlueprintFunctionLibrary.get_data(h)
+            o = unreal.SubobjectDataBlueprintFunctionLibrary.get_object(d)
+            if o is None or o.get_name() in seen:
+                continue
+            seen.add(o.get_name())
+            ov = unreal.find_object(None, gp + ":" + o.get_name())
+            c = ov if ov is not None else o
+            pname = None
+            try:
+                ph = unreal.SubobjectDataBlueprintFunctionLibrary.get_parent_handle(d)
+                pd = unreal.SubobjectDataBlueprintFunctionLibrary.get_data(ph)
+                po = unreal.SubobjectDataBlueprintFunctionLibrary.get_object(pd)
+                pname = po.get_name() if po is not None else None
+            except Exception:
+                pname = None
+            if not isinstance(c, unreal.SceneComponent):
+                continue
+            rel[c.get_name()] = c.get_relative_transform()
+            parent[c.get_name()] = pname
+            row = {"name": c.get_name(), "class": type(c).__name__,
+                   "parent": pname, "override": ov is not None, "mesh": None}
+            if isinstance(c, unreal.StaticMeshComponent):
+                m = c.get_editor_property("static_mesh")
+                if m is not None and not m.get_path_name().startswith("/Engine/"):
+                    row["mesh"] = add_mesh(m, pack)
+            order.append(row)
+        root_of = {}
+
+        def root(name, depth=0):
+            if name in root_of:
+                return root_of[name]
+            t = rel[name]
+            p = parent.get(name)
+            if p in rel and depth < 64:
+                t = unreal.MathLibrary.compose_transforms(t, root(p, depth + 1))
+            root_of[name] = t
+            return t
+
+        for row in order:
+            r = rel[row["name"]]
+            w = root(row["name"])
+            row["location_cm"] = [float(r.translation.x), float(r.translation.y), float(r.translation.z)]
+            row["rotation_quat"] = ue_rot_quat(r)
+            row["root_location_cm"] = [float(w.translation.x), float(w.translation.y), float(w.translation.z)]
+            row["root_rotation_quat"] = ue_rot_quat(w)
+            out["components"].append(row)
+    except Exception as e:
+        ERRORS.append("blueprint components %s: %s" % (bp_path, e))
+    try:
+        cdo = unreal.get_default_object(bp.generated_class())
+        mv = cdo.get_editor_property("vehicle_movement_component")
+        for p in ("mass", "drag_coefficient", "chassis_width", "chassis_height"):
+            try:
+                out["movement"][p] = float(mv.get_editor_property(p))
+            except Exception:
+                pass
+        for w in mv.get_editor_property("wheel_setups"):
+            wc = w.get_editor_property("wheel_class")
+            wcdo = unreal.get_default_object(wc) if wc else None
+            row = {"bone": str(w.get_editor_property("bone_name")),
+                   "class": wc.get_name() if wc else None}
+            for p in ("wheel_radius", "wheel_width", "max_steer_angle", "spring_rate",
+                      "spring_preload", "suspension_max_drop", "suspension_max_raise"):
+                try:
+                    row[p] = float(wcdo.get_editor_property(p))
+                except Exception:
+                    pass
+            out["wheels"].append(row)
+    except Exception as e:
+        ERRORS.append("blueprint movement %s: %s" % (bp_path, e))
+    say("  bp %-36s components=%d wheels=%d" %
+        (bp_path.rsplit(".", 1)[-1], len(out["components"]), len(out["wheels"])))
+    return out
+
+
+def run_vehicles():
+    packs = []
+    for pack in VEHICLE_PACKS:
+        if ONLY and pack["name"] not in ONLY:
+            continue
+        say("VEHPACK %s (forward %s)" % (pack["name"], pack["forward"]))
+        packs.append({"name": pack["name"], "license": pack["license"],
+                      "ship": pack["ship"], "fab_url": pack["fab_url"],
+                      "forward": pack["forward"], "selectors": []})
+        for v in pack["vehicles"]:
+            try:
+                key = add_skeletal_mesh(v["skeletal"], pack["name"])
+            except Exception as e:
+                ERRORS.append("%s: %s" % (v["skeletal"], e))
+                traceback.print_exc()
+                key = None
+            if key is None:
+                say("  ! %s not loaded in this project" % v["art"])
+                continue
+            bp = blueprint_defaults(v["blueprint"], pack["name"]) if v.get("blueprint") else None
+            VEHICLES.append({"art": v["art"], "pack": pack["name"],
+                             "forward": pack["forward"], "skeletal": key,
+                             "blueprint": bp})
+            say("  vehicle %-18s <- %s" % (v["art"], key))
+    return packs
+
+
+def run_weapons():
+    packs = []
+    for pack in WEAPON_PACKS:
+        if ONLY and pack["name"] not in ONLY:
+            continue
+        say("WPNPACK %s" % pack["name"])
+        packs.append({"name": pack["name"], "license": pack["license"],
+                      "ship": pack["ship"], "fab_url": pack["fab_url"],
+                      "selectors": []})
+        for folder, cls, n in pack["weapons"]:
+            base = "%s/%s/%s" % (MW, folder, n)
+            stem = "Modern_Weapons_%s_%s" % (cls, n)
+            sm = unreal.load_asset("%s/SM_%s.SM_%s" % (base, stem, stem))
+            if sm is None:
+                say("  ! %s not loaded in this project" % stem)
+                continue
+            rec = {"art": ("SM_MW_%s_%s" % (cls, n)).upper(), "pack": pack["name"],
+                   "class": cls.lower(), "mesh": add_mesh(sm, pack["name"]),
+                   "magazine": None, "skeletal": None}
+            for suffix in ("_Mag", "_Magazine"):
+                mag = unreal.load_asset("%s/SM_%s%s.SM_%s%s" % (base, stem, suffix, stem, suffix))
+                if mag is not None:
+                    rec["magazine"] = add_mesh(mag, pack["name"])
+                    break
+            # The skeletal twin carries the `muzzle` socket and the moving
+            # joints; LOD 0 only -- it crosses for its skeleton, not its skin.
+            rec["skeletal"] = add_skeletal_mesh("%s/SKM_%s.SKM_%s" % (base, stem, stem),
+                                                pack["name"], lod_limit=1)
+            WEAPONS.append(rec)
+            say("  weapon %-24s mag=%s" % (rec["art"], rec["magazine"] is not None))
+    return packs
+
+
 # ── the animation INVENTORY (wave CHAR1a.2) ─────────────────────────────────
 #
 # An `AnimSequence` crosses this bridge as a `.inf_anim`. Nothing else does —
@@ -2026,6 +2414,8 @@ def run():
                     traceback.print_exc()
 
     packs.extend(run_characters())
+    packs.extend(run_vehicles())
+    packs.extend(run_weapons())
 
     t1 = datetime.datetime.now(datetime.timezone.utc)
     manifest = {
@@ -2036,7 +2426,12 @@ def run():
         # the same law the `.ipack` header carries: a newer container is
         # rejected by name, and a reader that grows an arm keys it on the
         # version rather than reinterpreting the bytes.
-        "schema_version": 2,
+        # **v3 (wave VEH3f.2a)**: `vehicles` and `weapons` are new SECTIONS, a
+        # skeletal record carries `joints` (read back off its LOD-0 glTF) and
+        # `sockets` (raw, bone-relative), and a pack carries `fab_url` and
+        # `forward`. Bumped for the v2 reason: a v2 reader would import the
+        # meshes, ignore the vehicles and report success.
+        "schema_version": 3,
         "generator": "tools/ue-export/export.py",
         "engine": unreal.SystemLibrary.get_engine_version(),
         "project": unreal.Paths.get_project_file_path(),
@@ -2061,6 +2456,8 @@ def run():
         "movement_sets": movement_sets(),
         "materials": sorted(MATERIALS.values(), key=lambda r: r["key"]),
         "fixtures": sorted(FIXTURES.values(), key=lambda r: r["key"]),
+        "vehicles": sorted(VEHICLES, key=lambda r: r["art"]),
+        "weapons": sorted(WEAPONS, key=lambda r: r["art"]),
         "textures": sorted(TEXTURES.values(), key=lambda r: r["key"]),
         "errors": ERRORS,
     }

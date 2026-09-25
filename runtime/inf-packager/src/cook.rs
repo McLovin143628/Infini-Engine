@@ -1146,6 +1146,26 @@ fn drawn_meshes(inputs: &[CookInput]) -> BTreeSet<AssetId> {
             }
         }
     }
+    // **AND WHAT THE ENGINE ITSELF DRAWS RIGIDLY** (wave VEH3f.2a): the weapon
+    // in a hand and traffic's imported bodies are drawn through a `MeshRef` no
+    // level holds, so the threshold's premise ("there is a cheaper path") is as
+    // false for them as for a level's own. A 1 172-triangle pistol under the
+    // 2 048 default drew nothing in a shipped build.
+    out.extend(
+        inf_ecs::weapon::engine_spawned_meshes()
+            .into_iter()
+            .chain(inf_ecs::roster::engine_spawned_art_meshes())
+            .map(AssetId),
+    );
+    // …and every SECTION of every drawn mesh: a section is drawn in its parent's
+    // place (`inf_mesh::section`), so it is drawn whatever its size. An id with
+    // no asset behind it is inert here.
+    let parents: Vec<AssetId> = out.iter().copied().collect();
+    for m in parents {
+        for s in 0..inf_mesh::MAX_SECTIONS {
+            out.insert(inf_mesh::section_mesh_id(m, s));
+        }
+    }
     out
 }
 
@@ -2230,6 +2250,16 @@ fn asset_deps(db: &AssetDb, id: AssetId, unreadable: &mut BTreeSet<String>) -> V
             // the AR4's committed identity and drew nothing at all.
             deps.extend(
                 inf_ecs::weapon::engine_spawned_meshes()
+                    .into_iter()
+                    .map(AssetId),
+            );
+            // **AND THE IMPORTED BODIES TRAFFIC SPAWNS** (wave VEH3f.2a), on the
+            // same argument: a roster car traffic builds is named by no entity,
+            // and its art -- the local project's, or the committed fallback --
+            // is what it draws. A body's SECTIONS ride in on the body's own
+            // dependency edges (`inf_mesh::section`).
+            deps.extend(
+                inf_ecs::roster::engine_spawned_art_meshes()
                     .into_iter()
                     .map(AssetId),
             );

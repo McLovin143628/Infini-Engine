@@ -75,7 +75,15 @@ pub struct VmeshRegistry {
     /// because a 1 m box at the entity's transform is a claim about the world
     /// that no author made — and the reason it is not silent is this set.
     missing: Mutex<HashSet<Uuid>>,
+    /// **Each mesh's drawn SECTIONS** (wave VEH3f.2a), found by computing their
+    /// ids (`inf_mesh::section_mesh_id`) the first time a mesh is asked about
+    /// and remembered: `(slot, vmesh id)` in slot order, empty for a mesh drawn
+    /// whole -- which is every mesh an importer did not section.
+    sections: Mutex<HashMap<Uuid, Arc<[(u32, Uuid)]>>>,
 }
+
+/// One drawn section of a sectioned mesh: its slot, and its DAG.
+pub type VmeshSection = (u32, u128, Arc<VgeomSource>);
 
 impl VmeshRegistry {
     pub fn new() -> Self {
@@ -98,6 +106,10 @@ impl VmeshRegistry {
     /// Register a source under its asset GUID (used by loaders + tests).
     pub fn insert(&mut self, vmesh_id: Uuid, source: Arc<VgeomSource>) {
         self.meshes.insert(vmesh_id, source);
+        // A new DAG can be some mesh's section: forget what was found.
+        if let Ok(mut c) = self.sections.lock() {
+            c.clear();
+        }
     }
 
     /// Index an in-memory [`VgeomMesh`](inf_vgeom::VgeomMesh) — the door for tests
@@ -109,6 +121,9 @@ impl VmeshRegistry {
     ) -> Result<(), String> {
         self.meshes
             .insert(vmesh_id, Arc::new(VgeomSource::from_mesh(mesh)?));
+        if let Ok(mut c) = self.sections.lock() {
+            c.clear();
+        }
         Ok(())
     }
 
@@ -243,6 +258,34 @@ impl VmeshRegistry {
                 None
             }
         }
+    }
+
+    /// **The drawn sections of `mesh_id`** (wave VEH3f.2a), slot order -- empty
+    /// for a mesh drawn whole. See `inf_mesh::section` for the arrangement; a
+    /// section whose DAG is absent is simply not listed (the parent is then
+    /// drawn whole, which is what a checkout without the local art does).
+    pub fn sections(&self, mesh_id: Uuid) -> Vec<VmeshSection> {
+        let ids: Arc<[(u32, Uuid)]> = {
+            let Ok(mut cache) = self.sections.lock() else {
+                return Vec::new();
+            };
+            cache
+                .entry(mesh_id)
+                .or_insert_with(|| {
+                    (0..inf_mesh::MAX_SECTIONS)
+                        .filter_map(|s| {
+                            let sid = inf_mesh::section_mesh_id(AssetId(mesh_id), s).uuid();
+                            let v = derived_vmesh_id(sid);
+                            self.meshes.contains_key(&v).then_some((s, v))
+                        })
+                        .collect::<Vec<_>>()
+                        .into()
+                })
+                .clone()
+        };
+        ids.iter()
+            .filter_map(|(s, v)| self.meshes.get(v).map(|m| (*s, v.as_u128(), m.clone())))
+            .collect()
     }
 
     /// **Say what will not be drawn, once** (wave FIX2).

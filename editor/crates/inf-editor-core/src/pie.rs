@@ -1135,7 +1135,18 @@ where
     // The walk below finds what the DOCUMENT names; a weapon in a character's
     // hand is an entity the FIXED STEP spawns on a derived guid, so its mesh was
     // on no wire and the hero held an invisible rifle.
-    let engine_meshes = inf_ecs::weapon::engine_spawned_meshes();
+    // …and (wave VEH3f.2a) the imported bodies traffic spawns, on the same
+    // terms: `inf_ecs::roster::engine_spawned_art_meshes` is the list the cook
+    // closes over too.
+    let engine_meshes: Vec<Uuid> = {
+        let mut v = inf_ecs::weapon::engine_spawned_meshes();
+        v.extend(inf_ecs::roster::engine_spawned_art_meshes());
+        v.sort();
+        v.dedup();
+        v
+    };
+    // Every rigid mesh this payload draws, for the section materials below.
+    let mut drawn_meshes: Vec<Uuid> = Vec::new();
     for &guid in doc.order().iter().chain(engine_meshes.iter()) {
         // An engine-named mesh is an ASSET id and not an entity guid, so it goes
         // straight to the resolver; a document entity is looked up first.
@@ -1155,6 +1166,25 @@ where
         };
         if !seen_vmesh.insert(mesh) {
             continue;
+        }
+        drawn_meshes.push(mesh);
+        // **A sectioned mesh's SECTIONS** (wave VEH3f.2a): each is drawn in its
+        // parent's place, so each DAG rides the wire beside the parent's, by
+        // the id the player computes (`inf_mesh::section_mesh_id`).
+        for slot in 0..inf_mesh::MAX_SECTIONS {
+            let sid = inf_mesh::section_mesh_id(inf_asset::AssetId(mesh), slot).uuid();
+            match resolve_vmesh(sid) {
+                Some(VmeshRef::Path(path)) => {
+                    if let Some(p) = path.to_str() {
+                        vmesh_paths.push((
+                            inf_vgeom::derived_vmesh_id(inf_asset::AssetId(sid)).uuid(),
+                            p.to_string(),
+                        ));
+                    }
+                }
+                Some(VmeshRef::Stale) => stale_vmeshes.push(sid),
+                None => {}
+            }
         }
         match resolve_vmesh(mesh) {
             Some(VmeshRef::Path(path)) => match path.to_str() {
@@ -1373,6 +1403,16 @@ where
             continue;
         };
         bound.extend(mesh.material_slot_assets.iter().flatten().map(|a| a.uuid()));
+    }
+    // **AND EVERY SECTIONED MESH'S SECTION MATERIALS** (wave VEH3f.2a) -- the
+    // player's `material_content` probes the same computed ids in its pack.
+    for mesh in &drawn_meshes {
+        for slot in 0..inf_mesh::MAX_SECTIONS {
+            let mid = inf_mesh::section_material_id(inf_asset::AssetId(*mesh), slot).uuid();
+            if resolve_bytes(mid).is_some() {
+                bound.push(mid);
+            }
+        }
     }
     for asset in bound {
         if !seen_material.insert(asset) {

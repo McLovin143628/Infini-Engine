@@ -331,17 +331,22 @@ pub fn seat_geoms(
     let w = world.world();
     let mut out = Vec::new();
     for child in world.children_of(chassis) {
-        let named = world
-            .name_of(child)
-            .is_some_and(|n| n.starts_with(SEAT_PART_PREFIX));
-        if !named || w.get::<crate::components::MeshRef>(child).is_none() {
+        // The drawn steering wheel rides with the seats (wave VEH3f.2a): the
+        // hub is a cabin socket like the cushion, and a caller that skipped
+        // the full parts census must still put the hands on the drawn rim.
+        let kind = match world.name_of(child) {
+            Some(n) if n.starts_with(SEAT_PART_PREFIX) => KIND_SEAT,
+            Some(n) if n.starts_with(HUB_PART_PREFIX) => KIND_HUB,
+            _ => continue,
+        };
+        if w.get::<crate::components::MeshRef>(child).is_none() {
             continue;
         }
         let Some(t) = w.get::<Transform>(child) else {
             continue;
         };
         out.push(crate::boarding::PartGeom {
-            kind: KIND_SEAT,
+            kind,
             centre_frac: Vec3d::new(
                 (t.translation.x - collider.offset.x) / hx,
                 (t.translation.y - collider.offset.y) / hy,
@@ -352,6 +357,8 @@ pub fn seat_geoms(
                 0.5 * t.scale.y.abs() / hy,
                 0.5 * t.scale.z.abs() / hz,
             ),
+            // A drawn wheel's rake is its own pitch (wave VEH3f.2a).
+            rake_deg: if kind == KIND_HUB { t.rotation.x } else { 0.0 },
         });
     }
     out
@@ -360,6 +367,31 @@ pub fn seat_geoms(
 /// The name prefix a drawn seat part carries (wave VEH3f) -- `seat_r`,
 /// `seat_l`.
 pub const SEAT_PART_PREFIX: &str = "seat";
+
+/// The name prefix a drawn steering wheel carries (wave VEH3f.2a) -- `hub`.
+pub const HUB_PART_PREFIX: &str = "hub";
+
+/// **A drawn steering wheel's rotation** (wave VEH3f.2a) at column rake
+/// `rake_deg` and rim angle `rim_deg`, euler YXZ degrees -- the part's whole
+/// local rotation.
+///
+/// The wheel's mesh is written in its COLUMN frame (the rim in local `XY`, the
+/// column along local `+Z`, pointing at the driver), so the column's rest
+/// orientation is a yaw of 180 degrees and a pitch of the RAKE -- the pack's
+/// own, measured by the importer and carried in the art table, and the same
+/// number the grips' plane reads back off this transform
+/// (`inf_ecs::boarding::wheel_grips`) -- and the rack's turn is the innermost
+/// roll. A positive `rim_deg` rolls the rim the way the grips ride with it,
+/// so a hand on the rim and the rim under it turn together.
+pub fn hub_rim_euler(rake_deg: f64, rim_deg: f64) -> Vec3d {
+    let rim = if rim_deg.is_finite() { rim_deg } else { 0.0 };
+    let rake = if rake_deg.is_finite() {
+        rake_deg
+    } else {
+        crate::boarding::WHEEL_RAKE_DEG
+    };
+    Vec3d::new(rake, 180.0, rim)
+}
 
 /// **The box a chassis collider fills**, whatever shape it was authored as.
 ///
@@ -1658,6 +1690,12 @@ pub enum BodyPartKind {
     /// **A loading ramp** (wave VEH3g) -- hinged at its forward edge like a
     /// boot lid, swinging its tail DOWN ([`ramp_hinge`]). The Titan's.
     Ramp { hinge: Hinge },
+    /// **A drawn steering wheel** (wave VEH3f.2a) -- the art's own wheel on its
+    /// column. Never shed, never dented, and READ:
+    /// `inf_ecs::boarding::sockets_of` puts the driver's hub on its centre and
+    /// the rim at its radius, and the vehicle step turns it with the rack
+    /// (`hub_rim_euler`), so the hands grip a rim that is drawn and moves.
+    Hub,
 }
 
 /// **A door's hinge**: about the VERTICAL, at the door's own forward edge.
@@ -1776,6 +1814,8 @@ pub const KIND_GLASS: u8 = 5;
 pub const KIND_SEAT: u8 = 6;
 /// The same, for a [`BodyPartKind::Ramp`] (wave VEH3g) -- appended.
 pub const KIND_RAMP: u8 = 7;
+/// The same, for a [`BodyPartKind::Hub`] (wave VEH3f.2a) -- appended.
+pub const KIND_HUB: u8 = 8;
 
 impl BodyPartKind {
     /// The frozen wire number this kind folds as — **append only**, exactly as
@@ -1791,6 +1831,7 @@ impl BodyPartKind {
             BodyPartKind::Glass => KIND_GLASS,
             BodyPartKind::Seat => KIND_SEAT,
             BodyPartKind::Ramp { .. } => KIND_RAMP,
+            BodyPartKind::Hub => KIND_HUB,
         }
     }
 
@@ -1805,6 +1846,7 @@ impl BodyPartKind {
             BodyPartKind::Glass => "glass",
             BodyPartKind::Seat => "seat",
             BodyPartKind::Ramp { .. } => "ramp",
+            BodyPartKind::Hub => "hub",
         }
     }
 
@@ -1830,12 +1872,18 @@ impl BodyPartKind {
     /// **Whether this kind can come off at all.** A panel is the body: it
     /// dents, it is written off, and it stays bolted to what it is part of.
     pub fn sheds(self) -> bool {
-        !matches!(self, BodyPartKind::Panel | BodyPartKind::Seat)
+        !matches!(
+            self,
+            BodyPartKind::Panel | BodyPartKind::Seat | BodyPartKind::Hub
+        )
     }
 
     /// **Whether this kind DENTS.** Glass does not bend; it breaks.
     pub fn dents(self) -> bool {
-        !matches!(self, BodyPartKind::Glass | BodyPartKind::Seat)
+        !matches!(
+            self,
+            BodyPartKind::Glass | BodyPartKind::Seat | BodyPartKind::Hub
+        )
     }
 
     /// **The share of a crash's impulse that flows through this part's own
@@ -1868,7 +1916,7 @@ impl BodyPartKind {
             BodyPartKind::Glass => 0.14,
             // Inside the cabin: nothing reaches it that has not gone through a
             // door or a bulkhead first.
-            BodyPartKind::Seat => 0.0,
+            BodyPartKind::Seat | BodyPartKind::Hub => 0.0,
         }
     }
 
@@ -1895,7 +1943,7 @@ impl BodyPartKind {
             BodyPartKind::Bumper => 20.0,
             BodyPartKind::Glass => 12.5,
             // Never sheds, so it never needs a mass.
-            BodyPartKind::Seat => 0.0,
+            BodyPartKind::Seat | BodyPartKind::Hub => 0.0,
         }
     }
 
@@ -1941,6 +1989,7 @@ impl BodyPartKind {
     /// | `bumper` | [`Bumper`](BodyPartKind::Bumper) |
     /// | `glass` | [`Glass`](BodyPartKind::Glass) |
     /// | `seat` | [`Seat`](BodyPartKind::Seat) (wave VEH3f) |
+    /// | `hub` | [`Hub`](BodyPartKind::Hub) (wave VEH3f.2a) |
     /// | anything else | [`Panel`](BodyPartKind::Panel) |
     ///
     /// The parts tables declare the same fact in their own
@@ -1967,6 +2016,8 @@ impl BodyPartKind {
             KIND_SEAT
         } else if name.starts_with("ramp") {
             KIND_RAMP
+        } else if name.starts_with("hub") {
+            KIND_HUB
         } else {
             KIND_PANEL
         };
@@ -2004,6 +2055,7 @@ impl BodyPartKind {
             KIND_BUMPER => BodyPartKind::Bumper,
             KIND_GLASS => BodyPartKind::Glass,
             KIND_SEAT => BodyPartKind::Seat,
+            KIND_HUB => BodyPartKind::Hub,
             KIND_RAMP => BodyPartKind::Ramp {
                 hinge: Hinge::of(KIND_RAMP, centre, half).unwrap_or(Hinge {
                     axis: Vec3d::new(1.0, 0.0, 0.0),
@@ -3605,11 +3657,21 @@ pub fn rig_nodes_at(
     // hangs the machine's own mesh on one `art_body` part below. Its doors,
     // bonnet and glass are fused into the art, so there is nothing a box proxy
     // over them would honestly be.
-    let body_parts = def
-        .body
-        .parts()
+    //
+    // **AND AN ART BODY WITH PARTS OF ITS OWN** (wave VEH3f.2a) draws THOSE and
+    // none of its family's: the pack's doors on their hinge bones, its panes,
+    // its steering wheel, and a seat where the pack's Blueprint seats its
+    // driver -- each part's mesh at `art_part_guid` (the local art, or the
+    // committed fallback of our own boxes).
+    let art_parts: &'static [BodyPart] = def.art.map(|k| k.parts()).unwrap_or(&[]);
+    let family: &'static [BodyPart] = if art_parts.is_empty() {
+        def.body.parts()
+    } else {
+        art_parts
+    };
+    let body_parts = family
         .iter()
-        .filter(|p| def.art.is_none() || p.kind == BodyPartKind::Seat)
+        .filter(|p| def.art.is_none() || !art_parts.is_empty() || p.kind == BodyPartKind::Seat)
         .map(|p| {
             let paint = spawn.livery.and_then(|l| l.part(p.name));
             (*p, paint)
@@ -3624,7 +3686,7 @@ pub fn rig_nodes_at(
         // Built from the unliveried material and then overwritten, so a part
         // with no override is BYTE-IDENTICAL to what this loop wrote before the
         // livery existed rather than merely equal to it by inspection.
-        let mut material = if part.kind == BodyPartKind::Seat {
+        let mut material = if part.kind == BodyPartKind::Seat || part.kind == BodyPartKind::Hub {
             // **A seat is upholstery** (wave VEH3f): dark, matte, never the
             // body's paint -- it is seen through the glass, and a cushion in the
             // car's own red reads as a hole in the cabin.
@@ -3660,6 +3722,12 @@ pub fn rig_nodes_at(
             material.emissive = p.emissive;
             material.emissive_intensity = p.emissive_intensity;
         }
+        // An art part draws its own mesh; a family part its hero panel or its
+        // primitive, exactly as before.
+        let art_asset = def
+            .art
+            .filter(|_| !art_parts.is_empty())
+            .map(|k| crate::roster::art_part_guid(k, part.name));
         out.push(RigNode {
             guid: part_guid(part.name),
             name: part.name.to_string(),
@@ -3670,7 +3738,18 @@ pub fn rig_nodes_at(
                     part.centre.y * h.y,
                     part.centre.z * h.z,
                 ),
-                rotation: Vec3d::ZERO,
+                // A drawn steering wheel rests on its column (wave VEH3f.2a);
+                // every other part is axis-aligned, as every part always was.
+                rotation: if part.kind == BodyPartKind::Hub {
+                    hub_rim_euler(
+                        def.art
+                            .and_then(|k| k.body().hub_rake_deg)
+                            .unwrap_or(crate::boarding::WHEEL_RAKE_DEG),
+                        0.0,
+                    )
+                } else {
+                    Vec3d::ZERO
+                },
                 // The built-in primitives span ±0.5, so a part's SCALE is its
                 // full extent — twice its half-extent.
                 scale: Vec3d::new(
@@ -3689,10 +3768,11 @@ pub fn rig_nodes_at(
                 // (hinges, sheds, dents) moves the mesh exactly as it moved the
                 // box. Every other part, and every row without a set, draws its
                 // primitive as it always has.
-                asset: def
-                    .body_mesh
-                    .filter(|_| hero_parts(def.body).contains(&part.name))
-                    .map(|base| hero_part_mesh_guid(base, part.name)),
+                asset: art_asset.or_else(|| {
+                    def.body_mesh
+                        .filter(|_| hero_parts(def.body).contains(&part.name))
+                        .map(|base| hero_part_mesh_guid(base, part.name))
+                }),
             }),
             material: Some(material),
             class: None,

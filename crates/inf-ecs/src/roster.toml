@@ -108,15 +108,15 @@ label = "Pfister Comet S2"
 
 [pfister_comet_s2.vehicle]
 class = "coupe"
-half_width_m = 0.95
-half_height_m = 0.56
-half_length_m = 2.285
+half_width_m = 1.1209
+half_height_m = 0.491
+half_length_m = 2.1804
 mass_kg = 1450.0
 drag_coefficient = 0.39
-wheel_radius_m = 0.34
-half_track_m = 0.817
-half_wheelbase_m = 1.371
-wheel_drop_m = -0.42
+wheel_radius_m = 0.3413
+half_track_m = 0.8421
+half_wheelbase_m = 1.2718
+wheel_drop_m = -0.3641
 cog_height_m = -0.31
 stiffness_n_per_m = 55050.0
 damping_ns_per_m = 4470.0
@@ -132,6 +132,8 @@ brake_force_n = 16360.0
 handbrake_force_n = 7360.0
 cylinders = 6.0
 downforce_n_per_mps2 = 0.9
+wheel_offset_z_m = -0.0793
+art = "vvp1_sports"
 
 # Ubermacht Sentinel Classic -- inspired by the BMW M3 E46 -- high-revving inline-6 European classic.
 # 1570 kg on 0.17 m of travel: 38 % static by construction (k = m g / 4 / (travel x 0.38)).
@@ -758,15 +760,15 @@ label = "Karin Asterope GZ"
 
 [karin_asterope_gz.vehicle]
 class = "sedan"
-half_width_m = 0.92
-half_height_m = 0.62
-half_length_m = 2.45
+half_width_m = 1.0612
+half_height_m = 0.6238
+half_length_m = 2.4844
 mass_kg = 1600.0
 drag_coefficient = 0.28
-wheel_radius_m = 0.33
-half_track_m = 0.7912
-half_wheelbase_m = 1.47
-wheel_drop_m = -0.49
+wheel_radius_m = 0.351
+half_track_m = 0.6848
+half_wheelbase_m = 1.4472
+wheel_drop_m = -0.5703
 cog_height_m = -0.3
 stiffness_n_per_m = 44590.0
 damping_ns_per_m = 4220.0
@@ -781,6 +783,8 @@ max_engine_force_n = 20170.0
 brake_force_n = 16480.0
 handbrake_force_n = 7420.0
 cylinders = 6.0
+wheel_offset_z_m = -0.0342
+art = "dd_sedan"
 
 # Dinka Sugoi -- inspired by the Honda Civic Type R -- front-drive hyper-hatch.
 # 1430 kg on 0.22 m of travel: 40 % static by construction (k = m g / 4 / (travel x 0.40)).
@@ -791,15 +795,15 @@ label = "Dinka Sugoi"
 class = "sedan"
 body = "hatch"
 differential = "lsd"
-half_width_m = 0.945
-half_height_m = 0.605
-half_length_m = 2.295
+half_width_m = 0.9849
+half_height_m = 0.6567
+half_length_m = 2.206
 mass_kg = 1430.0
 drag_coefficient = 0.33
-wheel_radius_m = 0.33
-half_track_m = 0.8127
-half_wheelbase_m = 1.377
-wheel_drop_m = -0.475
+wheel_radius_m = 0.3512
+half_track_m = 0.6919
+half_wheelbase_m = 1.3564
+wheel_drop_m = -0.5727
 cog_height_m = -0.285
 stiffness_n_per_m = 39850.0
 damping_ns_per_m = 3770.0
@@ -815,6 +819,8 @@ brake_force_n = 14730.0
 handbrake_force_n = 6630.0
 cylinders = 4.0
 turbo_boost_max = 0.6
+wheel_offset_z_m = -0.0923
+art = "dd_hatch"
 
 # Ubermacht Oracle XS -- inspired by the BMW 7 Series E65 -- full-size European luxury autobahn cruiser.
 # 1950 kg on 0.22 m of travel: 40 % static by construction (k = m g / 4 / (travel x 0.40)).
@@ -1092,15 +1098,15 @@ label = "Cheval Fugitive"
 class = "sedan"
 drivetrain = "rwd"
 differential = "lsd"
-half_width_m = 0.95
-half_height_m = 0.635
-half_length_m = 2.5
+half_width_m = 1.0754
+half_height_m = 0.6332
+half_length_m = 2.464
 mass_kg = 1800.0
 drag_coefficient = 0.32
-wheel_radius_m = 0.33
-half_track_m = 0.817
-half_wheelbase_m = 1.5
-wheel_drop_m = -0.505
+wheel_radius_m = 0.3156
+half_track_m = 0.8535
+half_wheelbase_m = 1.3637
+wheel_drop_m = -0.575
 cog_height_m = -0.315
 stiffness_n_per_m = 50160.0
 damping_ns_per_m = 4750.0
@@ -1115,6 +1121,8 @@ max_engine_force_n = 26190.0
 brake_force_n = 18540.0
 handbrake_force_n = 8340.0
 cylinders = 8.0
+wheel_offset_z_m = 0.1118
+art = "vvp2_sedan"
 
 # Bravado Buffalo STX -- inspired by the Dodge Charger SRT Hellcat -- widebody supercharged muscle sedan.
 # 2100 kg on 0.22 m of travel: 40 % static by construction (k = m g / 4 / (travel x 0.40)).
@@ -1257,15 +1265,15 @@ label = "Declasse Asea"
 [declasse_asea.vehicle]
 class = "sedan"
 body = "hatch"
-half_width_m = 0.855
-half_height_m = 0.65
-half_length_m = 2.2
+half_width_m = 0.9005
+half_height_m = 0.543
+half_length_m = 1.9711
 mass_kg = 1150.0
 drag_coefficient = 0.33
-wheel_radius_m = 0.33
-half_track_m = 0.7353
-half_wheelbase_m = 1.32
-wheel_drop_m = -0.52
+wheel_radius_m = 0.274
+half_track_m = 0.6906
+half_wheelbase_m = 1.19
+wheel_drop_m = -0.5103
 cog_height_m = -0.33
 stiffness_n_per_m = 32050.0
 damping_ns_per_m = 3040.0
@@ -1280,6 +1288,8 @@ max_engine_force_n = 9620.0
 brake_force_n = 11850.0
 handbrake_force_n = 5330.0
 cylinders = 4.0
+wheel_offset_z_m = -0.0074
+art = "vvp1_hatch"
 
 # Coil Raiden -- inspired by the Tesla Model S Plaid -- instant-torque triple-motor electric sedan.
 # 2160 kg on 0.22 m of travel: 40 % static by construction (k = m g / 4 / (travel x 0.40)).
@@ -1426,15 +1436,15 @@ label = "Obey Rocoto"
 
 [obey_rocoto.vehicle]
 class = "suv"
-half_width_m = 0.99
-half_height_m = 0.73
-half_length_m = 2.46
+half_width_m = 1.1325
+half_height_m = 0.7158
+half_length_m = 2.3198
 mass_kg = 2200.0
 drag_coefficient = 0.35
-wheel_radius_m = 0.4
-half_track_m = 0.8514
-half_wheelbase_m = 1.476
-wheel_drop_m = -0.57
+wheel_radius_m = 0.4024
+half_track_m = 0.8155
+half_wheelbase_m = 1.43
+wheel_drop_m = -0.7459
 cog_height_m = -0.27
 stiffness_n_per_m = 49410.0
 damping_ns_per_m = 3960.0
@@ -1450,6 +1460,8 @@ brake_force_n = 21150.0
 handbrake_force_n = 9520.0
 cylinders = 6.0
 turbo_boost_max = 0.5
+wheel_offset_z_m = 0.0411
+art = "dd_suv"
 
 # Pegassi Toros -- inspired by the Lamborghini Urus -- Italian V8 super-SUV.
 # 2200 kg on 0.26 m of travel: 42 % static by construction (k = m g / 4 / (travel x 0.42)).
@@ -1586,15 +1598,15 @@ label = "Bravado Gresley"
 
 [bravado_gresley.vehicle]
 class = "suv"
-half_width_m = 0.965
-half_height_m = 0.78
-half_length_m = 2.55
+half_width_m = 1.1929
+half_height_m = 0.7778
+half_length_m = 2.5552
 mass_kg = 2400.0
 drag_coefficient = 0.37
-wheel_radius_m = 0.4
-half_track_m = 0.8299
-half_wheelbase_m = 1.53
-wheel_drop_m = -0.62
+wheel_radius_m = 0.3701
+half_track_m = 0.776
+half_wheelbase_m = 1.4091
+wheel_drop_m = -0.7213
 cog_height_m = -0.32
 stiffness_n_per_m = 53900.0
 damping_ns_per_m = 4320.0
@@ -1609,6 +1621,8 @@ max_engine_force_n = 35750.0
 brake_force_n = 23070.0
 handbrake_force_n = 10380.0
 cylinders = 8.0
+wheel_offset_z_m = 0.2457
+art = "vvp2_suv"
 
 # Karin BJ XL -- inspired by the Toyota FJ Cruiser -- retro-styled off-road four-door SUV.
 # 2000 kg on 0.26 m of travel: 42 % static by construction (k = m g / 4 / (travel x 0.42)).
@@ -1885,15 +1899,15 @@ label = "Vapid Radius"
 [vapid_radius.vehicle]
 class = "suv"
 drivetrain = "fwd"
-half_width_m = 0.965
-half_height_m = 0.745
-half_length_m = 2.39
+half_width_m = 0.9825
+half_height_m = 0.7344
+half_length_m = 2.1061
 mass_kg = 1900.0
 drag_coefficient = 0.36
-wheel_radius_m = 0.4
-half_track_m = 0.8299
-half_wheelbase_m = 1.434
-wheel_drop_m = -0.585
+wheel_radius_m = 0.3525
+half_track_m = 0.7822
+half_wheelbase_m = 1.3228
+wheel_drop_m = -0.6896
 cog_height_m = -0.285
 stiffness_n_per_m = 42670.0
 damping_ns_per_m = 3420.0
@@ -1909,6 +1923,8 @@ brake_force_n = 18270.0
 handbrake_force_n = 8220.0
 cylinders = 4.0
 turbo_boost_max = 0.5
+wheel_offset_z_m = 0.1168
+art = "vvp1_suv"
 
 # Benefactor Dubsta -- inspired by the Mercedes-Benz G-Class -- boxy tri-lock-differential off-road icon.
 # 2560 kg on 0.26 m of travel: 42 % static by construction (k = m g / 4 / (travel x 0.42)).
@@ -2293,15 +2309,15 @@ label = "Declasse Yosemite Rancher"
 class = "truck"
 drivetrain = "awd"
 differential = "locked"
-half_width_m = 1.0
-half_height_m = 0.835
-half_length_m = 2.4
+half_width_m = 0.9557
+half_height_m = 0.6291
+half_length_m = 2.1451
 mass_kg = 2100.0
 drag_coefficient = 0.5
-wheel_radius_m = 0.46
-half_track_m = 0.86
-half_wheelbase_m = 1.488
-wheel_drop_m = -0.655
+wheel_radius_m = 0.3081
+half_track_m = 0.6624
+half_wheelbase_m = 1.2771
+wheel_drop_m = -0.5993
 cog_height_m = -0.335
 stiffness_n_per_m = 47160.0
 damping_ns_per_m = 3780.0
@@ -2316,6 +2332,8 @@ max_engine_force_n = 25610.0
 brake_force_n = 19570.0
 handbrake_force_n = 8810.0
 cylinders = 8.0
+wheel_offset_z_m = 0.1194
+art = "vvp1_pickup"
 
 # Canis Kamcho -- inspired by the Jeep Gladiator Rubicon -- open-bed 4x4 utility pickup.
 # 2300 kg on 0.26 m of travel: 42 % static by construction (k = m g / 4 / (travel x 0.42)).
@@ -3665,15 +3683,15 @@ label = "HVY Flatbed"
 [hvy_flatbed.vehicle]
 class = "utility"
 body = "flatbed"
-half_width_m = 1.25
-half_height_m = 1.41
-half_length_m = 4.5
+half_width_m = 1.5317
+half_height_m = 1.1079
+half_length_m = 3.3485
 mass_kg = 10000.0
 drag_coefficient = 0.75
-wheel_radius_m = 0.5
-half_track_m = 1.075
-half_wheelbase_m = 2.61
-wheel_drop_m = -1.19
+wheel_radius_m = 0.4338
+half_track_m = 0.8839
+half_wheelbase_m = 1.9816
+wheel_drop_m = -0.9594
 cog_height_m = -0.69
 stiffness_n_per_m = 268910.0
 damping_ns_per_m = 25930.0
@@ -3688,6 +3706,8 @@ max_engine_force_n = 57670.0
 brake_force_n = 78480.0
 handbrake_force_n = 35320.0
 cylinders = 6.0
+wheel_offset_z_m = 0.044
+art = "vvp1_cab_chassis"
 
 # JoBuilt Hauler -- inspired by the Peterbilt 379 -- classic long-nose highway semi.
 # 9500 kg on 0.22 m of travel: 33 % static by construction (k = m g / 6 / (travel x 0.33)).
@@ -3863,15 +3883,15 @@ label = "Brute Boxville"
 [brute_boxville.vehicle]
 class = "cargo"
 body = "van"
-half_width_m = 1.2
-half_height_m = 1.41
-half_length_m = 3.65
+half_width_m = 1.5317
+half_height_m = 1.5204
+half_length_m = 3.6607
 mass_kg = 7500.0
 drag_coefficient = 0.65
-wheel_radius_m = 0.45
-half_track_m = 1.032
-half_wheelbase_m = 2.117
-wheel_drop_m = -1.24
+wheel_radius_m = 0.4342
+half_track_m = 0.8839
+half_wheelbase_m = 1.9816
+wheel_drop_m = -1.3236
 cog_height_m = -0.59
 stiffness_n_per_m = 212890.0
 damping_ns_per_m = 19980.0
@@ -3887,6 +3907,8 @@ brake_force_n = 55180.0
 handbrake_force_n = 24830.0
 cylinders = 8.0
 engine_voice_kind = 0.0
+wheel_offset_z_m = 0.3561
+art = "vvp1_box_truck"
 
 # MTL Flatbed Cargo -- inspired by the International WorkStar -- an open stake-bed heavy material truck.
 # 12000 kg on 0.24 m of travel: 36 % static by construction (k = m g / 6 / (travel x 0.36)).
@@ -4366,15 +4388,15 @@ label = "Vapid Speedo"
 
 [vapid_speedo.vehicle]
 class = "van"
-half_width_m = 1.0
-half_height_m = 0.94
-half_length_m = 2.95
+half_width_m = 1.355
+half_height_m = 1.2843
+half_length_m = 2.7349
 mass_kg = 2700.0
 drag_coefficient = 0.45
-wheel_radius_m = 0.38
-half_track_m = 0.86
-half_wheelbase_m = 1.77
-wheel_drop_m = -0.78
+wheel_radius_m = 0.4489
+half_track_m = 0.8609
+half_wheelbase_m = 1.5268
+wheel_drop_m = -1.24
 cog_height_m = -0.36
 stiffness_n_per_m = 68980.0
 damping_ns_per_m = 6140.0
@@ -4389,6 +4411,8 @@ max_engine_force_n = 32210.0
 brake_force_n = 25160.0
 handbrake_force_n = 11320.0
 cylinders = 8.0
+wheel_offset_z_m = 0.2967
+art = "vvp2_box_truck"
 
 # Bravado Rumpo Custom -- inspired by the Dodge Ram Van -- a lifted 4x4 high-top utility van.
 # 2600 kg on 0.24 m of travel: 40 % static by construction (k = m g / 4 / (travel x 0.40)).
@@ -4430,15 +4454,15 @@ label = "Declasse Burrito"
 
 [declasse_burrito.vehicle]
 class = "van"
-half_width_m = 1.0
-half_height_m = 0.94
-half_length_m = 3.05
+half_width_m = 1.2998
+half_height_m = 1.3092
+half_length_m = 2.9879
 mass_kg = 2900.0
 drag_coefficient = 0.45
-wheel_radius_m = 0.38
-half_track_m = 0.86
-half_wheelbase_m = 1.83
-wheel_drop_m = -0.78
+wheel_radius_m = 0.3898
+half_track_m = 0.8018
+half_wheelbase_m = 1.844
+wheel_drop_m = -1.2749
 cog_height_m = -0.36
 stiffness_n_per_m = 74090.0
 damping_ns_per_m = 6600.0
@@ -4453,6 +4477,8 @@ max_engine_force_n = 34610.0
 brake_force_n = 27030.0
 handbrake_force_n = 12160.0
 cylinders = 8.0
+wheel_offset_z_m = 0.3516
+art = "vvp2_camper"
 
 # Benefactor Surfer -- inspired by the Volkswagen Type 2 -- a classic rear-engine camper van.
 # 1300 kg on 0.24 m of travel: 40 % static by construction (k = m g / 4 / (travel x 0.40)).

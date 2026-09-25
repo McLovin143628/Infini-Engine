@@ -245,6 +245,10 @@ pub struct EditorRenderAssets {
     /// Opened vmesh sources by **mesh** GUID. `None` is a negative entry: this
     /// mesh has no usable DAG, so stop trying every frame.
     vgeom: HashMap<Uuid, Option<LoadedVgeom>>,
+    /// **Each mesh's section ids** (wave VEH3f.2a): `(slot, section mesh id)`
+    /// for the sections whose derived DAG the project holds -- probed once per
+    /// mesh by computed id, dropped with the rest of the loaded payloads.
+    rigid_sections: HashMap<Uuid, Arc<[(u32, Uuid)]>>,
     /// Bind-space skinned geometry by **mesh GUID** — see `skinned_geometry`
     /// (round-2 finding R2-1). The skeleton is not part of the value and was
     /// never part of it.
@@ -417,6 +421,8 @@ impl EditorRenderAssets {
     /// Forget one mesh asset's opened payloads (a targeted re-import invalidation).
     pub fn invalidate(&mut self, mesh_id: Uuid) {
         self.vgeom.remove(&mesh_id);
+        // A re-imported mesh (or section) can move any parent's section list.
+        self.rigid_sections.clear();
         self.skinned.remove(&mesh_id);
         self.scatter.remove(&mesh_id);
         self.rescanned_for.clear();
@@ -424,6 +430,7 @@ impl EditorRenderAssets {
 
     fn drop_loaded(&mut self) {
         self.vgeom.clear();
+        self.rigid_sections.clear();
         self.skinned.clear();
         self.skeletons.clear();
         self.clips.clear();
@@ -458,6 +465,38 @@ impl EditorRenderAssets {
         let loaded = self.open_vgeom(mesh_id);
         self.vgeom.insert(mesh_id, loaded.clone());
         loaded
+    }
+
+    /// **The drawn SECTIONS of `mesh_id`** (wave VEH3f.2a), slot order: each
+    /// section's mesh id (for the caller's live set), the material id its
+    /// surface is looked up by (`inf_mesh::section_material_id`, computed here so
+    /// the viewport crate names no mesh crate) and its loaded DAG. Empty for a
+    /// mesh drawn whole. MIRROR of the player's `VmeshRegistry::sections`: the
+    /// same computed ids, the same slot order.
+    pub fn resolve_sections(&mut self, mesh_id: Uuid) -> Vec<(Uuid, u128, LoadedVgeom)> {
+        let ids: Arc<[(u32, Uuid)]> = match self.rigid_sections.get(&mesh_id) {
+            Some(hit) => hit.clone(),
+            None => {
+                let found: Vec<(u32, Uuid)> = (0..inf_mesh::MAX_SECTIONS)
+                    .map(|s| (s, inf_mesh::section_mesh_id(inf_asset::AssetId(mesh_id), s).uuid()))
+                    .filter(|(_, sid)| {
+                        let v = inf_vgeom::derived_vmesh_id(inf_asset::AssetId(*sid)).uuid();
+                        self.resolve_path(v).is_some()
+                    })
+                    .collect();
+                let arc: Arc<[(u32, Uuid)]> = found.into();
+                self.rigid_sections.insert(mesh_id, arc.clone());
+                arc
+            }
+        };
+        ids.iter()
+            .filter_map(|(s, sid)| {
+                let mat = inf_mesh::section_material_id(inf_asset::AssetId(mesh_id), *s)
+                    .uuid()
+                    .as_u128();
+                self.resolve_vgeom(*sid).map(|l| (*sid, mat, l))
+            })
+            .collect()
     }
 
     fn open_vgeom(&mut self, mesh_id: Uuid) -> Option<LoadedVgeom> {
@@ -840,6 +879,7 @@ impl EditorRenderAssets {
         // lookup borrows `self` mutably (it caches) and the entity walk borrows
         // the document.
         let mut skinned: BTreeSet<Uuid> = BTreeSet::new();
+        let mut rigid: BTreeSet<Uuid> = BTreeSet::new();
         let world = doc.world();
         let w = world.world();
         for &guid in doc.order() {
@@ -865,6 +905,21 @@ impl EditorRenderAssets {
                 w.get::<inf_ecs::components::SkeletalMesh>(entity)
                     .and_then(|s| s.mesh),
             );
+            rigid.extend(
+                w.get::<inf_ecs::components::MeshRef>(entity)
+                    .and_then(|m| m.asset),
+            );
+        }
+        // **AND A SECTIONED MESH'S SECTION MATERIALS** (wave VEH3f.2a) -- named
+        // by computed id, the skinned slots' reason one mesh kind over; the
+        // player's `material_content` and the PIE payload probe the same ids.
+        for mesh in rigid {
+            for s in 0..inf_mesh::MAX_SECTIONS {
+                let mid = inf_mesh::section_material_id(inf_asset::AssetId(mesh), s).uuid();
+                if self.resolve_path(mid).is_some() {
+                    bindings.insert(mid);
+                }
+            }
         }
         // **AND THE SKINNED MESH'S MATERIAL SLOTS** (wave CHAR1a.3). A
         // slot is named by the `.inf_mesh`, not by any component, so a body
