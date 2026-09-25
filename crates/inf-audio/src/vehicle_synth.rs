@@ -801,7 +801,9 @@ mod tests {
                 "{name} is not deterministic"
             );
         }
-        assert!(vehicle_clip_pcm(31).is_empty());
+        // One past the last clip is empty (VEH3g grew the table from 31 to
+        // 36: the rotor, the propeller, the turbine and the two hull clips).
+        assert!(vehicle_clip_pcm(VEHICLE_CLIP_NAMES.len() as u8).is_empty());
     }
 
     /// **THE FIRING PERIOD IS IN THE SAMPLES** — counted, per family and per

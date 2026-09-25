@@ -629,8 +629,15 @@ fn every_aeroplane_lifts_off_inside_the_islands_runway() {
         runway.length_m, runway.name
     );
     println!(
-        "  row                        mass t   Vs m/s   rotate deg   roll m   to 35 ft m   \
-         lift-off m/s   climb m/s"
+        "  {:26} {:>6}  {:>6}  {:>10}  {:>7}  {:>10}  {:>12}  {:>9}",
+        "row",
+        "mass t",
+        "Vs m/s",
+        "rotate deg",
+        "roll m",
+        "to 35 ft m",
+        "lift-off m/s",
+        "climb m/s"
     );
     let mut longest = 0.0f64;
     let mut rows = Vec::new();
@@ -905,7 +912,10 @@ fn collective(want_vs: f64, vs: f64) -> f64 {
 /// end of the hover), then 10 s of forward stick covering 100 m.
 #[test]
 fn five_helicopters_lift_off_hover_and_translate() {
-    println!("  row                       climb m   hover |vs|   forward m   at m/s");
+    println!(
+        "  {:26} {:>7}   {:>10}   {:>9}   {:>6}",
+        "row", "climb m", "hover |vs|", "forward m", "at m/s"
+    );
     for id in [
         "nagasaki_buzzard",
         "buckingham_maverick",
@@ -1345,7 +1355,10 @@ fn the_police_helicopter_flies_its_air_lane_and_never_the_road() {
 #[test]
 fn a_planing_hull_rises_and_a_displacement_hull_does_not() {
     println!("THE DRAUGHT TABLE (flat water, full power; draught off the hull's world position):");
-    println!("  row                   planes at   rest m    v m/s:draught m every 10 s");
+    println!(
+        "  {:22} {:>9}   {:>6}    v m/s:draught m every 10 s",
+        "row", "planes at", "rest m"
+    );
     let mut csv = Vec::new();
     let mut planed = 0usize;
     for id in [

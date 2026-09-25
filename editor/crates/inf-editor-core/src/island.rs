@@ -2112,7 +2112,11 @@ pub const EMS_APRON_OFFSET_M: f64 = 6.0;
 pub const POLICE_HELI_ROW: &str = "buckingham_maverick";
 
 /// How many parking pitches past the civilian helipad the police pad stands.
-pub const POLICE_PAD_SLOTS: usize = 2;
+///
+/// FOUR, measured: at two the pad sat 3 m from the tractor-trailer VEH3f
+/// parks at Harbour City's station and the two chassis overlapped
+/// (`veh3f_gate::the_real_islands_kerbs_step_around_its_fleets`).
+pub const POLICE_PAD_SLOTS: usize = 4;
 
 /// **The longest paved segment an airstrip is split into**, metres (wave
 /// VEH3g) -- under the island's 256 m partition cell, so a segment is binned in

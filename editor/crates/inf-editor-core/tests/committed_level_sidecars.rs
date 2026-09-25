@@ -356,11 +356,16 @@ fn the_islands_only_wheel_less_vehicles_are_the_ones_it_placed() {
             .collect::<Vec<_>>()
             .join("\n  ")
     );
+    // THREE since wave VEH3g: the launch, VEH2c's helicopter, and Air One --
+    // the police helicopter on Harbour City's pad (`island::POLICE_HELI_ROW`),
+    // which the dispatcher flies along its air lane. The four aeroplanes the
+    // airfield parks are WHEELED (their gear is the wheel rig), so they are
+    // counted with the cars above, not here.
     assert_eq!(
         craft.len(),
-        2,
-        "the island ships {} wheel-less craft, not the launch and the \
-         helicopter:\n  {}",
+        3,
+        "the island ships {} wheel-less craft, not the launch, the helicopter \
+         and Air One:\n  {}",
         craft.len(),
         craft.join("\n  ")
     );
