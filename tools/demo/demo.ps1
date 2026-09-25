@@ -109,6 +109,13 @@ param(
     # line from the hero, then turns left and right across it -- and skips every
     # other leg, `-AudioOnly`'s shape.
     [switch]$RosterOnly,
+    # **THE FLIGHT LEG ON ITS OWN** (wave VEH3g). Runs `Invoke-Veh3gLeg`
+    # straight after the player is up: the hero stands beside a Dodo that
+    # `-PlaceCar` put on the Harbour City Runway's threshold, boards, holds `W`
+    # for the take-off roll, `Space` to rotate, climbs, then cuts the throttle
+    # and holds the stick back into a STALL. Every frame triggers on the
+    # craft columns (77-84), never on a sleep. `-AudioOnly`'s shape.
+    [switch]$AirOnly,
     # **WRITE THE SESSION'S AUDIO TO A WAV** (wave VEH3e), `INF_RENDER_AUDIO`:
     # the player's mixer renders to this file (through the same kira mixer the
     # device path uses) instead of to a device. Empty is off.
@@ -1358,6 +1365,74 @@ function Invoke-Veh3fGallery {
     [InfInput]::Down(0x11); Start-Sleep -Milliseconds 2500; [InfInput]::Up(0x11)   # W
 }
 
+# ── THE FLIGHT LEG (wave VEH3g) ──────────────────────────────────────────────
+#
+# A take-off from the island's runway, a climb, and a stall, on the shipped
+# player's own keys: `W` is the throttle (on a wing the engine drives the
+# propeller, not the wheels), `Space` is the elevator's pull (`move_up`; the
+# wing ignores the handbrake the same key carries while it is pulled), and the
+# frames trigger on the hero log's craft columns: `$c[77]` the chassis height,
+# `$c[78]` the airspeed, `$c[79]` the angle of attack, `$c[80]` CL.
+function Invoke-Veh3gLeg {
+    Restore-PlayerFocus "before the flight leg"
+    Stand-Up "before the flight leg" | Out-Null
+    $isRow = { param($c) $c.Count -gt 84 }
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "140-veh3g-threshold.png") | ForEach-Object { Say $_ }
+    $inCraft = $false
+    for ($k = 0; $k -lt 20 -and -not $inCraft; $k++) {
+        [InfInput]::Down(0x12); Start-Sleep -Milliseconds 70; [InfInput]::Up(0x12)   # E
+        $inCraft = @(Wait-ForHero -Csv $heroCsv -What "in the cockpit (the craft columns live)" -TimeoutS 2.0 `
+            -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^driving") -and ([double]$c[77] -ne 0.0) })[-1]
+    }
+    if (-not $inCraft) {
+        Say "VEH3g: the hero never reached the Dodo's cockpit in twenty taps of E -- no flight frame in this session"
+        return
+    }
+    $rest = [double](@(Get-Content $heroCsv -ErrorAction Ignore | Where-Object { $_ -match "^[0-9]" } |
+        Where-Object { ($_ -split ",").Count -gt 84 })[-1] -split ",")[77]
+    Say ("VEH3g: in the cockpit, the chassis at {0:N2} m" -f $rest)
+    [InfInput]::Down(0x11)   # W: full throttle
+    Wait-ForHero -Csv $heroCsv -What "the take-off roll (30 m/s through the air)" -TimeoutS 45.0 `
+        -Predicate { param($c) (& $isRow $c) -and ([double]$c[78] -gt 30.0) } `
+        -Out (Join-Path $OutDir "141-veh3g-roll.png") | Out-Null
+    [InfInput]::Down(0x39)   # Space: rotate
+    Wait-ForHero -Csv $heroCsv -What "airborne (10 m over the runway)" -TimeoutS 20.0 `
+        -Predicate { param($c) (& $isRow $c) -and ([double]$c[77] -gt $rest + 10.0) } `
+        -Out (Join-Path $OutDir "142-veh3g-takeoff.png") | Out-Null
+    [InfInput]::Up(0x39)
+    Wait-ForHero -Csv $heroCsv -What "the climb (40 m over the runway)" -TimeoutS 30.0 `
+        -Predicate { param($c) (& $isRow $c) -and ([double]$c[77] -gt $rest + 40.0) } `
+        -Out (Join-Path $OutDir "143-veh3g-climb.png") | Out-Null
+    # THE STALL: power off, the stick held back until the wing passes 16 deg.
+    [InfInput]::Up(0x11)
+    [InfInput]::Down(0x39)
+    Wait-ForHero -Csv $heroCsv -What "the stall (alpha past 16 deg)" -TimeoutS 25.0 `
+        -Predicate { param($c) (& $isRow $c) -and ([double]$c[79] -gt 16.5) } `
+        -Out (Join-Path $OutDir "144-veh3g-stall.png") | Out-Null
+    Wait-ForHero -Csv $heroCsv -What "the lift collapsed (CL under 0.9, alpha still past 16)" -TimeoutS 6.0 `
+        -Predicate { param($c) (& $isRow $c) -and ([double]$c[79] -gt 16.0) -and ([double]$c[80] -lt 0.9) } `
+        -Out (Join-Path $OutDir "145-veh3g-stall-break.png") | Out-Null
+    [InfInput]::Up(0x39)
+    [InfInput]::Down(0x11)
+    Wait-ForHero -Csv $heroCsv -What "flying again (alpha under 10 deg)" -TimeoutS 10.0 `
+        -Predicate { param($c) (& $isRow $c) -and ([double]$c[79] -lt 10.0) -and ([double]$c[78] -gt 25.0) } `
+        -Out (Join-Path $OutDir "146-veh3g-recovered.png") | Out-Null
+    Start-Sleep -Seconds 3
+    [InfInput]::Up(0x11)
+    $all = @(Get-Content $heroCsv -ErrorAction Ignore | Where-Object { $_ -match "^[0-9]" } |
+        Where-Object { ($_ -split ",").Count -gt 84 } | Where-Object { [double](($_ -split ",")[77]) -ne 0.0 })
+    if ($all.Count -gt 0) {
+        $alt = @($all | ForEach-Object { [double](($_ -split ",")[77]) }) | Measure-Object -Maximum
+        $ias = @($all | ForEach-Object { [double](($_ -split ",")[78]) }) | Measure-Object -Maximum
+        $aoa = @($all | ForEach-Object { [double](($_ -split ",")[79]) }) | Measure-Object -Maximum
+        Say ("VEH3g COLUMNS: {0} craft rows; highest {1:N1} m ({2:N1} over the runway); fastest {3:N1} m/s; alpha up to {4:N1} deg" -f $all.Count, $alt.Maximum, ($alt.Maximum - $rest), $ias.Maximum, $aoa.Maximum)
+    }
+}
+
+if ($AirOnly) {
+    Say "AIR ONLY (-AirOnly): the flight leg, and nothing else"
+    Invoke-Veh3gLeg
+}
 if ($RosterOnly) {
     Say "ROSTER ONLY (-RosterOnly): the roster leg, and nothing else"
     Invoke-Veh3fLeg
@@ -1374,7 +1449,7 @@ if ($AudioOnly) {
     Say "AUDIO ONLY (-AudioOnly): the audio leg, and nothing else"
     Invoke-Veh3eLeg
 }
-if (-not $BoardingOnly -and -not $AudioOnly -and -not $RosterOnly -and -not $GalleryOnly) {
+if (-not $BoardingOnly -and -not $AudioOnly -and -not $RosterOnly -and -not $GalleryOnly -and -not $AirOnly) {
 
 # ── 5a. THE ISLAND'S OWN SIDEARM, with no environment variable ───────────────
 #
@@ -3085,7 +3160,7 @@ if (Test-Path $heroCsv) {
 Say ("windows now: " + ((Get-Process | Where-Object { $_.MainWindowTitle -ne "" -and ($_.ProcessName -like "inf*") } |
     ForEach-Object { "$($_.ProcessName)[$($_.Id)] '$($_.MainWindowTitle)'" }) -join " | "))
 
-if (-not $BoardingOnly -and -not $AudioOnly -and -not $RosterOnly -and -not $GalleryOnly) {
+if (-not $BoardingOnly -and -not $AudioOnly -and -not $RosterOnly -and -not $GalleryOnly -and -not $AirOnly) {
 # ── 6z. WAVE VEH3a — THE TYRES, AND WHAT THE GROUND UNDER THEM IS ────────────
 #
 # Four frames, every one TRIGGERED on `hero.csv`'s eight new columns rather than

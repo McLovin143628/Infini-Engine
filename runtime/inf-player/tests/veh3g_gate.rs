@@ -17,6 +17,7 @@
 //! | arm | reads | VEH2c? |
 //! |---|---|---|
 //! | `the_dodo_takes_off_climbs_and_lands_on_a_strip` | the chassis's altitude trace, its wheels' contacts, the vertical speed at the first contact after flight, the roll-out's end | **fails** -- a wheeled chassis never left the ground |
+//! | `the_keyboard_pilot_rotates_with_space` | the Dodo's height over the strip flown with the handbrake on the elevator's key, as the shipped map binds them | **fails** -- no lift-off |
 //! | `a_wing_with_no_area_never_leaves_the_ground` | the same Dodo at full power with `wing_area_m2` 0: its peak altitude | passes (the control) |
 //! | `every_aeroplane_lifts_off_inside_the_islands_runway` | each of the five rows' ground roll to the LAST wheel contact before 35 ft, against the recipe's own runway length; the distance to 35 ft printed | **fails** -- no lift-off |
 //! | `the_dodo_floats_and_flies_off_the_water` | the floatplane's hull bottom against the surface at rest (wheels touching: none), its settle, the water run, its height a minute later | **fails** -- it floats (VEH2c's buoyancy) and never leaves the water |
@@ -513,6 +514,50 @@ fn the_dodo_takes_off_climbs_and_lands_on_a_strip() {
         "the circuit is {} samples",
         rep.trace.len()
     );
+}
+
+/// **THE KEYBOARD PILOT ROTATES WITH SPACE** -- the shipped input map puts
+/// `move_up` (the elevator) and `handbrake` on the same key, so a player who
+/// pulls back to rotate commands the handbrake with it. The Dodo is flown the
+/// way the keyboard flies it: full throttle, then from Vr the stick on its
+/// stop WITH the handbrake, and the arm reads the height over the runway.
+///
+/// **Mutation → red**: the wing's "the elevator is not the parking brake" line
+/// removed (the gear locks at rotation).
+#[test]
+fn the_keyboard_pilot_rotates_with_space() {
+    let def = row("mammoth_dodo");
+    let vr = stall_speed(&def) * 1.1;
+    let mut sim = strip_sim(&def);
+    for _ in 0..90 {
+        sim.step_once(Default::default());
+    }
+    let (p0, _, _) = body_state(&sim, CRAFT);
+    let mut screen: Option<f64> = None;
+    let mut rotating = false;
+    for _ in 0..(60.0 * HZ) as usize {
+        let (p, _, _) = body_state(&sim, CRAFT);
+        if screen.is_none() && p.y - p0.y >= SCREEN_HEIGHT_M {
+            screen = Some(p.z - p0.z);
+        }
+        rotating |= flight(&sim, CRAFT).airspeed_mps >= vr;
+        let c = VehicleControls {
+            throttle: 1.0,
+            vertical: if rotating { 1.0 } else { 0.0 },
+            handbrake: rotating,
+            ..Default::default()
+        };
+        command(&mut sim, CRAFT, c);
+        if screen.is_some() {
+            break;
+        }
+    }
+    println!(
+        "THE KEYBOARD PILOT: Space held from Vr ({vr:.1} m/s); 35 ft after {} m",
+        screen.map_or("never".to_string(), |d| format!("{d:.0}"))
+    );
+    let d = screen.expect("the keyboard pilot never left the ground");
+    assert!(d < 1_700.0, "35 ft only after {d:.0} m");
 }
 
 /// **The recogniser IS the wing area**: the same Dodo with `wing_area_m2` 0 is a

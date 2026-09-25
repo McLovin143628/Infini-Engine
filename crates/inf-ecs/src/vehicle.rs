@@ -8740,6 +8740,14 @@ impl Vehicle for RaycastVehicle {
         let (controls, scale) = (self.controls, self.engine_scale);
         self.controls.throttle = 0.0;
         self.engine_scale = 0.0;
+        // THE ELEVATOR IS NOT THE PARKING BRAKE. The shipped keyboard map puts
+        // `move_up` and `handbrake` on the one key (Space), so a pilot pulling
+        // back to rotate would lock the gear at the same moment. On a wing
+        // the handbrake holds only while the stick is NOT pulled; the wheel
+        // brakes (`S` while rolling) stay a car's.
+        if controls.vertical > 0.0 {
+            self.controls.handbrake = false;
+        }
         self.solve_ground(chassis, dt, out);
         self.controls = controls;
         self.engine_scale = scale;
