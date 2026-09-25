@@ -1303,7 +1303,7 @@ mod air_lane_lab {
 ///
 /// **Mutation → red**: `assign` handing an air unit `drive_path` (its run holds
 /// a path); `run_units` without the `fly_unit` branch (it never climbs and never
-/// arrives).
+/// arrives); the audit's: `AIR_ORBIT_RAD_S` 0 (it hovers at one point).
 #[test]
 fn the_police_helicopter_flies_its_air_lane_and_never_the_road() {
     use air_lane_lab::*;
@@ -1336,6 +1336,8 @@ fn the_police_helicopter_flies_its_air_lane_and_never_the_road() {
     let (mut worst_off, mut lowest) = (0.0f64, f64::MAX);
     let mut cruiser_routed = false;
     let mut rows = Vec::new();
+    let (mut swept, mut last_bearing, mut orbit_steps) = (0.0f64, None::<f64>, 0usize);
+    let (mut r_lo, mut r_hi) = (f64::MAX, 0.0f64);
     for i in 0..(60 * 60) {
         town.step();
         let res = inf_ecs::dispatch::dispatch_of(&town.world).expect("a dispatcher");
@@ -1359,6 +1361,26 @@ fn the_police_helicopter_flies_its_air_lane_and_never_the_road() {
         ));
         if run.state == UnitState::OnScene && on_scene.is_none() {
             on_scene = Some(i as f64 * DT);
+        }
+        // THE ORBIT (VEH3g audit): the bearing from the scene, unwrapped, and
+        // the horizontal radius, over every on-scene step.
+        if run.state == UnitState::OnScene {
+            let rel = DVec3::new(p.x - scene.x, 0.0, p.z - scene.z);
+            let b = inf_math::patan2_64(rel.x, rel.z);
+            if let Some(prev) = last_bearing {
+                let mut d: f64 = b - prev;
+                while d > std::f64::consts::PI {
+                    d -= std::f64::consts::TAU;
+                }
+                while d < -std::f64::consts::PI {
+                    d += std::f64::consts::TAU;
+                }
+                swept += d;
+            }
+            last_bearing = Some(b);
+            orbit_steps += 1;
+            r_lo = r_lo.min(rel.length());
+            r_hi = r_hi.max(rel.length());
         }
         let flat = DVec3::new(p.x - pad.x, 0.0, p.z - pad.z);
         if run.state == UnitState::EnRoute && flat.length() > 60.0 {
@@ -1385,6 +1407,22 @@ fn the_police_helicopter_flies_its_air_lane_and_never_the_road() {
         "the track wandered {worst_off:.1} m off the line"
     );
     assert!(on_scene.is_some(), "the helicopter never arrived");
+    // THE ORBIT (VEH3g audit, priority j'): on scene it circles the scene --
+    // the bearing from the scene sweeps, at about the hover offset.
+    println!(
+        "  THE ORBIT: {orbit_steps} on-scene steps, the bearing from the scene swept {:.0} deg, radius {r_lo:.1}..{r_hi:.1} m (the offset {} m)",
+        swept.abs().to_degrees(),
+        inf_ecs::dispatch::AIR_HOVER_OFFSET_M
+    );
+    assert!(
+        swept.abs().to_degrees() > 90.0,
+        "on scene the helicopter swept {:.0} deg round the scene -- it hovers, it does not orbit",
+        swept.abs().to_degrees()
+    );
+    assert!(
+        r_hi < inf_ecs::dispatch::AIR_HOVER_OFFSET_M * 2.0,
+        "the orbit wandered {r_hi:.1} m from the scene"
+    );
     assert!(
         cruiser_routed,
         "the control: the cruiser never drove a route"
@@ -2848,4 +2886,227 @@ fn d_turns_the_aeroplane_right_on_the_ground_and_in_the_air() {
         bank_right > 0.1,
         "in the air D did not lower the right (+X) wing"
     );
+}
+
+/// **STREAMING AT 120 m/s OVER THE REAL ISLAND** (VEH3g audit, priority e') --
+/// LOCAL ONLY: the built island's loose content through the player's own
+/// loader, cell and terrain streaming attached exactly as PIE attaches them.
+///
+/// The wave measured its 120 m/s row on the FIXTURE island only. Here the
+/// source flies the Luxor's approach: 4.5 km along the runway's own line from
+/// the east (x 3 400 -> -1 100 at z 2 560, over Alder Bay and Harbour City's
+/// east side) at 120 m/s, 300 m up. Read per step, as the fixture arm reads
+/// them: blocking loads, the closest a cell arrived to the source (pop-in), the
+/// cell one cell-length ahead on the flight line missing, and the step's cost.
+/// Asserted: no blocking load, and no cell arriving nearer than 200 m -- the
+/// streaming claims; the cell-ahead count and the milliseconds are printed.
+#[test]
+fn streaming_holds_at_120_mps_over_the_real_island() {
+    let content = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../island-build/project/Content");
+    if !content.join("VancouverIsland.inf_lvl").is_file() {
+        println!("SKIP: no built island project (local-only content; CI has none)");
+        return;
+    }
+    let source = inf_player::level::DevDirLevelSource::new(content.join("VancouverIsland.inf_lvl"));
+    let terrains = inf_player::level::terrain_paths_by_guid_from_dir(&content);
+    let pcg_terrains = terrains.clone();
+    let builder = inf_player::level::InfSceneWorldBuilder::with_defaults(
+        inf_player::level::load_actor_classes_from_dir(&content),
+    )
+    .with_pcgs(inf_player::level::load_pcg_payloads_by_guid_from_dir(
+        &content,
+    ))
+    .with_biome_sets(inf_player::level::load_biome_sets_by_guid_from_dir(
+        &content,
+    ))
+    .with_terrain_resolver(std::sync::Arc::new(move |g| {
+        inf_player::level::terrain_source_from_file(pcg_terrains.get(&g)?).ok()
+    }));
+    let t_load = std::time::Instant::now();
+    let mut built = inf_player::level::load(&source, &builder).expect("the island builds");
+    let partition = built.take_partition();
+    let pcg = built.pcg_context();
+    let mut sim = inf_player::sim_from_built(built);
+    inf_player::attach_cell_streaming(&mut sim, &partition, pcg);
+    inf_player::attach_terrain_streaming(&mut sim, &inf_player::TerrainContent::Dir(terrains));
+    let load_s = t_load.elapsed().as_secs_f64();
+    let hero = inf_ecs::movement::camera_subject(sim.world())
+        .and_then(|g| sim.world().entity_of(g))
+        .expect("the island has a pawn");
+    let put = |sim: &mut RuntimeSim, p: DVec3| {
+        if let Some(mut t) = sim.world_mut().world_mut().get_mut::<Transform>(hero) {
+            t.translation = Vec3d::new(p.x, p.y, p.z);
+        }
+    };
+    let (from, to) = (
+        DVec3::new(3_400.0, 300.0, 2_560.0),
+        DVec3::new(-1_100.0, 300.0, 2_560.0),
+    );
+    let route_m = (to - from).length();
+    let dir = (to - from) / route_m;
+    // Settle at the start so the boot's own paging is not charged to the pass.
+    put(&mut sim, from);
+    for _ in 0..120 {
+        put(&mut sim, from);
+        sim.step_once(Default::default());
+    }
+    let cell_m = sim.cell_streaming().cell_size_m();
+    let available: std::collections::BTreeSet<(i32, i32)> =
+        sim.cell_streaming().available().collect();
+    let blocking0 = sim.cell_streaming().stats().blocking_loads;
+    let acts0 = sim.cell_streaming().stats().activations;
+    let mut prev: std::collections::BTreeSet<(i32, i32)> =
+        sim.cell_streaming().resident().collect();
+    let step_m = 120.0 / HZ;
+    let run = (route_m / step_m).ceil() as u64;
+    let (mut closest, mut ahead_missing, mut ahead_asked) = (f64::INFINITY, 0u64, 0u64);
+    let (mut arrived, mut peak) = (0usize, 0usize);
+    let mut wall = std::time::Duration::ZERO;
+    let mut worst_ms = 0.0f64;
+    let (mut worst_at, mut worst_arrivals) = (0u64, 0usize);
+    for step in 0..run {
+        let p = from + dir * (step as f64 * step_m).min(route_m);
+        put(&mut sim, p);
+        let t0 = std::time::Instant::now();
+        sim.step_once(Default::default());
+        let dt = t0.elapsed();
+        wall += dt;
+        let now: std::collections::BTreeSet<(i32, i32)> = sim.cell_streaming().resident().collect();
+        if dt.as_secs_f64() * 1000.0 > worst_ms {
+            worst_ms = dt.as_secs_f64() * 1000.0;
+            worst_at = step;
+            worst_arrivals = now.difference(&prev).count();
+        }
+        for c in now.difference(&prev) {
+            arrived += 1;
+            closest = closest.min(inf_player::cell_stream::distance_to_cell(
+                *c, p.x, p.z, cell_m,
+            ));
+        }
+        let ahead = p + dir * cell_m;
+        let coord = (
+            (ahead.x / cell_m).floor() as i32,
+            (ahead.z / cell_m).floor() as i32,
+        );
+        if available.contains(&coord) {
+            ahead_asked += 1;
+            if !now.contains(&coord) {
+                ahead_missing += 1;
+            }
+        }
+        peak = peak.max(now.len());
+        prev = now;
+    }
+    let s = sim.cell_streaming().stats();
+    println!(
+        "REAL ISLAND AT 120 m/s: loaded in {load_s:.1} s; {} cells available ({cell_m:.0} m); {route_m:.0} m in {run} steps; {} blocking loads; {} activations, {arrived} arrivals, the closest {closest:.1} m from the source; the cell ahead missing on {ahead_missing} of {ahead_asked} steps; peak {peak} resident; mean {:.2} ms a step, worst {worst_ms:.1} ms ({})",
+        available.len(),
+        s.blocking_loads - blocking0,
+        s.activations - acts0,
+        wall.as_secs_f64() * 1000.0 / run as f64,
+        if cfg!(debug_assertions) { "dev build" } else { "release" }
+    );
+    assert!(
+        ahead_asked > 100,
+        "the route crossed only {ahead_asked} partitioned steps"
+    );
+    assert_eq!(
+        s.blocking_loads - blocking0,
+        0,
+        "a cell was loaded BLOCKING at 120 m/s"
+    );
+    // The cell a whole cell-length ahead sits on the activation radius's edge
+    // (printed): measured and not asserted at zero. The pop-in claim is the
+    // closest a cell ARRIVED: never nearer than 200 m (252.0 measured; the
+    // fixture's 252.9).
+    println!(
+        "  activation radius {:.0} m, prefetch margin {:.0} m; the worst step was step {worst_at} ({worst_arrivals} cell(s) arrived on it)",
+        sim.cell_streaming().settings().effective_activation_radius(),
+        sim.cell_streaming().settings().effective_prefetch_margin(),
+    );
+    assert!(
+        closest >= 200.0,
+        "a cell arrived {closest:.1} m from a 120 m/s aircraft -- in front of it"
+    );
+}
+
+/// **THE ISLAND'S DODO FLIES OFF THE APRON AND STAYS IN THE WORLD** (VEH3g
+/// audit) -- LOCAL ONLY (the built island). The audit's first real-editor
+/// session flew the Dodo off the Harbour City runway: at x -251, 50 m up, its
+/// pilot fell out of the sky (hero.csv: `Driving` -> `FallControlled` at
+/// 64.4 s) because the aeroplane had been DESPAWNED -- its birth cell (the
+/// apron's) left the want set and the re-home would only hand a mover to a
+/// cell with content, and the runway's middle has none. Moved along the same
+/// line with the streaming source over it, the Dodo must survive the 900 m.
+/// (Before the fix: despawned at step 1331, x -255.5.)
+#[test]
+fn the_islands_dodo_flies_off_the_apron_and_stays_in_the_world() {
+    let content = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../island-build/project/Content");
+    if !content.join("VancouverIsland.inf_lvl").is_file() {
+        println!("SKIP: no built island project (local-only content; CI has none)");
+        return;
+    }
+    let source = inf_player::level::DevDirLevelSource::new(content.join("VancouverIsland.inf_lvl"));
+    let terrains = inf_player::level::terrain_paths_by_guid_from_dir(&content);
+    let pcg_terrains = terrains.clone();
+    let builder = inf_player::level::InfSceneWorldBuilder::with_defaults(
+        inf_player::level::load_actor_classes_from_dir(&content),
+    )
+    .with_pcgs(inf_player::level::load_pcg_payloads_by_guid_from_dir(
+        &content,
+    ))
+    .with_biome_sets(inf_player::level::load_biome_sets_by_guid_from_dir(
+        &content,
+    ))
+    .with_terrain_resolver(std::sync::Arc::new(move |g| {
+        inf_player::level::terrain_source_from_file(pcg_terrains.get(&g)?).ok()
+    }));
+    let mut built = inf_player::level::load(&source, &builder).expect("the island builds");
+    let partition = built.take_partition();
+    let pcg = built.pcg_context();
+    let mut sim = inf_player::sim_from_built(built);
+    inf_player::attach_cell_streaming(&mut sim, &partition, pcg);
+    inf_player::attach_terrain_streaming(&mut sim, &inf_player::TerrainContent::Dir(terrains));
+    let hero = inf_ecs::movement::camera_subject(sim.world())
+        .and_then(|g| sim.world().entity_of(g))
+        .unwrap();
+    let put = |sim: &mut RuntimeSim, p: DVec3| {
+        if let Some(mut t) = sim.world_mut().world_mut().get_mut::<Transform>(hero) {
+            t.translation = Vec3d::new(p.x, p.y, p.z);
+        }
+    };
+    let from = DVec3::new(-921.0, 16.0, 2455.0);
+    for _ in 0..240 {
+        put(&mut sim, from);
+        sim.step_once(Default::default());
+    }
+    let mut dodo = None;
+    for e in sim.world().world().iter_entities() {
+        if e.get::<inf_ecs::components::Name>()
+            .is_some_and(|n| n.0.contains("Dodo"))
+        {
+            if let Some(g) = e.get::<inf_ecs::components::Guid>() {
+                dodo = Some(g.0);
+            }
+        }
+    }
+    let dodo = dodo.expect("a dodo");
+    for i in 0..1800 {
+        let p = from + DVec3::new(i as f64 * 0.5, 0.0, 0.0);
+        put(&mut sim, p + DVec3::new(0.0, 0.0, 3.0));
+        if let Some(b) = sim.bridge3d().body_of(dodo) {
+            let bw = sim.bridge3d_mut().world_mut();
+            bw.set_body_translation(b, p);
+        }
+        sim.step_once(Default::default());
+        if sim.world().entity_of(dodo).is_none() {
+            panic!(
+                "the Dodo was DESPAWNED at step {i}, x {:.1} -- flown out of its birth cell",
+                p.x
+            );
+        }
+    }
+    println!("THE APRON'S DODO: moved 900 m east with the source over it, still in the world");
 }

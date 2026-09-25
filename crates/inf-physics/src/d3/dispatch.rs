@@ -893,9 +893,17 @@ fn fly_unit(
         .and_then(|g| res.incidents.get(&g))
         .map(|i| i.at);
     let (goal, land_at) = match (run.state, scene) {
-        (UnitState::EnRoute | UnitState::OnScene, Some(target)) => {
-            (dispatch::air_hover_point(unit.home, target), None)
-        }
+        (UnitState::EnRoute, Some(target)) => (dispatch::air_hover_point(unit.home, target), None),
+        // On scene it ORBITS (VEH3g audit): the hover point turned about the
+        // scene by the clock since it arrived.
+        (UnitState::OnScene, Some(target)) => (
+            dispatch::air_orbit_point(
+                dispatch::air_hover_point(unit.home, target),
+                target,
+                step.saturating_sub(run.since_step) as f64 * dt,
+            ),
+            None,
+        ),
         _ => (
             DVec3::new(
                 unit.home.x,

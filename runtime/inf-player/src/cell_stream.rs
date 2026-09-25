@@ -699,6 +699,18 @@ impl CellStreaming {
             cells_within(pos.x, pos.z, r, self.cell_size_m, &mut activate);
             cells_within(pos.x, pos.z, r + margin, self.cell_size_m, &mut prefetch);
         }
+        // **THE CELLS THAT MAY HOLD A MOVER** (VEH3g audit): every wanted cell,
+        // content or not. `activate` keeps only the cells the store has a
+        // payload for, and the re-home rule below used to ask it -- so a mover
+        // that left its birth cell over EMPTY ground (a runway's middle, a
+        // field, the sea) had nowhere to be handed and was despawned with its
+        // birth cell. Measured on the island: the Mammoth Dodo, flown off the
+        // Harbour City apron with its pilot in it, vanished 665 m east at
+        // x -255.5 and dropped him from 50 m. A cell here that has no payload
+        // is resident only for the movers handed to it, and leaves with the
+        // want set like any other.
+        let mut holding = activate.clone();
+        holding.retain(|c| !self.blocked.contains(c));
         activate.retain(|c| self.available.contains(c) && !self.blocked.contains(c));
         prefetch.retain(|c| self.available.contains(c) && !self.blocked.contains(c));
 
@@ -763,7 +775,7 @@ impl CellStreaming {
             .resident
             .keys()
             .copied()
-            .filter(|c| !activate.contains(c))
+            .filter(|c| !holding.contains(c))
             .collect();
         // The re-homes this reconcile performed, applied after the loop so the
         // walk over `leaving` does not mutate the map it is reading.
@@ -801,7 +813,7 @@ impl CellStreaming {
                 // exactly as before, so a level whose entities do not move
                 // produces the same trace it always did.
                 if let Some(now) = current_cell(world, e, self.cell_size_m) {
-                    if now != coord && activate.contains(&now) {
+                    if now != coord && holding.contains(&now) {
                         rehomed.push((now, *guid));
                         continue;
                     }
@@ -1536,6 +1548,48 @@ mod tests {
             1,
             "the second sync re-homed something too"
         );
+    }
+
+    /// **A MOVER OVER EMPTY GROUND KEEPS ITS PLACE** (VEH3g audit). The re-home
+    /// used to hand a mover only to a cell the store has a PAYLOAD for, so one
+    /// that left its birth cell over a cell with no content -- a runway's
+    /// middle, a field, the sea -- was despawned with its birth cell. On the
+    /// island the Mammoth Dodo, flown off the apron with its pilot aboard,
+    /// vanished at x -255.5 and dropped him from 50 m.
+    ///
+    /// Here the prop born in cell 0 goes to x = 550 -- cell 5, which the
+    /// fixture gives no content -- with the source; cell 0 leaves; the prop
+    /// lives, counted, and cell 5 is resident for it. When the source goes, it
+    /// goes. Mutation that reds it: re-home against `activate` again.
+    #[test]
+    fn a_mover_over_an_empty_cell_is_rehomed_not_despawned() {
+        let (mut world, mut s) = fixture();
+        move_source(&mut world, 50.0);
+        s.sync_sim(&mut world, 1);
+        assert!(world.entity_of(guid(0x100)).is_some(), "cell 0's prop");
+        move_entity(&mut world, guid(0x100), 550.0);
+        move_source(&mut world, 550.0);
+        s.sync_sim(&mut world, 2);
+        assert!(
+            !s.is_resident((0, 0)),
+            "cell 0 did not leave -- nothing is tested"
+        );
+        assert!(
+            world.entity_of(guid(0x100)).is_some(),
+            "a mover over an EMPTY cell was despawned by the cell it left"
+        );
+        assert_eq!(s.stats().rehomed, 1);
+        assert!(
+            s.is_resident((5, 0)),
+            "the empty cell does not hold its mover"
+        );
+        move_source(&mut world, 5000.0);
+        s.sync_sim(&mut world, 3);
+        assert!(
+            world.entity_of(guid(0x100)).is_none(),
+            "a re-homed mover became immortal"
+        );
+        assert!(!s.is_resident((5, 0)));
     }
 
     /// **THE CONTROL**: an entity that did NOT move is despawned by its birth

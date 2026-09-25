@@ -1100,10 +1100,30 @@ pub fn nearest_unit(costs: &[(Uuid, f64)]) -> Option<Uuid> {
 pub const AIR_LANE_ALTITUDE_M: f64 = 60.0;
 
 /// **How far short of the scene an air unit holds its hover**, metres,
-/// horizontally, on the side it came from -- an orbit's radius, collapsed to one
-/// point because this dispatcher has no orbit (carried). Thirty: over the
-/// block, not over the roof of the building it is watching.
+/// horizontally, on the side it came from -- the radius of its ORBIT once on
+/// scene ([`air_orbit_point`], VEH3g audit). Thirty: over the block, not over
+/// the roof of the building it is watching.
 pub const AIR_HOVER_OFFSET_M: f64 = 30.0;
+
+/// **How fast an air unit orbits the scene**, rad/s (VEH3g audit): 7.5 m/s round
+/// a 30 m circle, a turn every 25 s -- a police helicopter circling a block.
+pub const AIR_ORBIT_RAD_S: f64 = 0.25;
+
+/// **Where an air unit is on its orbit**, `t_s` seconds after it came on scene
+/// (VEH3g audit): the hover point [`air_hover_point`] turned about the scene's
+/// vertical by [`AIR_ORBIT_RAD_S`]` x t_s`, so the orbit starts exactly where the
+/// approach ended. Portable (`psin64` / `pcos64`) and a pure function of the
+/// clock the run already keeps -- no state.
+pub fn air_orbit_point(hover: DVec3, target: DVec3, t_s: f64) -> DVec3 {
+    let a = AIR_ORBIT_RAD_S * t_s.max(0.0);
+    let (s, c) = (inf_math::psin64(a), inf_math::pcos64(a));
+    let (dx, dz) = (hover.x - target.x, hover.z - target.z);
+    DVec3::new(
+        target.x + dx * c - dz * s,
+        hover.y,
+        target.z + dx * s + dz * c,
+    )
+}
 
 /// **The speed an air unit cruises its lane at**, m/s -- the police Maverick's
 /// comfortable cruise, well under the rotorcraft's 38.7 m/s ceiling.
