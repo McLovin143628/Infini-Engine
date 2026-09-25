@@ -5261,6 +5261,16 @@ fn import_weapon(
             }
             out
         };
+        // The recipe copied the committed FALLBACK into the content root at
+        // this identity under OUR name; the art replaces it (the vehicles'
+        // rule), so no two files claim one GUID.
+        let fallback = crate::vehicle_bodies::weapon_fallback_stem(&stem);
+        for ext in ["inf_mesh", "inf_mesh.toml"] {
+            let copy = project.root().join(format!("{fallback}.{ext}"));
+            if copy.is_file() {
+                std::fs::remove_file(&copy)?;
+            }
+        }
         let path = project.root().join(format!("{stem}.inf_mesh"));
         project.write_asset_at_with_id(&path, &payload, want, deps, None)?;
         report.rebinds.push((format!("{stem}.inf_mesh"), want));

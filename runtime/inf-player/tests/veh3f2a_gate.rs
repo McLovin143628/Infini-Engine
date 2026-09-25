@@ -1373,9 +1373,16 @@ fn nothing_from_unreal_is_committed() {
                 || l.ends_with(".gltf")
                 || l.ends_with(".glb")
                 || l.ends_with(".fbx")
-                || f.rsplit('/')
-                    .next()
-                    .is_some_and(|n| n.starts_with("SK_") || n.starts_with("SKM_"))
+                || f.rsplit('/').next().is_some_and(|n| {
+                    n.starts_with("SK_")
+                            || n.starts_with("SKM_")
+                            // An `SM_`/`MI_`/`T_` payload is named like a pack's
+                            // asset (VEH3f's rule): a committed fallback is
+                            // named OURS (`weapon_fallback_stem`).
+                            || (n.starts_with("SM_") && n.ends_with(".inf_mesh"))
+                            || (n.starts_with("MI_") && n.ends_with(".inf_mat"))
+                            || (n.starts_with("T_") && n.ends_with(".inf_tex"))
+                })
         })
         .collect();
     println!(

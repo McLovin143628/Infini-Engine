@@ -12637,7 +12637,7 @@ mod tests {
 
         // **The weapon art fallback (wave VEH3f.2a)**, on the same terms.
         let wdir = crate::vehicle_bodies::weapon_art_dir();
-        if wdir.join("SM_MW_PISTOL_01.inf_mesh").exists() {
+        if wdir.join("weapon_mw_pistol_01.inf_mesh").exists() {
             let mut have: Vec<String> = std::fs::read_dir(&wdir)
                 .unwrap()
                 .filter_map(|e| e.ok())

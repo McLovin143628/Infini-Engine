@@ -3413,7 +3413,12 @@ mod tests {
         }
         // Vacuity guards: the parked draw really reaches the kerb's families,
         // and the circuit draw really reaches a bus or a truck.
-        assert!(seen.len() >= 9, "the parked draw only reached {seen:?}");
+        // EIGHT since wave VEH3f.2a: a class with imported bodies draws only
+        // those (`catalogue_row_id`), and the thirteen art rows' bodies are
+        // eight families -- the ninth the kerb used to reach came from a
+        // non-art row of an art class. The guard's job (the draw is not one
+        // family) is unchanged.
+        assert!(seen.len() >= 8, "the parked draw only reached {seen:?}");
         assert!(
             circuit_heavy > 0,
             "no circuit car was ever a bus or a truck"

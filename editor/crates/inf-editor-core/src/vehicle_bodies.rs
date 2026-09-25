@@ -526,11 +526,23 @@ pub fn art_fallback_meshes() -> Vec<HeroMesh> {
 /// The committed folder the weapon fallbacks live in, under `samples/`.
 pub const WEAPON_ART_FOLDER: &str = "weapon-art";
 
+/// **The committed fallback's file stem for a weapon art key** (wave VEH3f.2a):
+/// `SM_MW_SHOTGUN_01` -> `weapon_mw_shotgun_01`. Ours, not the pack's -- a
+/// committed file named like a pack's asset reads as Unreal content
+/// (`veh3f_gate::nothing_from_unreal_is_committed` bans an `SM_*.inf_mesh`).
+pub fn weapon_fallback_stem(key: &str) -> String {
+    format!(
+        "weapon_{}",
+        key.strip_prefix("SM_").unwrap_or(key).to_ascii_lowercase()
+    )
+}
+
 /// **The committed fallback of every Modern Weapons body** (wave VEH3f.2a): a
 /// DCC box at each weapon's measured bounds (`inf_ecs::weapon::MW_WEAPON_ART`),
 /// and one at its magazine's seat, at the identities the class table names --
-/// ours, generated from NUMBERS, never a vertex of the pack. A local
-/// `inf-import --weapons` writes the pack's own mesh over each one in place.
+/// ours, generated from NUMBERS, never a vertex of the pack, and NAMED ours
+/// ([`weapon_fallback_stem`]): a local `inf-import --weapons` writes the pack's
+/// own mesh at the same identity and removes the copy.
 pub fn weapon_art_fallback_meshes() -> Vec<HeroMesh> {
     let opts = ExportOptions {
         normals: NormalPolicy::Recompute,
@@ -546,7 +558,7 @@ pub fn weapon_art_fallback_meshes() -> Vec<HeroMesh> {
             0.5 * (hi[2] + lo[2]),
         ];
         out.push(HeroMesh {
-            file: format!("{key}.inf_mesh"),
+            file: format!("{}.inf_mesh", weapon_fallback_stem(key)),
             guid: inf_ecs::weapon::weapon_mesh_guid(key),
             asset: merged(&unit, placed(&unit, size, mid, false)),
         });
@@ -554,7 +566,7 @@ pub fn weapon_art_fallback_meshes() -> Vec<HeroMesh> {
             // A magazine is modelled at its seat, so its box is centred on the
             // origin: 2 cm wide, 10 cm tall, 3 cm deep -- a pistol magazine.
             out.push(HeroMesh {
-                file: format!("{key}_MAG.inf_mesh"),
+                file: format!("{}.inf_mesh", weapon_fallback_stem(&format!("{key}_MAG"))),
                 guid: inf_ecs::weapon::weapon_mesh_guid(&format!("{key}_MAG")),
                 asset: merged(
                     &unit,

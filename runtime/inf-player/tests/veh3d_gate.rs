@@ -3164,6 +3164,7 @@ fn a_near_car_that_is_driving_draws_its_riders_in_their_seats() {
     let mut measured = 0usize;
     let mut worst_pelvis = 0.0f64;
     let mut worst_head_under_roof = f64::INFINITY;
+    let mut worst_row = "";
     let mut most = 0usize;
     for _ in 0..600 {
         sim.step_once(RuntimeInput::default());
@@ -3211,11 +3212,14 @@ fn a_near_car_that_is_driving_draws_its_riders_in_their_seats() {
             cars.insert(chassis);
             passengers += usize::from(seat == SeatIndex::Passenger.as_u8());
             worst_pelvis = worst_pelvis.max((pelvis - cushion).length());
+            if roof - head.y < worst_head_under_roof {
+                worst_row = inf_ecs::traffic::catalogue_row_id(chassis).unwrap_or("?");
+            }
             worst_head_under_roof = worst_head_under_roof.min(roof - head.y);
         }
     }
     println!(
-        "=== Near riders ===\n  {} occupied Near cars drew a posed body ({measured} rider-steps, {passengers} of them passengers); at most {most} riders at once\n  the pelvis joint at worst {:.2} mm off its cushion; the head at least {:.3} m under the roof",
+        "=== Near riders ===\n  {} occupied Near cars drew a posed body ({measured} rider-steps, {passengers} of them passengers); at most {most} riders at once\n  the pelvis joint at worst {:.2} mm off its cushion; the head at least {:.3} m under the roof (`{worst_row}`)",
         cars.len(),
         worst_pelvis * 1000.0,
         worst_head_under_roof

@@ -92,6 +92,30 @@ pub const SEAT_FLOOR_FRAC_Y: f64 = -0.80;
 /// `-0.55` / `-0.10`.
 pub const SEAT_CUSHION_FRAC_Y: f64 = -0.45;
 
+/// **How far a seated body's HEAD joint rises above its H-point**, metres --
+/// measured on the Near riders `veh3d_gate` draws: 0.714 m on the lowest body
+/// that clipped (wave VEH3f.2a), rounded UP, and that 6 mm is the head room.
+pub const SEATED_HEAD_ABOVE_H_M: f64 = 0.72;
+
+/// **The cushion's height fraction for a hull `half_y` metres high** (wave
+/// VEH3f.2a): [`SEAT_CUSHION_FRAC_Y`], or lower where that would put a seated
+/// head through the roof.
+///
+/// The proportional rule was measured on the saloon and the 0.58 m coupe, and a
+/// hull under about 0.50 m breaks it: the imported sports car's own bounds are
+/// 0.491 m, and its Near rider's head stood 2 mm through the roof. So the
+/// cushion sits no higher than `half_y - SEATED_HEAD_ABOVE_H_M` -- which binds
+/// only below `half_y` = 0.4966 m, and only on a hull that draws NO seat
+/// (`sockets_of`: a family that draws a cushion authored it at the
+/// proportional rule): the imported sports car, which draws none -- and, for a
+/// caller that passes no parts (a Near car's rider), the two low supercars
+/// under 0.4966 m as well. Every other row's seat stays exactly where it was,
+/// because `min` returns the proportional fraction itself above that height.
+pub fn cushion_frac_y(half_y: f64) -> f64 {
+    let hy = half_y.abs().max(1e-6);
+    SEAT_CUSHION_FRAC_Y.min((hy - SEATED_HEAD_ABOVE_H_M) / hy)
+}
+
 /// How far off the centreline a front seat is, as a fraction of the chassis
 /// half-width. 0.42 of 0.92 m is 0.386 m on the saloon, which is a real car's
 /// seat centre.
@@ -539,9 +563,17 @@ pub fn sockets_of(half: Vec3d, offset: Vec3d, parts: &[PartGeom]) -> VehicleSock
     let at = |fx: f64, fy: f64, fz: f64| {
         Vec3d::new(offset.x + fx * hx, offset.y + fy * hy, offset.z + fz * hz)
     };
-    let seat_r = at(SEAT_LATERAL_FRAC_X, SEAT_CUSHION_FRAC_Y, SEAT_FRONT_FRAC_Z);
-    let seat_l = at(-SEAT_LATERAL_FRAC_X, SEAT_CUSHION_FRAC_Y, SEAT_FRONT_FRAC_Z);
-    let seat_rear = at(0.0, SEAT_CUSHION_FRAC_Y, SEAT_REAR_FRAC_Z);
+    // A drawn cushion's family authored its seat at the proportional rule
+    // (`the_drawn_seat_is_the_seat_the_body_sits_on`), so the head-room rule
+    // is for a hull that draws none.
+    let cushion = if parts.iter().any(|p| p.kind == crate::vehicle::KIND_SEAT) {
+        SEAT_CUSHION_FRAC_Y
+    } else {
+        cushion_frac_y(hy)
+    };
+    let seat_r = at(SEAT_LATERAL_FRAC_X, cushion, SEAT_FRONT_FRAC_Z);
+    let seat_l = at(-SEAT_LATERAL_FRAC_X, cushion, SEAT_FRONT_FRAC_Z);
+    let seat_rear = at(0.0, cushion, SEAT_REAR_FRAC_Z);
     // The pedals and the hub belong to the DRIVER's side, whichever that is.
     let d = SEAT_LATERAL_FRAC_X;
     let mut pedal_throttle = at(d * PEDAL_THROTTLE_FRAC_X, PEDAL_FRAC_Y, PEDAL_FRAC_Z);

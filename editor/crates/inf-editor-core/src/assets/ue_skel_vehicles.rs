@@ -783,19 +783,27 @@ pub fn split_skel_vehicle(i: &SkelVehicleIn) -> Result<SkelVehicleSplit, String>
     // ── the seats: the Blueprint's driver, or behind the drawn hub, or (a pack
     //    with neither) where every family seats its driver -- the hull
     //    fractions `inf_ecs::boarding` has always used ──
-    let seat_plan = i
+    //
+    // A seat from the hull fractions is DRAWN as nothing: it would restate
+    // the rule `sockets_of` applies to a hull with no cushion, and a drawn
+    // cushion switches off that rule's head-room clamp (the imported sports
+    // car, 0.491 m high, needs it). Its plan still places the door proxies.
+    let measured_seat = i
         .seat
         .map(|p| to_engine(f, p) - centre)
-        .or_else(|| hub_at.map(|h| DVec3::new(h.x, 0.0, h.z - SEAT_BEHIND_HUB_M)))
-        .or_else(|| {
-            Some(DVec3::new(
-                inf_ecs::boarding::SEAT_LATERAL_FRAC_X * half.x,
-                0.0,
-                inf_ecs::boarding::SEAT_FRONT_FRAC_Z * half.z,
-            ))
-        });
-    if let Some(s) = seat_plan {
-        let y = inf_ecs::boarding::SEAT_CUSHION_FRAC_Y * half.y;
+        .or_else(|| hub_at.map(|h| DVec3::new(h.x, 0.0, h.z - SEAT_BEHIND_HUB_M)));
+    let seat_plan = measured_seat.or_else(|| {
+        Some(DVec3::new(
+            inf_ecs::boarding::SEAT_LATERAL_FRAC_X * half.x,
+            0.0,
+            inf_ecs::boarding::SEAT_FRONT_FRAC_Z * half.z,
+        ))
+    });
+    if let Some(s) = measured_seat {
+        // The cushion's TOP on the H-point `sockets_of` seats the driver at
+        // (`veh3f_gate::the_drawn_seat_is_the_seat_the_body_sits_on`), so the
+        // part's centre is half a cushion below it.
+        let y = inf_ecs::boarding::SEAT_CUSHION_FRAC_Y * half.y - SEAT_HALF_M[1];
         let h = DVec3::new(SEAT_HALF_M[0], SEAT_HALF_M[1], SEAT_HALF_M[2]);
         let driver_x = if s.x.abs() < 0.05 { 0.0 } else { s.x };
         parts.push(ArtPartOut {
