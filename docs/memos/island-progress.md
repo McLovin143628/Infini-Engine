@@ -41220,3 +41220,134 @@ automatic (no key), no ground effect, spin or density lapse; hull speed (the
 beam reach makes 5.97 m/s on a 12 m hull, above a displacement hull's 4.3);
 the drawn gear leg and mast; the unlimited spherical ragdoll joints.
 
+
+## WAVE VEH3f.2a — REAL VEHICLE + WEAPON ART THROUGH THE UE BRIDGE (2026-09-25)
+
+Range `e89d3938..` (implementer; nothing pushed). Report:
+`campaign-briefs/veh3f2a-implementer-report.md`. Scene v28, payload 13, goldens
+66, `EXPECTED_LEVELS` 24 -- no schema move; `Cargo.lock` unchanged; no new
+dependency. The island `.inf_lvl` moved with its cause (the imported-art lot,
+then the art rows' COG and seat parts: 274 519 -> 307 746 B). NOTHING from
+Unreal/Fab is in the tree: the art lives in `island-build/project/Content/UE/`
+and a checkout without it draws our own boxes at the same GUIDs
+(`samples/vehicle-art/`, 452 files; `samples/weapon-art/`, 32).
+
+### what landed
+
+* **Input delivery (item 0).** A key pressed and released inside one frame's
+  batch was a press the sim never saw: the batch applied down then up before
+  the step read it. `inf_input::InputState` now latches a tap for the commit
+  it landed in; the shipped player's window gained a low-level keyboard probe
+  (`# key OS/WIN/TAP/ACT` in the hero log). The VEH3g "PIE window's lost E
+  presses" carry is this.
+* **The skeletal bridge.** `tools/ue-export/export.py` writes manifest v3: a
+  skinned mesh's bones (read back from the exported glTF -- the commandlet's
+  component transforms read zero), its sockets (bone-relative, composed at
+  import), every LOD rung, and the Blueprint's component and Chaos-wheel
+  defaults. The UE glTF exporter maps UE `(x, y, z)` cm to glTF `(x, z, y)` m
+  (measured; the fixture convention `(x, z, -y)` is not the exporter's), a
+  quaternion `(-x, -z, -y, w)`; the packs face UE `+X`, which the per-pack
+  `forward` field turns into this engine's `+Z`.
+* **The split** (`ue_skel_vehicles`): a skinned car cut BY BONE into its
+  chassis, four wheels (hub on the bone, radius from the tyre), two doors
+  (hinge edge on the `Left_Door`/`Right_Door` bones), up to eight glass panes,
+  the steering wheel (its rim plane and the pack's column rake), and seats
+  where a Blueprint or the drawn rim places one; door PROXIES over the doorless
+  Vol.1/Vol.2 bodies. Split worst 0.199 mm against the bones over 13 cars.
+* **Data-driven art.** `ArtKey(u16)` indexes `vehicle_art.toml` (NUMBERS only
+  -- no pack asset name, no slot name); 20 rows (7 machines, 13 cars), any
+  roster row can name one (`art = "dd_sedan"`). The rig draws each part at the
+  art's GUID; a `Hub` part turns with the rack (`hub_rim_euler`).
+* **Drawn sections.** A multi-material rigid mesh is drawn one instance per
+  section (`inf_mesh::section_mesh_id` / `section_material_id`, up to 48), each
+  with its slot's own surface; the paint slot has no record and wears the
+  row's paint; glass is the engine's dark glass; translucent lamp lenses are
+  dropped. The player projector, the editor viewport and the cook all walk
+  the same ids.
+* **13 cars mapped by class**: `karin_asterope_gz` = the calibration sedan;
+  `dinka_sugoi`, `obey_rocoto` (DrivableCars); `cheval_fugitive`,
+  `bravado_gresley`, `declasse_burrito`, `vapid_speedo` (Vol.2);
+  `declasse_asea`, `declasse_yosemite_rancher`, `pfister_comet_s2`,
+  `vapid_radius`, `brute_boxville`, `hvy_flatbed` (Vol.1). Geometry from the
+  art; each row keeps its family's COG height ABOVE THE AXLE (the art moved the
+  box around it; the camper at -0.70, the rule's -0.855 braking at the band's
+  0.96 g edge). A class with art rows draws only them at the kerb.
+* **Weapons**: 13 Modern Weapons bodies + 5 magazines through the WPN2d socket
+  door; no registry row draws a primitive (WPN2d's 14 shotguns and launchers
+  and its 10 SMG-drawn pistols); the shot, flash and brass leave the pack's
+  `muzzle` socket (0.000 mm on a rigged hero); the magazine is its own mesh,
+  out on the reload.
+* **Deterministic import**: a pack material or texture NEW to a project takes
+  `import_path_guid(path)`; two fresh imports of the calibration pack agree on
+  all 728 files under `UE/Vehicles/` (26 sidecars of the generic glTF door's
+  loose static meshes still differ -- carried).
+* **Play with the art present**: textures ride the PIE envelope as bytes, and
+  the island named 921.2 MB of them against a 268.4 MB frame. A 160 MiB
+  `PIE_TEXTURE_BUDGET_BYTES` (document bindings first): 164.1 MB shipped, a
+  171.3 MB payload. Past it a surface previews at its material's scalars.
+
+### judged
+
+* **The seat that could not reach the wheel.** The first seat rule took the
+  Blueprint's `Driver` to `steering_wheel` distance (0.53 m) -- the COLUMN
+  ROOT, not the rim -- and the Vol.2 driver's hands ended 83.3 mm off the
+  wheel. The three measured Blueprint seats are 0.296/0.328/0.313 m behind
+  the rim: `SEAT_BEHIND_HUB_M` 0.31, rim residual 0.00 mm.
+* **The low roof.** The imported sports car's bounds are 0.491 m high; the
+  proportional cushion put a Near rider's head 2 mm through it.
+  `boarding::cushion_frac_y` clamps a seatless hull's H-point under the head
+  (0.72 m, measured); binds only below 0.4966 m.
+* **The door hinge's slack is the solver's.** The art door swings about a
+  point 7.5 mm off the table's pivot through 66 deg; VEH3c's own primitive
+  door measures 11.7 mm on the same metric. Bounded at 15 mm, said.
+* **Weapon fallbacks were named like the pack's assets** (`SM_MW_*.inf_mesh`)
+  and `veh3f_gate`'s licence arm refused them: renamed ours
+  (`weapon_mw_*`), the importer evicts the copy.
+
+### the census (10 island minutes, `INF_VEH3F2A_ISLAND_MINUTES=10`, dev build)
+
+660 traffic samples on the CI island: sedan 120, SUV 240, truck 60, van 240
+IMPORTED; 0 shell (VEH3f.2b's column); 0 primitive; 600 of 600 resident art
+chassis drawing the art's body.
+
+### what the shipped host showed
+
+13 of 13 imported bodies drawn in the PIE gallery, sectioned and textured to
+the budget; a Vol.1 pickup in island traffic; the editor relaunched drawing
+the imported sedan at the crossroads and, selected, its door's Details grid
+reading `Mesh Asset dd_sedan_door_l`. The calibration sedan boarded on the
+shipped host (`-TimeScale 0.2`): unlocking -> opening -> entering -> seated
+-> driving -> exiting -> closing; hand on the handle 184 rows worst
+0.000 m, hands on the rim 49 rows worst 0.000 m, feet on the pedals 132 rows
+worst 0.0419 m (over the brief's 2 cm -- carried). The input probe: 78 taps
+that went down and up inside one frame were latched and reached the sim (each
+one a lost press before item 0); no key the OS saw that the window missed.
+The editor and Play came back only after two defects this wave had made:
+the section probes' rescan-on-miss (the viewport never drew; Play waited on
+its lock) and the 921 MB PIE payload.
+
+### carried, by name
+
+**The frame rate with the art present**: a windowed PIE session on the
+island ran at a median 166.8 ms a frame (p10 140.0, p90 171.4, 562 samples)
+in traffic, and at ~13 % of real time beside the Harbour City lot -- no
+baseline without the art was measured this session, the editor was drawing
+the same scene alongside, and the machine's commit limit killed one of the
+editor's WebViews on every launch (the `Out of Memory` panel in every frame).
+`SHIPPING_FRAME_CEILING_MS` is NOT shown to hold with imported traffic; the
+A/B (art present/absent, editor closed) is VEH3f.2b's first measurement.
+The weapon frames (the hero holding the pack shotgun and launcher) were not
+taken: the full session's hero was ragdolled before the class leg. The
+pedals' 41.9 mm on the calibration sedan.
+`texture_paths` on the PIE envelope (a payload rung, ~0.5 day) -- until then
+Play previews the art past 160 MiB untextured while the cook draws it; car
+paint's clearcoat layer and flake (UE's `M_Carpaint`: ClearCoat 1, top
+roughness 0, three flake layers) -- a second specular lobe and a flake normal
+in the mesh and vgeom shaders, ~2.5 days, PAR-era; the door CUT for the
+doorless Vol.1/Vol.2 bodies (a DCC knife over each body, ~0.5 day a car, or
+VEH3f.2b's shells); the Vol.1 cars and the Vol.2 box truck draw no steering
+wheel (the packs ship none separate), so their grips are the hull-fraction
+rim; two lot rows (`obey_rocoto`, `declasse_yosemite_rancher`) found no kerb
+vertex at Harbour City; the generic glTF door's fresh GUIDs (26 sidecars per
+calibration import); the pack LODs 1-3 are recorded, not drawn -- every
+section is a meshlet DAG.
