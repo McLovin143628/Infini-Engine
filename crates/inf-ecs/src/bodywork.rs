@@ -94,14 +94,24 @@ pub const HULL_PANELS: f64 = 4.0;
 ///   nine thousand. Against a 4 500 N.s mount it tears, which is right.
 /// * the JOINT path asks what the part's OWN hinge carried. A 22 kg door hitting
 ///   a lamp post at 30 km/h can deliver `m·v` = **183 N.s** and no more — it is
-///   a door, not a car. Measured at 68 km/h it reaches **515**, against **2** in
-///   open air. Compared to the same 4 500 it never breaks, and an open door
+///   a door, not a car. Measured at 68 km/h it reaches **2 060**, against **9**
+///   in open air. Compared to the same 4 500 it never breaks, and an open door
 ///   would be indestructible by anything smaller than the car it is on.
 ///
 /// So a hinge tears at a SPEED: four metres a second of the part's own momentum,
 /// which is a door that hits something at walking-to-jogging pace and loses.
-/// Cornering at half a g puts 1.8 N.s through a 22 kg door in a step, so the
-/// margin against normal driving is about fifty to one.
+///
+/// **Those are the WHOLE step's impulses** (VEH3g audit). Until then
+/// `PhysicsWorld3D::joint_impulse` read one substep of four, so the numbers this
+/// constant was sized beside were quarters (515 and 2 at VEH3c) and the hinge
+/// really let go at sixteen metres a second of momentum, not four. The read is
+/// corrected and this constant is NOT: four is what the sentence above claims,
+/// and it is now what the world does. The lamp post still tears the door (2 060
+/// against 88 for a 22 kg door), open air still does not (9), and cornering at
+/// half a g -- VEH3c's quarter-read 1.8 N.s, so about 7 -- keeps a margin of
+/// about twelve to one rather than the fifty the quarter-read claimed. The
+/// CRASH path (`J = m·|dv|`) never read a joint and did not move: 30 / 4 056 /
+/// 9 308 / 17 730 / 28 606 N.s at 15-90 km/h, to the newton-second.
 ///
 /// **The tuning still governs it.** [`hinge_tear_ns`] scales this by the row's
 /// own `part_break_impulse_ns` against the default, so a car tuned UNBREAKABLE

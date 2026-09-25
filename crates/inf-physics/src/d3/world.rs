@@ -1161,12 +1161,31 @@ impl PhysicsWorld3D {
     ///
     /// This is the whole of what makes a BREAKABLE joint possible in this
     /// engine — see [`BreakWatch3D`](super::joint::BreakWatch3D).
+    ///
+    /// **The WHOLE step's, not one substep's** (VEH3g audit). Rapier keeps the
+    /// impulse of the LAST of its `num_solver_iterations` substeps, so read raw
+    /// this was a quarter of what the joint carried: a 1 000 kg box hanging
+    /// still off a fixed, a revolute and a spherical joint read **40.875 N.s
+    /// against its m·g·dt of 163.500 -- 0.2500, to four places, on all three**.
+    /// VEH3c's hinge tear (`inf_ecs::bodywork::HINGE_TEAR_MPS`) was sized
+    /// against the quarter. [`solver_substeps`](Self::solver_substeps) is the one
+    /// factor, shared with [`rope_impulse_ns`](Self::rope_impulse_ns).
     pub fn joint_impulse(&self, joint: JointId3D) -> Option<super::joint::JointImpulse3D> {
         let j = self.impulse_joints.get(joint.0)?;
+        let n = self.solver_substeps();
         Some(super::joint::JointImpulse3D {
-            linear: DVec3::new(j.impulses[0], j.impulses[1], j.impulses[2]),
-            angular: DVec3::new(j.impulses[3], j.impulses[4], j.impulses[5]),
+            linear: DVec3::new(j.impulses[0], j.impulses[1], j.impulses[2]) * n,
+            angular: DVec3::new(j.impulses[3], j.impulses[4], j.impulses[5]) * n,
         })
+    }
+
+    /// **How many substeps the solver ran a step** (VEH3g audit) -- the factor
+    /// between the impulse rapier stores on a joint (the last substep's) and
+    /// what the joint carried over the whole fixed step. The ONE door both
+    /// [`joint_impulse`](Self::joint_impulse) and
+    /// [`rope_impulse_ns`](Self::rope_impulse_ns) read it through.
+    pub fn solver_substeps(&self) -> f64 {
+        self.integration_parameters.num_solver_iterations.max(1) as f64
     }
 
     /// **What a ROPE carried on the last step**, newton-seconds (wave VEH3g) --
@@ -1182,13 +1201,12 @@ impl PhysicsWorld3D {
     /// **Times the solver's substeps.** The limit's stored impulse is the LAST
     /// substep's, and rapier solves `num_solver_iterations` (4) of them a step:
     /// read raw, the same cable held that car at **4 660 N against its
-    /// 18 639 N weight -- a quarter, to the newton**. The same holds for
-    /// `joint_impulse`, which VEH3c's breakable hinges read (carried in the
-    /// wave's ledger rather than re-tuned under them here).
+    /// 18 639 N weight -- a quarter, to the newton**. The same held for
+    /// [`joint_impulse`](Self::joint_impulse), which is corrected through the
+    /// same [`solver_substeps`](Self::solver_substeps) (VEH3g audit).
     pub fn rope_impulse_ns(&self, joint: JointId3D) -> Option<f64> {
         let j = self.impulse_joints.get(joint.0)?;
-        let substeps = self.integration_parameters.num_solver_iterations.max(1) as f64;
-        Some(j.data.limits[0].impulse.abs() * substeps)
+        Some(j.data.limits[0].impulse.abs() * self.solver_substeps())
     }
 
     /// **Re-aim a revolute's position motor**, radians (wave VEH3c's audit).

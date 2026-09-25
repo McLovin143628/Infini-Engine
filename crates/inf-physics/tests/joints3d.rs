@@ -712,3 +712,71 @@ fn a_hinged_part_that_straddles_its_own_hull_needs_its_contacts_off() {
         "even with contacts off the pair reached {off:.2} m/s — something else is pushing it"
     );
 }
+
+/// **A JOINT'S IMPULSE IS THE WHOLE STEP'S** (VEH3g audit) -- the one corrected
+/// read VEH3c's hinge tear and VEH3g's winch share.
+///
+/// A 1 000 kg box hangs still off a static anchor on each of the three kinds a
+/// breakable part or a ragdoll uses. At rest the joint carries the weight, so
+/// what it carried over one fixed step is `m·g·dt` = 163.5 N.s. Rapier stores
+/// the LAST substep's impulse: read raw it was **40.875 -- 0.2500 of it, on all
+/// three kinds**, which is what VEH3c's break thresholds had been compared to.
+///
+/// Mutation that reds it: drop `solver_substeps()` from `joint_impulse`.
+#[test]
+fn a_joints_impulse_is_the_whole_steps_not_one_substeps() {
+    for (name, kind) in [
+        ("fixed", JointKind3D::Fixed),
+        (
+            "revolute",
+            JointKind3D::Revolute {
+                axis: DVec3::Z,
+                limits: None,
+                motor: None,
+            },
+        ),
+        ("spherical", JointKind3D::Spherical),
+    ] {
+        let mut world = PhysicsWorld3D::new(DVec3::new(0.0, -9.81, 0.0));
+        let anchor = world.add_body(
+            BodyKind3D::Static,
+            DVec3::new(0.0, 5.0, 0.0),
+            DQuat::IDENTITY,
+        );
+        let b = world.add_body(
+            BodyKind3D::Dynamic,
+            DVec3::new(0.0, 4.0, 0.0),
+            DQuat::IDENTITY,
+        );
+        world.add_collider(
+            b,
+            ColliderDesc3D::new(ColliderShape3D::Box {
+                half_extents: DVec3::splat(0.5),
+            })
+            .density(1000.0),
+        );
+        let j = world
+            .add_joint(
+                anchor,
+                b,
+                JointDesc3D::new(kind)
+                    .local_anchor1(DVec3::ZERO)
+                    .local_anchor2(DVec3::new(0.0, 1.0, 0.0)),
+            )
+            .expect("the joint builds");
+        for _ in 0..240 {
+            world.step(DT);
+        }
+        let read = world.joint_impulse(j).expect("live").magnitude_ns();
+        let weight_ns = 1000.0 * 9.81 * DT;
+        eprintln!(
+            "{name}: the joint carried {read:.3} N.s over the step, m g dt {weight_ns:.3} ({:.4}), {} substeps",
+            read / weight_ns,
+            world.solver_substeps()
+        );
+        assert!(
+            (read / weight_ns - 1.0).abs() < 1e-3,
+            "{name}: the joint reads {read:.3} N.s against the {weight_ns:.3} it carried"
+        );
+    }
+}
