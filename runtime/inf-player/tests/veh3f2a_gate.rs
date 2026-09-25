@@ -4,24 +4,24 @@
 //! answers the audit's question: would a car that imported as an untextured,
 //! wheel-less lump pass it?
 //!
-//! | arm | READS | LUMP? |
-//! |---|---|---|
-//! | `a_v3_manifest_states_bones_sockets_and_blueprint_defaults` | a v3 manifest's joints, sockets, Blueprint components and a weapon's composed muzzle (CI: a synthetic manifest; local: the three real ones, joints against the glTF they were read back from) | CI half: yes (parser-level); local half: no (joints vs the glTF skeleton) |
-//! | `the_split_puts_every_part_on_its_bone` | the split's wheel hubs vs bone rest poses (≤ 1 mm), mesh centres, door boxes' front edge on the hinge bone, the pane, the rake (CI: a synthetic skinned car; local: every imported car's vehicle TOML vs its manifest's bones and vs the committed art table) | no: a lump has no wheel part |
-//! | `the_calibration_doors_swing_on_the_packs_hinge` | the art door's own world transform: its hinge point stays on the chassis pivot through the swing (≤ 1 mm), the angle, and a lamp post tears it | no: a lump has no door |
-//! | `the_art_wheels_turn_with_wheel_speed` | each wheel entity's drawn spin vs the distance rolled over its radius, and the tyre child's mesh GUID | no: no wheel GUIDs |
-//! | `the_drawn_steering_wheel_turns_with_the_rack` | the hub part's roll vs the rim rule, its rake vs the art table, the grips vs the drawn rim circle | no: no hub |
-//! | `the_calibration_car_boards_at_its_sockets_on_the_shipped_host` | posed joints vs live sockets on `RuntimeSim` (handle, rim, pedals ≤ 20 mm) | no: its sockets are the art's parts |
-//! | `every_art_row_draws_committed_geometry_without_the_art` | each art row's rig mesh GUIDs vs the committed fallback files, and the player projector drawing them whole | yes: this is the ABSENT arm, the fallback IS a lump by design |
-//! | `the_island_draws_the_imported_art_where_it_is` (local) | the island project's files at the art GUIDs: triangles, sections, section materials with texture maps, the projector drawing the sections with their own surfaces | no |
-//! | `nothing_from_unreal_is_committed` | `git ls-files` + every committed blob this wave added (names), and (local) 4 KiB chunk hashes against the local art | n/a |
-//! | `every_traffic_car_of_an_imported_class_is_an_art_row` | 20 000 traffic identities through `catalogue_row_id` | no: reads the draw |
-//! | `the_body_kind_census_over_the_ci_island` | body kinds of the CI island's traffic after its first minute | fallback counts as imported (it IS the art's GUID) |
-//! | `the_weapon_muzzle_is_the_packs_socket` | the round's origin and the casing's spawn vs weapon transform x the pack socket; the magazine at its seat and out on the reload | no |
-//! | `no_weapon_class_draws_a_primitive` | every registry row's mesh identity, and its committed fallback | no |
-//! | `the_import_is_deterministic` (local) | two imports of the calibration pack into two projects, file bytes | n/a |
-//! | `sixty_four_imported_cars_cost_what_they_cost` (release) | the player projector over 64 art cars vs 64 box cars | n/a (COST) |
-//! | `this_wave_moved_no_schema` | the three constants | n/a |
+//! | arm | READS | LUMP? | MUTATION (measured) |
+//! |---|---|---|---|
+//! | `a_v3_manifest_states_bones_sockets_and_blueprint_defaults` | a v3 manifest's joints, sockets, Blueprint components and a weapon's composed muzzle (CI: a synthetic manifest; local: the three real ones, joints against the glTF they were read back from, worst 5.2e-9 m) | CI half: yes (parser-level); local half: no | socket not composed through its bone -> red (muzzle at (0, 0.755, -0.07)) |
+//! | `the_split_puts_every_part_on_its_bone` | wheel hubs vs bone rest poses (≤ 1 mm), door boxes' front edge on the hinge bone, the committed table vs the import (local: 13 cars, worst 0.199 mm) | no: a lump has no wheel part | `to_engine` identity for +X -> red (a wheel 5.7 m off its bone) |
+//! | `the_calibration_doors_swing_on_the_packs_hinge` | the door's solved transform: its hinge point vs the chassis pivot through the swing (≤ 15 mm, the solver's slack: 7.5 mm here, 11.7 mm on VEH3c's own door), the angle, a lamp post tearing it | no: a lump has no door | pivot at the box centre -> red (706 mm) |
+//! | `the_art_wheels_turn_with_wheel_speed` | each wheel's drawn spin vs distance rolled over its radius, the tyre child's mesh GUID | no | art wheel GUID dropped -> red |
+//! | `the_drawn_steering_wheel_turns_with_the_rack` | the hub's roll vs the rim rule, its rake, the grips vs the drawn rim circle | no: no hub | roll write zeroed -> red; hub sockets off `KIND_HUB` -> red (211.7 mm) |
+//! | `the_calibration_car_boards_at_its_sockets_on_the_shipped_host` | posed joints vs live sockets on `RuntimeSim` (handle, rim, pedals ≤ 20 mm), calibration + a Vol.2 sedan | no | VACUOUS to the hub-socket mutation (residual is to the socket; the hub arm owns it); the column-root seat -> red (83.3 mm) |
+//! | `every_art_row_draws_committed_geometry_without_the_art` | each art row's rig mesh GUIDs vs the committed fallback files, projected whole | yes: the ABSENT arm, the fallback IS a lump by design | (stated in the arm) |
+//! | `the_island_draws_the_imported_art_where_it_is` (local) | the island project's files at the art GUIDs: 78 417 triangles, 17 sections, 16 textured, 1 paint; the projector drawing each section with its own surface | no | section branch emptied -> red |
+//! | `nothing_from_unreal_is_committed` | `git ls-files`, pack words in every committed fallback byte, (local) 430 612 4 KiB chunk hashes of the art vs every committed `samples/` chunk | n/a | (stated in the arm) |
+//! | `every_traffic_car_of_an_imported_class_is_an_art_row` | 20 000 identities through `catalogue_row_id` | no: reads the draw | art filter removed -> red (1 678 non-art coupes) |
+//! | `the_island_body_kind_census` | the CI island's traffic records by class and kind, and every resident art chassis' drawn body, over 1 island minute (10 in release off CI: 660 samples, 0 primitive, 600/600 resident chassis on the art body) | fallback counts as imported (it IS the art's GUID) | art filter removed -> red (6 primitive sedans); body GUID dropped -> red |
+//! | `the_weapon_muzzle_is_the_packs_socket` | a rigged hero's round origin and casing spawn vs weapon transform x pack socket (0.000 mm); the magazine at its seat and out on the reload | no | muzzle back on `muzzle_forward_m` -> red (264.5 mm) |
+//! | `no_weapon_class_draws_a_primitive` | every registry row's mesh identity and its committed fallback | no | `Launcher` arm `None` -> red (`fim_92_stinger`); `Shotgun` arm VACUOUS (every shotgun row named first) |
+//! | `the_import_is_deterministic` (local) | two imports of the calibration pack, 920 files; 0 of this wave's differ, 26 residue of the generic glTF door | n/a | `import_path_guid` -> `AssetId::new()` -> red |
+//! | `sixty_four_imported_cars_cost_what_they_cost` (release) | the player projector over 64 art cars vs 64 box cars (CI: the fallback DAGs) | n/a (COST) | print-only in dev/CI (the house conditioning) |
+//! | `this_wave_moved_no_schema` | the three constants | n/a | n/a |
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -969,9 +969,11 @@ fn rigged_runtime_sim_for(row: &str, hero_at: DVec3) -> inf_player::runtime_sim:
 /// art) boards the same way through its proxy, and says so.
 ///
 /// **Mutation**: the hub's sockets back on the hull fraction (`sockets_of`
-/// ignoring `KIND_HUB`) -> red on the rim (the hands grip air off the drawn
-/// wheel -- the residual is to the socket, so the arm asks the grips to be on
-/// the drawn rim as well, in the arm above).
+/// ignoring `KIND_HUB`) -> this arm stays GREEN (VACUOUS, measured: the
+/// residual is hand-to-SOCKET, and the socket moved with the mutation); the
+/// hub arm above goes red on it (a grip 211.7 mm off the drawn rim). The seat
+/// behind the rim (`SEAT_BEHIND_HUB_M` at the column root's 0.53 m) -> red
+/// here: the Vol.2 driver 83.3 mm short of the wheel.
 #[test]
 fn the_calibration_car_boards_at_its_sockets_on_the_shipped_host() {
     use inf_ecs::movement::actions::{INTERACT, MOVE_X, MOVE_Y};
@@ -1814,7 +1816,10 @@ fn the_weapon_muzzle_is_the_packs_socket() {
 /// left drawing a primitive -- every shotgun and every launcher but the grenade
 /// -- now name a pack body.
 ///
-/// **Mutation**: the class table's `Shotgun` arm back to `None` -> red.
+/// **Mutation**: the class table's `Launcher` arm back to `None` -> red
+/// (`fim_92_stinger` draws a primitive). The `Shotgun` arm is VACUOUS to this
+/// arm over the shipped registry -- every shotgun row is named by the pack
+/// table first -- and is kept for a row the table does not know.
 #[test]
 fn no_weapon_class_draws_a_primitive() {
     let reg = registry();
@@ -2053,4 +2058,154 @@ const ART_PROJECTION_BUDGET_MS: f64 = 2.0;
 fn this_wave_moved_no_schema() {
     assert_eq!(inf_scene::SCHEMA_VERSION, 28);
     assert_eq!(inf_runtime::pie::SCENE_PAYLOAD_VERSION, 13);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// (6b) THE BODY-KIND CENSUS ON THE ISLAND
+// ═════════════════════════════════════════════════════════════════════════════
+
+const HZ: f64 = 60.0;
+
+fn fixture_recipe() -> PathBuf {
+    repo().join("samples/island-fixture/island.toml")
+}
+
+/// The CI island, cooked and booted as `run_headless` boots it (`veh3f_gate`'s
+/// harness, verbatim).
+fn island_sim(tmp: &Path) -> inf_player::runtime_sim::RuntimeSim {
+    let recipe = inf_island::IslandRecipe::load(&fixture_recipe()).expect("the fixture recipe");
+    let build = inf_island::build_island(&recipe, &inf_island::BuildOptions::default())
+        .expect("the fixture island builds");
+    let proj = tmp.join("island");
+    inf_project::ProjectManifest::new(&recipe.name, "blank-3d")
+        .save(&proj)
+        .expect("scaffold");
+    inf_island::write_content(&build, &proj.join("Content")).expect("content");
+    let out = tmp.join("out");
+    inf_packager::cook(&proj, &out, &inf_packager::CookOptions::default())
+        .expect("the island cooks");
+    let source = inf_player::level::PackLevelSource::open(&out).expect("the pack opens");
+    let mut built = inf_player::build_world_from_pack(&source).expect("the world builds");
+    let partition = built.take_partition();
+    let pcg = built.pcg_context();
+    let mut sim = inf_player::sim_from_built(built);
+    inf_player::attach_cell_streaming(&mut sim, &partition, pcg);
+    inf_player::attach_terrain_streaming(
+        &mut sim,
+        &inf_player::TerrainContent::Pack(source.clone()),
+    );
+    sim
+}
+
+/// TEN island minutes in a release build off CI (the brief's number), ONE in a
+/// dev build or on a shared runner; `INF_VEH3F2A_ISLAND_MINUTES` overrides.
+fn island_minutes() -> u64 {
+    if let Some(m) = std::env::var("INF_VEH3F2A_ISLAND_MINUTES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        return m;
+    }
+    if cfg!(debug_assertions) || std::env::var_os("CI").is_some() {
+        1
+    } else {
+        10
+    }
+}
+
+/// **The body-kind census, after the island's minutes** (wave VEH3f.2a).
+///
+/// The CI island cooked and booted as the player boots it, the crowd set
+/// aside (`veh3f_gate`'s traffic-census reason), stepped for
+/// [`island_minutes`]; every traffic record counted by class and by body kind:
+/// IMPORTED (the row names an art body -- the art where the project has it,
+/// its committed fallback where it does not, which is CI), SHELL (a DCC shell:
+/// VEH3f.2b's, none yet, so the column is 0 by construction and printed so
+/// VEH3f.2b's number has a place to land) and PRIMITIVE (the family boxes).
+/// And off the WORLD, not the record: every RESIDENT chassis of an art row
+/// draws the art's body GUID -- the thing the census claims.
+///
+/// **Target**: every traffic car of an imported class is imported (the
+/// Construction class excepted: its machines are placed, not drawn by the kerb).
+///
+/// **Mutation**: the art filter in `catalogue_row_id` removed -> red (primitive
+/// sedans at the kerb); `rig_nodes_at`'s art body GUID back to the family
+/// primitive -> red on the resident draw.
+#[test]
+fn the_island_body_kind_census() {
+    use inf_ecs::roster::RosterClass;
+    let tmp = tempfile::tempdir().expect("a temp dir");
+    let mut sim = island_sim(tmp.path());
+    inf_ecs::crowd::set_population(sim.world_mut(), BTreeMap::new());
+    let minutes = island_minutes();
+    let art_classes: BTreeSet<RosterClass> = inf_ecs::roster::roster()
+        .0
+        .values()
+        .filter(|d| d.art.is_some())
+        .filter_map(|d| d.roster_class)
+        .filter(|c| *c != RosterClass::Construction)
+        .collect();
+    // class -> (imported, shell, primitive), over every sample.
+    let mut census: BTreeMap<RosterClass, [usize; 3]> = BTreeMap::new();
+    let (mut resident_art, mut resident_drawn) = (0usize, 0usize);
+    let steps = minutes * 60 * HZ as u64;
+    for s in 0..steps {
+        sim.step_once(Default::default());
+        if s % 600 != 599 {
+            continue;
+        }
+        let w = sim.world();
+        let Some(t) = inf_ecs::traffic::traffic_of(w) else {
+            continue;
+        };
+        for (g, r) in &t.records {
+            let Some(c) = r.def.roster_class else {
+                continue;
+            };
+            let e = census.entry(c).or_default();
+            if r.def.art.is_some() {
+                e[0] += 1;
+                // Off the world: a resident chassis draws the art's body.
+                if let Some(art) = r.def.art {
+                    if w.entity_of(*g).is_some() {
+                        resident_art += 1;
+                        let body = inf_ecs::roster::art_body_guid(art);
+                        if bevy_free::drawn(w, *g)
+                            .iter()
+                            .any(|(_, m)| m.asset == Some(body))
+                        {
+                            resident_drawn += 1;
+                        }
+                    }
+                }
+            } else {
+                e[2] += 1;
+            }
+        }
+    }
+    println!("{minutes} island minute(s), sampled every 10 s; traffic records by class:");
+    println!(
+        "  {:<12} {:>9} {:>6} {:>10}",
+        "class", "imported", "shell", "primitive"
+    );
+    let mut total = [0usize; 3];
+    for (c, n) in &census {
+        println!("  {:<12} {:>9} {:>6} {:>10}", c.name(), n[0], n[1], n[2]);
+        for k in 0..3 {
+            total[k] += n[k];
+        }
+        if art_classes.contains(c) {
+            assert_eq!(n[2], 0, "{} drew {} primitive cars", c.name(), n[2]);
+        }
+    }
+    println!(
+        "  {:<12} {:>9} {:>6} {:>10}; resident art chassis {resident_art}, drawing the art's body {resident_drawn}",
+        "total", total[0], total[1], total[2]
+    );
+    assert!(total[0] > 0, "no imported car was drawn at all");
+    assert!(resident_art > 0, "no art chassis was ever resident");
+    assert_eq!(
+        resident_drawn, resident_art,
+        "a resident art chassis draws something else"
+    );
 }

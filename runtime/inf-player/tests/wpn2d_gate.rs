@@ -2055,47 +2055,15 @@ fn every_class_names_its_art_and_the_two_without_say_so() {
         "  rows with NO art (the primitive, and it says so): {}",
         bare.len()
     );
-    for id in &bare {
-        let def = defs.get(id).and_then(|i| i.weapon).expect("a weapon");
-        assert!(
-            matches!(
-                def.audio_class(),
-                WeaponClass::Shotgun | WeaponClass::Launcher
-            ),
-            "{id} has no art and is not a shotgun or a launcher"
-        );
-    }
-    // Fourteen, and the split is **nine shotguns and five launchers** (the
-    // audit's fix). The wave's own report and this comment both said "ten
-    // shotguns and four launchers", and neither is what the table answers:
-    // `saiga_12` is an AK-pattern shotgun and the NAME rule reaches it before
-    // the class rule does, so it draws `SM_KA47`; and `g67_grenade` is a
-    // `launcher`-class row that the THROWABLE rule reaches first, so it draws
-    // `SM_G67`. Two rows cross the class boundary in opposite directions and
-    // the total is the same fourteen either way, which is exactly how a
-    // miscounted split survives a total.
-    assert_eq!(bare.len(), 14);
-    let bare_by_class = |c: WeaponClass| -> usize {
-        bare.iter()
-            .filter(|id| {
-                defs.get(id)
-                    .and_then(|i| i.weapon)
-                    .is_some_and(|d| d.audio_class() == c)
-            })
-            .count()
-    };
-    assert_eq!(
-        (
-            bare_by_class(WeaponClass::Shotgun),
-            bare_by_class(WeaponClass::Launcher)
-        ),
-        (9, 5),
-        "the bare rows are {bare:?}"
-    );
-    assert!(
-        bare.iter().all(|id| id != "g67_grenade"),
-        "the grenade is drawn as a primitive"
-    );
+    // **NONE, since wave VEH3f.2a.** The fourteen WPN2d left drawing a
+    // primitive -- nine shotguns and five launchers -- now draw the Modern
+    // Weapons pack's bodies, at identities whose committed fallbacks stand in
+    // where the art is absent; the pack's name table is read BEFORE the AK
+    // rule, so `saiga_12` moved from `SM_KA47` to the box-fed pack shotgun, and
+    // the ten pistols WPN2d drew as the stockless SMG draw the pack's pistols
+    // and revolvers. `veh3f2a_gate::no_weapon_class_draws_a_primitive` is the
+    // arm that owns the claim; this one keeps the census.
+    assert!(bare.is_empty(), "rows still draw a primitive: {bare:?}");
     // **AND THE WHOLE TABLE IS PINNED, ROW COUNT BY ROW COUNT** (the audit's
     // fix). The census was printed and never asserted, so the class -> art
     // table lived in a report where nothing could contradict it. It is 88 rows,
@@ -2105,12 +2073,22 @@ fn every_class_names_its_art_and_the_two_without_say_so() {
     let want: &[(&str, usize)] = &[
         ("SM_AR4", 16),
         ("SM_G67", 1),
-        ("SM_KA47", 6),
+        ("SM_KA47", 5),
         ("SM_KA_VAL", 10),
         ("SM_KA_VAL_Y", 10),
         ("SM_M9_KNIFE", 2),
+        ("SM_MW_LAUNCHER_01", 5),
+        ("SM_MW_PISTOL_01", 2),
+        ("SM_MW_PISTOL_02", 2),
+        ("SM_MW_PISTOL_03", 2),
+        ("SM_MW_PISTOL_04", 2),
+        ("SM_MW_REVOLVER_01", 1),
+        ("SM_MW_REVOLVER_02", 1),
+        ("SM_MW_SHOTGUN_01", 3),
+        ("SM_MW_SHOTGUN_02", 3),
+        ("SM_MW_SHOTGUN_03", 1),
+        ("SM_MW_SHOTGUN_04", 3),
         ("SM_SMG11", 19),
-        ("SM_SMG11_NOSTOCK", 10),
     ];
     let got: Vec<(&str, usize)> = by_key.iter().map(|(k, n)| (*k, *n)).collect();
     assert_eq!(got.as_slice(), want, "the class -> art table moved");
@@ -2200,7 +2178,9 @@ fn the_weapon_is_drawn_with_its_classs_art_and_it_follows_the_hand() {
     );
     // …and it is marked, which is what the fade rule and this gate ask.
     assert!(weapon::is_equipped_weapon(&r.world, weapon_guid));
-    // A SHOTGUN has no art and keeps the placeholder, stretched to its barrel.
+    // A SHOTGUN draws the Modern Weapons pack's body now (wave VEH3f.2a: the
+    // class table's `Shotgun` arm names `SM_MW_SHOTGUN_01`, whose committed
+    // fallback stands in where the art is absent), drawn at 1:1 like the rifle.
     let mut s = Range::new(registry());
     s.arm(HERO, "remington_870");
     s.step();
@@ -2210,8 +2190,9 @@ fn the_weapon_is_drawn_with_its_classs_art_and_it_follows_the_hand() {
         .expect("a weapon entity");
     let sm = s.world.world().get::<MeshRef>(se).copied().expect("a mesh");
     assert_eq!(
-        sm.asset, None,
-        "the shotgun claims art the bundle has none of"
+        sm.asset,
+        Some(weapon::weapon_mesh_guid("SM_MW_SHOTGUN_01")),
+        "the shotgun does not draw the pack's body"
     );
     let ss = s
         .world
@@ -2219,10 +2200,7 @@ fn the_weapon_is_drawn_with_its_classs_art_and_it_follows_the_hand() {
         .get::<Transform>(se)
         .map(|t| t.scale)
         .expect("a transform");
-    assert!(
-        (ss.z - row("remington_870").muzzle_forward_m).abs() < 1e-9,
-        "the placeholder is not the barrel's own length"
-    );
+    assert_eq!(ss, Vec3d::ONE, "the shotgun's real mesh was stretched");
     // **THE WEAPON FOLLOWS THE HAND SOCKET.** `update_attachments` composes
     // `model_to_world(holder) x socket x offset`, and for a character with no
     // rig the socket is the documented identity fallback — so the weapon sits at
