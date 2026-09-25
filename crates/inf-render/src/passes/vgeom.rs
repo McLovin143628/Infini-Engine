@@ -1676,9 +1676,7 @@ impl VgeomNode {
                 // No pool may outgrow the storage binding this device grants (the
                 // VEH3f.2a audit): see `inf_vgeom::VgeomPools`.
                 let mut s = inf_vgeom::VgeomStreamer::new(inf_vgeom::VgeomStreamBudget::default());
-                s.set_pool_cap(u64::from(
-                    gpu.device.limits().max_storage_buffer_binding_size,
-                ));
+                s.set_pool_cap(gpu.device.limits().max_storage_buffer_binding_size);
                 s
             },
             draws: BTreeMap::new(),
