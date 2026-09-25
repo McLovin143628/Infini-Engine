@@ -38,7 +38,8 @@
 //!   `inf_ecs::vehicle::Hinge::of` puts every door's axis;
 //! * the **steering wheel**: in its COLUMN frame (rim in local `XY`, column on
 //!   local `+Z`, toward the driver), unit-boxed, so `hub_rim_euler` seats it on
-//!   the engine's raked column and rolls it with the rack.
+//!   the PACK's measured column rake (the art table's `hub_rake_deg`) and rolls
+//!   it with the rack; the grips follow the same plane.
 
 use std::collections::BTreeMap;
 
