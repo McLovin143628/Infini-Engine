@@ -972,6 +972,14 @@ fn rigged_runtime_sim_for(row: &str, hero_at: DVec3) -> inf_player::runtime_sim:
 /// hub arm above goes red on it (a grip 211.7 mm off the drawn rim). The seat
 /// behind the rim (`SEAT_BEHIND_HUB_M` at the column root's 0.53 m) -> red
 /// here: the Vol.2 driver 83.3 mm short of the wheel.
+///
+/// **The audit's addition**: `W` held through the seat and across the
+/// hand-over to the wheel, as the shipped demo holds it, and the seated rows
+/// counted beside the driving ones -- the throttle's 0 -> 1 step is now inside
+/// the arm (before it, the arm's throttle was 0 until 300 steps after the
+/// hand-over). Measured: the posed feet stay within 3e-7 m of the pedal faces
+/// through that step, so the demo's one 41.9 mm row (1 of 132, the first
+/// `driving` row) does not reproduce on `RuntimeSim` with the template rig.
 #[test]
 fn the_calibration_car_boards_at_its_sockets_on_the_shipped_host() {
     use inf_ecs::movement::actions::{INTERACT, MOVE_X, MOVE_Y};
@@ -1002,6 +1010,9 @@ fn the_calibration_car_boards_at_its_sockets_on_the_shipped_host() {
             }
             if let Some(d) = driving_at {
                 match i - d {
+                    // `W` still held as the seat hands over (the audit's
+                    // addition, see the doc): the throttle's 0 -> 1 step.
+                    0..=29 => input = input.axis_at(MOVE_Y, 1.0),
                     30..=150 => input = input.axis_at(MOVE_X, 1.0),
                     151..=270 => input = input.axis_at(MOVE_X, -1.0),
                     300..=360 => input = input.axis_at(MOVE_Y, 1.0),
@@ -1010,6 +1021,12 @@ fn the_calibration_car_boards_at_its_sockets_on_the_shipped_host() {
                 }
             } else if p == BoardPhase::Driving || (p == BoardPhase::Idle && seated) {
                 driving_at = Some(i);
+            } else if p == BoardPhase::Seated {
+                // **W held through the seat** (the VEH3f.2a audit): the shipped
+                // demo's own input -- the throttle goes 0 -> 1 and the handbrake
+                // 1 -> 0 on the step the seat hands over to the wheel, which is
+                // the one row the demo read 41.9 mm on and this arm never met.
+                input = input.axis_at(MOVE_Y, 1.0);
             }
             sim.step_once(input);
             let (p, seated) = phase(&sim);
@@ -1029,6 +1046,9 @@ fn the_calibration_car_boards_at_its_sockets_on_the_shipped_host() {
                     }
                     pedal.extend(r.feet_m);
                 }
+                // The seated rows the demo counts too (its `pedal_m` column is
+                // written in `seated` and `driving` alike).
+                BoardPhase::Seated => pedal.extend(r.feet_m),
                 _ => {}
             }
         }
