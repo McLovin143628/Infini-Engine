@@ -900,7 +900,10 @@ fn fly_unit(
             dispatch::air_orbit_point(
                 dispatch::air_hover_point(unit.home, target),
                 target,
-                step.saturating_sub(run.since_step) as f64 * dt,
+                // The pilot flies at a point a few seconds AHEAD on the circle:
+                // its cruise is `dist x 0.25`, so a goal at its own nose would
+                // be chased at a crawl (measured: 31 deg of orbit in 10 s).
+                step.saturating_sub(run.since_step) as f64 * dt + dispatch::AIR_ORBIT_LEAD_S,
             ),
             None,
         ),

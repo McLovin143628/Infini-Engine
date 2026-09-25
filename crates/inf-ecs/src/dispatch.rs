@@ -1109,6 +1109,11 @@ pub const AIR_HOVER_OFFSET_M: f64 = 30.0;
 /// a 30 m circle, a turn every 25 s -- a police helicopter circling a block.
 pub const AIR_ORBIT_RAD_S: f64 = 0.25;
 
+/// **How far ahead on its orbit an air unit aims**, seconds (VEH3g audit): the
+/// lane's pilot cruises at a quarter of its distance to the goal, so the goal
+/// leads it round the circle rather than sitting on its nose.
+pub const AIR_ORBIT_LEAD_S: f64 = 4.0;
+
 /// **Where an air unit is on its orbit**, `t_s` seconds after it came on scene
 /// (VEH3g audit): the hover point [`air_hover_point`] turned about the scene's
 /// vertical by [`AIR_ORBIT_RAD_S`]` x t_s`, so the orbit starts exactly where the
