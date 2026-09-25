@@ -55,10 +55,12 @@
 //! COLLAPSES: it falls linearly to [`POST_STALL_CL_FRAC`] of its peak over
 //! [`STALL_BREAK_DEG`], then fades to zero at 90° like a flat plate, while a
 //! flat plate's drag ([`POST_STALL_DRAG`]) arrives. Full back stick asks for
-//! [`STALL_OVERSHOOT_DEG`] past the stall, so a pilot CAN stall the aeroplane,
-//! and the tail's break ([`STALL_PITCH_BREAK`]) is what drops the nose once it
-//! has. Every angle is from [`inf_math::portable::patan2_64`]; no std trig is on
-//! this path.
+//! [`STALL_OVERSHOOT_DEG`] past the stall, so a pilot CAN stall the aeroplane.
+//! The lift's collapse is what drops the nose; the tail's break
+//! ([`STALL_PITCH_BREAK`]) is what keeps the stall SHALLOW -- it bounds how far
+//! past the stall the wing goes and how long it stays there (VEH3g audit: 32.2
+//! deg deepest and 5.4 s past it, against 50.3 deg and 7.5 s without). Every
+//! angle is from [`inf_math::portable::patan2_64`]; no std trig is on this path.
 //!
 //! # What this model does not have, by name
 //!
@@ -116,7 +118,14 @@ pub const PITCH_STIFFNESS: f64 = 2.0;
 pub const PITCH_DAMPING_RATIO: f64 = 0.8;
 
 /// Extra nose-down stiffness per radian past the stall -- the centre of pressure
-/// moving aft as the flow separates, which is what drops the nose.
+/// moving aft as the flow separates.
+///
+/// **It does not drop the nose -- the collapse does** (VEH3g audit). Zeroed, the
+/// nose still falls (34.0 to -33.0 deg) and the stall arm stayed green: the
+/// wave's second vacuous item. What it does is BOUND the stall: with it the
+/// Dodo's angle of attack peaks at **32.2 deg** and the wing is stalled for
+/// **5.4 s** (89 m lost); without it **50.3 deg** and **7.5 s** (155 m lost) --
+/// a deep stall. The stall arm asserts the bound.
 pub const STALL_PITCH_BREAK: f64 = 1.5;
 
 /// The roll rate full aileron commands, rad/s (80 deg/s -- a light aeroplane).

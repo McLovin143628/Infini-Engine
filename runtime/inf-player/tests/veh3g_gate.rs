@@ -890,6 +890,30 @@ fn the_stall_collapses_the_lift_and_drops_the_nose() {
         "the nose did not drop: {pitch_peak:.1} -> {pitch_after:.1}"
     );
     assert!(alt_loss > 10.0, "a stall that lost {alt_loss:.1} m");
+    // **AND THE STALL IS BOUNDED** (VEH3g audit) -- what `STALL_PITCH_BREAK`
+    // does, which the nose-drop above could not see (the collapse drops the
+    // nose on its own; the constant zeroed stayed green). Measured: the
+    // deepest alpha past the stall 32.2 deg over 326 stalled steps; with the
+    // break zeroed 50.3 deg over 448 (a deep stall, 155 m lost). The bounds
+    // are 2.25 x stall_deg and seven seconds. Mutation: the break 0 -> red.
+    let deepest = trace
+        .iter()
+        .skip(at_stall)
+        .map(|s| s.alpha)
+        .fold(f64::MIN, f64::max);
+    println!(
+        "  the deepest alpha past the stall {deepest:.1} deg; {stalled_steps} stalled steps ({:.1} s)",
+        stalled_steps as f64 * DT
+    );
+    assert!(
+        deepest < 2.25 * stall,
+        "the wing went {deepest:.1} deg past a {stall} deg stall -- a deep stall the tail did not bound"
+    );
+    assert!(
+        (stalled_steps as f64) * DT < 7.0,
+        "the wing stayed stalled {:.1} s under held back stick",
+        stalled_steps as f64 * DT
+    );
 }
 
 // ── 2. THE HELICOPTERS ───────────────────────────────────────────────────────
