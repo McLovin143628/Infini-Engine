@@ -149,7 +149,15 @@ pub const CASING_MAX_M: f64 = 12.0;
 /// `crate::weapon::LAYER_SALTS`' family, and for its reason: a casing's own
 /// entity is a thing in the world that could carry an `AudioSource`, and its
 /// landing must not take that voice.
-pub const CASING_SALT: u64 = 0x5750_4e32_0000_00f0;
+///
+/// **Widely spread** (VEH3g audit): it was `0x5750_4e32_0000_00f0`, `0xf0..f4`
+/// from the gunshot salts. The spin and the bounce note keep that old value as
+/// their seed ([`CASING_SEED`]), so no casing lands differently.
+pub const CASING_SALT: u64 = 0x7B1B_DBBE_487F_6DA0;
+
+/// **The seed a casing's spin and bounce note draw from** (VEH3g audit) -- the
+/// value [`CASING_SALT`] had when it doubled as the seed.
+pub const CASING_SEED: u64 = 0x5750_4e32_0000_00f0;
 
 /// **The marker on a casing's drawn entity** (wave WPN2c).
 ///
@@ -453,7 +461,7 @@ pub fn eject_velocity(def: &WeaponDef, yaw_deg: f64) -> DVec3 {
 /// call rather than two, and the third axis is as uncorrelated as it needs to
 /// be for a thing that is spinning too fast to look at.
 pub fn eject_spin(seq: u64) -> DVec3 {
-    let (a, b) = crate::weapon::shot_uniforms(CASING_SALT, seq);
+    let (a, b) = crate::weapon::shot_uniforms(CASING_SEED, seq);
     DVec3::new(
         (a * 2.0 - 1.0) * CASING_SPIN_DEG_S,
         (b * 2.0 - 1.0) * CASING_SPIN_DEG_S,
@@ -468,7 +476,7 @@ pub fn eject_spin(seq: u64) -> DVec3 {
 /// so the seventeenth case of a session lands on the same note in a replay, in
 /// a PIE preview and in a shipped build.
 pub fn bounce_pitch(seq: u64) -> f64 {
-    let (_, u) = crate::weapon::shot_uniforms(CASING_SALT ^ 0x9e37, seq);
+    let (_, u) = crate::weapon::shot_uniforms(CASING_SEED ^ 0x9e37, seq);
     1.0 + (u - 0.5) * 2.0 * CASING_PITCH_SPREAD
 }
 

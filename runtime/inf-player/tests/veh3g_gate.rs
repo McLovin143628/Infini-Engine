@@ -2521,3 +2521,132 @@ fn the_real_islands_runway_is_flat_and_the_dodo_leaves_it() {
         "it ran off the end ({roll:.0} m)"
     );
 }
+
+/// **NO TWO SOUNDS IN THE WORLD SHARE A SOURCE KEY** (VEH3g audit, the VEH3e
+/// salt collision).
+///
+/// A layer's key is `entity_key(guid) ^ salt`, so two voices of two entities
+/// collide whenever the two guids differ by what the two salts differ by. VEH3e's
+/// eleven engine salts were `...0001..000b` and the door salts `...0011..0014`:
+/// any two entities whose guids differ by `0x10` put one car's grain on the
+/// other's door latch. Every salt family that keys a sound off an entity is
+/// here -- the sixteen engine/craft voices, the four door layers, the four
+/// gunshot layers, the casing -- plus the entity's own bare key.
+///
+/// Two populations, both of every entity at once:
+///
+/// * **the committed island level**, every entity it ships;
+/// * **a fixture's minting**: 4 096 guids in a row, the way every gate in this
+///   repository mints them (`CRAFT` / `LOAD` here are `0x5E3E_0001` / `..0020`).
+///
+/// And the salts themselves: every pairwise difference must be far from any
+/// guid difference a fixture makes (more than 2^32), which is what makes the
+/// census a property rather than a sample.
+///
+/// Mutation that reds it: the door salts back at `...0011..0014`.
+#[test]
+fn no_two_sounds_in_the_world_share_a_source_key() {
+    use inf_ecs::vehicle_audio::{door_key, entity_key, voice_key, DoorLayer, VoiceLayer};
+    let doors = [
+        DoorLayer::Latch,
+        DoorLayer::Creak,
+        DoorLayer::Slam,
+        DoorLayer::Thud,
+    ];
+    let keys_of = |g: Uuid| -> Vec<(u64, String)> {
+        let k = entity_key(g);
+        let mut out = vec![(k, "bare".to_string())];
+        for l in VoiceLayer::ALL {
+            out.push((voice_key(k, l), format!("{l:?}")));
+        }
+        for d in doors {
+            out.push((door_key(k, d), format!("door {d:?}")));
+        }
+        for (i, s) in inf_ecs::weapon::LAYER_SALTS.iter().enumerate() {
+            out.push((k ^ s, format!("gunshot layer {i}")));
+        }
+        out.push((k ^ inf_ecs::casing::CASING_SALT, "casing".to_string()));
+        out
+    };
+    let census = |guids: &[Uuid]| -> (usize, Vec<String>) {
+        let mut seen: BTreeMap<u64, (Uuid, String)> = BTreeMap::new();
+        let mut clashes = Vec::new();
+        let mut n = 0usize;
+        for g in guids {
+            for (key, what) in keys_of(*g) {
+                n += 1;
+                if let Some((og, ow)) = seen.get(&key) {
+                    if clashes.len() < 6 {
+                        clashes.push(format!("{g} {what} == {og} {ow}"));
+                    } else {
+                        clashes.push(String::new());
+                    }
+                } else {
+                    seen.insert(key, (*g, what));
+                }
+            }
+        }
+        (n, clashes)
+    };
+
+    // The committed island.
+    let lvl = std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../samples/island/VancouverIsland.inf_lvl"
+    ));
+    let bytes = std::fs::read(lvl).expect("the committed island level");
+    let level = inf_scene::decode(&bytes).expect("it decodes");
+    let island: Vec<Uuid> = level.entities.iter().map(|e| e.guid).collect();
+    let (ni, ci) = census(&island);
+    // A fixture's minting.
+    let minted: Vec<Uuid> = (0..4096u128)
+        .map(|i| Uuid::from_u128(0x5E3E_0000 + i))
+        .collect();
+    let (nm, cm) = census(&minted);
+    println!(
+        "source keys: the island {} entities, {ni} keys, {} clashes; a fixture's 4 096 guids, {nm} keys, {} clashes",
+        island.len(),
+        ci.len(),
+        cm.len()
+    );
+    for c in ci.iter().chain(cm.iter()).filter(|c| !c.is_empty()).take(6) {
+        println!("  {c}");
+    }
+    // The salts, pairwise.
+    let mut salts: Vec<(u64, String)> = vec![(0, "bare".to_string())];
+    for (i, s) in inf_ecs::vehicle_audio::VOICE_SALTS.iter().enumerate() {
+        salts.push((*s, format!("voice {i}")));
+    }
+    for (i, s) in inf_ecs::vehicle_audio::DOOR_SALTS.iter().enumerate() {
+        salts.push((*s, format!("door {i}")));
+    }
+    for (i, s) in inf_ecs::weapon::LAYER_SALTS.iter().enumerate() {
+        salts.push((*s, format!("gunshot {i}")));
+    }
+    salts.push((inf_ecs::casing::CASING_SALT, "casing".to_string()));
+    let mut closest = (u64::MAX, String::new());
+    for (i, (a, an)) in salts.iter().enumerate() {
+        for (b, bn) in salts.iter().skip(i + 1) {
+            let d = a ^ b;
+            if d < closest.0 {
+                closest = (d, format!("{an} vs {bn}"));
+            }
+        }
+    }
+    println!(
+        "  the closest two salts differ by {:#x} ({})",
+        closest.0, closest.1
+    );
+    assert!(
+        ci.is_empty() && cm.is_empty(),
+        "{} island and {} fixture source keys collide",
+        ci.len(),
+        cm.len()
+    );
+    assert!(
+        closest.0 > u32::MAX as u64,
+        "two salts differ by {:#x} ({}): two guids that far apart share a voice",
+        closest.0,
+        closest.1
+    );
+}

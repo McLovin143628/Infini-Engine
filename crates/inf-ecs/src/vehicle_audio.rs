@@ -389,17 +389,25 @@ impl VoiceLayer {
 /// (the rolling road's the eleventh, VEH3e audit), none of which may be the
 /// chassis's own emitter key.
 pub const VOICE_SALTS: [u64; 16] = [
-    0x5645_4833_0000_0001,
-    0x5645_4833_0000_0002,
-    0x5645_4833_0000_0003,
-    0x5645_4833_0000_0004,
-    0x5645_4833_0000_0005,
-    0x5645_4833_0000_0006,
-    0x5645_4833_0000_0007,
-    0x5645_4833_0000_0008,
-    0x5645_4833_0000_0009,
-    0x5645_4833_0000_000a,
-    0x5645_4833_0000_000b,
+    // **Every salt WIDELY SPREAD** (VEH3g audit). These eleven were
+    // `...0001..000b` and the door salts `...0011..0014`, so two entities whose
+    // guids differed by `0x10` shared a voice (one car's grain on another's
+    // door latch) and two whose guids differed by 1 swapped GrainMid for
+    // GrainFull: 73 728 clashes over a fixture's 4 096 minted guids. Now no two
+    // salts in any family that keys a sound off an entity (these, the doors,
+    // `weapon::LAYER_SALTS`, `casing::CASING_SALT`) differ by less than 2^50 --
+    // `veh3g_gate::no_two_sounds_in_the_world_share_a_source_key`.
+    0x6CD9_5E27_1E5E_5CB0,
+    0xB0C9_5942_8A35_888F,
+    0xE92D_2A7E_320D_3457,
+    0xA623_9357_40C5_CEE6,
+    0x18DE_FE88_9526_FE40,
+    0xACA9_C8C8_F515_B5DE,
+    0x664A_2FF3_ADA6_DFE9,
+    0x7B1E_78D2_37EE_DA7D,
+    0xBF48_80F6_B976_46A7,
+    0x639F_B18B_190F_2C30,
+    0x5E20_A2CA_E6CA_127A,
     // The craft (wave VEH3g) -- five WIDELY SPREAD salts, not five in a row.
     // A key is `guid ^ salt`, so two voices of two craft collide whenever the
     // two guids differ by what the two salts differ by -- and fixtures mint
@@ -435,10 +443,10 @@ pub enum DoorLayer {
 
 /// The salts a body's door keys are spread over.
 pub const DOOR_SALTS: [u64; 4] = [
-    0x5645_4833_0000_0011,
-    0x5645_4833_0000_0012,
-    0x5645_4833_0000_0013,
-    0x5645_4833_0000_0014,
+    0xEE4E_F33D_CAF1_EF55,
+    0xFFFD_A158_8AD0_3B03,
+    0xE602_8F0D_FC98_4FC2,
+    0xDFF7_DCDC_7629_95B7,
 ];
 
 /// The key one door layer of one body plays on.
@@ -1749,20 +1757,12 @@ mod tests {
         // four door layers.
         assert_eq!(keys.len(), 20);
         assert!(!keys.contains(&k));
-        // …and no CRAFT voice is another NEARBY entity's door (wave VEH3g):
-        // fixtures mint guids a few apart, and a craft salt in the door salts'
-        // own neighbourhood made a car's hull spray read as a hero's creak.
-        // Only the craft layers: VEH3e's own eleven sit `0x10` under the four
-        // door salts, so `car ^ …0001 == hero ^ …0011` whenever two guids
-        // differ by sixteen (carried in the wave's ledger). And no craft layer
-        // of one craft is ANOTHER craft layer of a nearby craft.
-        let craft = [
-            VoiceLayer::Rotor,
-            VoiceLayer::Prop,
-            VoiceLayer::Jet,
-            VoiceLayer::HullSlap,
-            VoiceLayer::HullSpray,
-        ];
+        // …and no voice is another NEARBY entity's voice or door (wave VEH3g,
+        // widened to EVERY layer by its audit): fixtures mint guids a few
+        // apart, and salts in a row made `car ^ …0001 == hero ^ …0011`
+        // whenever two guids differed by sixteen. The whole-world census is
+        // `veh3g_gate::no_two_sounds_in_the_world_share_a_source_key`.
+        let craft = VoiceLayer::ALL;
         for delta in 1u64..=0x40 {
             for a in craft {
                 for b in VoiceLayer::ALL {
@@ -1775,13 +1775,7 @@ mod tests {
             }
         }
         for delta in 1u64..=0x40 {
-            for l in [
-                VoiceLayer::Rotor,
-                VoiceLayer::Prop,
-                VoiceLayer::Jet,
-                VoiceLayer::HullSlap,
-                VoiceLayer::HullSpray,
-            ] {
+            for l in VoiceLayer::ALL {
                 for d in [
                     DoorLayer::Latch,
                     DoorLayer::Creak,

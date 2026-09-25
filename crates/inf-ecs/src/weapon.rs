@@ -2125,16 +2125,24 @@ impl ReportLayerKind {
 /// keys that do not collide with the shooter are four salts. So the carried
 /// item is closed by the change that needed it closed.
 ///
-/// The values are not arbitrary: each is the same `"WPN2"` stamp the clip GUIDs
-/// carry, so a key seen in a log says where it came from; and no entity guid's
-/// low 64 bits can collide with one more often than with any other 64-bit
-/// value, which is the bound `guid_source_key` itself has always had.
+/// **Widely spread, not four in a row** (VEH3g audit). They were
+/// `0x5750_4e32_0000_0001..0004`, so two shooters whose guids differed by 1..7
+/// traded layers (one's transient on the other's body) -- and fixtures mint
+/// guids one apart. Every sound-keying salt family now differs pairwise by more
+/// than 2^50 (`veh3g_gate::no_two_sounds_in_the_world_share_a_source_key`).
+/// The body's pitch jitter, which used to seed off the second salt, keeps its
+/// old seed through [`BODY_PITCH_SEED`], so no shot changes its note.
 pub const LAYER_SALTS: [u64; 4] = [
-    0x5750_4e32_0000_0001,
-    0x5750_4e32_0000_0002,
-    0x5750_4e32_0000_0003,
-    0x5750_4e32_0000_0004,
+    0xF768_D2B4_F931_AD4B,
+    0x1D46_DA57_E5AE_06D2,
+    0xA140_4808_CB19_9F31,
+    0x7959_54BC_BA9C_EF89,
 ];
+
+/// **The seed the body layer's pitch jitter draws from** (VEH3g audit) -- the
+/// value `LAYER_SALTS[1]` had when it doubled as the seed, split out so the
+/// keys could move without moving a single shot's note.
+pub const BODY_PITCH_SEED: u64 = 0x5750_4e32_0000_0002;
 
 /// **The source key one layer of one shooter's report plays on** (wave WPN2c).
 ///
@@ -2386,7 +2394,7 @@ pub fn report_layers(
         s
     };
     // The body's pitch, from the counter hash rather than from an RNG.
-    let (u, _) = shot_uniforms(LAYER_SALTS[1], shot_index);
+    let (u, _) = shot_uniforms(BODY_PITCH_SEED, shot_index);
     let pitch = 1.0 + (u - 0.5) * 2.0 * BODY_PITCH_JITTER;
 
     let transient = base(
