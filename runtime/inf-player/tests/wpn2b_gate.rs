@@ -2604,10 +2604,14 @@ fn the_hero_log_and_its_readme_agree() {
     // swinging through a slalom and a dozer pivoting on its tracks all read
     // `Driving` in the mode column, and a frame of each has to be triggered on
     // a column that can see it.
+    // **Eighty-five since wave VEH3g**, which appended the eight craft columns
+    // on the same argument: a take-off, a stall, a winch lift and a planing
+    // hull all read `Driving` in the mode column, and a frame of each has to be
+    // triggered on a column that can see it.
     let n = width(&armed);
-    assert_eq!(n, 77, "the row is {n} fields and this arm's word is 77");
+    assert_eq!(n, 85, "the row is {n} fields and this arm's word is 85");
     assert!(
-        README.contains("SEVENTY-SEVEN") || README.contains("seventy-seven"),
+        README.contains("EIGHTY-FIVE") || README.contains("eighty-five"),
         "`tools/demo/README.md` does not say how many columns hero.csv has"
     );
     for col in [
@@ -2649,6 +2653,15 @@ fn the_hero_log_and_its_readme_agree() {
         "body_kind",
         "hitch_deg",
         "track_yaw",
+        // Wave VEH3g's eight.
+        "craft_alt",
+        "craft_ias",
+        "craft_alpha",
+        "craft_cl",
+        "craft_spool",
+        "winch_n",
+        "hull_draught",
+        "wind_rel_deg",
         "parts_shed",
         // Wave VEH3d's seven.
         "board",

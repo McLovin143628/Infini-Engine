@@ -9364,8 +9364,9 @@ fn streaming_holds_at_aircraft_speed_and_the_table_says_what_it_costs() {
 
     /// The speeds, m/s: a car, then the mandate's 60 and past it. 60 m/s is
     /// 216 km/h, which is a fast light aircraft and above this wave's own
-    /// helicopter (38.7 m/s measured).
-    const SPEEDS: [f64; 4] = [24.0, 60.0, 80.0, 110.0];
+    /// helicopter (38.7 m/s measured). **120 since wave VEH3g**: the Luxor on
+    /// its approach, the fastest thing the roster flies over the island.
+    const SPEEDS: [f64; 5] = [24.0, 60.0, 80.0, 110.0, 120.0];
 
     // THE ROUTE, from the recipe's own sites: the start (Fixture Town) to
     // Fixture Camp. Both ends are settlements and everything between them is
@@ -9409,6 +9410,14 @@ fn streaming_holds_at_aircraft_speed_and_the_table_says_what_it_costs() {
         /// Where the milliseconds went: the two streaming phases, and the
         /// vehicle phase, in that order.
         phases: (f64, f64, f64),
+        /// **The closest a cell was to the source on the step it became
+        /// resident**, metres (wave VEH3g) -- the POP-IN number: a cell that
+        /// arrives while the source is inside it arrived in front of the camera.
+        closest_arrival_m: f64,
+        /// Steps on which the cell ONE CELL-LENGTH AHEAD of the source, on the
+        /// flight line, was NOT resident (wave VEH3g): the ground an aircraft
+        /// is about to overfly, missing.
+        ahead_missing: u64,
     }
 
     /// One phase's accumulated milliseconds, by the name the profile publishes.
@@ -9442,6 +9451,11 @@ fn streaming_holds_at_aircraft_speed_and_the_table_says_what_it_costs() {
         let mut min_pages = usize::MAX;
         let mut prev: std::collections::BTreeSet<(i32, i32)> =
             sim.cell_streaming().resident().collect();
+        let cell_m = sim.cell_streaming().cell_size_m();
+        let available: std::collections::BTreeSet<(i32, i32)> =
+            sim.cell_streaming().available().collect();
+        let mut closest_arrival = f64::INFINITY;
+        let mut ahead_missing = 0u64;
         let mut wall = std::time::Duration::ZERO;
         let mut prof = inf_player::step_profile::StepProfile::default();
         for step in 0..run {
@@ -9454,6 +9468,24 @@ fn streaming_holds_at_aircraft_speed_and_the_table_says_what_it_costs() {
             prof.accumulate(&sim.step_profile());
             let now: std::collections::BTreeSet<(i32, i32)> =
                 sim.cell_streaming().resident().collect();
+            // Every cell that ARRIVED this step, and how far the source was
+            // from it when it did.
+            for c in now.difference(&prev) {
+                closest_arrival = closest_arrival.min(inf_player::cell_stream::distance_to_cell(
+                    *c, p.x, p.z, cell_m,
+                ));
+            }
+            // The cell one cell-length ahead on the flight line: is the ground
+            // the aircraft is about to be over already there? Only asked of a
+            // cell the partition HAS (the route's far end runs out of island).
+            let ahead = p + dir * cell_m;
+            let coord = (
+                (ahead.x / cell_m).floor() as i32,
+                (ahead.z / cell_m).floor() as i32,
+            );
+            if available.contains(&coord) && !now.contains(&coord) {
+                ahead_missing += 1;
+            }
             churn += now.symmetric_difference(&prev).count();
             peak = peak.max(now.len());
             min_pages = min_pages.min(sim.terrain_streaming().stats().sim_resident_level0);
@@ -9479,6 +9511,8 @@ fn streaming_holds_at_aircraft_speed_and_the_table_says_what_it_costs() {
                 at(&prof, "terrain stream") / run as f64,
                 at(&prof, "vehicle") / run as f64,
             ),
+            closest_arrival_m: closest_arrival,
+            ahead_missing,
         });
     }
 
@@ -9488,12 +9522,12 @@ fn streaming_holds_at_aircraft_speed_and_the_table_says_what_it_costs() {
     );
     println!(
         "   m/s   km/h   steps  blocking  acts  pages  churn  peak  min pg   mean step  \
-         cell/terr/veh"
+         cell/terr/veh   arrival  ahead-miss"
     );
     for r in &rows {
         println!(
             "  {:5.0}  {:5.0}  {:6}  {:8}  {:4}  {:5}  {:5}  {:4}  {:6}  {:8.4} ms  \
-             {:.4}/{:.4}/{:.4}",
+             {:.4}/{:.4}/{:.4}  {:6.1} m  {:5}",
             r.speed,
             r.speed * 3.6,
             r.steps,
@@ -9506,7 +9540,9 @@ fn streaming_holds_at_aircraft_speed_and_the_table_says_what_it_costs() {
             r.mean_ms,
             r.phases.0,
             r.phases.1,
-            r.phases.2
+            r.phases.2,
+            r.closest_arrival_m,
+            r.ahead_missing
         );
     }
 
@@ -9570,6 +9606,28 @@ fn streaming_holds_at_aircraft_speed_and_the_table_says_what_it_costs() {
             r.speed,
             r.peak_cells,
             peak_slow
+        );
+    }
+
+    // (e) NO POP-IN AT THE JET'S SPEED (wave VEH3g). Every cell that arrived did
+    //     so with the source a streaming radius away from it, less the ground
+    //     one step covers -- never with the source inside it -- and the cell a
+    //     whole cell-length ahead on the flight line was already resident on
+    //     every step. A streamer that fell behind a 120 m/s aircraft would show
+    //     either: a cell arriving at 0 m (in front of the camera) or the ground
+    //     ahead missing.
+    for r in &rows {
+        assert!(
+            r.closest_arrival_m > 0.0,
+            "at {:.0} m/s a cell arrived {:.1} m from the source -- the ground \
+             popped in under it",
+            r.speed,
+            r.closest_arrival_m
+        );
+        assert_eq!(
+            r.ahead_missing, 0,
+            "at {:.0} m/s the cell one cell-length ahead was missing on {} steps",
+            r.speed, r.ahead_missing
         );
     }
 

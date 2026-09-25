@@ -1696,17 +1696,24 @@ pub const fn trunk_hinge(centre: Vec3d, half: Vec3d) -> Hinge {
     }
 }
 
-/// How far a cargo ramp swings down, degrees (wave VEH3g).
+/// How far a cargo ramp swings down, degrees (wave VEH3g) -- a magnitude; the
+/// hinge's signed limit is its negative (see [`ramp_hinge`]).
 pub const RAMP_OPEN_DEG: f64 = 28.0;
 
 /// **A loading ramp's hinge** (wave VEH3g): about the LATERAL at its FORWARD
-/// edge, like a boot lid's -- and turning the OTHER way, so its tail swings
-/// DOWN to the ground instead of up. The Titan's rear ramp.
+/// edge, like a boot lid's, so its tail swings DOWN to the ground. The Titan's
+/// rear ramp.
+///
+/// **Negative, and that was measured**: the first cut signed it positive, and
+/// the part's revolute read +28 deg as rear-edge UP -- a 580 kg ramp its hinge
+/// motor could not lift, which sat at -0.44 deg on its closed limit with its
+/// rear edge 1 cm from where it started. `the_titan_ramp_swings_down_on_its_
+/// hinge` reads the edge's drop off the world.
 pub const fn ramp_hinge(centre: Vec3d, half: Vec3d) -> Hinge {
     Hinge {
         axis: Vec3d::new(1.0, 0.0, 0.0),
         at: Vec3d::new(centre.x, centre.y, centre.z + half.z),
-        open_deg: RAMP_OPEN_DEG,
+        open_deg: -RAMP_OPEN_DEG,
     }
 }
 
@@ -2001,7 +2008,7 @@ impl BodyPartKind {
                 hinge: Hinge::of(KIND_RAMP, centre, half).unwrap_or(Hinge {
                     axis: Vec3d::new(1.0, 0.0, 0.0),
                     at: centre,
-                    open_deg: RAMP_OPEN_DEG,
+                    open_deg: -RAMP_OPEN_DEG,
                 }),
             },
             _ => BodyPartKind::Panel,
@@ -4095,6 +4102,70 @@ pub fn winch(
     world.world_mut().entity_mut(e).insert(joint);
     world.mark_dirty();
     true
+}
+
+/// **Every load hanging on `lifter`'s winch** (wave VEH3g), in `Guid` order --
+/// the entities carrying a `Distance` joint whose other end is `lifter`.
+pub fn winch_loads_of(world: &EcsWorld, lifter: Uuid) -> Vec<Uuid> {
+    let w = world.world();
+    let Some(mut q) = w.try_query::<(&crate::components::Joint3D, &crate::components::Guid)>()
+    else {
+        return Vec::new();
+    };
+    let mut out: Vec<Uuid> = q
+        .iter(w)
+        .filter(|(j, _)| {
+            j.kind == crate::components::JointKind3D::Distance && j.other.get() == Some(lifter)
+        })
+        .map(|(_, g)| g.0)
+        .collect();
+    out.sort_unstable();
+    out
+}
+
+/// **The craft instruments' row** (wave VEH3g) -- under the speed and the
+/// height: a WING reads its airspeed, angle of attack, lift coefficient and
+/// power lever (and says STALL when it is past its stall), a HULL its
+/// draught, its planing share and the apparent wind a sail meets, and a lifter
+/// the cable's tension. The empty string for a car -- which draws no new row.
+///
+/// `FLIGHT  IAS 45.2 m/s  AOA 5.2  CL 0.81  THR 100%` /
+/// `HULL  DRAUGHT 0.061 m  PLANE 80%  APP WIND 38  HEEL 2.1` /
+/// `WINCH 18624 N`.
+pub fn craft_instruments(
+    flight: Option<crate::aero::FlightState>,
+    marine: Option<crate::marine::MarineState>,
+    winch_n: Option<f64>,
+) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(f) = flight {
+        parts.push(format!(
+            "FLIGHT  IAS {:.1} m/s  AOA {:.1}  CL {:.2}  THR {:.0}%{}",
+            f.airspeed_mps,
+            f.alpha_deg,
+            f.cl,
+            (f.spool * 100.0).round(),
+            if f.stalled { "  STALL" } else { "" }
+        ));
+    }
+    if let Some(m) = marine {
+        let mut hull = format!(
+            "HULL  DRAUGHT {:.3} m  PLANE {:.0}%",
+            m.draught_m,
+            (m.planing_share * 100.0).round()
+        );
+        if m.sail_force != glam::DVec3::ZERO {
+            hull.push_str(&format!(
+                "  APP WIND {:.0}  HEEL {:.1}",
+                m.apparent_wind_deg, m.heel_deg
+            ));
+        }
+        parts.push(hull);
+    }
+    if let Some(t) = winch_n.filter(|t| t.is_finite()) {
+        parts.push(format!("WINCH {:.0} N", t));
+    }
+    parts.join("    ")
 }
 
 /// **Let the load go** (wave VEH3g): removes a `Distance` joint from `load` --

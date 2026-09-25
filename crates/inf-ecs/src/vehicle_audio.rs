@@ -400,15 +400,19 @@ pub const VOICE_SALTS: [u64; 16] = [
     0x5645_4833_0000_0009,
     0x5645_4833_0000_000a,
     0x5645_4833_0000_000b,
-    // The craft (wave VEH3g) -- in their own range, bit 16, and NOT in the gap
-    // under the door salts: the first cut took `…000c` to `…0010`, and the VEH3e
-    // course's car and hero guids differ by two, so `car ^ …0010` was
-    // `hero ^ …0012` and a door's creak read as the car's hull spray.
-    0x5645_4833_0001_0001,
-    0x5645_4833_0001_0002,
-    0x5645_4833_0001_0003,
-    0x5645_4833_0001_0004,
-    0x5645_4833_0001_0005,
+    // The craft (wave VEH3g) -- five WIDELY SPREAD salts, not five in a row.
+    // A key is `guid ^ salt`, so two voices of two craft collide whenever the
+    // two guids differ by what the two salts differ by -- and fixtures mint
+    // guids a few apart. Measured twice: `…000c..0010` put a car's hull spray
+    // on the VEH3e course hero's creak (guids two apart), and `…0001_0001..5`
+    // put a helicopter's rotor on a jet's spool (guids two apart, salts two
+    // apart). These differ from each other, and from every salt above, in
+    // dozens of bits.
+    0x9E37_79B9_7F4A_7C15,
+    0xC2B2_AE3D_27D4_EB4F,
+    0x1656_67B1_9E37_79F9,
+    0x85EB_CA77_C2B2_AE63,
+    0x27D4_EB2F_1656_67C5,
 ];
 
 /// The key one layer of one car plays on.
@@ -1750,7 +1754,26 @@ mod tests {
         // own neighbourhood made a car's hull spray read as a hero's creak.
         // Only the craft layers: VEH3e's own eleven sit `0x10` under the four
         // door salts, so `car ^ …0001 == hero ^ …0011` whenever two guids
-        // differ by sixteen (carried in the wave's ledger).
+        // differ by sixteen (carried in the wave's ledger). And no craft layer
+        // of one craft is ANOTHER craft layer of a nearby craft.
+        let craft = [
+            VoiceLayer::Rotor,
+            VoiceLayer::Prop,
+            VoiceLayer::Jet,
+            VoiceLayer::HullSlap,
+            VoiceLayer::HullSpray,
+        ];
+        for delta in 1u64..=0x40 {
+            for a in craft {
+                for b in VoiceLayer::ALL {
+                    assert_ne!(
+                        voice_key(k, a),
+                        voice_key(k ^ delta, b),
+                        "{a:?} vs {b:?} at {delta}"
+                    );
+                }
+            }
+        }
         for delta in 1u64..=0x40 {
             for l in [
                 VoiceLayer::Rotor,

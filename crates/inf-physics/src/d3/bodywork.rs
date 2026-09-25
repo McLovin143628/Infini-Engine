@@ -819,6 +819,12 @@ fn kind_of_state(s: &PartState) -> BodyPartKind {
         inf_ecs::vehicle::KIND_TRUNK => "trunk",
         inf_ecs::vehicle::KIND_BUMPER => "bumper",
         inf_ecs::vehicle::KIND_GLASS => "glass",
+        inf_ecs::vehicle::KIND_SEAT => "seat",
+        // Wave VEH3g's ramp. This table is a SECOND spelling of the wire kinds
+        // (`BodyPartKind::as_u8`'s inverse) and it forgot the ramp on the first
+        // cut: the Titan's ramp re-read as a PANEL, which has no hinge, so
+        // `set_part_open` refused it and the ramp never moved (measured 0.00 m).
+        inf_ecs::vehicle::KIND_RAMP => "ramp",
         _ => "panel",
     };
     BodyPartKind::of(name, s.centre_frac, s.half_frac)

@@ -507,12 +507,16 @@ fn airfield(doc: &mut SceneDoc, name: &str, strips: &[inf_island::AirstripSpec])
             // SEALED: `inf_physics::d3::vehicle::surface_under` reads a friction
             // at or above 0.85 as asphalt, so a tyre on the strip is on tarmac
             // with no SurfaceMap stamp at all.
+            // The HALF-EXTENTS are the slab's own in metres: the physics bridge
+            // does not apply a `Transform`'s scale to a collider (the scale
+            // draws the unit cube), and the first cut's unit box dropped a Dodo
+            // straight through the paving onto the levelled ground under it.
             insert!(
                 doc,
                 g,
                 inf_ecs::components::Collider3D {
                     shape_kind: inf_ecs::components::ColliderShape3DKind::Box,
-                    half_extents: Vec3d::new(0.5, 0.5, 0.5),
+                    half_extents: Vec3d::new(strip.width_m * 0.5, AIRSTRIP_SLAB_HALF_M, seg * 0.5),
                     friction: 0.9,
                     ..Default::default()
                 },
@@ -2992,6 +2996,18 @@ mod tests {
                         c.friction >= 0.85,
                         "{}: segment {k} is not sealed",
                         strip.name
+                    );
+                    // The COLLIDER is the slab's size in metres -- the bridge
+                    // ignores a `Transform`'s scale, so a unit box here is a
+                    // runway an aeroplane falls through.
+                    assert!(
+                        (c.half_extents.x * 2.0 - t.scale.x).abs() < 1e-9
+                            && (c.half_extents.y * 2.0 - t.scale.y).abs() < 1e-9
+                            && (c.half_extents.z * 2.0 - t.scale.z).abs() < 1e-9,
+                        "{}: segment {k}'s collider {:?} is not its drawn slab {:?}",
+                        strip.name,
+                        c.half_extents,
+                        t.scale
                     );
                     assert!(
                         t.scale.z <= ISLAND_CELL_SIZE_M,

@@ -1220,6 +1220,24 @@ impl RuntimeSim {
         &self.cells
     }
 
+    /// **The tension in `lifter`'s winch cables**, newtons (wave VEH3g) -- the
+    /// sum over every load hanging on it of the rope's limit impulse
+    /// (`PhysicsWorld3D::rope_impulse_ns`, the step's, all substeps) over the
+    /// fixed step; `None` for a machine with nothing on its hook. What the HUD's
+    /// winch row, the hero log's column and the gate all read.
+    pub fn winch_tension_n(&self, lifter: Uuid) -> Option<f64> {
+        let loads = inf_ecs::vehicle::winch_loads_of(self.world(), lifter);
+        let b = self.bridge3d();
+        let dt = self.stepper.fixed_dt();
+        let mut total: Option<f64> = None;
+        for load in loads {
+            if let Some(ns) = b.joint_of(load).and_then(|j| b.world().rope_impulse_ns(j)) {
+                *total.get_or_insert(0.0) += ns / dt;
+            }
+        }
+        total
+    }
+
     /// The `terrain.height_at` **host seam**, as the simulation sees it: the exact
     /// function the Blueprint node dispatches to (every non-empty [`Terrain`],
     /// each on its component-resident working set and shifted by its own entity

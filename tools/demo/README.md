@@ -57,8 +57,10 @@ hero.csv          t,frame,x,y,z,mode,speed,camera_clip,aim_yaw,head_yaw,head_pit
                   board,seat,hand_m,hinge_deg,wheel_m,pedal_m,rim_deg,
                   gear,load,slip_front,slip_rear,voice_surface,grain_pitch,
                   whine_pitch,squeal_front,squeal_rear,voice_cmds,thumps,
-                  roster_class,roster_row,body_kind,hitch_deg,track_yaw
-                  — SEVENTY-SEVEN columns, four rows a second, and NO header line:
+                  roster_class,roster_row,body_kind,hitch_deg,track_yaw,
+                  craft_alt,craft_ias,craft_alpha,craft_cl,craft_spool,
+                  winch_n,hull_draught,wind_rel_deg
+                  — EIGHTY-FIVE columns, four rows a second, and NO header line:
                   every consumer filters on `^[0-9]`, and the `#` lines are the
                   driver's own notes. Columns are only ever APPENDED, so every
                   index a script already reads keeps its meaning: 14-17 are wave
@@ -189,6 +191,18 @@ hero.csv          t,frame,x,y,z,mode,speed,camera_clip,aim_yaw,head_yaw,head_pit
                   (`$c[76]`, the chassis yaw rate in rad/s when the car steers
                   by skid, `0` otherwise) -- the columns a line-up, a trailer
                   through a slalom and a dozer pivoting are triggered on.
+                  77-84 are VEH3g's, read off the sim for the CRAFT the hero
+                  sits in (all `0` when it sits in nothing): `craft_alt`
+                  (`$c[77]`, the chassis's world height, m), `craft_ias`
+                  (`$c[78]`, a wing's airspeed, m/s), `craft_alpha` (`$c[79]`,
+                  its angle of attack, degrees), `craft_cl` (`$c[80]`, its lift
+                  coefficient), `craft_spool` (`$c[81]`, its engine's spool in
+                  `[0, 1]`), `winch_n` (`$c[82]`, the cable tension under the
+                  craft's hook, N), `hull_draught` (`$c[83]`, the hull's draught
+                  off its world position, m) and `wind_rel_deg` (`$c[84]`, the
+                  craft's heading less where the P17 wind comes from, degrees)
+                  -- the columns a take-off, a stall, a winch lift, a planing
+                  hull and a yacht under sail are triggered on.
 demo.log          every step the driver took, with timings
 ```
 

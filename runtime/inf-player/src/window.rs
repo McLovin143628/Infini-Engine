@@ -734,8 +734,11 @@ impl PlayerApp {
                 cm.runtime.velocity.to_dvec3().length(),
             )
         };
-        let (rig, gear, at, airborne, tyres, drivetrain, turbocharged) = {
+        let (rig, gear, at, airborne, tyres, drivetrain, turbocharged, flight, marine) = {
             let v = sim.bridge3d().vehicle_of(vehicle)?;
+            // **THE CRAFT INSTRUMENTS** (wave VEH3g): a wing's and a hull's own
+            // published state, copied out for the tyre row's reason.
+            let (flight, marine) = (v.flight(), v.marine());
             let rig = v.rig().clone();
             // **THE DRIVETRAIN ROW** (wave VEH3b): the crank, the clutch and the
             // turbo, copied out here for the tyre row's reason exactly -- the
@@ -746,22 +749,40 @@ impl PlayerApp {
             // copied out here because the formatting is Ring 0's and the borrow
             // is not.
             let tyres = v.wheels().to_vec();
+            // A fixed wing draws a height too (wave VEH3g): it is an aircraft
+            // whose recogniser is its wing, not a rotor.
             let airborne = rig
                 .parts_of(inf_ecs::vehicle::PartKind::Rotor)
                 .next()
-                .is_some();
+                .is_some()
+                || flight.is_some();
             let at = sim.world().entity_of(vehicle).and_then(|e| {
                 sim.world()
                     .world()
                     .get::<inf_ecs::components::Transform>(e)
                     .map(|t| t.translation.to_dvec3())
             })?;
-            (rig, v.gear(), at, airborne, tyres, drivetrain, turbocharged)
+            (
+                rig,
+                v.gear(),
+                at,
+                airborne,
+                tyres,
+                drivetrain,
+                turbocharged,
+                flight,
+                marine,
+            )
         };
         // The ground query is a `&mut` call on the sim (it may page a tile in),
         // so it is made only for the one craft that draws a height.
         let height = airborne.then(|| at.y - sim.terrain_height_at(at.x, at.z));
         let head = inf_ecs::vehicle::craft_readout(&rig, speed, gear, height);
+        // The craft row (wave VEH3g) right under the speed and the height: the
+        // wing's airspeed, angle of attack, lift coefficient and power, the
+        // hull's draught and planing, the cable's tension. Empty for a car.
+        let instruments =
+            inf_ecs::vehicle::craft_instruments(flight, marine, sim.winch_tension_n(vehicle));
         // The tyre row goes UNDER the instruments, and a craft with no tyres
         // draws no second line at all — a boat and a helicopter answer the empty
         // string from Ring 0 rather than being special-cased here.
@@ -833,7 +854,7 @@ impl PlayerApp {
         });
         let roster = inf_ecs::roster::roster_readout(sim.world(), vehicle, yaw);
         let mut text = head;
-        for line in [drive, row, damage, audio] {
+        for line in [instruments, drive, row, damage, audio] {
             if !line.is_empty() {
                 text.push('\n');
                 text.push_str(&line);

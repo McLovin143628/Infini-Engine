@@ -1838,9 +1838,53 @@ impl HeroLog {
             }
             None => ("-", "-", "-", None, 0.0),
         };
+        // **THE CRAFT COLUMNS** (wave VEH3g): the altitude of the craft the hero
+        // is in (its chassis's world height), the wing's airspeed, angle of
+        // attack, lift coefficient and spool, the winch cable's tension, the
+        // hull's draught off its world position, and the craft's heading against
+        // the P17 wind (the angle between where it points and where the wind
+        // comes from) -- every one off the sim, the cert's (VEH3h) inputs.
+        let (c_alt, c_ias, c_alpha, c_cl, c_spool, c_winch, c_draught, c_wind) = match seated_car {
+            Some(car) => {
+                let b = sim.bridge3d();
+                let (pos, rot) = b
+                    .body_of(car)
+                    .and_then(|body| {
+                        Some((
+                            b.world().body_translation(body)?,
+                            b.world().body_rotation(body)?,
+                        ))
+                    })
+                    .unwrap_or((glam::DVec3::ZERO, glam::DQuat::IDENTITY));
+                let v = b.vehicle_of(car);
+                let f = v.and_then(|v| v.flight()).unwrap_or_default();
+                let m = v.and_then(|v| v.marine());
+                let (_, (wx, wz)) = inf_ecs::sky::water_environment(sim.world());
+                let fwd = rot * glam::DVec3::Z;
+                let wind_from = inf_math::patan2_64(-wx, -wz);
+                let heading = inf_math::patan2_64(fwd.x, fwd.z);
+                let rel = if wx == 0.0 && wz == 0.0 {
+                    0.0
+                } else {
+                    let d = (heading - wind_from).to_degrees();
+                    d - 360.0 * ((d + 180.0) / 360.0).floor()
+                };
+                (
+                    pos.y,
+                    f.airspeed_mps,
+                    f.alpha_deg,
+                    f.cl,
+                    f.spool,
+                    sim.winch_tension_n(car).unwrap_or(0.0),
+                    m.map(|m| m.draught_m).unwrap_or(0.0),
+                    rel,
+                )
+            }
+            None => (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+        };
         let line = match &probe.hero {
             Some(h) => format!(
-                "{:.3},{},{:.4},{:.4},{:.4},{},{:.4},{:.4},{:.2},{:.2},{:.2},{},{},{:.4},{:.4},{:.2},{},{},{},{:.3},{},{:.3},{},{:.3},{:.4},{:.4},{:.4},{},{},{},{},{},{},{},{},{},{:.1},{:.1},{:.1},{:.1},{:.1},{},{:.4},{:.4},{:.3},{:.0},{:.3},{:.3},{},{:.1},{:.1},{},{},{},{},{},{:.4},{:.1},{:.4},{:.4},{:.1},{},{:.2},{:.3},{:.3},{},{:.3},{:.3},{:.3},{:.3},{:.2},{},{},{},{},{},{:.4}\n",
+                "{:.3},{},{:.4},{:.4},{:.4},{},{:.4},{:.4},{:.2},{:.2},{:.2},{},{},{:.4},{:.4},{:.2},{},{},{},{:.3},{},{:.3},{},{:.3},{:.4},{:.4},{:.4},{},{},{},{},{},{},{},{},{},{:.1},{:.1},{:.1},{:.1},{:.1},{},{:.4},{:.4},{:.3},{:.0},{:.3},{:.3},{},{:.1},{:.1},{},{},{},{},{},{:.4},{:.1},{:.4},{:.4},{:.1},{},{:.2},{:.3},{:.3},{},{:.3},{:.3},{:.3},{:.3},{:.2},{},{},{},{},{},{:.4},{:.2},{:.2},{:.2},{:.3},{:.3},{:.0},{:.4},{:.1}\n",
                 sim.steps() as f64 / 60.0,
                 probe.frame,
                 h.position[0],
@@ -1931,7 +1975,15 @@ impl HeroLog {
                     Some(a) => format!("{a:.2}"),
                     None => String::new(),
                 },
-                r_track
+                r_track,
+                c_alt,
+                c_ias,
+                c_alpha,
+                c_cl,
+                c_spool,
+                c_winch,
+                c_draught,
+                c_wind
             ),
             // **`no-hero` NAMES THE MODE COLUMN** (WPN2b audit, carried 224).
             //
@@ -1945,11 +1997,12 @@ impl HeroLog {
             // wave FIX1 and harmless only because no predicate happened to
             // match either spelling.
             //
-            // The row is 77 fields wide since wave VEH3f — 72 at VEH3e plus
-            // the five roster columns — which the gate asserts against the
-            // armed branch above it and against the demo README.
+            // The row is 85 fields wide since wave VEH3g — 72 at VEH3e, the
+            // five roster columns of VEH3f and the eight craft columns — which
+            // the gate asserts against the armed branch above it and against
+            // the demo README.
             None => format!(
-                "{:.3},{},,,,no-hero,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,\n",
+                "{:.3},{},,,,no-hero,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,\n",
                 sim.steps() as f64 / 60.0,
                 probe.frame
             ),
