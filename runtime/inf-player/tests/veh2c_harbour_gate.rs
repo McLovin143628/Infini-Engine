@@ -290,8 +290,14 @@ fn script() -> Vec<Beat> {
     for _ in 0..420 {
         b.push(Beat::stick(0.0, 1.0));
     }
-    // Helm over, and round.
-    for _ in 0..300 {
+    // Helm over, and round. **1 500 steps (wave VEH3g), was 300.** The launch
+    // turns at 0.127 rad/s at 7.7 m/s (a 61 m circle, measured on this tree with
+    // and without VEH3g's hull changes alike -- 0.126 to 0.128), so a 5 s helm
+    // was a 36-degree jink and "it came back" held by centimetres: 145.4 m
+    // reached, 145.4 m out at the end. VEH3g's heave dashpot moved the end by
+    // 0.9 m and the arm went red on a script that never turned the boat round.
+    // Twenty-five seconds is the U-turn "round" meant.
+    for _ in 0..1500 {
         b.push(Beat::stick(1.0, 1.0));
     }
     // BACK: full ahead again on the new heading.

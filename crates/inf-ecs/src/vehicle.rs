@@ -10534,7 +10534,25 @@ impl Vehicle for RotorVehicle {
         //    knots is how a machine is over-stressed.
         let limit = steer_limit_deg(&self.tuning, forward_mps);
         // Nose DOWN to go forward, so a forward stick is a negative pitch.
-        let want = -self.controls.throttle.clamp(-1.0, 1.0) * limit;
+        //
+        // **A pull-back at speed is a FLARE** (wave VEH3g). `from_intent` hands
+        // a back stick at speed over as the BRAKE -- a car's rule, and the right
+        // one for a car -- and this class read the throttle alone, so a pilot
+        // pulling back at 30 m/s asked for a level attitude and could not
+        // decelerate except by drag. So a brake while moving FORWARD is a
+        // pull-back, and a brake while moving BACKWARD stays what it was since
+        // P29.7 -- nothing, a level attitude the drag stops -- because read as a
+        // pull-back there it flew an air unit that was told "forward" while
+        // sliding backward away from its own pad at 30 m/s (measured), and read
+        // as a push it changed VEH2c's fixed-stick circuit (38.1 m against its
+        // 40 m arm).
+        let flare = if forward_mps > 0.0 {
+            self.controls.brake
+        } else {
+            0.0
+        };
+        let stick = (self.controls.throttle - flare).clamp(-1.0, 1.0);
+        let want = -stick * limit;
         let returning = want.abs() < self.pitch_cmd_deg.abs() || want * self.pitch_cmd_deg < 0.0;
         let rate = if returning {
             self.tuning.steer_return_deg_per_s

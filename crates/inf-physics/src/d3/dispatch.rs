@@ -682,25 +682,46 @@ fn assign(
             })
             .map(|(chassis, unit)| (*chassis, unit.home))
             .collect();
-        let costs = dispatch::route_costs(&graph, dest, &homes);
+        // **THE AIR LANE** (wave VEH3g, closing VEH2c's refusal). An air unit is
+        // costed by the straight line from its pad, never by a route over the
+        // carriageway -- it is never handed to `route_costs` at all -- and it
+        // answers only a response the severity ladder already calls big
+        // (`dispatch::AIR_UNIT_MIN_UNITS`).
+        let air_wanted = wanted_units(world, res, incident_guid) >= dispatch::AIR_UNIT_MIN_UNITS;
+        let (air_homes, road_homes): (Vec<(Uuid, DVec3)>, Vec<(Uuid, DVec3)>) = homes
+            .into_iter()
+            .partition(|(chassis, _)| dispatch::is_air_unit(world, *chassis));
+        let mut costs = dispatch::route_costs(&graph, dest, &road_homes);
+        if air_wanted {
+            for (chassis, home) in &air_homes {
+                let d = DVec3::new(incident.at.x - home.x, 0.0, incident.at.z - home.z);
+                costs.push((*chassis, d.length()));
+            }
+        }
         let Some(chassis) = dispatch::nearest_unit(&costs) else {
             res.unanswered = res.unanswered.saturating_add(1);
             stats.unanswered += 1;
             continue;
         };
         let unit = fleet.units[&chassis];
+        let flies = air_homes.iter().any(|(g, _)| *g == chassis);
         let to_yaw = traffic::yaw_of_dir(incident.at - unit.home);
-        let Some(path) = traffic::drive_path(
-            &graph,
-            &lanes,
-            unit.home,
-            unit.home_yaw_deg,
-            incident.at,
-            to_yaw,
-        ) else {
-            res.unanswered = res.unanswered.saturating_add(1);
-            stats.unanswered += 1;
-            continue;
+        let path = if flies {
+            None
+        } else {
+            let Some(path) = traffic::drive_path(
+                &graph,
+                &lanes,
+                unit.home,
+                unit.home_yaw_deg,
+                incident.at,
+                to_yaw,
+            ) else {
+                res.unanswered = res.unanswered.saturating_add(1);
+                stats.unanswered += 1;
+                continue;
+            };
+            Some(path)
         };
         res.runs.insert(
             chassis,
@@ -708,7 +729,7 @@ fn assign(
                 state: UnitState::EnRoute,
                 incident: Some(incident_guid),
                 since_step: step,
-                path: Some(path),
+                path,
             },
         );
         if let Some(i) = res.incidents.get_mut(&incident_guid) {
@@ -747,6 +768,12 @@ fn run_units(
         };
         let unit = fleet.units[&chassis];
         let crew = dispatch::crew_guid(chassis);
+        if run.state != UnitState::InStation && dispatch::is_air_unit(world, chassis) {
+            fly_unit(
+                world, bridge, res, &unit, chassis, crew, &run, step, dt, stats,
+            );
+            continue;
+        }
         match run.state {
             UnitState::InStation => {}
             UnitState::EnRoute | UnitState::Returning => {
@@ -823,6 +850,109 @@ fn run_units(
                 }
             }
         }
+    }
+}
+
+/// **Fly an air unit's run** (wave VEH3g) -- out along its lane, hover over
+/// the scene while the scene is worked, back along the lane and down onto its
+/// pad. The crew stays in the seat the whole way: nobody gets out of a
+/// helicopter at sixty metres, so `arrive`'s unseat is not this unit's.
+///
+/// The stick is `dispatch::air_lane_intent`'s, written onto the crew's own
+/// intent axes (`intent_move` and `intent_vertical`), so the movement door
+/// turns it into the rotorcraft's controls through `VehicleControls::from_intent`
+/// exactly as it does a player's. The run's `path` stays `None` from the
+/// assignment to the pad: there is no carriageway anywhere in it.
+#[allow(clippy::too_many_arguments)]
+fn fly_unit(
+    world: &mut EcsWorld,
+    bridge: &mut PhysicsBridge3D,
+    res: &mut DispatchRes,
+    unit: &inf_ecs::dispatch::FleetUnit,
+    chassis: Uuid,
+    crew: Uuid,
+    run: &UnitRun,
+    step: u64,
+    dt: f64,
+    stats: &mut DispatchStats,
+) {
+    let archetype = inf_ecs::society::level_archetype(world);
+    let Some(body) = bridge.body_of(chassis) else {
+        return;
+    };
+    let w = bridge.world();
+    let (Some(at), Some(rot)) = (w.body_translation(body), w.body_rotation(body)) else {
+        return;
+    };
+    let linvel = w.body_linvel(body).unwrap_or(DVec3::ZERO);
+    if !ensure_crew(world, bridge, chassis, crew, &archetype, at) {
+        return;
+    }
+    let scene = run
+        .incident
+        .and_then(|g| res.incidents.get(&g))
+        .map(|i| i.at);
+    let (goal, land_at) = match (run.state, scene) {
+        (UnitState::EnRoute | UnitState::OnScene, Some(target)) => {
+            (dispatch::air_hover_point(unit.home, target), None)
+        }
+        _ => (
+            DVec3::new(
+                unit.home.x,
+                unit.home.y + dispatch::AIR_LANE_ALTITUDE_M,
+                unit.home.z,
+            ),
+            Some(unit.home.y),
+        ),
+    };
+    let (mv, vertical) =
+        dispatch::air_lane_intent(at, rot * DVec3::Z, -(rot * DVec3::X), linvel, goal, land_at);
+    if let Some(e) = world.entity_of(crew) {
+        if let Some(mut cm) = world.world_mut().get_mut::<CharacterMovement>(e) {
+            cm.runtime.intent_move = mv;
+            cm.runtime.intent_vertical = vertical;
+            cm.runtime.want_handbrake = false;
+            stats.steered += 1;
+        }
+    }
+    let flat = DVec3::new(goal.x - at.x, 0.0, goal.z - at.z).length();
+    match run.state {
+        UnitState::EnRoute if scene.is_some() && flat <= dispatch::ON_SCENE_M => {
+            if let Some(r) = res.runs.get_mut(&chassis) {
+                r.state = UnitState::OnScene;
+                r.since_step = step;
+            }
+            if let Some(g) = run.incident {
+                if let Some(i) = res.incidents.get_mut(&g) {
+                    i.state = IncidentState::OnScene;
+                }
+            }
+            stats.arrived += 1;
+        }
+        UnitState::EnRoute | UnitState::OnScene if scene.is_none() => {
+            send_home_air(res, chassis, step);
+        }
+        UnitState::OnScene => {
+            if work_the_scene(world, res, chassis, crew, unit.kind, step, dt) {
+                send_home_air(res, chassis, step);
+                stats.resolved += 1;
+            }
+        }
+        UnitState::Returning if flat <= dispatch::HOME_M && (at.y - unit.home.y) < 1.5 => {
+            park(world, bridge, res, chassis, crew);
+            stats.returned += 1;
+        }
+        _ => {}
+    }
+}
+
+/// An air unit's way home: the lane back to its pad, no route.
+fn send_home_air(res: &mut DispatchRes, chassis: Uuid, step: u64) {
+    if let Some(run) = res.runs.get_mut(&chassis) {
+        run.state = UnitState::Returning;
+        run.since_step = step;
+        run.incident = None;
+        run.path = None;
     }
 }
 

@@ -1089,6 +1089,128 @@ pub fn nearest_unit(costs: &[(Uuid, f64)]) -> Option<Uuid> {
         .map(|(g, _)| *g)
 }
 
+// ── the air lane (wave VEH3g) ───────────────────────────────────────────────
+
+/// **The altitude an air unit flies its lane at**, metres above the higher of
+/// where it left and where it is going.
+///
+/// Sixty: clear of every building the island's grammar raises (the tallest
+/// archetype is under forty metres) with room to spare, and low enough that a
+/// player on the street sees and hears it.
+pub const AIR_LANE_ALTITUDE_M: f64 = 60.0;
+
+/// **How far short of the scene an air unit holds its hover**, metres,
+/// horizontally, on the side it came from -- an orbit's radius, collapsed to one
+/// point because this dispatcher has no orbit (carried). Thirty: over the
+/// block, not over the roof of the building it is watching.
+pub const AIR_HOVER_OFFSET_M: f64 = 30.0;
+
+/// **The speed an air unit cruises its lane at**, m/s -- the police Maverick's
+/// comfortable cruise, well under the rotorcraft's 38.7 m/s ceiling.
+pub const AIR_CRUISE_MPS: f64 = 30.0;
+
+/// **The smallest response an air unit answers**: an incident the severity
+/// ladder wants at least this many units on (wave VEH3g).
+///
+/// Two -- `crime::Response::MultiUnit`, heat three, two stars. A stolen bicycle
+/// is not a helicopter; a chase is. The ladder is the one EMS3 built, so this
+/// reads what it already decides rather than adding a second threshold.
+pub const AIR_UNIT_MIN_UNITS: usize = 2;
+
+/// Whether `chassis` is an AIR unit -- a rig whose parts include a rotor.
+///
+/// Derived from the rig (`vehicle::rig_of`) rather than from a flag, the VEH2c
+/// recogniser's own argument: the parts are what the scene authored, so the
+/// dispatcher cannot disagree with the model that flies the machine.
+pub fn is_air_unit(world: &EcsWorld, chassis: Uuid) -> bool {
+    crate::vehicle::rig_of(world, chassis).is_some_and(|rig| {
+        rig.parts_of(crate::vehicle::PartKind::Rotor)
+            .next()
+            .is_some()
+    })
+}
+
+/// **Where an air unit holds, for a scene at `target` approached from `from`**
+/// -- the hover point: [`AIR_HOVER_OFFSET_M`] short of the scene on the approach
+/// line, at [`AIR_LANE_ALTITUDE_M`] over the higher of the two ends.
+///
+/// A pure function of the two ends and nothing about any road: this is the
+/// whole of what makes the air lane "never the carriageway".
+pub fn air_hover_point(from: DVec3, target: DVec3) -> DVec3 {
+    let d = DVec3::new(from.x - target.x, 0.0, from.z - target.z);
+    let len = d.length();
+    let back = if len > 1e-6 { d / len } else { DVec3::Z };
+    let off = back * AIR_HOVER_OFFSET_M.min(len);
+    DVec3::new(
+        target.x + off.x,
+        from.y.max(target.y) + AIR_LANE_ALTITUDE_M,
+        target.z + off.z,
+    )
+}
+
+/// **The pilot**: the stick an air unit's crew holds to fly straight to `goal`
+/// at its altitude, turning to face it, and hover there -- or, with
+/// `land_at = Some(y)`, to come down onto `y` once it is overhead.
+///
+/// Answers `(move_input, vertical)` -- a character's own intent axes, so the
+/// movement door turns them into the rotorcraft's controls through
+/// `VehicleControls::from_intent` exactly as it does a player's. No road, no
+/// `drive_intent`, no carriageway: the lane is a straight line in the air.
+///
+/// `stbd` is the airframe's starboard (`-(rotation * X)`: the chassis basis
+/// calls `+X` "right" and it is the pilot's left).
+pub fn air_lane_intent(
+    at: DVec3,
+    fwd: DVec3,
+    stbd: DVec3,
+    linvel: DVec3,
+    goal: DVec3,
+    land_at: Option<f64>,
+) -> (crate::math::Vec2d, f64) {
+    let to = DVec3::new(goal.x - at.x, 0.0, goal.z - at.z);
+    let dist = to.length();
+    let dir = if dist > 1e-6 { to / dist } else { DVec3::ZERO };
+    let fwd_h = DVec3::new(fwd.x, 0.0, fwd.z).normalize_or_zero();
+    let stbd_h = DVec3::new(stbd.x, 0.0, stbd.z).normalize_or_zero();
+    // ── the altitude: the lane's, until it is overhead a place to land.
+    let overhead = dist < 12.0;
+    let want_y = match land_at {
+        Some(y) if overhead => y,
+        _ => goal.y,
+    };
+    let vs_want = ((want_y - at.y) * 0.4).clamp(-3.0, 4.0);
+    let vertical = ((vs_want - linvel.y) * 0.5).clamp(-1.0, 1.0);
+    // ── the heading: face the goal (the pedals are a yaw RATE).
+    let (steer, ahead) = if dist > 5.0 {
+        let side = dir.dot(stbd_h);
+        let ahead = dir.dot(fwd_h);
+        let steer = if ahead < 0.0 {
+            if side >= 0.0 {
+                1.0
+            } else {
+                -1.0
+            }
+        } else {
+            (side * 2.5).clamp(-1.0, 1.0)
+        };
+        (steer, ahead.max(0.0))
+    } else {
+        (0.0, 0.0)
+    };
+    // ── the speed: nothing until the machine is near its lane's altitude, then
+    //    a cruise that tapers into the hover. The stick is a pitch ATTITUDE, so
+    //    forward is nose-down and a pull-back is a flare.
+    let climbing = (goal.y - at.y) > 20.0 && land_at.is_none();
+    let v_want = if climbing {
+        0.0
+    } else {
+        (dist * 0.25).min(AIR_CRUISE_MPS) * ahead
+    };
+    let v_fwd = linvel.dot(fwd_h);
+    let stick = ((v_want - v_fwd) * 0.12).clamp(-1.0, 1.0);
+    (crate::math::Vec2d::new(steer, stick), vertical)
+}
+
 // ── the scene ───────────────────────────────────────────────────────────────
 
 /// **What a crew member does at a scene**, by service.
