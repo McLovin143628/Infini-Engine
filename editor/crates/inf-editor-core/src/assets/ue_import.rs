@@ -449,6 +449,8 @@ struct Pack {
     license: String,
     /// v3: the pack's Fab listing, carried into every licence row.
     fab_url: String,
+    /// v3: how the pack's vehicles face in UE's frame (`+X` or `+Y`).
+    forward: String,
     /// v2: whether this pack's licence permits SHIPPING the content, as opposed
     /// to using it as a local reference. Recorded per pack because the three
     /// character packs differ: ALS is MIT (ship), the mannequins are Epic's
@@ -4304,9 +4306,14 @@ fn import_material(
         // overwrites its own output instead of writing `X_1.inf_tex` beside it.
         // Measured before this line existed: the second import wrote 106
         // duplicate assets and doubled the project's texture bytes.
-        let id = project.write_tiled_texture_at(
-            &dest.join(format!("{name}_{slot}.inf_tex")),
+        // …and (wave VEH3f.2a) a DETERMINISTIC GUID for a texture new to the
+        // project, so two fresh imports of one manifest write the same bytes.
+        let path = dest.join(format!("{name}_{slot}.inf_tex"));
+        let fresh = import_path_guid(project, &path);
+        let id = project.write_tiled_texture_keyed(
+            &path,
             &image,
+            Some(fresh),
             Some(mat.source_note()),
             None,
         )?;
@@ -4422,8 +4429,43 @@ fn import_material(
             Ok(id)
         }
         // …and the material likewise, for the same reason and by the same door.
-        None => project.write_asset_at(&dest.join(format!("{name}.inf_mat")), &asset, deps, None),
+        None => {
+            // The id a re-import keeps, or (a material new to the project) the
+            // keyed one -- wave VEH3f.2a's determinism, as the texture writer.
+            let path = dest.join(format!("{name}.inf_mat"));
+            let id = match project.db().get_by_path(&path).map(|e| (e.id(), e.kind())) {
+                Some((have, inf_asset::AssetKind::Material)) => have,
+                _ => import_path_guid(project, &path),
+            };
+            project.write_asset_at_with_id(&path, &asset, id, deps, None)
+        }
     }
+}
+
+/// **The GUID an imported file NEW to a project takes** (wave VEH3f.2a): a
+/// pure function of its path under the content root, salted, so two fresh
+/// imports of one manifest agree byte for byte (`veh3f2a_gate`'s determinism
+/// arm) where `AssetId::new()` minted a different v4 on every run. A path
+/// already registered keeps the id it has -- the callers ask the database
+/// first -- so nothing an existing project references moves.
+fn import_path_guid(project: &AssetProject, path: &Path) -> AssetId {
+    let rel = path
+        .strip_prefix(project.root())
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/");
+    let mut bytes = [0u8; 16];
+    for (i, chunk) in bytes.chunks_mut(8).enumerate() {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        for b in b"inf:ue-import-path:".iter().chain(rel.as_bytes()) {
+            h ^= u64::from(*b);
+            h = h.wrapping_mul(0x0000_0100_0000_01B3);
+        }
+        chunk.copy_from_slice(&h.to_le_bytes());
+    }
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    AssetId(uuid::Uuid::from_bytes(bytes))
 }
 
 /// The ground-library kind a rebind stem names.
@@ -5115,6 +5157,34 @@ fn import_skel_vehicle(
         door_proxy,
     );
     std::fs::write(dir.join(format!("{}.vehicle.toml", v.art)), toml)?;
+    // **The in-car camera, as a `camera.toml` SUGGESTION** (wave VEH3f.2a): the
+    // pack Blueprint's `Camera_InCar` is a cockpit eye, and the engine's drive
+    // camera is a chase camera over the whole car -- so the pack's number is
+    // offered as the drive block a cockpit view would be (no arm, the eye at the
+    // driver's head), in the level camera table's own vocabulary, and NOT
+    // applied: an author pastes it into `Content/camera.toml` to use it.
+    if let Some(c) = split.camera {
+        let lines = [
+            format!(
+                "# {} -- the pack Blueprint's in-car camera (Camera_InCar), as a camera.toml",
+                v.art
+            ),
+            format!(
+                "# SUGGESTION (wave VEH3f.2a): the eye at chassis ({:.3}, {:.3}, {:.3}) m, the",
+                c.x, c.y, c.z
+            ),
+            "# driver's head. A cockpit view is the drive block with no arm and this offset."
+                .to_string(),
+            "# Not applied: paste into Content/camera.toml to use it.".to_string(),
+            "[drive]".to_string(),
+            "arm_length_m = 0.0".to_string(),
+            format!("offset_x = {:.4}", c.x),
+            format!("offset_y = {:.4}", c.y),
+            format!("offset_z = {:.4}", c.z),
+        ];
+        let text = lines.join("\n") + "\n";
+        std::fs::write(dir.join(format!("{}.camera.toml", v.art)), text)?;
+    }
     // The recipe copies the committed FALLBACK into the content root at these
     // same GUIDs; two files claiming one GUID is a registry that answers
     // either, so the art replaces the copy (the VEH3f rule).
@@ -5200,29 +5270,7 @@ fn import_weapon(
     // The muzzle: the socket's offset composed with its bone's rest pose, in
     // the weapon's own frame (the glTF's: length on +Z, up on +Y -- this
     // engine's weapon frame, measured: the shotgun's muzzle end at z 0.7535).
-    let sk = w
-        .skeletal
-        .as_deref()
-        .and_then(|k| m.skeletal_meshes.iter().find(|s| s.key == k));
-    let joint = |name: &str| sk.and_then(|s| s.joints.iter().find(|j| j.name == name));
-    let muzzle = sk
-        .and_then(|s| {
-            s.sockets
-                .iter()
-                .find(|x| x.name.eq_ignore_ascii_case("muzzle"))
-        })
-        .and_then(|sock| {
-            let b = joint(&sock.bone)?;
-            let q = glam::DQuat::from_array(b.world_rotation).normalize();
-            Some(glam::DVec3::from_array(b.world_m) + q * ue_cm_to_gltf_m(sock.location_cm))
-        });
-    let magazine = sk
-        .and_then(|s| {
-            s.joints
-                .iter()
-                .find(|j| j.name.to_ascii_lowercase().starts_with("magazine"))
-        })
-        .map(|j| glam::DVec3::from_array(j.world_m));
+    let (muzzle, magazine) = weapon_seats(m, w);
     let mut toml = format!(
         "# {} -- the VEH3f.2a weapon bridge ({}); licence: {}\n",
         w.art,
@@ -5262,6 +5310,153 @@ fn import_weapon(
             .unwrap_or_else(|| "NOT FOUND".to_string())
     ));
     Ok(())
+}
+
+// ── wave VEH3f.2a: what a v3 manifest says, for a gate to read ─────────────
+
+/// **One skinned car, as a v3 manifest states it** (wave VEH3f.2a) -- the
+/// numbers the gate compares against the glTF they were read back from and
+/// against what the importer wrote.
+#[derive(Debug, Clone, Default)]
+pub struct VehicleCensus {
+    pub art: String,
+    pub pack: String,
+    pub forward: String,
+    /// The skeletal record's LOD-0 glTF, relative to the manifest.
+    pub lod0_file: Option<String>,
+    /// Triangles per exported rung, as the exporter counted them.
+    pub lod_triangles: Vec<u32>,
+    /// `(name, parent, world_m)` per joint, glTF frame.
+    pub joints: Vec<(String, Option<String>, [f64; 3])>,
+    /// `(socket, bone, location_cm)`, raw.
+    pub sockets: Vec<(String, String, [f64; 3])>,
+    /// `(component, root location cm)` per Blueprint component.
+    pub bp_components: Vec<(String, [f64; 3])>,
+    /// The Blueprint's first Chaos wheel radius, cm.
+    pub bp_wheel_radius_cm: Option<f64>,
+}
+
+/// **One weapon, as a v3 manifest states it**, with its muzzle composed the
+/// importer's way (`import_weapon`).
+#[derive(Debug, Clone, Default)]
+pub struct WeaponCensus {
+    pub art: String,
+    pub muzzle_m: Option<[f64; 3]>,
+    pub magazine_m: Option<[f64; 3]>,
+}
+
+/// **A v3 manifest, as the gate reads it** (wave VEH3f.2a): the schema, each
+/// pack's `(name, fab_url, licence, ship, forward)`, the cars and the weapons.
+#[derive(Debug, Clone, Default)]
+pub struct ManifestCensus {
+    pub schema_version: u32,
+    pub packs: Vec<(String, String, String, bool, String)>,
+    pub vehicles: Vec<VehicleCensus>,
+    pub weapons: Vec<WeaponCensus>,
+}
+
+/// The weapon's muzzle and magazine seat, in its own frame -- the ONE
+/// composition both the importer and the census use.
+fn weapon_seats(m: &Manifest, w: &ManifestWeapon) -> (Option<glam::DVec3>, Option<glam::DVec3>) {
+    let sk = w
+        .skeletal
+        .as_deref()
+        .and_then(|k| m.skeletal_meshes.iter().find(|s| s.key == k));
+    let joint = |name: &str| sk.and_then(|s| s.joints.iter().find(|j| j.name == name));
+    let muzzle = sk
+        .and_then(|s| {
+            s.sockets
+                .iter()
+                .find(|x| x.name.eq_ignore_ascii_case("muzzle"))
+        })
+        .and_then(|sock| {
+            let b = joint(&sock.bone)?;
+            let q = glam::DQuat::from_array(b.world_rotation).normalize();
+            Some(glam::DVec3::from_array(b.world_m) + q * ue_cm_to_gltf_m(sock.location_cm))
+        });
+    let magazine = sk
+        .and_then(|s| {
+            s.joints
+                .iter()
+                .find(|j| j.name.to_ascii_lowercase().starts_with("magazine"))
+        })
+        .map(|j| glam::DVec3::from_array(j.world_m));
+    (muzzle, magazine)
+}
+
+/// **Read a manifest's v3 sections** (wave VEH3f.2a).
+pub fn manifest_census(text: &str) -> std::result::Result<ManifestCensus, String> {
+    let m: Manifest = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    let mut out = ManifestCensus {
+        schema_version: m.schema_version,
+        ..Default::default()
+    };
+    for p in &m.packs {
+        out.packs.push((
+            p.name.clone(),
+            p.fab_url.clone(),
+            p.license.clone(),
+            p.ship,
+            p.forward.clone(),
+        ));
+    }
+    for v in &m.vehicles {
+        let sk = m.skeletal_meshes.iter().find(|s| s.key == v.skeletal);
+        out.vehicles.push(VehicleCensus {
+            art: v.art.clone(),
+            pack: v.pack.clone(),
+            forward: v.forward.clone(),
+            lod0_file: sk.and_then(|s| {
+                s.lods
+                    .iter()
+                    .find(|l| l.level == 0)
+                    .and_then(|l| l.file.clone())
+            }),
+            lod_triangles: sk
+                .map(|s| s.lods.iter().map(|l| l.triangles).collect())
+                .unwrap_or_default(),
+            joints: sk
+                .map(|s| {
+                    s.joints
+                        .iter()
+                        .map(|j| (j.name.clone(), j.parent.clone(), j.world_m))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            sockets: sk
+                .map(|s| {
+                    s.sockets
+                        .iter()
+                        .map(|x| (x.name.clone(), x.bone.clone(), x.location_cm))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            bp_components: v
+                .blueprint
+                .as_ref()
+                .map(|b| {
+                    b.components
+                        .iter()
+                        .map(|c| (c.name.clone(), c.root_location_cm))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            bp_wheel_radius_cm: v
+                .blueprint
+                .as_ref()
+                .and_then(|b| b.wheels.first())
+                .map(|w| w.wheel_radius),
+        });
+    }
+    for w in &m.weapons {
+        let (muzzle, magazine) = weapon_seats(&m, w);
+        out.weapons.push(WeaponCensus {
+            art: w.art.clone(),
+            muzzle_m: muzzle.map(|p| p.to_array()),
+            magazine_m: magazine.map(|p| p.to_array()),
+        });
+    }
+    Ok(out)
 }
 
 impl Material {

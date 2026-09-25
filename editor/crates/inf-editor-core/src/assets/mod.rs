@@ -741,6 +741,22 @@ impl AssetProject {
         source: Option<String>,
         import: Option<toml::Table>,
     ) -> Result<AssetId> {
+        self.write_tiled_texture_keyed(path, image, None, source, import)
+    }
+
+    /// [`write_tiled_texture_at`](Self::write_tiled_texture_at), with the GUID a
+    /// texture NEW to this project takes named by the caller (wave VEH3f.2a):
+    /// a path already registered keeps its own id, so a re-import into one
+    /// project moves nothing, and two fresh imports of one manifest agree byte
+    /// for byte.
+    pub fn write_tiled_texture_keyed(
+        &mut self,
+        path: &Path,
+        image: &inf_material::TiledTextureImage,
+        fresh: Option<AssetId>,
+        source: Option<String>,
+        import: Option<toml::Table>,
+    ) -> Result<AssetId> {
         let bytes = image.as_bytes();
         let hash = ContentHash::of(bytes);
         let reuse = match self.db.get_by_path(path).map(|e| (e.id(), e.kind())) {
@@ -751,6 +767,9 @@ impl AssetProject {
             }
             None => None,
         };
+        // A keyed id claimed by another path is that path's; minting it again
+        // would put two entries on one GUID.
+        let reuse = reuse.or(fresh.filter(|f| self.db.get(*f).is_none()));
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }

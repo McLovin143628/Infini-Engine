@@ -80,6 +80,24 @@ if ($SyncVehicles) {
     & $import --manifest $manifest --into (Join-Path $holder $Project) --pack ConstructionVehiclesPack1 --dest UE --vehicles
     if ($LASTEXITCODE -ne 0) { throw "inf-import --vehicles failed" }
     Say "construction art synced into $Project/Content/UE/Vehicles"
+    # **The car packs and the weapon pack** (wave VEH3f.2a): the three v3
+    # manifests tools/ue-export/export.py writes for them (one per uproject the
+    # packs live in), split by bone and written at the GUIDs the art table and
+    # the weapon table name. Textures at 4096, their real resolution. LOCAL ONLY,
+    # like everything above: Fab Standard -- the user confirms the tier first.
+    $cars = @(
+        @{ M = "veh3f2a-dd/manifest.json";   P = @("DrivableCarsBasicVehicleS") },
+        @{ M = "veh3f2a-vvp2/manifest.json"; P = @("VehicleVarietyPackVolume2") },
+        @{ M = "veh3f2a-ow/manifest.json";   P = @("VehicleVarietyPack", "MarketplaceBlockout") }
+    )
+    foreach ($c in $cars) {
+        $m = Join-Path $holder "$UeOut/$($c.M)"
+        if (-not (Test-Path $m)) { Say "MISSING $m -- that pack's art stays the committed fallback"; continue }
+        $packs = @(); foreach ($p in $c.P) { $packs += @("--pack", $p) }
+        & $import --manifest $m --into (Join-Path $holder $Project) @packs --dest UE --vehicles --weapons --max-texture 4096
+        if ($LASTEXITCODE -ne 0) { throw "inf-import of $m failed" }
+        Say "synced $($c.M)"
+    }
     exit 0
 }
 

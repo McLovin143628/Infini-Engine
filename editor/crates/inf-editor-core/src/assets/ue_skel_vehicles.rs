@@ -88,10 +88,13 @@ pub const PANE_MIN_AREA_M2: f64 = 0.08;
 /// The most panes one body carries.
 pub const MAX_PANES: usize = 8;
 
-/// Where a body with no Blueprint seat puts its driver, behind the drawn hub,
-/// metres -- the calibration sedan's own Blueprint distance (0.527 m, `Driver`
-/// to `steering_wheel`), rounded.
-pub const SEAT_BEHIND_HUB_M: f64 = 0.53;
+/// Where a body with no Blueprint seat puts its driver's cushion, behind the
+/// drawn rim's centre, metres -- the three DrivableCars bodies' own Blueprint
+/// seats measure 0.296, 0.328 and 0.313 m behind their rims. (The first cut
+/// took 0.53 m, the Blueprint's `Driver` to its `steering_wheel` COMPONENT --
+/// the column's root, not the rim -- and a driver seated there could not reach
+/// the wheel: 83 mm short, measured by the gate's boarding arm.)
+pub const SEAT_BEHIND_HUB_M: f64 = 0.31;
 
 /// A door part's half-thickness, metres -- the families' own doors are 0.045 of
 /// a saloon's half-width, about this.
@@ -951,4 +954,285 @@ pub fn skel_body_toml(
         ));
     }
     s
+}
+
+/// **A synthetic skinned car** (wave VEH3f.2a) -- ours, generated, in the
+/// exporter's glTF frame (facing `+X`, up `+Y`, the car's right on `+Z`) --
+/// for the gate and the unit tests: a body box on the root, a window pane on
+/// the body in the GLASS slot, four wheel "tyres" (octagonal prisms, axle on
+/// `Z`) each weighted to its wheel bone, two doors weighted to their hinge
+/// bones, and a raked steering disc weighted to `SteeringWheel`. Slot 0 is
+/// paint, slot 1 glass, slot 2 plain.
+pub mod fixture {
+    use glam::DVec3;
+    use inf_mesh::{MeshAsset, MeshVertex, SubMesh, VertexSkin};
+
+    use super::SlotRole;
+
+    /// The joints: `(name, world rest position)`, glTF frame.
+    pub fn joints() -> Vec<(String, DVec3)> {
+        vec![
+            ("Root".into(), DVec3::ZERO),
+            ("Front_Left_Wheel".into(), DVec3::new(1.40, 0.34, -0.75)),
+            ("Front_Right_Wheel".into(), DVec3::new(1.40, 0.34, 0.75)),
+            ("Rear_Left_Wheel".into(), DVec3::new(-1.45, 0.34, -0.75)),
+            ("Rear_Right_Wheel".into(), DVec3::new(-1.45, 0.34, 0.75)),
+            ("Left_Door".into(), DVec3::new(0.85, 0.80, -0.86)),
+            ("Right_Door".into(), DVec3::new(0.85, 0.80, 0.86)),
+            ("SteeringWheel".into(), DVec3::new(0.60, 0.95, -0.40)),
+        ]
+    }
+
+    /// The roles of the three slots.
+    pub fn roles() -> Vec<SlotRole> {
+        vec![SlotRole::Paint, SlotRole::Glass, SlotRole::Plain]
+    }
+
+    /// The tyre radius the fixture's wheels are built at, metres.
+    pub const TYRE_R: f64 = 0.34;
+
+    /// The steering disc's rake, degrees, in `hub_rim_euler`'s convention.
+    pub const RAKE_DEG: f64 = -24.0;
+
+    fn quad_box(lo: DVec3, hi: DVec3, joint: u16, out: &mut Vec<(DVec3, u16)>) {
+        let c = |x: f64, y: f64, z: f64| DVec3::new(x, y, z);
+        let v = [
+            c(lo.x, lo.y, lo.z),
+            c(hi.x, lo.y, lo.z),
+            c(hi.x, hi.y, lo.z),
+            c(lo.x, hi.y, lo.z),
+            c(lo.x, lo.y, hi.z),
+            c(hi.x, lo.y, hi.z),
+            c(hi.x, hi.y, hi.z),
+            c(lo.x, hi.y, hi.z),
+        ];
+        let faces = [
+            [0, 2, 1, 0, 3, 2],
+            [4, 5, 6, 4, 6, 7],
+            [0, 1, 5, 0, 5, 4],
+            [3, 7, 6, 3, 6, 2],
+            [0, 4, 7, 0, 7, 3],
+            [1, 2, 6, 1, 6, 5],
+        ];
+        for f in faces {
+            for i in f {
+                out.push((v[i], joint));
+            }
+        }
+    }
+
+    /// An octagonal prism about an axis through `c` along `axis` (unit), of
+    /// radius `r` and half-width `w`: a tyre, or (flat) a steering disc.
+    fn prism(c: DVec3, axis: DVec3, r: f64, w: f64, joint: u16, out: &mut Vec<(DVec3, u16)>) {
+        // Two in-plane axes, exact for the axes this fixture uses.
+        let a = if axis.y.abs() < 0.9 {
+            DVec3::Y
+        } else {
+            DVec3::X
+        };
+        let u = axis.cross(a).normalize();
+        let v = axis.cross(u).normalize();
+        // An octagon at the eight exact directions (no trig: the committed
+        // fixture's bytes must be the same on every platform).
+        let s = std::f64::consts::FRAC_1_SQRT_2;
+        let dirs = [
+            (1.0, 0.0),
+            (s, s),
+            (0.0, 1.0),
+            (-s, s),
+            (-1.0, 0.0),
+            (-s, -s),
+            (0.0, -1.0),
+            (s, -s),
+        ];
+        let ring = |side: f64| -> Vec<DVec3> {
+            dirs.iter()
+                .map(|(x, y)| c + u * (x * r) + v * (y * r) + axis * (side * w))
+                .collect()
+        };
+        let (p, q) = (ring(-1.0), ring(1.0));
+        for k in 0..8 {
+            let n = (k + 1) % 8;
+            for t in [[p[k], p[n], q[n]], [p[k], q[n], q[k]]] {
+                for x in t {
+                    out.push((x, joint));
+                }
+            }
+            for t in [[c - axis * w, p[n], p[k]], [c + axis * w, q[k], q[n]]] {
+                for x in t {
+                    out.push((x, joint));
+                }
+            }
+        }
+    }
+
+    fn submesh(tris: Vec<(DVec3, u16)>, slot: u32) -> SubMesh {
+        let vertices: Vec<MeshVertex> = tris
+            .iter()
+            .map(|(p, _)| MeshVertex {
+                position: [p.x as f32, p.y as f32, p.z as f32],
+                ..Default::default()
+            })
+            .collect();
+        let skin: Vec<VertexSkin> = tris
+            .iter()
+            .map(|(_, j)| VertexSkin {
+                joints: [*j, 0, 0, 0],
+                weights: [1.0, 0.0, 0.0, 0.0],
+            })
+            .collect();
+        SubMesh {
+            name: format!("slot{slot}"),
+            indices: (0..vertices.len() as u32).collect(),
+            vertices,
+            material_slot: Some(slot),
+            skin,
+        }
+    }
+
+    /// The car.
+    pub fn car() -> MeshAsset {
+        let j = joints();
+        let mut paint = Vec::new();
+        let mut glass = Vec::new();
+        let mut plain = Vec::new();
+        // The body, and a windscreen-sized pane on it (0.9 m^2, a PANE).
+        quad_box(
+            DVec3::new(-2.3, 0.25, -0.85),
+            DVec3::new(2.3, 1.35, 0.85),
+            0,
+            &mut paint,
+        );
+        quad_box(
+            DVec3::new(0.55, 1.10, -0.65),
+            DVec3::new(0.60, 1.45, 0.65),
+            0,
+            &mut glass,
+        );
+        // The wheels, axle on glTF Z (the car's lateral), on their bones.
+        for k in 1..=4u16 {
+            prism(j[k as usize].1, DVec3::Z, TYRE_R, 0.11, k, &mut plain);
+        }
+        // The doors: from the hinge bone (their FRONT edge) back 1.0 m, 5 cm
+        // thick, just outside the body.
+        for (k, side) in [(5u16, -1.0f64), (6u16, 1.0f64)] {
+            let p = j[k as usize].1;
+            quad_box(
+                DVec3::new(p.x - 1.0, 0.35, p.z - side * 0.05),
+                DVec3::new(p.x, 1.10, p.z),
+                k,
+                &mut paint,
+            );
+        }
+        // The steering disc: rim plane raked so its face turns up at the
+        // driver (behind it, glTF -X), by RAKE_DEG.
+        let rake = RAKE_DEG.to_radians();
+        let axis = DVec3::new(-rake.cos(), -rake.sin(), 0.0).normalize();
+        prism(j[7].1, axis, 0.18, 0.02, 7, &mut plain);
+        MeshAsset::new(
+            vec![submesh(paint, 0), submesh(glass, 1), submesh(plain, 2)],
+            vec!["paint".into(), "glass".into(), "plain".into()],
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn split() -> SkelVehicleSplit {
+        let mesh = fixture::car();
+        let joints = fixture::joints();
+        let roles = fixture::roles();
+        split_skel_vehicle(&SkelVehicleIn {
+            art: "fixture",
+            facing: Facing::PlusX,
+            mesh: &mesh,
+            joints: &joints,
+            roles: &roles,
+            steering: None,
+            seat: None,
+            camera: None,
+            door_proxy: false,
+        })
+        .expect("the fixture splits")
+    }
+
+    /// **Every part lands on its bone** (wave VEH3f.2a): the wheels' hubs are
+    /// their bones' rest positions and their meshes are centred on them; the
+    /// front wheels (glTF +X) come out at the engine's front (+Z); each door's
+    /// box has its front edge and lateral centre on its hinge bone; the pane is
+    /// out of the body; the steering wheel carries the fixture's rake.
+    ///
+    /// **Mutations**: `to_engine` the identity for +X (the car imported facing
+    /// sideways) -> red on the front wheels; the door box's front edge at the
+    /// door's own bounds -> red on the pivot.
+    #[test]
+    fn the_split_puts_every_part_on_its_bone() {
+        let s = split();
+        let joints = fixture::joints();
+        // The collider centre, recovered from one hub. Wheel 0 is the -X front:
+        // the car's RIGHT front (glTF +Z is the car's right, and the engine's
+        // right is -X), so its bone is `Front_Right_Wheel`.
+        let centre = to_engine(Facing::PlusX, joints[2].1) - s.hubs[0];
+        let want = |j: usize| to_engine(Facing::PlusX, joints[j].1) - centre;
+        assert_eq!(s.wheels.len(), 4);
+        for (k, bone) in [(0usize, 2usize), (1, 1), (2, 4), (3, 3)] {
+            let d = (s.hubs[k] - want(bone)).length();
+            assert!(d < 1e-3, "wheel {k} is {d} m off its bone");
+            let b = s.wheels[k].bounds;
+            let mid = DVec3::new(
+                0.5 * (b.min[0] + b.max[0]) as f64,
+                0.5 * (b.min[1] + b.max[1]) as f64,
+                0.5 * (b.min[2] + b.max[2]) as f64,
+            );
+            assert!(mid.length() < 1e-3, "wheel {k}'s mesh centre is {mid:?}");
+        }
+        assert!(
+            s.hubs[0].z > 0.0 && s.hubs[1].z > 0.0,
+            "the front wheels are not at +Z"
+        );
+        assert!(
+            s.hubs[0].x < 0.0 && s.hubs[1].x > 0.0,
+            "wheel 0 is not the -X front"
+        );
+        assert!((s.wheel_radius - fixture::TYRE_R).abs() < 1e-3);
+        for (name, bone) in [("door_l", 5usize), ("door_r", 6usize)] {
+            let d = s
+                .parts
+                .iter()
+                .find(|p| p.name == name)
+                .unwrap_or_else(|| panic!("no {name}"));
+            let pivot = want(bone);
+            assert!((d.centre.x - pivot.x).abs() < 1e-3, "{name} centre x");
+            assert!(
+                (d.centre.z + d.half.z - pivot.z).abs() < 1e-3,
+                "{name}'s front edge is {} m off its hinge bone",
+                d.centre.z + d.half.z - pivot.z
+            );
+        }
+        assert!(s.parts.iter().any(|p| p.name.starts_with("glass")));
+        let rake = s.pack_rake_deg.expect("a hub");
+        assert!(
+            (rake - fixture::RAKE_DEG).abs() < 0.5,
+            "the hub's rake is {rake} deg"
+        );
+    }
+
+    /// **Two splits of one input are the same bytes** (wave VEH3f.2a).
+    #[test]
+    fn a_split_is_deterministic() {
+        let (a, b) = (split(), split());
+        let enc = |m: &MeshAsset| inf_asset::encode(m).expect("encodes");
+        assert_eq!(enc(&a.body), enc(&b.body));
+        for (x, y) in a.wheels.iter().zip(&b.wheels) {
+            assert_eq!(enc(x), enc(y));
+        }
+        for (x, y) in a.parts.iter().zip(&b.parts) {
+            assert_eq!(x.name, y.name);
+            if let (Some(p), Some(q)) = (&x.mesh, &y.mesh) {
+                assert_eq!(enc(p), enc(q));
+            }
+        }
+    }
 }
