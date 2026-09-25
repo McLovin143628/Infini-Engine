@@ -340,9 +340,23 @@ impl PoolAllocator {
 /// A pool that does run out of *budget* is not a failure: the allocation fails,
 /// the page is not paged in, `budget_clamped` is reported, and the cut clamps to
 /// what is resident — softer detail, never a hole.
+///
+/// **And no ONE pool may outgrow a GPU binding** (the VEH3f.2a audit). Each pool
+/// is one storage buffer bound whole to the cull and raster passes, so its
+/// capacity is also bounded by the device's `max_storage_buffer_binding_size`
+/// ([`set_pool_cap`](Self::set_pool_cap)) -- `wgpu::Limits::default()`'s
+/// 128 MiB, which is what this engine requests on every device. The shared
+/// budget is 256 MiB, and the island with the imported Fab traffic present
+/// grew the VERTEX pool to 137 362 176 bytes: `create_bind_group` refused it
+/// and the renderer panicked on its first frame at the crossroads. A pool at its
+/// cap fails the allocation like a pool out of budget -- softer detail, never a
+/// hole, and never a binding the device refuses.
 #[derive(Debug, Clone)]
 pub struct VgeomPools {
     budget_bytes: u64,
+    /// The most bytes ONE pool may hold -- see the type's doc. `u64::MAX` (no
+    /// cap beyond the shared budget) until a renderer names its device's.
+    pool_cap_bytes: u64,
     pub vertices: PoolAllocator,
     pub meshlets: PoolAllocator,
     pub mlverts: PoolAllocator,
@@ -362,6 +376,7 @@ impl VgeomPools {
     pub fn new(budget_bytes: u64) -> Self {
         Self {
             budget_bytes,
+            pool_cap_bytes: u64::MAX,
             vertices: PoolAllocator::new(VERTEX_REC_LEN as u64),
             meshlets: PoolAllocator::new(MESHLET_REC_LEN as u64),
             mlverts: PoolAllocator::new(4),
@@ -395,8 +410,30 @@ impl VgeomPools {
     /// [`alloc_page`](Self::alloc_page), which is transactional and carries the
     /// floor guarantee.
     pub fn alloc(&mut self, kind: PoolKind, units: u64) -> Option<PoolBlock> {
-        let headroom = self.budget_bytes.saturating_sub(self.capacity_bytes());
+        let headroom = self.headroom(kind);
         self.pool_mut(kind).alloc(units, headroom, true)
+    }
+
+    /// **Cap every pool at `bytes`** -- the device's
+    /// `max_storage_buffer_binding_size` (see the type's doc). Pools already past
+    /// it keep what they hold; they simply cannot grow.
+    pub fn set_pool_cap(&mut self, bytes: u64) {
+        self.pool_cap_bytes = bytes;
+    }
+
+    /// The per-pool cap, bytes (`u64::MAX` when none was set).
+    pub fn pool_cap_bytes(&self) -> u64 {
+        self.pool_cap_bytes
+    }
+
+    /// What `kind` may still grow by: the shared budget's headroom, and its own
+    /// binding cap's -- whichever is tighter.
+    fn headroom(&mut self, kind: PoolKind) -> u64 {
+        let shared = self.budget_bytes.saturating_sub(self.capacity_bytes());
+        let own = self
+            .pool_cap_bytes
+            .saturating_sub(self.pool_mut(kind).capacity_bytes());
+        shared.min(own)
     }
 
     /// Return a block to one pool.
@@ -435,7 +472,7 @@ impl VgeomPools {
     fn try_page(&mut self, needs: [u64; 4], speculate: bool) -> Option<[PoolBlock; 4]> {
         let mut out = [PoolBlock::default(); 4];
         for (i, kind) in Self::ORDER.into_iter().enumerate() {
-            let headroom = self.budget_bytes.saturating_sub(self.capacity_bytes());
+            let headroom = self.headroom(kind);
             match self.pool_mut(kind).alloc(needs[i], headroom, speculate) {
                 Some(b) => out[i] = b,
                 None => {
@@ -1003,12 +1040,27 @@ impl VgeomStreamer {
     /// other knobs take effect on the next plan.
     pub fn set_budget(&mut self, budget: VgeomStreamBudget) {
         if budget.budget_bytes != self.budget.budget_bytes {
+            let cap = self.pools.pool_cap_bytes();
             self.pools = VgeomPools::new(budget.budget_bytes);
+            self.pools.set_pool_cap(cap);
             self.assets.clear();
             self.stats.resident_pages = 0;
             self.stats.resident_bytes = 0;
         }
         self.budget = budget;
+    }
+
+    /// **Cap every pool at one GPU binding** (the VEH3f.2a audit) -- see
+    /// [`VgeomPools`]. A new cap re-pages from nothing, like a new budget: a pool
+    /// already past it could not be bound.
+    pub fn set_pool_cap(&mut self, bytes: u64) {
+        if bytes != self.pools.pool_cap_bytes() {
+            self.pools = VgeomPools::new(self.budget.budget_bytes);
+            self.pools.set_pool_cap(bytes);
+            self.assets.clear();
+            self.stats.resident_pages = 0;
+            self.stats.resident_bytes = 0;
+        }
     }
 
     #[inline]
@@ -2547,5 +2599,46 @@ mod tests {
         let b = s.residency(2).unwrap().resident_pages();
         assert!(a >= 1 && b >= 1, "both keep their floor");
         assert!(a > b, "the closer asset refines further ({a} vs {b})");
+    }
+
+    /// **No pool outgrows one GPU binding** (the VEH3f.2a audit): with a 256 MiB
+    /// shared budget and a 1 MiB per-pool cap, pages that need mostly VERTICES
+    /// fill the vertex pool to the cap and then fail -- they do not borrow the
+    /// shared headroom past it. The island with the imported traffic put
+    /// 137 362 176 bytes in the vertex pool against the device's 134 217 728-byte
+    /// binding and the renderer panicked in `create_bind_group`.
+    ///
+    /// **Mutation**: `headroom` answering the shared budget alone -> red.
+    #[test]
+    fn no_pool_outgrows_its_binding_cap() {
+        const CAP: u64 = 1 << 20;
+        let mut pools = VgeomPools::new(DEFAULT_VGEOM_BUDGET_BYTES);
+        pools.set_pool_cap(CAP);
+        let (mut ok, mut refused) = (0usize, 0usize);
+        for _ in 0..2_000 {
+            // A vertex-heavy page: 256 vertices, a meshlet, its lists.
+            match pools.alloc_page([256, 4, 256, 96]) {
+                Some(_) => ok += 1,
+                None => refused += 1,
+            }
+        }
+        let caps = [
+            pools.vertices.capacity_bytes(),
+            pools.meshlets.capacity_bytes(),
+            pools.mlverts.capacity_bytes(),
+            pools.mltris.capacity_bytes(),
+        ];
+        assert!(ok > 0, "nothing fit under the cap at all");
+        assert!(refused > 0, "the fixture never reached the cap: {caps:?}");
+        for c in caps {
+            assert!(
+                c <= CAP,
+                "a pool holds {c} bytes against a {CAP}-byte binding cap"
+            );
+        }
+        assert!(
+            pools.capacity_bytes() < DEFAULT_VGEOM_BUDGET_BYTES,
+            "the cap, not the budget, bound this fixture"
+        );
     }
 }

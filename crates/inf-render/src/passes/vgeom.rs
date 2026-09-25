@@ -1672,7 +1672,15 @@ impl VgeomNode {
             env,
             dummy_hzb: dummy_hzb(gpu),
             pools: VgeomPoolBuffers::new(gpu),
-            streamer: inf_vgeom::VgeomStreamer::new(inf_vgeom::VgeomStreamBudget::default()),
+            streamer: {
+                // No pool may outgrow the storage binding this device grants (the
+                // VEH3f.2a audit): see `inf_vgeom::VgeomPools`.
+                let mut s = inf_vgeom::VgeomStreamer::new(inf_vgeom::VgeomStreamBudget::default());
+                s.set_pool_cap(u64::from(
+                    gpu.device.limits().max_storage_buffer_binding_size,
+                ));
+                s
+            },
             draws: BTreeMap::new(),
             hzb: HzbChain::new(gpu),
             prev_view: None,
@@ -2274,13 +2282,21 @@ impl RenderNode for VgeomNode {
 
         // A vertex-pulled indirect draw of `visible`/`args` into the MSAA targets.
         // Both passes are identical apart from which pair of buffers they read.
-        let raster_draw = |encoder: &mut wgpu::CommandEncoder,
-                           label: &str,
-                           pools: &VgeomPoolBuffers,
-                           draw: &AssetDraw,
-                           visible: &wgpu::Buffer,
-                           args: &wgpu::Buffer| {
-            let raster_bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        //
+        // **ONE render pass for every asset's draw, and ONE compute pass for
+        // every asset's cull** (the VEH3f.2a audit). This used to begin a compute
+        // pass AND a render pass PER ASSET, twice a frame (early and late): the
+        // island with the imported traffic has 336 meshlet assets (a sectioned
+        // art body is one asset per material slot), so a frame recorded 1 344
+        // passes here, 672 of them loading and storing the 1080p MSAA targets,
+        // and measured +16.7 ms of record (`submit` 11.8 -> 22.4 ms) and +7.0 ms
+        // of `vgeom` GPU against the same island with the fallback bodies. The
+        // draws are recorded in the same asset order into the same targets
+        // through the same pipeline, so the image is the same; what goes is the
+        // pass boundaries between them (a dispatch in one compute pass still sees
+        // the previous dispatch's writes -- each dispatch is its own usage scope).
+        let raster_bg_of = |pools: &VgeomPoolBuffers, draw: &AssetDraw, visible: &wgpu::Buffer| {
+            gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("vgeom-raster"),
                 layout: raster_bgl,
                 entries: &[
@@ -2317,37 +2333,67 @@ impl RenderNode for VgeomNode {
                         resource: draw.remap.as_entire_binding(),
                     },
                 ],
-            });
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some(label),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &frame.targets.color_msaa,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &frame.targets.depth,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(raster);
-            pass.set_bind_group(0, frame.view_bg, &[]);
-            pass.set_bind_group(1, &*lights_bg, &[]);
-            pass.set_bind_group(2, &env_bg, &[]);
-            pass.set_bind_group(3, &raster_bg, &[]);
-            pass.draw_indirect(args, 0);
+            })
         };
+        let raster_batch =
+            |encoder: &mut wgpu::CommandEncoder,
+             label: &str,
+             items: &[(&wgpu::BindGroup, &wgpu::Buffer)]| {
+                if items.is_empty() {
+                    return;
+                }
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some(label),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &frame.targets.color_msaa,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &frame.targets.depth,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(raster);
+                pass.set_bind_group(0, frame.view_bg, &[]);
+                pass.set_bind_group(1, &*lights_bg, &[]);
+                pass.set_bind_group(2, &env_bg, &[]);
+                for (raster_bg, args) in items {
+                    pass.set_bind_group(3, *raster_bg, &[]);
+                    pass.draw_indirect(args, 0);
+                }
+            };
+        // Every asset's cull, in one compute pass: `(bind group, workgroups)`.
+        let cull_batch =
+            |encoder: &mut wgpu::CommandEncoder, label: &str, items: &[(&wgpu::BindGroup, u32)]| {
+                if items.is_empty() {
+                    return;
+                }
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some(label),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&cull.pipeline);
+                for (bg, groups) in items {
+                    pass.set_bind_group(0, *bg, &[]);
+                    pass.dispatch_workgroups(*groups, 1, 1);
+                }
+            };
+        // The forward path's early and late work, gathered per asset and recorded
+        // in one pass each: `(asset, cull bind group, workgroups, raster bind group)`.
+        let mut early: Vec<(u128, wgpu::BindGroup, u32, wgpu::BindGroup)> = Vec::new();
+        let mut late: Vec<(u128, wgpu::BindGroup, u32, wgpu::BindGroup)> = Vec::new();
 
         // ── Pass 1: (early | single) cull + draw ─────────────────────────────
         //
@@ -2504,17 +2550,17 @@ impl RenderNode for VgeomNode {
                 &frame.vgeom_audit.stats,
             );
             let total = visible_slots(instance_count, meshlet_count);
-            {
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("vgeom-cull-early"),
-                    timestamp_writes: None,
-                });
-                pass.set_pipeline(&cull.pipeline);
-                pass.set_bind_group(0, &cull_bg, &[]);
-                pass.dispatch_workgroups(total.div_ceil(64).max(1), 1, 1);
-            }
             match (vis_slot, vis.as_ref()) {
                 (Some(slot), Some(v)) => {
+                    {
+                        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                            label: Some("vgeom-cull-early"),
+                            timestamp_writes: None,
+                        });
+                        pass.set_pipeline(&cull.pipeline);
+                        pass.set_bind_group(0, &cull_bg, &[]);
+                        pass.dispatch_workgroups(total.div_ceil(64).max(1), 1, 1);
+                    }
                     vis_raster_draw(
                         gpu,
                         encoder,
@@ -2530,16 +2576,26 @@ impl RenderNode for VgeomNode {
                     );
                     vis_cleared = true;
                 }
-                _ => raster_draw(
-                    encoder,
-                    "vgeom-raster-early",
-                    pools,
-                    draw,
-                    &draw.visible,
-                    &draw.draw_args,
-                ),
+                _ => {
+                    let raster_bg = raster_bg_of(pools, draw, &draw.visible);
+                    early.push((*asset_id, cull_bg, total.div_ceil(64).max(1), raster_bg));
+                }
             }
         }
+        // The forward path's early culls, then its early draws, one pass each.
+        cull_batch(
+            encoder,
+            "vgeom-cull-early",
+            &early.iter().map(|e| (&e.1, e.2)).collect::<Vec<_>>(),
+        );
+        raster_batch(
+            encoder,
+            "vgeom-raster-early",
+            &early
+                .iter()
+                .filter_map(|e| draws.get(&e.0).map(|d| (&e.3, &d.draw_args)))
+                .collect::<Vec<_>>(),
+        );
 
         if !two_pass {
             // …and so does the resolve: this is a whole frame's visibility, not
@@ -2606,15 +2662,6 @@ impl RenderNode for VgeomNode {
                 &frame.vgeom_audit.stats,
             );
             let total = visible_slots(instance_count, meshlet_count);
-            {
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("vgeom-cull-late"),
-                    timestamp_writes: None,
-                });
-                pass.set_pipeline(&cull.pipeline);
-                pass.set_bind_group(0, &cull_bg, &[]);
-                pass.dispatch_workgroups(total.div_ceil(64).max(1), 1, 1);
-            }
             // Issued unconditionally: on a conservative frame the shader appends
             // nothing, so this is a zero-instance indirect draw. Deliberately NOT
             // skipped on the CPU — the drawn set lives entirely on the GPU, and a
@@ -2623,6 +2670,15 @@ impl RenderNode for VgeomNode {
             let vis_slot = vis_bases.iter().position(|(a, _)| *a == asset_id);
             match (vis_slot, vis.as_ref()) {
                 (Some(slot), Some(v)) if vis_on => {
+                    {
+                        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                            label: Some("vgeom-cull-late"),
+                            timestamp_writes: None,
+                        });
+                        pass.set_pipeline(&cull.pipeline);
+                        pass.set_bind_group(0, &cull_bg, &[]);
+                        pass.dispatch_workgroups(total.div_ceil(64).max(1), 1, 1);
+                    }
                     vis_raster_draw(
                         gpu,
                         encoder,
@@ -2638,14 +2694,10 @@ impl RenderNode for VgeomNode {
                     );
                     vis_cleared = true;
                 }
-                _ => raster_draw(
-                    encoder,
-                    "vgeom-raster-late",
-                    pools,
-                    draw,
-                    &draw.visible_late,
-                    &draw.draw_args_late,
-                ),
+                _ => {
+                    let raster_bg = raster_bg_of(pools, draw, &draw.visible_late);
+                    late.push((asset_id, cull_bg, total.div_ceil(64).max(1), raster_bg));
+                }
             }
 
             // Ping-pong: what the late dispatch just published becomes next
@@ -2662,6 +2714,22 @@ impl RenderNode for VgeomNode {
                 residency_generation,
             });
         }
+        // The forward path's late culls, then its late draws, one pass each. The
+        // swap above only moved handles: every bind group gathered here holds
+        // its own reference to the buffer it was built with.
+        cull_batch(
+            encoder,
+            "vgeom-cull-late",
+            &late.iter().map(|e| (&e.1, e.2)).collect::<Vec<_>>(),
+        );
+        raster_batch(
+            encoder,
+            "vgeom-raster-late",
+            &late
+                .iter()
+                .filter_map(|e| draws.get(&e.0).map(|d| (&e.3, &d.draw_args_late)))
+                .collect::<Vec<_>>(),
+        );
 
         if vis_cleared {
             if let Some(v) = vis.as_ref() {

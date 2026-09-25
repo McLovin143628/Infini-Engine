@@ -2615,3 +2615,345 @@ fn the_island_at_shipping_resolution() {
         "Reported, never asserted: the ceilings in `inf_player::budget` are set from the composed city, and asserting them over a different world would re-pin a ratchet by accident."
     );
 }
+
+// ── THE ISLAND IN IMPORTED TRAFFIC (the VEH3f.2a audit) ─────────────────────
+
+/// Frames the traffic is given to fill the streets before anything is measured,
+/// at the island's 60 Hz: twenty seconds.
+const TRAFFIC_WARMUP_STEPS: usize = 1_200;
+
+/// The street-level camera: the eye 1.8 m above the ground at the hero's own
+/// station, looking OUT along the street and turning 3 degrees a frame, so one
+/// 120-frame round looks down every street that leaves the crossroads once.
+/// Looking out rather than in is the point: the frame holds the near car and the
+/// cars 300 m down the road, which is where a level-of-detail cut earns its keep.
+fn street_orbit(step: u64, width: u32, height: u32, at: DVec3) -> RenderView {
+    let yaw = (step as f64 * 3.0).to_radians();
+    let (s, c) = (inf_math::psin64(yaw), inf_math::pcos64(yaw));
+    RenderView {
+        origin: FloatingOrigin::new(DVec3::ZERO),
+        eye_world: at + DVec3::new(0.0, 1.8, 0.0),
+        forward: Vec3::new(c as f32, -0.05, s as f32).normalize(),
+        up: Vec3::Y,
+        fov_y: 70f32.to_radians(),
+        near: 0.05,
+        width,
+        height,
+        ortho: None,
+    }
+}
+
+/// The pack's world with BOTH streamers attached, exactly as
+/// `the_island_at_shipping_resolution` assembles it.
+fn open_streamed(pack: &Path) -> Fixture {
+    let source = PackLevelSource::open(pack).expect("the island pack opens");
+    let mut built = inf_player::build_world_from_pack(&source).expect("the world builds");
+    let partition = built.take_partition();
+    let pcg = built.pcg_context();
+    let record = built.render;
+    let materials = std::sync::Arc::new(source.material_content());
+    let reader = std::sync::Arc::new(
+        PackReader::open(&pack.join(inf_player::level::PACK_FILE)).expect("the pack maps"),
+    );
+    let skinned = inf_player::skinned::SkinnedRegistry::from_pack(reader.clone());
+    let voxel_assets = inf_player::voxel::VoxelRegistry::from_pack(reader.clone());
+    let scatter_meshes = inf_player::scatter_mesh::from_pack(&reader);
+    let vmeshes = inf_player::vmesh::VmeshRegistry::from_pack(reader)
+        .expect("the island's meshlet DAGs index");
+    let mut sim = inf_player::sim_from_built(built);
+    inf_player::attach_cell_streaming(&mut sim, &partition, pcg);
+    inf_player::attach_terrain_streaming(
+        &mut sim,
+        &inf_player::TerrainContent::Pack(PackLevelSource::open(pack).expect("re-open")),
+    );
+    Fixture {
+        sim,
+        vmeshes,
+        skinned,
+        voxel_assets,
+        scatter_meshes,
+        record,
+        materials,
+    }
+}
+
+/// What the meshlet path DREW on one frame of the street camera at 1080p -- the
+/// vgeom audit's pairs -- after `settle` frames, on a renderer of its own (the
+/// audit is off in `measure`, whose frames must be the shipped command stream).
+fn meshlet_census(
+    gpu: &GpuContext,
+    fx: &mut Fixture,
+    settings: inf_render::RenderSettings,
+    view: &RenderView,
+    settle: usize,
+) -> (inf_render::VgeomAudit, usize) {
+    let (w, h) = (view.width, view.height);
+    let target = HeadlessTarget::new(gpu, w, h);
+    let mut renderer = EngineRenderer::new(gpu, HEADLESS_FORMAT);
+    renderer.set_settings(settings);
+    bind_virtual_textures(gpu, &mut renderer, fx);
+    renderer.set_vgeom_audit(true);
+    let mut scene = RenderScene {
+        grid_enabled: false,
+        ..Default::default()
+    };
+    let mut voxels = inf_voxel::VoxelVolumes::new();
+    let mut debris = inf_render::DebrisCache::default();
+    // The census's second half: the ORBIT, so what the streamer loads and
+    // evicts while the camera turns (the churn a moving frame pays in `submit`)
+    // is counted -- `view` is frame 0 of it.
+    let turning = |s: usize| {
+        street_orbit(
+            s as u64,
+            view.width,
+            view.height,
+            view.eye_world - DVec3::new(0.0, 1.8, 0.0),
+        )
+    };
+    let mut half = inf_vgeom::VgeomStreamStats::default();
+    for s in 0..(2 * settle.max(1)) {
+        let v = if s < settle {
+            *view
+        } else {
+            turning(s - settle)
+        };
+        if s == settle {
+            half = renderer.vgeom_stream_report().stats;
+        }
+        let view = &v;
+        sync_voxel_store(&mut voxels, &fx.voxel_assets, &fx.sim, view.eye_world);
+        project_scene_full(
+            &mut scene,
+            &fx.sim,
+            1.0,
+            &fx.vmeshes,
+            &fx.skinned,
+            &voxels,
+            &mut debris,
+            renderer.vt_textures(),
+            &fx.scatter_meshes,
+            &std::collections::HashMap::new(),
+        );
+        renderer.render(gpu, &scene, view, &target.view, (w, h));
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+    let report = renderer.vgeom_stream_report();
+    println!(
+        "  streamer over {settle} turning frames: {} loads, {} evictions; now {}",
+        report.stats.loads - half.loads,
+        report.stats.evictions - half.evictions,
+        report.stats.summary()
+    );
+    println!(
+        "  meshlet assets on frame 0: {} in the scene, {} with residency; {} resident pages of {} ({:.1} MB resident)",
+        scene.vgeom_assets.len(),
+        report.pages.len(),
+        report.pages.values().map(|p| p.0).sum::<usize>(),
+        report.pages.values().map(|p| p.1).sum::<usize>(),
+        report.stats.resident_bytes as f64 / 1e6
+    );
+    (renderer.vgeom_audit(gpu), scene.vgeom_instances.len())
+}
+
+/// How much dearer the island's SHIPPED frame may be with the imported art than
+/// with the committed fallback bodies at the same station, as a ratio of p50s.
+///
+/// Measured by the VEH3f.2a audit on an RTX 4070 Ti at the Harbour City
+/// crossroads, 400 traffic records, 52 resident within 150 m (47 art rows):
+/// **1.374** (100.6 against 73.2 ms) with a compute and a render pass PER
+/// meshlet asset, **1.153** (66.2 against 57.4 ms) with one of each per phase.
+/// 1.25 sits between them, so the per-asset passes coming back is red here.
+pub const ART_TRAFFIC_FRAME_RATIO: f64 = 1.25;
+
+/// One pack's two traffic rows at 1080p, `(SHIPPED p50, SHIPPED p95)`.
+fn island_traffic_rows(gpu: &GpuContext, pack: &Path) -> (f64, f64) {
+    let info = gpu.adapter.get_info();
+    let mut fx = open_streamed(pack);
+    let at = hero_at(&fx.sim).expect("the island has a player-controlled hero");
+    let ground = fx.sim.terrain_height_at(at.x, at.z);
+    let at = DVec3::new(at.x, ground, at.z);
+    for _ in 0..TRAFFIC_WARMUP_STEPS {
+        fx.sim
+            .step_once(inf_player::runtime_sim::RuntimeInput::default());
+    }
+    let t = fx.sim.traffic_stats();
+    // The traffic within sight: resident chassis of traffic records, by distance.
+    let (mut near, mut art_near, mut far) = (0usize, 0usize, 0usize);
+    {
+        let w = fx.sim.world();
+        if let Some(tr) = inf_ecs::traffic::traffic_of(w) {
+            for (g, r) in &tr.records {
+                let Some(e) = w.entity_of(*g) else { continue };
+                let Some(p) = w
+                    .world()
+                    .get::<inf_ecs::components::Transform>(e)
+                    .map(|t| t.translation.to_dvec3())
+                else {
+                    continue;
+                };
+                if (p - at).length() <= 150.0 {
+                    near += 1;
+                    art_near += usize::from(r.def.art.is_some());
+                } else {
+                    far += 1;
+                }
+            }
+        }
+    }
+    println!(
+        "=== THE ISLAND IN TRAFFIC on {} ({:?}) -- pack {} ===",
+        info.name,
+        info.device_type,
+        pack.display()
+    );
+    println!(
+        "  traffic: {} records ({} driving; tiers full/near/far/dormant {:?}); resident within 150 m of the crossroads: {near} ({art_near} art rows), beyond: {far}",
+        t.cars, t.driving, t.per_tier
+    );
+    assert!(
+        t.cars > 0 && near > 0,
+        "no traffic at the crossroads: {t:?}"
+    );
+    let (shipped, tier) = shipped_settings(gpu, fx.record);
+    let lit_record = inf_scene::RenderSettingsRecord {
+        bloom_enabled: true,
+        ssao_enabled: true,
+        taa: true,
+        shadows_enabled: true,
+        gi_enabled: true,
+        ..fx.record
+    };
+    let (mut lit, _) = shipped_settings(gpu, lit_record);
+    lit.vsm.enabled = true;
+    println!(
+        "  tier {tier:?}; camera at ({:.0}, {:.1}, {:.0}), 1.8 m eye, turning 3 deg a frame",
+        at.x, at.y, at.z
+    );
+    let path = move |step: u64, w: u32, h: u32| street_orbit(step, w, h, at);
+    let mut shipped_row = (f64::NAN, f64::NAN);
+    for (label, settings) in [("SHIPPED", shipped), ("LIT", lit)] {
+        let m = measure(gpu, &mut fx, 1920, 1080, settings, &path);
+        let r = m.round();
+        println!(
+            "TRAFFIC 1080p {label}: p50 {:.3} p95 {:.3} p99 {:.3} worst {:.3} ms ({:.1} fps at p50); every round's p50 {:?}",
+            r.p50,
+            r.p95,
+            r.p99,
+            r.worst,
+            1000.0 / r.p50.max(1.0e-9),
+            m.rounds
+                .iter()
+                .map(|x| (x.p50 * 1000.0).round() / 1000.0)
+                .collect::<Vec<_>>()
+        );
+        println!(
+            "  content    {} instances, {} scatter instances, {} vgeom instances, {} skinned, {} terrain tiles, {} virtual textures",
+            m.instances,
+            m.scatter_instances,
+            m.vgeom_instances,
+            m.skinned,
+            m.terrain_tiles,
+            m.vt_textures
+        );
+        let cpu_sum: f64 = m.cpu_ms.iter().sum();
+        for (i, name) in CPU_STAGE_NAMES.iter().enumerate() {
+            println!("  cpu {name:>16}: {:.3} ms", m.cpu_ms[i]);
+        }
+        println!("  cpu {:>16}: {cpu_sum:.3} ms", "TOTAL");
+        print_step_clocks(label, &m);
+        print_record_profile(label, &m);
+        println!("  gpu {:>16}: {:.3} ms", "frame", m.gpu_frame_ms);
+        let mut passes = m.passes.clone();
+        passes.sort_by(|a, b| b.1.total_cmp(&a.1));
+        for (name, ms, rec) in passes
+            .iter()
+            .filter(|(_, ms, rec)| *ms >= 0.01 || *rec >= 0.01)
+        {
+            println!("  gpu {name:>16}: {ms:.3} ms   (record {rec:.3} ms)");
+        }
+        let (audit, instances) = meshlet_census(gpu, &mut fx, settings, &path(0, 1920, 1080), 30);
+        println!(
+            "  meshlets on frame 0: {instances} vgeom instances; (instance, meshlet) pairs: base cut {}, occluded {}, drawn early {} + late {}, clamped {}",
+            audit.base_cut, audit.occluded, audit.early_drawn, audit.late_drawn, audit.clamped
+        );
+        println!(
+            "  DISTANCE FROM THE CEILING: p95 {:+.3} ms against SHIPPING_FRAME_CEILING_MS {SHIPPING_FRAME_CEILING_MS} (the composed city's ratchet, not asserted over this world -- the island's own frame is PERF1's)",
+            r.p95 - SHIPPING_FRAME_CEILING_MS
+        );
+        assert!(m.terrain_tiles > 0, "{label}: the frame drew no terrain");
+        assert!(
+            m.vgeom_instances > 0,
+            "{label}: the frame drew no meshlet instance"
+        );
+        if label == "SHIPPED" {
+            shipped_row = (r.p50, r.p95);
+        }
+    }
+    shipped_row
+}
+
+/// **THE ISLAND IN IMPORTED TRAFFIC** (the VEH3f.2a audit's (a')): the frame the
+/// wave's own art costs, at 1080p, in the shipped settings and lit, on packs the
+/// caller cooked -- `INF_ISLAND_PACK` the local project (the imported art
+/// present) and `INF_ISLAND_PACK_FALLBACK` the same project with the vehicle art
+/// swapped for the committed fallback (what CI draws). Same process, same
+/// adapter, same station, back to back.
+///
+/// ```text
+/// INF_ISLAND_PACK=<art cook> INF_ISLAND_PACK_FALLBACK=<fallback cook>
+///     cargo test --release -p inf-player --test fps_instrument
+///     -- --ignored the_island_in_imported_traffic --nocapture
+/// ```
+///
+/// The hero stands at its authored start -- Harbour City's crossroads, where the
+/// kerb spawns the traffic -- the traffic gets twenty seconds to fill the
+/// streets, and the camera stands in the road looking out along it.
+///
+/// **What it asserts, and what it only prints.** The ratio: the art's SHIPPED
+/// p50 over the fallback's is at most [`ART_TRAFFIC_FRAME_RATIO`], release on a
+/// representative adapter off CI (the house conditioning) -- the art must not
+/// make the island's frame much dearer than the boxes it replaces. The absolute
+/// [`SHIPPING_FRAME_CEILING_MS`] is PRINTED as a distance: it is the composed
+/// city's ratchet, and over this world (1 024 skinned townsfolk, an 11 ms fixed
+/// step) the FALLBACK island measures 57.4 ms p50 -- a PERF1 matter, which the
+/// report routes by name. With no pack named it is a SKIP, never a pass.
+#[test]
+#[ignore = "needs cooked island packs (INF_ISLAND_PACK, INF_ISLAND_PACK_FALLBACK) and a real GPU"]
+fn the_island_in_imported_traffic() {
+    let Some(pack) = std::env::var_os("INF_ISLAND_PACK").map(PathBuf::from) else {
+        println!("SKIP the_island_in_imported_traffic: INF_ISLAND_PACK names no pack");
+        return;
+    };
+    let Ok(gpu) = GpuContext::headless() else {
+        println!("SKIP the_island_in_imported_traffic: no GPU adapter");
+        return;
+    };
+    let info = gpu.adapter.get_info();
+    let art = island_traffic_rows(&gpu, &pack);
+    let Some(fallback) = std::env::var_os("INF_ISLAND_PACK_FALLBACK").map(PathBuf::from) else {
+        println!(
+            "(INF_ISLAND_PACK_FALLBACK unset: the art's ratio against the fallback is not taken)"
+        );
+        return;
+    };
+    let boxes = island_traffic_rows(&gpu, &fallback);
+    let ratio = art.0 / boxes.0.max(1.0e-9);
+    println!(
+        "=== THE ART'S PRICE === SHIPPED p50 {:.3} ms with the art, {:.3} with the fallback: x{ratio:.3} (+{:.3} ms); p95 {:.3} / {:.3}; ceiling x{ART_TRAFFIC_FRAME_RATIO}",
+        art.0,
+        boxes.0,
+        art.0 - boxes.0,
+        art.1,
+        boxes.1
+    );
+    if cfg!(debug_assertions) || std::env::var_os("CI").is_some() || !representative(&info) {
+        println!("reported, not asserted: dev profile, CI or a non-representative adapter");
+        return;
+    }
+    assert!(
+        ratio <= ART_TRAFFIC_FRAME_RATIO,
+        "the imported art makes the island's SHIPPED frame x{ratio:.3} the fallback's ({:.3} against {:.3} ms), over x{ART_TRAFFIC_FRAME_RATIO}",
+        art.0,
+        boxes.0
+    );
+}
