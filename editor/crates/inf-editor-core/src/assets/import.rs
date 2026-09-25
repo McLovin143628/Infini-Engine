@@ -166,7 +166,7 @@ fn import_audio(
         .map_err(|e| AssetError::Import(e.to_string()))?;
     let name = file_stem(source);
     let import_tbl = audio_settings_table(&settings);
-    let id = project.write_asset(
+    let id = project.write_asset_path_keyed(
         dest_dir,
         &name,
         &audio,
@@ -287,7 +287,7 @@ fn import_image(
     advisories.extend(outside_root_advisories(project, source));
     let name = file_stem(source);
     let import_tbl = settings_table(&settings);
-    let id = project.write_tiled_texture(
+    let id = project.write_tiled_texture_path_keyed(
         dest_dir,
         &name,
         &image,
@@ -398,7 +398,7 @@ fn import_mesh_container(
             inf_material::texture_import_advisories(g.images[i].width, g.images[i].height),
         ));
         let name = format!("{}_{}", file_stem(source), g.images[i].name);
-        let id = project.write_tiled_texture(
+        let id = project.write_tiled_texture_path_keyed(
             dest_dir,
             &name,
             &tex,
@@ -427,7 +427,14 @@ fn import_mesh_container(
         };
         let deps = mat.texture_dependencies();
         let name = format!("{}_{}", file_stem(source), m.name);
-        let id = project.write_asset(dest_dir, &name, &mat, source_rel.clone(), deps, None)?;
+        let id = project.write_asset_path_keyed(
+            dest_dir,
+            &name,
+            &mat,
+            source_rel.clone(),
+            deps,
+            None,
+        )?;
         material_ids.push(id);
         produced.push(id);
     }
@@ -442,7 +449,14 @@ fn import_mesh_container(
         // pass. See `SkeletonAsset::imported` for the number that found it.
         let asset = inf_anim::SkeletonAsset::imported(sk.skeleton.clone());
         let name = format!("{}_{}", file_stem(source), sk.name);
-        let id = project.write_asset(dest_dir, &name, &asset, source_rel.clone(), vec![], None)?;
+        let id = project.write_asset_path_keyed(
+            dest_dir,
+            &name,
+            &asset,
+            source_rel.clone(),
+            vec![],
+            None,
+        )?;
         skeleton_ids.push(id);
         produced.push(id);
     }
@@ -491,7 +505,14 @@ fn import_mesh_container(
         // sidecar so a re-imported rig can be NOTICED. Sidecar-only, so neither
         // bincode payload moves.
         let import = super::skeleton_binding::import_table(project, skel_id);
-        let id = project.write_asset(dest_dir, &name, &asset, source_rel.clone(), deps, import)?;
+        let id = project.write_asset_path_keyed(
+            dest_dir,
+            &name,
+            &asset,
+            source_rel.clone(),
+            deps,
+            import,
+        )?;
         produced.push(id);
     }
 
@@ -512,8 +533,14 @@ fn import_mesh_container(
         if let Some(sid) = im.skin.and_then(|i| skeleton_ids.get(i).copied()) {
             deps.push(sid);
         }
-        let id =
-            project.write_asset(dest_dir, &im.name, &im.mesh, source_rel.clone(), deps, None)?;
+        let id = project.write_asset_path_keyed(
+            dest_dir,
+            &im.name,
+            &im.mesh,
+            source_rel.clone(),
+            deps,
+            None,
+        )?;
         produced.push(id);
         primary.get_or_insert(id);
     }
@@ -946,6 +973,71 @@ mod tests {
             bytes.push(std::fs::read(&entry.path).unwrap());
         }
         assert_eq!(bytes[0], bytes[1], "two imports of one source differ");
+    }
+
+    /// **Two imports write the same FILES, sidecars and cache index included**
+    /// (the VEH3f.2a audit). The test above compares one payload; a sidecar
+    /// carries the asset's GUID, its dependencies' GUIDs and (for a derived
+    /// `.inf_vmesh`) its source mesh's GUID, and the import cache's manifest
+    /// maps keys to GUIDs -- so a door that mints ids writes different bytes on
+    /// every run while every payload agrees. The calibration car's import
+    /// differed in 26 sidecars that way. A static glTF, a skinned glTF with a
+    /// clip, and an image, into two fresh projects: every file under each root
+    /// is compared byte for byte.
+    ///
+    /// **Mutation**: `write_asset_path_keyed` minting `AssetId::new()` -> red.
+    #[test]
+    fn two_imports_write_the_same_files_sidecars_included() {
+        let src = tempfile::tempdir().unwrap();
+        let tri = write_triangle_gltf(src.path());
+        let skinned = write_skinned_gltf(src.path());
+        let png = write_corner_png(src.path(), "Corners", 132, 132);
+        let mut trees: Vec<std::collections::BTreeMap<String, Vec<u8>>> = Vec::new();
+        for _ in 0..2 {
+            let proj_dir = tempfile::tempdir().unwrap();
+            let mut proj = AssetProject::open(proj_dir.path()).unwrap();
+            let dest = proj.content_dir("imported").unwrap();
+            for f in [&tri, &skinned, &png] {
+                proj.import_file(f, &dest).unwrap();
+            }
+            let mut tree = std::collections::BTreeMap::new();
+            let mut stack = vec![proj_dir.path().to_path_buf()];
+            while let Some(d) = stack.pop() {
+                for e in std::fs::read_dir(&d).unwrap().flatten() {
+                    let p = e.path();
+                    if p.is_dir() {
+                        stack.push(p);
+                    } else {
+                        let rel = p
+                            .strip_prefix(proj_dir.path())
+                            .unwrap()
+                            .to_string_lossy()
+                            .replace('\\', "/");
+                        tree.insert(rel, std::fs::read(&p).unwrap());
+                    }
+                }
+            }
+            trees.push(tree);
+        }
+        let sidecars = trees[0].keys().filter(|k| k.ends_with(".toml")).count();
+        assert!(
+            sidecars >= 5,
+            "only {sidecars} sidecars written -- the fixture imported too little to prove anything"
+        );
+        assert_eq!(
+            trees[0].keys().collect::<Vec<_>>(),
+            trees[1].keys().collect::<Vec<_>>(),
+            "the two imports wrote different file sets"
+        );
+        let differ: Vec<&String> = trees[0]
+            .iter()
+            .filter(|(k, v)| trees[1].get(*k) != Some(v))
+            .map(|(k, _)| k)
+            .collect();
+        assert!(
+            differ.is_empty(),
+            "two imports of the same sources differ in {differ:?}"
+        );
     }
 
     /// Write a minimal single-triangle glTF with an external buffer.

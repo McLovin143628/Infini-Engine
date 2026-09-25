@@ -256,6 +256,51 @@ impl AssetProject {
         Ok(id)
     }
 
+    /// [`write_asset`](Self::write_asset), with the GUID a **path function**
+    /// (the VEH3f.2a audit): the file lands where `write_asset` would put it
+    /// (a free path under `dir`), and its id is [`path_guid`] of that path --
+    /// unless another asset already holds that id, in which case one is minted,
+    /// so two entries never share a GUID. This is the door every FILE IMPORT
+    /// writes through: two imports of the same source into two fresh projects
+    /// produce the same bytes, sidecars included, where `AssetId::new()` wrote
+    /// a different v4 on every run (26 sidecars of the calibration car's
+    /// import differed). A re-import of the same bytes never reaches it -- the
+    /// import cache answers with the existing id first.
+    pub fn write_asset_path_keyed<T: AssetPayload>(
+        &mut self,
+        dir: &Path,
+        name: &str,
+        payload: &T,
+        source: Option<String>,
+        dependencies: Vec<AssetId>,
+        import: Option<toml::Table>,
+    ) -> Result<AssetId> {
+        let ext = T::KIND.extension().expect("payload kinds have extensions");
+        let path = unique_path(dir, name, ext)?;
+        let keyed = path_guid(self.root(), &path);
+        let id = match self.db.get(keyed) {
+            Some(_) => AssetId::new(),
+            None => keyed,
+        };
+        self.write_asset_with_id(dir, name, payload, Some(id), source, dependencies, import)
+    }
+
+    /// [`write_tiled_texture`](Self::write_tiled_texture) with the id
+    /// [`write_asset_path_keyed`](Self::write_asset_path_keyed) would give it: a
+    /// free path under `dir`, and [`path_guid`] of it unless that id is taken.
+    pub fn write_tiled_texture_path_keyed(
+        &mut self,
+        dir: &Path,
+        name: &str,
+        image: &inf_material::TiledTextureImage,
+        source: Option<String>,
+        import: Option<toml::Table>,
+    ) -> Result<AssetId> {
+        let path = self.unique_asset_path(dir, name, "inf_tex")?;
+        let keyed = path_guid(self.root(), &path);
+        self.write_tiled_texture_keyed(&path, image, Some(keyed), source, import)
+    }
+
     /// Register an asset whose payload a **specialized writer** already put on
     /// disk, instead of the generic dual-format [`write_asset`](Self::write_asset).
     ///
@@ -990,6 +1035,34 @@ pub(crate) fn outside_root_advisory(source: &Path) -> String {
 }
 
 /// A collision-free payload path: `<dir>/<name>.<ext>`, `_1`, `_2`, …
+/// **The GUID an imported file NEW to a project takes** (wave VEH3f.2a, moved
+/// here from the UE bridge by its audit): a pure function of its path under
+/// the content root, salted, so two fresh imports of one source agree byte for
+/// byte where `AssetId::new()` minted a different v4 on every run. The salt is
+/// the bridge's own (`inf:ue-import-path:`), so every texture and material the
+/// bridge has already written keeps its id. Callers ask the database first: a
+/// path already registered keeps the id it has, and an id already taken is
+/// minted instead.
+pub(crate) fn path_guid(root: &Path, path: &Path) -> AssetId {
+    let rel = path
+        .strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/");
+    let mut bytes = [0u8; 16];
+    for (i, chunk) in bytes.chunks_mut(8).enumerate() {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        for b in b"inf:ue-import-path:".iter().chain(rel.as_bytes()) {
+            h ^= u64::from(*b);
+            h = h.wrapping_mul(0x0000_0100_0000_01B3);
+        }
+        chunk.copy_from_slice(&h.to_le_bytes());
+    }
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    AssetId(uuid::Uuid::from_bytes(bytes))
+}
+
 fn unique_path(dir: &Path, name: &str, ext: &str) -> Result<PathBuf> {
     let safe = sanitize(name);
     let mut candidate = dir.join(format!("{safe}.{ext}"));

@@ -19,7 +19,7 @@
 //! | `the_island_body_kind_census` | the CI island's traffic records by class and kind, and every resident art chassis' drawn body, over 1 island minute (10 in release off CI: 660 samples, 0 primitive, 600/600 resident chassis on the art body) | fallback counts as imported (it IS the art's GUID) | art filter removed -> red (6 primitive sedans); body GUID dropped -> red |
 //! | `the_weapon_muzzle_is_the_packs_socket` | a rigged hero's round origin and casing spawn vs weapon transform x pack socket (0.000 mm); the magazine at its seat and out on the reload | no | muzzle back on `muzzle_forward_m` -> red (264.5 mm) |
 //! | `no_weapon_class_draws_a_primitive` | every registry row's mesh identity and its committed fallback | no | `Launcher` arm `None` -> red (`fim_92_stinger`); `Shotgun` arm VACUOUS (every shotgun row named first) |
-//! | `the_import_is_deterministic` (local) | two imports of the calibration pack, 920 files; 0 of this wave's differ, 26 residue of the generic glTF door | n/a | `import_path_guid` -> `AssetId::new()` -> red |
+//! | `the_import_is_deterministic` (local) | two imports of the calibration pack, 920 files; 0 differ (the audit keyed the generic glTF door and the cache index; the wave left 26) | n/a | `import_path_guid` -> `AssetId::new()` -> red; `write_asset_path_keyed` minting -> red |
 //! | `sixty_four_imported_cars_cost_what_they_cost` (release) | the player projector over 64 art cars vs 64 box cars (CI: the fallback DAGs) | n/a (COST) | print-only in dev/CI (the house conditioning) |
 //! | `this_wave_moved_no_schema` | the three constants | n/a | n/a |
 //! | `the_islands_play_payload_fits_its_frame` (local) | the island project's level through `build_scene_payload` with the project's resolvers: 60 textures, 164.1 MB, a 171.3 MB payload under `MAX_FRAME_LEN` (921.2 MB of textures before the budget) | n/a | the budget's guard removed -> red |
@@ -1879,17 +1879,19 @@ fn no_weapon_class_draws_a_primitive() {
 /// calibration manifest imported into two fresh projects and every written
 /// file compared byte for byte.
 ///
-/// What this wave's doors write -- every file under `UE/Vehicles/`, every
-/// pack material and texture `import_material` writes (their GUIDs are now a
-/// pure function of the path, `import_path_guid`), every payload -- is
-/// identical. The residue is the ASSET0 generic glTF door's: the SIDECARS of
-/// the pack's loose static meshes (`UE/SM_*`) and of the placeholder
-/// materials their glTFs embed, whose GUIDs that door still mints fresh, and
-/// the import cache's own index. Counted and bounded here (their payloads are
-/// identical), carried with a price in the report.
+/// EVERY file is identical, sidecars and the import cache's index included
+/// (the VEH3f.2a audit). The wave left a residue of 26 differing sidecars --
+/// the generic glTF door (`import_file`, which the bridge calls for the pack's
+/// loose static meshes) minted a fresh v4 for every mesh, material, texture,
+/// skeleton and clip it wrote, and the derived `.inf_vmesh` sidecars carried
+/// those ids on -- plus an import-cache manifest written from a hash map. Both
+/// doors now key on the path (`AssetProject::write_asset_path_keyed`,
+/// `write_tiled_texture_path_keyed`, one `path_guid` with the bridge's salt)
+/// and the manifest is a `BTreeMap`, so the arm asserts NOTHING differs.
 ///
 /// **Mutation**: `import_path_guid` back to `AssetId::new()` -> red (every
-/// pack material and every texture sidecar differs).
+/// pack material and every texture sidecar differs); `write_asset_path_keyed`
+/// minting (`AssetId::new()`) -> red (the loose meshes' sidecars differ).
 #[test]
 fn the_import_is_deterministic() {
     let Some(manifest) = local_manifests()
@@ -1935,22 +1937,12 @@ fn the_import_is_deterministic() {
         .filter(|(k, v)| y.get(*k) != Some(v))
         .map(|(k, _)| k)
         .collect();
-    // The ASSET0 generic glTF door's residue: a sidecar of a loose static
-    // mesh or of a material its glTF embeds, or the cache index.
-    let residue = |f: &str| {
-        f.starts_with(".inf/")
-            || (f.ends_with(".toml")
-                && !f.starts_with("UE/Vehicles/")
-                && (f.starts_with("UE/SM_") || f.contains("_LOD0_Material")))
-    };
-    let ours: Vec<&&String> = differ.iter().filter(|f| !residue(f)).collect();
     let vehicles = x.keys().filter(|k| k.starts_with("UE/Vehicles/")).count();
     println!(
-        "two imports: {} and {} files ({vehicles} under UE/Vehicles/); {} differ, all of them the generic glTF door's sidecars or its cache index; {} of this wave's",
+        "two imports: {} and {} files ({vehicles} under UE/Vehicles/); {} differ: {differ:?}",
         x.len(),
         y.len(),
         differ.len(),
-        ours.len()
     );
     assert_eq!(
         x.len(),
@@ -1959,12 +1951,8 @@ fn the_import_is_deterministic() {
     );
     assert!(vehicles > 300, "only {vehicles} files under UE/Vehicles/");
     assert!(
-        ours.is_empty(),
-        "this wave's files differ between two imports: {ours:?}"
-    );
-    assert!(
-        differ.len() <= 40,
-        "the generic door's residue grew to {}",
+        differ.is_empty(),
+        "two imports of one manifest differ in {} files: {differ:?}",
         differ.len()
     );
 }

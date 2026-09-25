@@ -11,7 +11,7 @@
 //! `import key → produced asset id`. It is pure content-addressing: a stale
 //! entry is simply never looked up again.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -33,8 +33,10 @@ impl ImportKey {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct Manifest {
-    /// import-key hex → produced asset id.
-    entries: HashMap<String, AssetId>,
+    /// import-key hex → produced asset id -- in KEY ORDER (the VEH3f.2a audit):
+    /// a hash map wrote the manifest in a different order every run, so two
+    /// imports of one source differed in this file even with every id stable.
+    entries: BTreeMap<String, AssetId>,
 }
 
 /// A content-addressed import cache rooted at a directory (usually

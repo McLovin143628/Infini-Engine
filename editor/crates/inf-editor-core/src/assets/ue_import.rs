@@ -4449,23 +4449,7 @@ fn import_material(
 /// already registered keeps the id it has -- the callers ask the database
 /// first -- so nothing an existing project references moves.
 fn import_path_guid(project: &AssetProject, path: &Path) -> AssetId {
-    let rel = path
-        .strip_prefix(project.root())
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/");
-    let mut bytes = [0u8; 16];
-    for (i, chunk) in bytes.chunks_mut(8).enumerate() {
-        let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-        for b in b"inf:ue-import-path:".iter().chain(rel.as_bytes()) {
-            h ^= u64::from(*b);
-            h = h.wrapping_mul(0x0000_0100_0000_01B3);
-        }
-        chunk.copy_from_slice(&h.to_le_bytes());
-    }
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    AssetId(uuid::Uuid::from_bytes(bytes))
+    super::path_guid(project.root(), path)
 }
 
 /// The ground-library kind a rebind stem names.
