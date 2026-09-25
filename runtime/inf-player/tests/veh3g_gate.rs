@@ -37,6 +37,16 @@
 //! | `this_wave_moved_no_schema` | scene / payload versions, the tunable count | passes |
 //! | `the_shipped_host_draws_the_craft_row_and_logs_the_columns` | `window.rs` / `pie_drive.rs` source and the Ring-0 row | n/a |
 //! | `the_real_islands_runway_is_flat_and_the_dodo_leaves_it` | LOCAL: the built island's terrain under the paving and a take-off off the committed level's paving | skips on CI |
+//! | `no_two_sounds_in_the_world_share_a_source_key` (audit) | every sound-keying salt family's keys over the committed island's entities and a fixture's 4 096 minted guids; the salts' pairwise differences | fails -- 73 728 fixture clashes |
+//! | `d_turns_the_aeroplane_right_on_the_ground_and_in_the_air` (audit) | the heading change under steer +1 on the strip and at 300 m, and the +X wing's drop | fails -- no wing |
+//! | `streaming_holds_at_120_mps_over_the_real_island` (audit) | LOCAL: blocking loads, the closest arrival, the cell ahead, the step's cost along the Luxor's approach | skips on CI |
+//! | `the_islands_dodo_flies_off_the_apron_and_stays_in_the_world` (audit) | LOCAL: the Dodo entity's existence as it is moved 900 m off its birth cell with the source over it | skips on CI |
+//! | `the_islands_dodo_boards_where_the_flight_leg_puts_it` (audit) | LOCAL: the boarding phase after one `interact` at the demo's placement | skips on CI |
+//!
+//! The audit also re-aimed four arms: the sail reads the pinching heel (the
+//! no-go fill), the stall reads the deepest alpha (`STALL_PITCH_BREAK`), the
+//! take-off table asserts the 35 ft distance with a tenth in hand (the flap),
+//! and the air lane reads the orbit's swept bearing.
 
 use std::collections::BTreeMap;
 
@@ -3109,4 +3119,101 @@ fn the_islands_dodo_flies_off_the_apron_and_stays_in_the_world() {
         }
     }
     println!("THE APRON'S DODO: moved 900 m east with the source over it, still in the world");
+}
+
+/// **THE ISLAND'S DODO BOARDS WHERE THE FLIGHT LEG PUTS IT** (VEH3g audit) --
+/// LOCAL ONLY. The demo's `-AirOnly` placement, replayed on the player's own
+/// loader and input door: the hero stands at the apron, the Dodo is put on the
+/// western threshold (`place_vehicle`, `-PlaceCar`'s door), the hero beside it
+/// (`-SpawnAt`'s write), and one `interact` press. It must reach `Driving`.
+/// Three of the audit's four real-editor sessions (and one of the wave's two)
+/// logged "the boarding begins NEVER FIRED" at exactly this placement; this arm
+/// is what says the placement and the boarding are sound, so the cause is the
+/// key's delivery to the window and not the game.
+#[test]
+fn the_islands_dodo_boards_where_the_flight_leg_puts_it() {
+    use inf_ecs::movement::actions::INTERACT;
+    let content = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../island-build/project/Content");
+    if !content.join("VancouverIsland.inf_lvl").is_file() {
+        println!("SKIP: no built island project (local-only content; CI has none)");
+        return;
+    }
+    let source = inf_player::level::DevDirLevelSource::new(content.join("VancouverIsland.inf_lvl"));
+    let terrains = inf_player::level::terrain_paths_by_guid_from_dir(&content);
+    let pcg_terrains = terrains.clone();
+    let (skeletons, clips, machines) = inf_player::level::load_anim_assets_from_dir(&content);
+    let builder = inf_player::level::InfSceneWorldBuilder::with_defaults(
+        inf_player::level::load_actor_classes_from_dir(&content),
+    )
+    .with_pcgs(inf_player::level::load_pcg_payloads_by_guid_from_dir(
+        &content,
+    ))
+    .with_biome_sets(inf_player::level::load_biome_sets_by_guid_from_dir(
+        &content,
+    ))
+    .with_anim_assets(skeletons, clips, machines)
+    .with_terrain_resolver(std::sync::Arc::new(move |g| {
+        inf_player::level::terrain_source_from_file(pcg_terrains.get(&g)?).ok()
+    }));
+    let mut built = inf_player::level::load(&source, &builder).expect("the island builds");
+    let partition = built.take_partition();
+    let pcg = built.pcg_context();
+    let mut sim = inf_player::sim_from_built(built);
+    inf_player::attach_cell_streaming(&mut sim, &partition, pcg);
+    inf_player::attach_terrain_streaming(&mut sim, &inf_player::TerrainContent::Dir(terrains));
+    let hero_g = inf_ecs::movement::camera_subject(sim.world()).unwrap();
+    let hero = sim.world().entity_of(hero_g).unwrap();
+    let dodo = Uuid::parse_str("f415385d-9f79-25c3-7a45-a6d5ad6f2b34").unwrap();
+    let put = |sim: &mut RuntimeSim, p: DVec3| {
+        let e = sim.world().entity_of(hero_g).unwrap();
+        if let Some(mut t) = sim.world_mut().world_mut().get_mut::<Transform>(e) {
+            t.translation = Vec3d::new(p.x, p.y, p.z);
+            t.rotation.y = 90.0;
+        }
+        if let Some(mut cm) = sim
+            .world_mut()
+            .world_mut()
+            .get_mut::<inf_ecs::components::CharacterMovement>(e)
+        {
+            cm.runtime.velocity = Vec3d::ZERO;
+            cm.runtime.body_yaw_deg = 90.0;
+            cm.runtime.target_yaw_deg = 90.0;
+            cm.runtime.aim_yaw_deg = 90.0;
+        }
+    };
+    let _ = hero;
+    for i in 0..1800u32 {
+        if i == 180 {
+            put(&mut sim, DVec3::new(-921.0, 13.4, 2455.9));
+        }
+        if i == 360 {
+            let r = DQuat::from_rotation_y(90f64.to_radians());
+            assert!(
+                sim.place_vehicle(dodo, DVec3::new(-1060.0, 15.6, 2560.0), r),
+                "the Dodo could not be placed"
+            );
+        }
+        if i == 540 {
+            put(&mut sim, DVec3::new(-1060.8, 13.4, 2558.4));
+        }
+        let mut input = inf_player::runtime_sim::RuntimeInput::default();
+        if i == 900 {
+            input = input.press(INTERACT);
+        }
+        sim.step_once(input);
+        let phase = sim
+            .world()
+            .world()
+            .get::<inf_ecs::components::CharacterMovement>(sim.world().entity_of(hero_g).unwrap())
+            .map(|c| c.runtime.boarding.phase);
+        if phase == Some(inf_ecs::boarding::BoardPhase::Driving) {
+            println!(
+                "THE THRESHOLD DODO: boarded, driving {:.1} s after the press",
+                (i as f64 - 900.0) * DT
+            );
+            return;
+        }
+    }
+    panic!("the hero never reached the Dodo's cockpit at the threshold");
 }
