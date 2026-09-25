@@ -18,13 +18,14 @@
 //! |---|---|---|
 //! | `the_dodo_takes_off_climbs_and_lands_on_a_strip` | the chassis's altitude trace, its wheels' contacts, the vertical speed at the first contact after flight, the roll-out's end | **fails** -- a wheeled chassis never left the ground |
 //! | `a_wing_with_no_area_never_leaves_the_ground` | the same Dodo at full power with `wing_area_m2` 0: its peak altitude | passes (the control) |
-//! | `every_aeroplane_lifts_off_inside_the_islands_runway` | each of the five rows' lift-off roll against the recipe's own runway length | **fails** -- no lift-off |
-//! | `the_stall_collapses_the_lift_and_drops_the_nose` | the force log's alpha and CL, the pitch and the altitude after full back stick | **fails** -- no CL at all |
+//! | `every_aeroplane_lifts_off_inside_the_islands_runway` | each of the five rows' ground roll to the LAST wheel contact before 35 ft, against the recipe's own runway length; the distance to 35 ft printed | **fails** -- no lift-off |
+//! | `the_dodo_floats_and_flies_off_the_water` | the floatplane's hull bottom against the surface at rest (wheels touching: none), its settle, the water run, its height a minute later | **fails** -- it floats (VEH2c's buoyancy) and never leaves the water |
+//! | `the_stall_collapses_the_lift_and_drops_the_nose` | the force log's alpha and CL -- the highest CL 3..8 deg past the stall against the peak -- the pitch and the altitude after full back stick | **fails** -- no CL at all |
 //! | `five_helicopters_lift_off_hover_and_translate` | each row's climb, its vertical speed held, its ground track | passes (the rows flew on the rotorcraft family) |
 //! | `the_cargobob_winch_lifts_a_car_and_lets_it_go` | the car's altitude against the lifter's, the rope's limit impulse as tension, the fall after release | **fails** -- no winch |
 //! | `the_police_helicopter_flies_its_air_lane_and_never_the_road` | the unit's run `path` every step, its track's height and straightness, its arrival | **fails** -- no air unit |
 //! | `a_planing_hull_rises_and_a_displacement_hull_does_not` | each motor hull's draught off its world position against its forward speed | **fails** -- the draught never moves |
-//! | `the_sail_drives_across_the_wind_and_not_into_it` | the yacht's forward speed at three headings, and again with the wind VECTOR turned | **fails** -- no sail |
+//! | `the_sail_drives_across_the_wind_and_not_into_it` | the yacht's forward speed at five headings (head to wind, 20, 45, beam, run), and again with the wind VECTOR turned | **fails** -- no sail |
 //! | `the_tug_pushes_the_superyacht` | the yacht's velocity with the tug's bow on its transom | passes (a screw pushes) |
 //! | `the_big_hulls_float_where_archimedes_puts_them` | the three ships' rest draught against `rho_b / rho_f x 2h` | passes (the Box branch is exact) |
 //! | `the_titan_ramp_swings_down_on_its_hinge` | the ramp part's rear edge in the chassis frame, closed and open | **fails** -- no ramp kind |
