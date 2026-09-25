@@ -249,6 +249,10 @@ pub struct DetailPlan<'a> {
     pub channel_half_m: f64,
     /// Site pads as `(centre, radius, datum)` — the carve's own list.
     pub pads: &'a [(DVec2, f64, f64)],
+    /// **The airstrips** (wave VEH3g) -- a runway with bumps is not a runway,
+    /// so the band is faded out over each strip's own batter, exactly as a pad
+    /// fades it over its radius.
+    pub strips: &'a [crate::recipe::AirstripSpec],
 }
 
 /// What one detail pass did — every number the ledger prints.
@@ -436,6 +440,10 @@ fn outcome_at(
             let d = (p - *centre).length();
             pad = pad.min(ramp(*radius, fade_reach_m(*radius), d));
         }
+    }
+    for strip in plan.strips {
+        let e = strip.outside_m(p);
+        pad = pad.min(ramp(0.0, strip.batter_m.max(1.0), e));
     }
     if pad <= 0.0 {
         return Outcome::Pad;
@@ -765,6 +773,7 @@ mod tests {
             channels: None,
             channel_half_m: 0.0,
             pads: &[],
+            strips: &[],
         }
     }
 

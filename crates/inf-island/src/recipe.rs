@@ -246,6 +246,70 @@ pub struct Site {
     pub radius_m: f64,
 }
 
+/// **A graded, paved rectangle** -- an airstrip or its apron (wave VEH3g).
+///
+/// The island's first designed ground that is not a circle: a site pad is a
+/// radial terrace and a runway is a long flat rectangle at ONE stated height.
+/// The carve levels the rectangle to [`elevation_m`](Self::elevation_m) and
+/// eases out over [`batter_m`](Self::batter_m) (`inf_island::terrain`), the
+/// detail band leaves it alone, and the Ring-1 level generator paves it at the
+/// same number -- which is why the height is STATED here rather than sampled:
+/// the level may not read an elevation (`the_level_is_authored_from_committed_
+/// design_alone`), and a runway whose paving and whose ground disagreed would
+/// be a slab floating over, or buried in, its own terrain.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AirstripSpec {
+    /// Its display name, and the content key its entities are derived from.
+    pub name: String,
+    /// World X (east) of the rectangle's centre.
+    pub x: f64,
+    /// World Z (south) of the rectangle's centre.
+    pub z: f64,
+    /// The long axis's heading, degrees clockwise from north (world `-Z`): `90`
+    /// is an east-west strip.
+    pub heading_deg: f64,
+    /// Length along the heading, metres.
+    pub length_m: f64,
+    /// Width across it, metres.
+    pub width_m: f64,
+    /// **The graded height**, metres -- stated, never sampled.
+    pub elevation_m: f64,
+    /// How far outside the rectangle the ground eases back to its own, metres.
+    #[serde(default = "default_batter")]
+    pub batter_m: f64,
+    /// `true` for an APRON -- paved and levelled like the runway, carrying no
+    /// runway markings, and where the island parks its aeroplanes.
+    #[serde(default)]
+    pub apron: bool,
+}
+
+fn default_batter() -> f64 {
+    60.0
+}
+
+impl AirstripSpec {
+    /// The unit vector ALONG the strip, world `(x, z)`.
+    pub fn along(&self) -> glam::DVec2 {
+        let r = self.heading_deg.to_radians();
+        // Clockwise from north, north being -Z: 0 -> (0, -1), 90 -> (1, 0).
+        glam::DVec2::new(
+            inf_math::portable::psin64(r),
+            -inf_math::portable::pcos64(r),
+        )
+    }
+
+    /// **How far outside the rectangle `p` is**, metres; `0` on it.
+    pub fn outside_m(&self, p: glam::DVec2) -> f64 {
+        let a = self.along();
+        let across = glam::DVec2::new(-a.y, a.x);
+        let d = p - glam::DVec2::new(self.x, self.z);
+        let ex = (d.dot(a).abs() - self.length_m * 0.5).max(0.0);
+        let ey = (d.dot(across).abs() - self.width_m * 0.5).max(0.0);
+        (ex * ex + ey * ey).sqrt()
+    }
+}
+
 /// What a site is for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -480,6 +544,11 @@ pub struct IslandRecipe {
     /// The settlement sites.
     #[serde(default)]
     pub sites: Vec<Site>,
+    /// **The airstrips and their aprons** (wave VEH3g) -- graded, paved
+    /// rectangles at stated heights. Defaulted, so every recipe written before
+    /// this wave still loads under `deny_unknown_fields` and carves as it did.
+    #[serde(default)]
+    pub airstrips: Vec<AirstripSpec>,
     /// Committed files beside the recipe that a build copies into the project's
     /// `Content` verbatim — the level, its blueprint assets, the `.inf_pcg` the
     /// biome set binds.
@@ -640,6 +709,28 @@ impl IslandRecipe {
                 "[grid] meters_per_sample is {} — it must be positive",
                 self.grid.meters_per_sample
             )));
+        }
+        for a in &self.airstrips {
+            let nums = [
+                a.x,
+                a.z,
+                a.heading_deg,
+                a.length_m,
+                a.width_m,
+                a.elevation_m,
+                a.batter_m,
+            ];
+            if nums.iter().any(|v| !v.is_finite())
+                || a.length_m <= 0.0
+                || a.width_m <= 0.0
+                || a.batter_m < 0.0
+            {
+                return Err(IslandError::Settings(format!(
+                    "[[airstrips]] {:?} needs a finite centre, heading and \
+                     elevation and a positive length and width",
+                    a.name
+                )));
+            }
         }
         if self.roads.grade_step_m <= 0.0 {
             return Err(IslandError::Settings(

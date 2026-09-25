@@ -195,6 +195,10 @@ pub struct CarvePlan<'a> {
     /// reads the MEAN, and the switchback is a carried item rather than a
     /// number hidden behind a percentile.
     pub corridor_flat_m: f64,
+    /// **The airstrips** (wave VEH3g): rectangles levelled to their stated
+    /// height, applied LAST, so a road corridor that passes near a runway
+    /// cannot put a crown in it.
+    pub strips: &'a [crate::recipe::AirstripSpec],
 }
 
 /// What the sample walk found.
@@ -209,6 +213,8 @@ pub struct SampleStats {
     pub corridor: u64,
     /// Samples a site pad moved.
     pub pad: u64,
+    /// Samples an airstrip levelled (wave VEH3g).
+    pub strip: u64,
     /// Samples **inside** the coastline whose carved ground is still under the
     /// waterline.
     ///
@@ -267,6 +273,7 @@ pub fn sample_terrain(
         let mut tile_land = 0u64;
         let mut tile_corr = 0u64;
         let mut tile_pad = 0u64;
+        let mut tile_strip = 0u64;
         let mut tile_lo = f64::INFINITY;
         let mut tile_hi = f64::NEG_INFINITY;
         let mut tile_sea_floor = f64::INFINITY;
@@ -352,6 +359,31 @@ pub fn sample_terrain(
                 }
             }
 
+            // **The airstrips, last** (wave VEH3g). Inside the rectangle the
+            // ground IS the strip's stated height; outside it the smoothstep
+            // eases back over the batter -- the road corridor's plateau-and-
+            // batter, rectangular. On land only, for the pad's reason: a strip
+            // near a shore does not build a pier.
+            if d > 0.0 {
+                for strip in plan.strips {
+                    let e = strip.outside_m(p);
+                    let w = if e <= 0.0 {
+                        1.0
+                    } else if strip.batter_m > 0.0 && e < strip.batter_m {
+                        1.0 - smooth01(e / strip.batter_m)
+                    } else {
+                        0.0
+                    };
+                    if w > 0.0 {
+                        let before = h;
+                        h = h + (strip.elevation_m - h) * w;
+                        if (h - before).abs() > 1e-9 {
+                            tile_strip += 1;
+                        }
+                    }
+                }
+            }
+
             tile_samples += 1;
             tile_lo = tile_lo.min(h);
             tile_hi = tile_hi.max(h);
@@ -372,6 +404,7 @@ pub fn sample_terrain(
         st.land += tile_land;
         st.corridor += tile_corr;
         st.pad += tile_pad;
+        st.strip += tile_strip;
         st.lo_m = st.lo_m.min(tile_lo);
         st.hi_m = st.hi_m.max(tile_hi);
         st.sea_floor_m = st.sea_floor_m.min(tile_sea_floor);
@@ -691,6 +724,7 @@ mod tests {
             corridor: None,
             corridor_half_m: 0.0,
             corridor_flat_m: 0.0,
+            strips: &[],
         };
         let (data, st) = sample_terrain(&r, &mosaic, &lattice, &carve);
 

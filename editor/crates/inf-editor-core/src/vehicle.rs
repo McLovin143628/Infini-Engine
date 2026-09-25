@@ -956,6 +956,32 @@ const TRUCK_BAR: BodyPart = BodyPart {
     kind: inf_ecs::vehicle::BodyPartKind::Panel,
 };
 
+/// A light bar on a helicopter's cabin roof, under the disc (wave VEH3g) --
+/// the `light_bar` the dispatcher's recogniser reads, on the air family.
+const AIR_BAR: BodyPart = BodyPart {
+    name: "light_bar",
+    centre: Vec3d::new(0.0, 0.92, 0.30),
+    half: Vec3d::new(0.30, 0.06, 0.14),
+    primitive: inf_ecs::components::Primitive::Cube,
+    kind: inf_ecs::vehicle::BodyPartKind::Panel,
+};
+
+/// **Blue with a white boom** -- the police helicopter, "Air One" (wave VEH3g).
+///
+/// A POLICE unit by its bar, exactly as a cruiser is; what makes it an AIR unit
+/// is its rotor (`inf_ecs::dispatch::is_air_unit`), and the dispatcher's air lane
+/// is what keeps it off the road VEH2c refused to send it down.
+pub const AIR_POLICE_LIVERY: Livery = Livery {
+    name: "air police",
+    parts: &[
+        ("cabin", PartPaint::flat(POLICE_BLUE)),
+        ("boom", PartPaint::flat(SERVICE_WHITE)),
+        ("fin", PartPaint::flat(SERVICE_WHITE)),
+    ],
+    extra: &[(AIR_BAR, BEACON_BLUE)],
+    service: Some(inf_ecs::dispatch::UnitKind::Police),
+};
+
 /// **White over blue** — the cruiser.
 pub const CRUISER_LIVERY: Livery = Livery {
     name: "cruiser",

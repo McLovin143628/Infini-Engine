@@ -449,6 +449,169 @@ pub const ISLAND_SCATTER_DENSITY: f64 = 0.02;
 /// A stable GUID from the island's name and a salt, mirroring
 /// `inf_island`'s own derivation so the level and the build agree about which
 /// asset is which without either storing a table.
+/// **Pave the recipe's airstrips** (wave VEH3g) -- see the call site's note.
+fn airfield(doc: &mut SceneDoc, name: &str, strips: &[inf_island::AirstripSpec]) {
+    use inf_ecs::components::Transform;
+    use inf_ecs::math::{Color, Vec3d};
+    let asphalt = {
+        use inf_material::ground::GroundKind::Asphalt;
+        let c = Asphalt.base_color();
+        inf_ecs::components::Material {
+            base_color: Color::new(c[0], c[1], c[2], c[3]),
+            roughness: Asphalt.roughness(),
+            metallic: 0.0,
+            asset: Some(crate::ground::ground_material_guid(Asphalt)),
+            ..Default::default()
+        }
+    };
+    let paint = inf_ecs::components::Material {
+        base_color: Color::new(0.92, 0.92, 0.9, 1.0),
+        roughness: 0.7,
+        metallic: 0.0,
+        ..Default::default()
+    };
+    let roster = inf_ecs::roster::roster();
+    for strip in strips {
+        let along = strip.along();
+        let yaw_deg = inf_math::patan2_64(along.x, along.y).to_degrees();
+        let n = (strip.length_m / AIRSTRIP_SEGMENT_M).ceil().max(1.0) as usize;
+        let seg = strip.length_m / n as f64;
+        let top = strip.elevation_m + AIRSTRIP_LIP_M;
+        for k in 0..n {
+            let s0 = -strip.length_m * 0.5 + seg * (k as f64 + 0.5);
+            let c = glam::DVec2::new(strip.x, strip.z) + along * s0;
+            let g = derived(name, &format!("island.airstrip.{}.{k}", strip.name));
+            doc.create_with_guid(
+                g,
+                SpawnKind::Empty,
+                &format!("{} {}", strip.name, k + 1),
+                None,
+            );
+            insert!(
+                doc,
+                g,
+                Transform {
+                    translation: Vec3d::new(c.x, top - AIRSTRIP_SLAB_HALF_M, c.y),
+                    rotation: Vec3d::new(0.0, yaw_deg, 0.0),
+                    scale: Vec3d::new(strip.width_m, AIRSTRIP_SLAB_HALF_M * 2.0, seg),
+                },
+            );
+            insert!(
+                doc,
+                g,
+                inf_ecs::components::RigidBody3D {
+                    kind: inf_ecs::components::BodyKind3D::Static,
+                    ..Default::default()
+                },
+            );
+            // SEALED: `inf_physics::d3::vehicle::surface_under` reads a friction
+            // at or above 0.85 as asphalt, so a tyre on the strip is on tarmac
+            // with no SurfaceMap stamp at all.
+            insert!(
+                doc,
+                g,
+                inf_ecs::components::Collider3D {
+                    shape_kind: inf_ecs::components::ColliderShape3DKind::Box,
+                    half_extents: Vec3d::new(0.5, 0.5, 0.5),
+                    friction: 0.9,
+                    ..Default::default()
+                },
+            );
+            insert!(
+                doc,
+                g,
+                inf_ecs::components::MeshRef {
+                    primitive: inf_ecs::components::Primitive::Cube,
+                    asset: None,
+                },
+            );
+            insert!(doc, g, asphalt.clone());
+            if !strip.apron {
+                // The centreline, drawn: a stripe down the middle of the segment.
+                let m = derived(
+                    name,
+                    &format!("island.airstrip.{}.{k}.centreline", strip.name),
+                );
+                doc.create_with_guid(m, SpawnKind::Empty, "Centreline", None);
+                insert!(
+                    doc,
+                    m,
+                    Transform {
+                        translation: Vec3d::new(c.x, top + 0.01, c.y),
+                        rotation: Vec3d::new(0.0, yaw_deg, 0.0),
+                        scale: Vec3d::new(0.9, 0.02, seg * 0.5),
+                    },
+                );
+                insert!(
+                    doc,
+                    m,
+                    inf_ecs::components::MeshRef {
+                        primitive: inf_ecs::components::Primitive::Cube,
+                        asset: None,
+                    },
+                );
+                insert!(doc, m, paint.clone());
+            }
+        }
+        if !strip.apron {
+            // The two thresholds: a bar across the strip at each end.
+            for (end, sign) in [("west", -1.0f64), ("east", 1.0)] {
+                let c = glam::DVec2::new(strip.x, strip.z)
+                    + along * (sign * (strip.length_m * 0.5 - 6.0));
+                let m = derived(
+                    name,
+                    &format!("island.airstrip.{}.threshold.{end}", strip.name),
+                );
+                doc.create_with_guid(m, SpawnKind::Empty, "Threshold", None);
+                insert!(
+                    doc,
+                    m,
+                    Transform {
+                        translation: Vec3d::new(c.x, top + 0.01, c.y),
+                        rotation: Vec3d::new(0.0, yaw_deg, 0.0),
+                        scale: Vec3d::new(strip.width_m * 0.8, 0.02, 3.0),
+                    },
+                );
+                insert!(
+                    doc,
+                    m,
+                    inf_ecs::components::MeshRef {
+                        primitive: inf_ecs::components::Primitive::Cube,
+                        asset: None,
+                    },
+                );
+                insert!(doc, m, paint.clone());
+            }
+        } else {
+            // The aeroplanes, parked on the apron nose along its long axis.
+            for (k, (row, offset)) in AIRFIELD_PARKING.iter().enumerate() {
+                let Some(def) = roster.get(row) else {
+                    continue;
+                };
+                let c = glam::DVec2::new(strip.x, strip.z) + along * *offset;
+                crate::vehicle::spawn_vehicle(
+                    doc,
+                    derived(name, &format!("island.airfield.{row}")),
+                    def,
+                    crate::vehicle::VehicleSpawn {
+                        name: inf_ecs::roster::roster_label(row).unwrap_or(row),
+                        at: DVec3::new(
+                            c.x,
+                            inf_ecs::vehicle::resting_origin_y(def, top) + CAR_LIFT_M,
+                            c.y,
+                        ),
+                        yaw_deg,
+                        paint: car_paint(k + 3),
+                        clip: None,
+                        livery: None,
+                        engine_voice: true,
+                    },
+                );
+            }
+        }
+    }
+}
+
 pub(crate) fn derived(name: &str, salt: &str) -> Uuid {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in salt.as_bytes().iter().chain(b"/").chain(name.as_bytes()) {
@@ -1561,9 +1724,104 @@ pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
                         engine_voice: true,
                     },
                 );
+
+                // ── AIR ONE (wave VEH3g): the police helicopter, on a pad of its
+                //    own further along the same apron. A POLICE unit by its bar
+                //    and an AIR unit by its rotor, so the dispatcher flies it
+                //    down its air lane -- the refusal above is kept for the
+                //    civilian machine, which a player takes.
+                let roster = inf_ecs::roster::roster();
+                if let Some(air) = roster.get(POLICE_HELI_ROW) {
+                    let along = (HELIPAD_SLOT + POLICE_PAD_SLOTS) as f64 * EMS_PARK_PITCH_M;
+                    let at2 = DVec3::new(
+                        v.x + dir.x * along + apron.x,
+                        v.y,
+                        v.z + dir.y * along + apron.y,
+                    );
+                    let pad2 = derived(name, "island.helipad.police");
+                    doc.create_with_guid(pad2, SpawnKind::Empty, "Police Helipad", None);
+                    insert!(
+                        doc,
+                        pad2,
+                        Transform {
+                            translation: Vec3d::new(at2.x, at2.y - HELIPAD_BURY_M, at2.z),
+                            rotation: Vec3d::new(0.0, yaw_deg, 0.0),
+                            scale: Vec3d::ONE,
+                        },
+                    );
+                    insert!(
+                        doc,
+                        pad2,
+                        inf_ecs::components::RigidBody3D {
+                            kind: inf_ecs::components::BodyKind3D::Static,
+                            ..Default::default()
+                        },
+                    );
+                    insert!(
+                        doc,
+                        pad2,
+                        inf_ecs::components::Collider3D {
+                            shape_kind: inf_ecs::components::ColliderShape3DKind::Box,
+                            half_extents: Vec3d::new(
+                                HELIPAD_RADIUS_M,
+                                HELIPAD_HALF_M,
+                                HELIPAD_RADIUS_M
+                            ),
+                            friction: 0.8,
+                            ..Default::default()
+                        },
+                    );
+                    insert!(
+                        doc,
+                        pad2,
+                        inf_ecs::components::MeshRef {
+                            primitive: inf_ecs::components::Primitive::Cylinder,
+                            asset: None,
+                        },
+                    );
+                    insert!(
+                        doc,
+                        pad2,
+                        inf_ecs::components::Material {
+                            base_color: inf_ecs::math::Color::new(0.13, 0.14, 0.15, 1.0),
+                            metallic: 0.0,
+                            roughness: 0.95,
+                            ..Default::default()
+                        },
+                    );
+                    crate::vehicle::spawn_vehicle(
+                        &mut doc,
+                        derived(name, "island.air_one"),
+                        air,
+                        crate::vehicle::VehicleSpawn {
+                            name: "Air One",
+                            at: DVec3::new(
+                                at2.x,
+                                crate::vehicle::resting_origin_y(air, at2.y + HELIPAD_LIP_M),
+                                at2.z,
+                            ),
+                            yaw_deg,
+                            paint: inf_ecs::math::Color::new(0.10, 0.16, 0.42, 1.0),
+                            clip: None,
+                            livery: Some(&crate::vehicle::AIR_POLICE_LIVERY),
+                            engine_voice: true,
+                        },
+                    );
+                }
             }
         }
     }
+
+    // ── the airfield (wave VEH3g) ─────────────────────────────────────────────
+    //
+    // Every `[[airstrips]]` rectangle of the recipe, paved: static asphalt slabs
+    // at the recipe's STATED height (the carve levelled the ground under them to
+    // the same number), split into segments no longer than a partition cell so
+    // the P16 partition streams each with the cell it stands in -- a 1.7 km
+    // runway in one entity would be binned by its centre and pop in whole. The
+    // runway carries a centreline and two threshold bars (drawn only); the
+    // APRON carries the island's aeroplanes, parked nose-east beside it.
+    airfield(&mut doc, name, &design.recipe.airstrips);
 
     // ── the hero ──────────────────────────────────────────────────────────────
     //
@@ -1844,6 +2102,36 @@ pub const EMS_PARK_PITCH_M: f64 = 11.0;
 /// appliance has over a saloon, so the widest thing in the catalogue still has
 /// its flank out of the lane.
 pub const EMS_APRON_OFFSET_M: f64 = 6.0;
+
+/// **The police helicopter's roster row** (wave VEH3g) -- the Maverick, the
+/// civilian and news machine the doc names, in the air police livery.
+pub const POLICE_HELI_ROW: &str = "buckingham_maverick";
+
+/// How many parking pitches past the civilian helipad the police pad stands.
+pub const POLICE_PAD_SLOTS: usize = 2;
+
+/// **The longest paved segment an airstrip is split into**, metres (wave
+/// VEH3g) -- under the island's 256 m partition cell, so a segment is binned in
+/// the cell it actually stands in.
+pub const AIRSTRIP_SEGMENT_M: f64 = 250.0;
+
+/// Half the paving slab's thickness, metres.
+pub const AIRSTRIP_SLAB_HALF_M: f64 = 0.25;
+
+/// How far the paving stands proud of the levelled ground, metres -- a lip a
+/// wheel rolls up without noticing, and enough that the drawn slab is never
+/// z-fighting the terrain it lies on.
+pub const AIRSTRIP_LIP_M: f64 = 0.05;
+
+/// **The island's aeroplanes and where on the apron each is parked**: the
+/// roster row and its offset along the apron from its centre, metres (wave
+/// VEH3g). Nose-east, beside one another, spaced by their own lengths.
+pub const AIRFIELD_PARKING: &[(&str, f64)] = &[
+    ("mammoth_dodo", -220.0),
+    ("buckingham_luxor_deluxe", -170.0),
+    ("titan_cargo", -110.0),
+    ("flyus_jetliner", -20.0),
+];
 
 /// The city whose harbour the launch is moored in, and whose police station
 /// keeps the helicopter (wave VEH2c).
@@ -2304,6 +2592,10 @@ mod tests {
         /// one of them is a **committed-design** door or a name-derived GUID; not
         /// one of them opens an elevation tile.
         const ALLOWED: &[&str] = &[
+            // Wave VEH3g's airstrip RECORD, off the committed recipe: a
+            // rectangle and a STATED height, which is exactly why the height is
+            // a recipe number -- the level paves at it without reading a tile.
+            "AirstripSpec",
             "IslandDesign", // the committed design, read by `read_design`
             "IslandRecipe", // the committed recipe
             "SiteKind",     // a site's own kind, off the committed recipe
@@ -2659,6 +2951,129 @@ mod tests {
     /// Run against both committed islands, because "the fixture is what CI
     /// exercises" is only true while the fixture and the shipped island are the
     /// same generator.
+    /// **THE AIRFIELD IS PAVED WHERE THE RECIPE LEVELS IT** (wave VEH3g) --
+    /// and no road crosses it, and its aeroplanes and its police helicopter are
+    /// the things the recognisers say they are.
+    ///
+    /// Reads the LEVEL the generator wrote and the DESIGN it was written from:
+    /// every airstrip is paved end to end by segments no longer than a
+    /// partition cell, each a SEALED static slab (friction at or above 0.85, so
+    /// `surface_under` answers asphalt) whose top is the recipe's stated height
+    /// plus the lip; every committed route is clear of every rectangle and its
+    /// batter; the parked aeroplanes are wheeled rigs whose class carries a
+    /// wing; Air One is a POLICE unit with a rotor. On the CI fixture (no
+    /// `[[airstrips]]`) the paving half is vacuous by construction and says so.
+    #[test]
+    fn the_airfield_is_paved_where_the_recipe_levels_it() {
+        for recipe in ISLAND_RECIPES {
+            let Some(d) = design(recipe) else {
+                println!("SKIP: no {recipe} in this tree");
+                continue;
+            };
+            let doc = island_scene(&d);
+            let name = d.recipe.name.as_str();
+            if d.recipe.airstrips.is_empty() {
+                println!("{recipe}: no [[airstrips]] -- nothing to pave (vacuous here)");
+                continue;
+            }
+            let mut segments = 0usize;
+            for strip in &d.recipe.airstrips {
+                let n = (strip.length_m / AIRSTRIP_SEGMENT_M).ceil().max(1.0) as usize;
+                let mut covered = 0.0f64;
+                for k in 0..n {
+                    let g = derived(name, &format!("island.airstrip.{}.{k}", strip.name));
+                    let e = doc
+                        .entity_of(g)
+                        .unwrap_or_else(|| panic!("{}: segment {k} is missing", strip.name));
+                    let w = doc.world().world();
+                    let t = w.get::<inf_ecs::components::Transform>(e).expect("placed");
+                    let c = w.get::<inf_ecs::components::Collider3D>(e).expect("solid");
+                    assert!(
+                        c.friction >= 0.85,
+                        "{}: segment {k} is not sealed",
+                        strip.name
+                    );
+                    assert!(
+                        t.scale.z <= ISLAND_CELL_SIZE_M,
+                        "{}: segment {k} is {} m long, longer than a cell",
+                        strip.name,
+                        t.scale.z
+                    );
+                    let top = t.translation.y + t.scale.y * 0.5;
+                    assert!(
+                        (top - (strip.elevation_m + AIRSTRIP_LIP_M)).abs() < 1e-9,
+                        "{}: segment {k}'s top is {top}, the recipe's height {}",
+                        strip.name,
+                        strip.elevation_m
+                    );
+                    covered += t.scale.z;
+                    segments += 1;
+                }
+                assert!(
+                    (covered - strip.length_m).abs() < 1e-6,
+                    "{}: paved {covered} m of {} m",
+                    strip.name,
+                    strip.length_m
+                );
+                // No committed route crosses the rectangle or its batter.
+                let mut nearest = f64::MAX;
+                for route in &d.routes {
+                    for pair in route.points.windows(2) {
+                        let (a, b) = (pair[0], pair[1]);
+                        let len = (b - a).length();
+                        let steps = (len / 2.0).ceil().max(1.0) as usize;
+                        for i in 0..=steps {
+                            let q = a + (b - a) * (i as f64 / steps as f64);
+                            let out = strip.outside_m(glam::DVec2::new(q.x, q.z));
+                            nearest = nearest.min(out);
+                        }
+                    }
+                }
+                println!(
+                    "{recipe}: {} paved in {n} segment(s) at {} m; the nearest route is {nearest:.1} m outside it",
+                    strip.name, strip.elevation_m
+                );
+                assert!(
+                    nearest > strip.batter_m,
+                    "{}: a route passes {nearest:.1} m from the paving, inside its {} m batter",
+                    strip.name,
+                    strip.batter_m
+                );
+            }
+            // The aeroplanes on the apron.
+            let mut planes = 0usize;
+            for (row, _) in AIRFIELD_PARKING {
+                let g = derived(name, &format!("island.airfield.{row}"));
+                let rig = inf_ecs::vehicle::rig_of(doc.world(), g)
+                    .unwrap_or_else(|| panic!("{recipe}: {row} is not a rig"));
+                assert!(!rig.wheels.is_empty(), "{row} has no gear");
+                let e = doc.entity_of(g).expect("the chassis");
+                let class = doc
+                    .world()
+                    .world()
+                    .get::<inf_ecs::components::VehicleClass>(e)
+                    .copied()
+                    .expect("a class");
+                assert!(class.wing_area_m2 > 0.0, "{row} carries no wing");
+                planes += 1;
+            }
+            // Air One: police by its bar, an air unit by its rotor.
+            let air = derived(name, "island.air_one");
+            assert_eq!(
+                inf_ecs::dispatch::unit_kind_of(doc.world(), air),
+                Some(inf_ecs::dispatch::UnitKind::Police),
+                "{recipe}: Air One is not a police unit"
+            );
+            assert!(
+                inf_ecs::dispatch::is_air_unit(doc.world(), air),
+                "{recipe}: Air One has no rotor"
+            );
+            println!(
+                "{recipe}: {segments} paved segment(s), {planes} aeroplanes, Air One on its pad"
+            );
+        }
+    }
+
     /// **THE HARBOUR HAS A BOAT AND THE STATION HAS A PAD** (wave VEH2c) — and
     /// the boat is over water rather than on a beach.
     ///

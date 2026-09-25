@@ -90,8 +90,8 @@ pub use detail::{apply_detail, DetailBand, DetailPlan, DetailStats};
 pub use hydro::{FlowField, HydroParams, Lake, Stream, StreamNetwork, Waterfall};
 pub use layers::StreetSpan;
 pub use recipe::{
-    AnchorSpec, BiomeSpec, GridSpec, HydroSpec, IslandRecipe, RoadSpec, SeaSpec, Site, SiteKind,
-    SourceSpec, ANCHOR_AGREEMENT_DEG, RECIPE_SCHEMA_VERSION,
+    AirstripSpec, AnchorSpec, BiomeSpec, GridSpec, HydroSpec, IslandRecipe, RoadSpec, SeaSpec,
+    Site, SiteKind, SourceSpec, ANCHOR_AGREEMENT_DEG, RECIPE_SCHEMA_VERSION,
 };
 pub use report::{IslandReport, LayerDrift};
 pub use roads::{

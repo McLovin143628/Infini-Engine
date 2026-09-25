@@ -496,17 +496,19 @@ pub fn build_island(
         corridor: corridor.as_ref(),
         corridor_half_m: corridor_half,
         corridor_flat_m: corridor_flat,
+        strips: &recipe.airstrips,
     };
     let (mut data, st) = terrain::sample_terrain(recipe, &mosaic, &lattice, &carve);
     say(
         BuildStep::Carve,
         format!(
-            "{} samples, {} on land, {} pad, {} corridor, {} nodata; {:.1}..{:.1} m, \
-             land {:.3} km2, shore {:.2} km",
+            "{} samples, {} on land, {} pad, {} corridor, {} strip, {} nodata; \
+             {:.1}..{:.1} m, land {:.3} km2, shore {:.2} km",
             st.samples,
             st.land,
             st.pad,
             st.corridor,
+            st.strip,
             st.nodata,
             st.lo_m,
             st.hi_m,
@@ -902,6 +904,7 @@ pub fn build_island(
             channels: Some(&detail_channels),
             channel_half_m: widest,
             pads: &site_pads,
+            strips: &recipe.airstrips,
         },
     );
     say(

@@ -368,6 +368,17 @@ content = [
   "../vehicle-audio/Vehicle_Roll_Gravel.inf_audio.toml",
   "../vehicle-audio/Vehicle_Roll_Soft.inf_audio",
   "../vehicle-audio/Vehicle_Roll_Soft.inf_audio.toml",
+  # The craft voices (wave VEH3g): rotor, propeller, turbine, hull.
+  "../vehicle-audio/Vehicle_Rotor_BladePass.inf_audio",
+  "../vehicle-audio/Vehicle_Rotor_BladePass.inf_audio.toml",
+  "../vehicle-audio/Vehicle_Prop_BladePass.inf_audio",
+  "../vehicle-audio/Vehicle_Prop_BladePass.inf_audio.toml",
+  "../vehicle-audio/Vehicle_Jet_Spool.inf_audio",
+  "../vehicle-audio/Vehicle_Jet_Spool.inf_audio.toml",
+  "../vehicle-audio/Vehicle_Hull_Slap.inf_audio",
+  "../vehicle-audio/Vehicle_Hull_Slap.inf_audio.toml",
+  "../vehicle-audio/Vehicle_Hull_Spray.inf_audio",
+  "../vehicle-audio/Vehicle_Hull_Spray.inf_audio.toml",
   "../vehicle-bodies/Sedan_lower.inf_mesh",
   "../vehicle-bodies/Sedan_lower.inf_mesh.toml",
   "../vehicle-bodies/Sedan_cabin.inf_mesh",
@@ -667,3 +678,37 @@ kind = "town"
 x = -1150.0
 z = -450.0
 radius_m = 210.0
+
+# ── The airfield (wave VEH3g) ────────────────────────────────────────────────
+#
+# A runway and its apron on the coastal flat EAST of Harbour City: the ground
+# between x = -1100 and +600 at z ~ 2500-2700 sits at 9-18 m on the committed
+# DEM (sampled at 100 m over the built terrain, `veh3g-implementer-report.md`),
+# 200 m back from the south shore and clear of the city's 600 m pad. The height
+# is STATED (13 m, the flat's middle) because the level generator may not read
+# an elevation: the carve levels the rectangle to it, the detail band leaves it
+# alone, and the Ring-1 generator paves it at the same number. The length is
+# measured against the roster's longest take-off roll (the Titan's, ~1.27 km on
+# a flat slab at full load) with the margin a pilot needs to abort.
+[[airstrips]]
+name = "Harbour City Runway"
+x = -250.0
+z = 2560.0
+heading_deg = 90.0
+length_m = 1700.0
+width_m = 45.0
+elevation_m = 13.0
+batter_m = 60.0
+
+# The apron, touching the runway's north edge: where the island's four
+# aeroplanes are parked.
+[[airstrips]]
+name = "Harbour City Apron"
+x = -700.0
+z = 2457.5
+heading_deg = 90.0
+length_m = 500.0
+width_m = 160.0
+elevation_m = 13.0
+batter_m = 40.0
+apron = true
