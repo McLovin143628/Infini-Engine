@@ -4690,8 +4690,9 @@ fn the_roster_families_seat_their_driver_inside_and_the_car_stays_on_its_wheels(
 ///   island's own wind (6.3 m/s, 18 deg off the runway) keeps it within a few
 ///   degrees to 30 m/s, into wind and down it.
 ///
-/// Mutation that reds it: `as_power_lever` not applied (the spool from a
-/// backward roll: 176 steps, not 38).
+/// Mutations that red it: `as_power_lever` not applied (the spool from a
+/// backward roll: 176 steps, not 38); the reversed-flow fade removed (the
+/// seated, hands-off Dodo rolling backwards in the tail wind).
 #[test]
 fn a_shipped_pilot_spools_and_holds_the_dodo_in_the_islands_wind() {
     use inf_ecs::movement::actions::{INTERACT, MOVE_X, MOVE_Y};
@@ -4707,6 +4708,7 @@ fn a_shipped_pilot_spools_and_holds_the_dodo_in_the_islands_wind() {
     // (wind x, wind z, push the aeroplane backwards once seated?)
     let cases = [
         ("tail wind 8 m/s", (0.0f32, 8.0f32), true),
+        ("tail wind 8 m/s, still", (0.0, 8.0), false),
         ("island wind into it", (2.0, -6.0), false),
         ("island wind down it", (2.0, 6.0), false),
         ("quartering 8 m/s", (5.66, -5.66), false),
@@ -4740,9 +4742,10 @@ fn a_shipped_pilot_spools_and_holds_the_dodo_in_the_islands_wind() {
         };
         let (mut creep, mut worst, mut parked_turn) = (0.0f64, 0.0f64, 0.0f64);
         let mut parked_from = 0.0f64;
+        let mut seated_creep = 0.0f64;
         let (mut driving_at, mut spooled_at) = (None::<u32>, None::<u32>);
         let mut lifted = false;
-        for i in 0..2100u32 {
+        for i in 0..2300u32 {
             let e = sim.world().entity_of(HERO).expect("hero");
             let phase = sim
                 .world()
@@ -4778,7 +4781,10 @@ fn a_shipped_pilot_spools_and_holds_the_dodo_in_the_islands_wind() {
                 parked_turn = parked_turn.max((h - parked_from).abs());
             }
             if let Some(d) = driving_at {
-                if i > d + 5 {
+                if !push_back && (d + 5..d + 125).contains(&i) {
+                    seated_creep = seated_creep.max(fwd.abs());
+                }
+                if i > d + 125 || (push_back && i > d + 5) {
                     input = input
                         .axis_at(MOVE_Y, 1.0)
                         .axis_at(MOVE_X, (-h / 3.0).clamp(-1.0, 1.0) as f32);
@@ -4791,8 +4797,9 @@ fn a_shipped_pilot_spools_and_holds_the_dodo_in_the_islands_wind() {
                 .and_then(|v| v.flight())
                 .unwrap_or_default();
             if let Some(d) = driving_at {
-                if i > d + 5 && spooled_at.is_none() && f.spool > 0.8 {
-                    spooled_at = Some(i - d - 5);
+                let w_from = if push_back { d + 5 } else { d + 125 };
+                if i > w_from && spooled_at.is_none() && f.spool > 0.8 {
+                    spooled_at = Some(i - w_from);
                 }
                 if f.airspeed_mps < 30.0 && !lifted {
                     worst = worst.max(chassis(&sim).1.abs());
@@ -4802,12 +4809,20 @@ fn a_shipped_pilot_spools_and_holds_the_dodo_in_the_islands_wind() {
             }
         }
         println!(
-            "  {name:22} parked creep {creep:.3} m/s, turned {parked_turn:.2} deg; spool 0.8 after {} steps of W{}; heading worst {worst:.1} deg to 30 m/s",
+            "  {name:24} parked creep {creep:.3} m/s, turned {parked_turn:.2} deg; seated hands-off {seated_creep:.3} m/s; spool 0.8 after {} steps of W{}; heading worst {worst:.1} deg to 30 m/s",
             spooled_at.map(|s| s.to_string()).unwrap_or("NEVER".into()),
             if push_back { " (rolling back 3 m/s)" } else { "" }
         );
         if creep > 0.1 {
             bad.push(format!("{name}: the parked Dodo crept {creep:.2} m/s"));
+        }
+        // Free wheels in a wind roll a little whichever way it blows (0.33 to
+        // 0.40 m/s over two seconds, into it or down it); the reversed-flow
+        // defect was 2.47 m/s backwards in the tail wind, run 4's 3.
+        if seated_creep > 1.0 {
+            bad.push(format!(
+                "{name}: seated with no input the Dodo rolled {seated_creep:.2} m/s"
+            ));
         }
         if parked_turn > 1.0 {
             bad.push(format!(
