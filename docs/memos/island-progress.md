@@ -41035,3 +41035,98 @@ a footprint-aware gap); the Harbour City box trailer stands on no wheel
 (pitched 4.7 deg, its rig placed over lower ground, ~0.5 d); the Pickup hero
 set hangs on no car in the committed island; the crowd's commute cliff.
 
+## WAVE VEH3g — AIR + SEA CLASSES (2026-09-24)
+
+Range `747ef164..` (implementer; nothing pushed). Report:
+`campaign-briefs/veh3g-implementer-report.md`. Scene v28, payload 13, goldens
+66, `EXPECTED_LEVELS` 24 -- no schema move; `Cargo.lock` unchanged. The island
+`.inf_lvl` moved once, with its cause (the airfield: 243 287 -> 274 519 B).
+
+### what landed
+
+* **The fixed wing** (`inf_ecs::aero`): the recogniser is `wing_area_m2 > 0`
+  on a WHEELED class (the gear is the wheel rig; the engine drives the
+  propeller, not the tyres). Lift ½ρv²S·CL(α), CL = a(α+3°) with
+  a = 2πAR/(AR+2), collapsing to 55 % over 4° past `stall_deg` and fading to
+  zero at 90°; drag CD0 + CL²/(πAR·0.8) + a post-stall plate. The elevator
+  commands an α, the ailerons a roll rate, the tail weathervanes; every torque
+  is an angular acceleration times rapier's principal inertia. Prop thrust
+  falls to zero at `max_speed_mps`, a jet loses 25 % to ram drag; spools
+  0.4 s / 3 s. Airspeed is the chassis velocity less the P17 wind.
+* **The take-off table** (flat lab, sea level, rotate at 1.1 Vs to the
+  attitude that flies there; the roll is to the LAST wheel contact before
+  35 ft): Duster 322 m / 612 m to 35 ft; Dodo 386 / 714; Luxor 1 173 / 1 827;
+  Titan 1 348 / 1 452; Jetliner 1 189 / 1 727. Runway 1 700 m.
+* **The stall**: the Dodo, power off, full back stick: α passed 16° 5.35 s
+  later at 28.1 m/s; the highest CL 3..8° past the stall 0.874 of a 1.380
+  peak (63 %); pitch 34.0 -> -25.5°; 89.4 m lost.
+* **The floatplane**: the Dodo floats with its hull 0.257 m under, no wheel
+  touching, runs 619 m on the water and flies off it.
+* **The keyboard pilot**: Space is both `move_up` and `handbrake`, so a
+  keyboard rotation locked the gear and the Dodo NEVER left the ground. On a
+  wing the handbrake now holds only while the stick is not pulled: 35 ft
+  after 494 m.
+* **Helicopters**: the five rows climb 21.7 m, hover at |vs| 0.000 and
+  translate 168-176 m. **The Cargobob's winch**: a Distance joint on the load,
+  tension = the limit impulse × the 4 substeps (read raw it was a quarter:
+  4 660 N under an 18 639 N car); the car rose to 28.8 m at 18 639 N and fell
+  to 0.6 m on release.
+* **THE AIR LANE**: an air unit (a rig with a rotor) is costed by the
+  straight line, answers only a response of 2+ units, is never handed a
+  road path, and flies 60 m up and 30 m over the target: 3 600 steps, 0 with
+  a road route, lowest 43.3 m, 0.0 m off the line, on scene at 30.1 s. Air
+  One is Harbour City's pad.
+* **Marine** (`inf_ecs::marine`): planing lift up to 0.6 W from 0.6 to 1.0 of
+  `planing_speed_mps`; hull heave/pitch damping ζ 0.7, roll 0.3. Draught at
+  rest -> planing: jetski 0.105 -> 0.051 m, Jetmax 0.210 -> 0.102, speeder
+  0.131 -> 0.072, dinghy 0.092 -> 0.052; tug 2.000, superyacht 1.302, cruise
+  ship 4.313 unchanged. Archimedes exact on all three ships (the Box branch):
+  the AABB-draught bound does not matter here, measured. The sail (8 m/s):
+  head to wind -1.52 m/s, 20° off -1.44, 45° off 0.49, beam 5.97 (heel 1.9°),
+  run 3.91; the wind turned 90° under a beam heading: -1.52. The tug pushed
+  the 900 t superyacht 396 m to 4.96 m/s.
+* **Voices**: Rotor_BladePass, Prop_BladePass, Jet_Spool, Hull_Slap,
+  Hull_Spray (clips 31-35, `samples/vehicle-audio/`); wheelless craft drop
+  the whine/squeal/roll layers; air and sea are never traffic, so the NEAR
+  rule gives them the full stack while running. 31 175 commands on each
+  host, identical, `dropped == 0`.
+* **Bodies**: nine primitive families (biplane, jet, cargo plane,
+  helicopter, tandem rotor, jetski, speedboat, sailboat, ship) with VEH3c
+  parts and VEH3d sockets; a `Ramp` part kind (the Titan's, 25.3° open, rear
+  edge down 1.69 m). Boarding on the shipped host: Dodo, Maverick, Jetmax at
+  0.00 mm on the controls and pedals (the Maverick's handle 0.00 mm).
+* **The airfield**: two `[[airstrips]]` in `island.toml` (the Harbour City
+  Runway, 1 700 × 45 m at 13 m, and an apron); the carve levels them last;
+  the level paves them in ≤ 250 m slabs whose colliders are sized in metres.
+  1 023 samples under the paving, all 13.000 m.
+* **Streaming at a jet's speed**: VEH2c's table gains 120 m/s -- 0 blocking
+  loads, the closest a cell arrived 252.9 m from the source, the cell ahead
+  missing on 0 steps (fixture island).
+* **Cost**: 18 craft 0.0354 ms against 18 sedans 0.0932 (release, 0.38×).
+* hero.csv 85 columns (77-84 the craft's), the HUD's craft row.
+
+### re-blessed, with cause
+
+The island level (the airfield); VEH2c's boat helm 300 -> 1 500 steps (the
+launch turns at 0.127 rad/s whatever this wave does -- a 61 m circle against
+the 37 m VEH2c's doc claims); the VEH2c launch-voice arm re-derived on layer
+keys; clip/file counts; the kerb-family census 12 -> 21.
+
+### the vacuous, said
+
+The stall arm passed a wing with NO collapse twice before it read the break
+band. The sail's no-go fill removed stays green: the force geometry and the
+hull's drag stop a boat pinching at 20° by themselves. `STALL_PITCH_BREAK` 0
+stays green: the collapse drops the nose on its own.
+
+### carried, by name
+
+The heavies reach 35 ft past the far threshold (Luxor 1 827 m, Jetliner
+1 727 m); no flaps, ground effect, spin or density lapse; an untended plane
+weathervanes on its gear (26° in 15 s in the island's wind); close-hauled
+sailing is slow (0.49 m/s); the air lane has no orbit; the superyacht and
+the cruise ship have no authored route; the drawn gear leg ends above the
+wheel and the mast is capped by the hull box; DCC hero shells are VEH3f.2's;
+no in-player take-off frame (five sessions: see the report); the VEH3e salt
+collision at guid delta 0x10; `joint_impulse` reads one substep of four.
+
