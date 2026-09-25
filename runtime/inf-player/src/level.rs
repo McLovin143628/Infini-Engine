@@ -2545,7 +2545,10 @@ impl PackLevelSource {
                 // skinned slots' reason one mesh kind over. Mirrored by the PIE
                 // payload builder and the editor viewport's walk.
                 if let Some(mesh) = e.mesh.as_ref().and_then(|m| m.asset) {
-                    bound.extend(crate::section_materials(|id| self.reader.contains(AssetId(id)), mesh));
+                    bound.extend(crate::section_materials(
+                        |id| self.reader.contains(AssetId(id)),
+                        mesh,
+                    ));
                 }
             }
         };
@@ -2600,7 +2603,10 @@ impl PackLevelSource {
         // …and the section materials of every mesh the ENGINE spawns (traffic's
         // imported bodies, wave VEH3f.2a), which no level entity names.
         for mesh in inf_ecs::roster::engine_spawned_art_meshes() {
-            bound.extend(crate::section_materials(|id| self.reader.contains(AssetId(id)), mesh));
+            bound.extend(crate::section_materials(
+                |id| self.reader.contains(AssetId(id)),
+                mesh,
+            ));
         }
         let mut materials = HashMap::new();
         for mat in &bound {

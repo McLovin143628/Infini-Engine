@@ -157,7 +157,10 @@ pub fn parse_art_table(text: &str) -> Result<Vec<ArtBody>, String> {
             source: leak(s("source").unwrap_or("")),
             pack: leak(s("pack").unwrap_or("")),
             facing,
-            tracked: row.get("tracked").and_then(|v| v.as_bool()).unwrap_or(false),
+            tracked: row
+                .get("tracked")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
             half_extents,
             parts: Box::leak(parts.into_boxed_slice()),
             door_proxy: row
@@ -294,7 +297,10 @@ mod tests {
             assert_eq!(k.name(), m);
             assert!(k.parts().is_empty(), "{m} keeps its family's seats");
         }
-        assert_eq!(ArtKey::from_name("excavator").map(|k| k.tracked()), Some(true));
+        assert_eq!(
+            ArtKey::from_name("excavator").map(|k| k.tracked()),
+            Some(true)
+        );
         for key in ArtKey::all() {
             for p in key.parts() {
                 assert_eq!(

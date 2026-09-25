@@ -2763,10 +2763,9 @@ impl EngineHost {
                         for (sid, mat, section) in sections {
                             live_render_assets.insert(sid);
                             if vgeom_seen.insert(section.id) {
-                                self.scene.vgeom_assets.push(inf_render::VgeomAsset::new(
-                                    section.id,
-                                    section.source,
-                                ));
+                                self.scene
+                                    .vgeom_assets
+                                    .push(inf_render::VgeomAsset::new(section.id, section.source));
                             }
                             let (c, m, r, e, v) = match derived_surface(mats, mat) {
                                 Some(d) => (

@@ -1573,7 +1573,13 @@ pub fn project_scene_full(
                             .uuid()
                             .as_u128();
                         let (c, m, r, e, v) = match derived_surface(materials, mat) {
-                            Some(d) => (d.0, d.1, d.2, d.3, inf_render::vt_set_for(vt_lib, Some(mat))),
+                            Some(d) => (
+                                d.0,
+                                d.1,
+                                d.2,
+                                d.3,
+                                inf_render::vt_set_for(vt_lib, Some(mat)),
+                            ),
                             None => (color, metallic, roughness, emissive, vt),
                         };
                         scene.vgeom_instances.push(VgeomInstance {

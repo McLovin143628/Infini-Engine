@@ -40,7 +40,8 @@ const SECTION_MATERIAL_SALT: u128 = 0x494e_4653_4543_5449_4f4e_4d41_544c_3030;
 
 fn mix(mesh: AssetId, slot: u32, salt: u128) -> AssetId {
     let mut x = mesh.uuid().as_u128() ^ salt;
-    x = x.rotate_left(29) ^ (u128::from(slot) + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15_f39c_c060_5ced_c835);
+    x = x.rotate_left(29)
+        ^ (u128::from(slot) + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15_f39c_c060_5ced_c835);
     x ^= x >> 67;
     x = x.wrapping_mul(0xff51_afd7_ed55_8ccd_c4ce_b9fe_1a85_ec53);
     x ^= x >> 59;
@@ -67,7 +68,9 @@ mod tests {
     /// parent twice.
     #[test]
     fn section_ids_are_pure_and_distinct() {
-        let a = AssetId(uuid::Uuid::from_u128(0x1234_5678_9abc_def0_0fed_cba9_8765_4321));
+        let a = AssetId(uuid::Uuid::from_u128(
+            0x1234_5678_9abc_def0_0fed_cba9_8765_4321,
+        ));
         let mut seen = std::collections::BTreeSet::new();
         for s in 0..MAX_SECTIONS {
             assert_eq!(section_mesh_id(a, s), section_mesh_id(a, s));

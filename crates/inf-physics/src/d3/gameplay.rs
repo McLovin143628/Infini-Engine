@@ -1117,17 +1117,14 @@ fn step_accessories(world: &mut EcsWorld, owner: Uuid, weapon_guid: Uuid, barrel
         .get::<weapon::WeaponState>(entity)
         .map(|s| s.reload_left_s)
         .unwrap_or(0.0);
-    if let Some((mesh, seat)) = equipped_weapon(world, owner)
-        .and_then(|(id, def)| inf_ecs::weapon::magazine_of(&id, &def))
+    if let Some((mesh, seat)) =
+        equipped_weapon(world, owner).and_then(|(id, def)| inf_ecs::weapon::magazine_of(&id, &def))
     {
         let g = magazine_guid(weapon_guid);
         want.insert(g);
         let out = reload_left > MAG_SEAT_S;
-        let offset = inf_ecs::math::Vec3d::new(
-            seat.x,
-            seat.y - if out { MAG_DROP_M } else { 0.0 },
-            seat.z,
-        );
+        let offset =
+            inf_ecs::math::Vec3d::new(seat.x, seat.y - if out { MAG_DROP_M } else { 0.0 }, seat.z);
         let e = match world.entity_of(g) {
             Some(e) => e,
             None => world.spawn_with_guid(g, "Magazine", None),

@@ -228,7 +228,14 @@ fn group_of(name: &str, joint: usize) -> Group {
 fn vert_engine(f: Facing, v: &MeshVertex, origin: DVec3) -> MeshVertex {
     let p = to_engine(f, v3(v.position)) - origin;
     let n = to_engine(f, v3(v.normal));
-    let t = to_engine(f, DVec3::new(v.tangent[0] as f64, v.tangent[1] as f64, v.tangent[2] as f64));
+    let t = to_engine(
+        f,
+        DVec3::new(
+            v.tangent[0] as f64,
+            v.tangent[1] as f64,
+            v.tangent[2] as f64,
+        ),
+    );
     MeshVertex {
         position: f3(p),
         normal: f3(n),
@@ -438,7 +445,8 @@ pub fn split_skel_vehicle(i: &SkelVehicleIn) -> Result<SkelVehicleSplit, String>
     wheel_joints.sort();
     wheel_joints.dedup();
     // FL, FR, RL, RR: front is +Z; index 0 is the -X side (`wheel_mounts`).
-    let mut ordered: Vec<(usize, DVec3)> = wheel_joints.iter().map(|j| (*j, joint_at(*j))).collect();
+    let mut ordered: Vec<(usize, DVec3)> =
+        wheel_joints.iter().map(|j| (*j, joint_at(*j))).collect();
     let corner = |p: DVec3| -> u8 {
         let front = p.z > 0.0;
         match (front, p.x < 0.0) {
@@ -463,11 +471,9 @@ pub fn split_skel_vehicle(i: &SkelVehicleIn) -> Result<SkelVehicleSplit, String>
     let mut radii = Vec::new();
     for (j, hub) in &ordered {
         let origin = centre + *hub;
-        let w = rebuild(
-            src,
-            &|si, ti| in_group(si, ti, Group::Wheel(*j)),
-            &|v| vert_engine(f, v, origin),
-        );
+        let w = rebuild(src, &|si, ti| in_group(si, ti, Group::Wheel(*j)), &|v| {
+            vert_engine(f, v, origin)
+        });
         let mut r = 0.0f64;
         for s in &w.submeshes {
             for v in &s.vertices {
@@ -539,7 +545,8 @@ pub fn split_skel_vehicle(i: &SkelVehicleIn) -> Result<SkelVehicleSplit, String>
             for (si, ti) in &tris {
                 let s = &src.submeshes[*si];
                 for k in 0..3 {
-                    let p = to_engine(f, v3(s.vertices[s.indices[ti * 3 + k] as usize].position)) - centre;
+                    let p = to_engine(f, v3(s.vertices[s.indices[ti * 3 + k] as usize].position))
+                        - centre;
                     lo = lo.min(p);
                     hi = hi.max(p);
                 }
@@ -559,11 +566,9 @@ pub fn split_skel_vehicle(i: &SkelVehicleIn) -> Result<SkelVehicleSplit, String>
             }
             let c = 0.5 * (lo + hi);
             let h = (0.5 * (hi - lo)).max(DVec3::splat(0.005));
-            let m = rebuild(
-                src,
-                &|si, ti| pane_of.get(&(si, ti)) == Some(&k),
-                &|v| unit_box(vert_engine(f, v, centre), c, h),
-            );
+            let m = rebuild(src, &|si, ti| pane_of.get(&(si, ti)) == Some(&k), &|v| {
+                unit_box(vert_engine(f, v, centre), c, h)
+            });
             let n = tris.len();
             panes.push(ArtPartOut {
                 name: format!("glass_{k}"),
@@ -622,11 +627,9 @@ pub fn split_skel_vehicle(i: &SkelVehicleIn) -> Result<SkelVehicleSplit, String>
         let rear = lo.z.min(pivot.z - 0.05);
         let c = DVec3::new(pivot.x, 0.5 * (lo.y + hi.y), 0.5 * (rear + pivot.z));
         let h = DVec3::new(hx, 0.5 * (hi.y - lo.y), 0.5 * (pivot.z - rear));
-        let m = rebuild(
-            src,
-            &|si, ti| in_group(si, ti, Group::Door(j)),
-            &|v| unit_box(vert_engine(f, v, centre), c, h),
-        );
+        let m = rebuild(src, &|si, ti| in_group(si, ti, Group::Door(j)), &|v| {
+            unit_box(vert_engine(f, v, centre), c, h)
+        });
         parts.push(ArtPartOut {
             name: if pivot.x > 0.0 { "door_l" } else { "door_r" }.to_string(),
             centre: c,
@@ -642,7 +645,12 @@ pub fn split_skel_vehicle(i: &SkelVehicleIn) -> Result<SkelVehicleSplit, String>
         Some(sm) => Some(rebuild(&sm.mesh, &|_, _| true, &|v| {
             let p = sm.rotation * v3(v.position) + sm.translation;
             let n = sm.rotation * v3(v.normal);
-            let t = sm.rotation * DVec3::new(v.tangent[0] as f64, v.tangent[1] as f64, v.tangent[2] as f64);
+            let t = sm.rotation
+                * DVec3::new(
+                    v.tangent[0] as f64,
+                    v.tangent[1] as f64,
+                    v.tangent[2] as f64,
+                );
             vert_engine(
                 f,
                 &MeshVertex {
@@ -657,11 +665,9 @@ pub fn split_skel_vehicle(i: &SkelVehicleIn) -> Result<SkelVehicleSplit, String>
         None => {
             let any = groups.iter().flatten().any(|g| *g == Group::Steering);
             any.then(|| {
-                rebuild(
-                    src,
-                    &|si, ti| in_group(si, ti, Group::Steering),
-                    &|v| vert_engine(f, v, centre),
-                )
+                rebuild(src, &|si, ti| in_group(si, ti, Group::Steering), &|v| {
+                    vert_engine(f, v, centre)
+                })
             })
         }
     };
@@ -740,12 +746,25 @@ pub fn split_skel_vehicle(i: &SkelVehicleIn) -> Result<SkelVehicleSplit, String>
             let col = rebuild(&m, &|_, _| true, &|v| {
                 let d = v3(v.position) - hub;
                 let nn = v3(v.normal);
-                let tt = DVec3::new(v.tangent[0] as f64, v.tangent[1] as f64, v.tangent[2] as f64);
+                let tt = DVec3::new(
+                    v.tangent[0] as f64,
+                    v.tangent[1] as f64,
+                    v.tangent[2] as f64,
+                );
                 MeshVertex {
-                    position: f3(DVec3::new(d.dot(x) / (2.0 * h.x), d.dot(y) / (2.0 * h.y), d.dot(z) / (2.0 * h.z))),
+                    position: f3(DVec3::new(
+                        d.dot(x) / (2.0 * h.x),
+                        d.dot(y) / (2.0 * h.y),
+                        d.dot(z) / (2.0 * h.z),
+                    )),
                     normal: f3(DVec3::new(nn.dot(x), nn.dot(y), nn.dot(z))),
                     uv: v.uv,
-                    tangent: [tt.dot(x) as f32, tt.dot(y) as f32, tt.dot(z) as f32, v.tangent[3]],
+                    tangent: [
+                        tt.dot(x) as f32,
+                        tt.dot(y) as f32,
+                        tt.dot(z) as f32,
+                        v.tangent[3],
+                    ],
                 }
             });
             hub_at = Some(hub);
@@ -806,11 +825,7 @@ pub fn split_skel_vehicle(i: &SkelVehicleIn) -> Result<SkelVehicleSplit, String>
             for side in [1.0f64, -1.0] {
                 let front = s.z + 0.55;
                 let rear = front - 1.0;
-                let c = DVec3::new(
-                    side * (half.x - 0.04),
-                    -0.15 * half.y,
-                    0.5 * (front + rear),
-                );
+                let c = DVec3::new(side * (half.x - 0.04), -0.15 * half.y, 0.5 * (front + rear));
                 let h = DVec3::new(0.04, 0.45 * half.y, 0.5 * (front - rear));
                 parts.push(ArtPartOut {
                     name: if side > 0.0 { "door_l" } else { "door_r" }.to_string(),
@@ -910,15 +925,15 @@ pub fn skel_body_toml(
         "half_extents_m = [{:.4}, {:.4}, {:.4}]\n",
         h.x, h.y, h.z
     ));
-    s.push_str(&format!(
-        "pack_lods = {}\n",
-        pack_lods.len().max(1)
-    ));
+    s.push_str(&format!("pack_lods = {}\n", pack_lods.len().max(1)));
     if door_proxy {
         s.push_str("door_proxy = true\n");
     }
     if let Some(c) = split.camera {
-        s.push_str(&format!("camera_m = [{:.4}, {:.4}, {:.4}]\n", c.x, c.y, c.z));
+        s.push_str(&format!(
+            "camera_m = [{:.4}, {:.4}, {:.4}]\n",
+            c.x, c.y, c.z
+        ));
     }
     if let Some(r) = split.pack_rake_deg {
         s.push_str(&format!("hub_rake_deg = {r:.3}\n"));

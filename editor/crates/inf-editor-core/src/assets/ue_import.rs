@@ -4897,9 +4897,10 @@ fn import_skel_vehicle(
     };
     use inf_ecs::vehicle_art::{art_guid_named, Facing};
     let Some(sk) = m.skeletal_meshes.iter().find(|s| s.key == v.skeletal) else {
-        report
-            .advisories
-            .push(format!("vehicle {}: no skeletal record {}", v.art, v.skeletal));
+        report.advisories.push(format!(
+            "vehicle {}: no skeletal record {}",
+            v.art, v.skeletal
+        ));
         return Ok(());
     };
     let Some(file) = sk
@@ -4966,7 +4967,10 @@ fn import_skel_vehicle(
                 let sg = inf_mesh::import_gltf(&base.join(f))
                     .map_err(|e| AssetError::Import(format!("steering {key}: {e}")))?;
                 steer_keys = rec.material_slots.clone();
-                steer_roles = steer_keys.iter().map(|k| slot_role(m, k.as_deref())).collect();
+                steer_roles = steer_keys
+                    .iter()
+                    .map(|k| slot_role(m, k.as_deref()))
+                    .collect();
                 sg.meshes.first().map(|x| SteeringMesh {
                     mesh: x.mesh.clone(),
                     rotation: ue_quat_to_gltf(c.root_rotation_quat),
@@ -5159,9 +5163,10 @@ fn import_weapon(
 ) -> Result<()> {
     let find = |key: &str| report.meshes.iter().find(|x| x.0 == key).map(|x| x.1);
     if find(&w.mesh).is_none() {
-        report
-            .advisories
-            .push(format!("weapon {}: mesh {} was not imported", w.art, w.mesh));
+        report.advisories.push(format!(
+            "weapon {}: mesh {} was not imported",
+            w.art, w.mesh
+        ));
         return Ok(());
     }
     let mut written = Vec::new();
@@ -5236,10 +5241,16 @@ fn import_weapon(
     }
     toml.push_str(&format!("class = \"{}\"\n", w.class));
     if let Some(p) = muzzle {
-        toml.push_str(&format!("muzzle_m = [{:.4}, {:.4}, {:.4}]\n", p.x, p.y, p.z));
+        toml.push_str(&format!(
+            "muzzle_m = [{:.4}, {:.4}, {:.4}]\n",
+            p.x, p.y, p.z
+        ));
     }
     if let Some(p) = magazine {
-        toml.push_str(&format!("magazine_m = [{:.4}, {:.4}, {:.4}]\n", p.x, p.y, p.z));
+        toml.push_str(&format!(
+            "magazine_m = [{:.4}, {:.4}, {:.4}]\n",
+            p.x, p.y, p.z
+        ));
     }
     std::fs::write(project.root().join(format!("{}.weapon.toml", w.art)), toml)?;
     report.advisories.push(format!(

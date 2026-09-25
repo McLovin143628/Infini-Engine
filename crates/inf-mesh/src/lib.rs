@@ -29,7 +29,6 @@ pub use asset::{
     TANGENT_PLACEHOLDER,
 };
 pub use error::MeshError;
-pub use section::{section_material_id, section_mesh_id, MAX_SECTIONS};
 pub use fracture::{
     clamp_chunk_count, derived_fracture_id, fracture_mesh, ChunkSection, FractureAsset,
     FractureChunk, FractureParams, FractureSkip, DEFAULT_CHUNK_COUNT, FRACTURE_ID_SALT,
@@ -44,3 +43,4 @@ pub use gltf_import::{
 pub use obj_import::import_obj;
 #[cfg(not(target_arch = "wasm32"))]
 pub use optimize::{optimize, simplify, Simplified};
+pub use section::{section_material_id, section_mesh_id, MAX_SECTIONS};

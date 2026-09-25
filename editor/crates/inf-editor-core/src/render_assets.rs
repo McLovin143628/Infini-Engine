@@ -478,7 +478,12 @@ impl EditorRenderAssets {
             Some(hit) => hit.clone(),
             None => {
                 let found: Vec<(u32, Uuid)> = (0..inf_mesh::MAX_SECTIONS)
-                    .map(|s| (s, inf_mesh::section_mesh_id(inf_asset::AssetId(mesh_id), s).uuid()))
+                    .map(|s| {
+                        (
+                            s,
+                            inf_mesh::section_mesh_id(inf_asset::AssetId(mesh_id), s).uuid(),
+                        )
+                    })
                     .filter(|(_, sid)| {
                         let v = inf_vgeom::derived_vmesh_id(inf_asset::AssetId(*sid)).uuid();
                         self.resolve_path(v).is_some()

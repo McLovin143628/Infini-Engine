@@ -287,7 +287,10 @@ fn build_world(args: &Args) -> Result<(BuiltWorld, TerrainContent), String> {
 /// slot order: every `inf_mesh::section_material_id(mesh, s)` for which
 /// `contains` answers -- the one probe both the pack walk and the dev-dir walk
 /// use. Empty for a mesh drawn whole.
-pub fn section_materials(contains: impl Fn(uuid::Uuid) -> bool, mesh: uuid::Uuid) -> Vec<uuid::Uuid> {
+pub fn section_materials(
+    contains: impl Fn(uuid::Uuid) -> bool,
+    mesh: uuid::Uuid,
+) -> Vec<uuid::Uuid> {
     (0..inf_mesh::MAX_SECTIONS)
         .map(|s| inf_mesh::section_material_id(inf_asset::AssetId(mesh), s).uuid())
         .filter(|id| contains(*id))
