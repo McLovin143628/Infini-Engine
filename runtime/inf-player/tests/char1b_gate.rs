@@ -4738,11 +4738,11 @@ fn a_ragdoll_draws_the_bodies_and_gets_up_without_a_snap() {
     // hand-off, which is the capsule being put down, not the blend. The steps
     // the physics pose is PART of (weight strictly between 0 and 1) are asked
     // on their own, over every joint but the roots, against the ragdoll's own
-    // p99 x 1.5. Measured: the
-    // local-space blend this audit replaced moved `middle_03_bulge_r` 981.9 mm
-    // in one step (`upperarm_r`'s shortest arc swapped sides, 129 degrees) and,
-    // with that flip held, the left hand 307 mm; the model-space blend with the
-    // held arc moves no joint more than 121 mm.
+    // p99 x 1.25. Measured: the local-space blend this audit replaced moved
+    // `middle_03_bulge_r` 981.9 mm in one step (`upperarm_r`'s shortest arc
+    // swapped sides, 129 degrees) and, with that flip held, the left hand
+    // 307 mm; the model-space blend on the SHORT arc alone 187.8 mm; the
+    // model-space blend with the held arc moves no joint more than 120.9 mm.
     let blend_max = handoff_limbs
         .iter()
         .zip(weights.iter())
@@ -4753,12 +4753,12 @@ fn a_ragdoll_draws_the_bodies_and_gets_up_without_a_snap() {
         "  the blend's own steps (0 < weight < 1): largest single-joint step {:.2} mm {}",
         blend_max * 1000.0,
         format_args!(
-            "against the ragdoll's p99 x 1.5 = {:.2} mm",
-            sim_p99 * 1500.0
+            "against the ragdoll's p99 x 1.25 = {:.2} mm",
+            sim_p99 * 1250.0
         )
     );
     assert!(
-        blend_max <= sim_p99 * 1.5,
+        blend_max <= sim_p99 * 1.25,
         "a step of the get-up blend moved one joint {:.2} mm against the ragdoll's own p99 {:.2} mm - {}",
         blend_max * 1000.0,
         sim_p99 * 1000.0,

@@ -3975,6 +3975,44 @@ fn crossed_markers(markers: &[inf_anim::AnimMarker], t0: f32, t1: f32, looping: 
 #[cfg(test)]
 mod tests {
 
+    /// **THE HELD ARC DOES NOT SWAP SIDES** (VEH3g audit) -- the get-up's
+    /// failure in a vacuum. `b` is frozen (the ragdoll's pose), `a` sweeps a
+    /// 300 degrees about Y (the clip animating), the weight sits at 0.5. The
+    /// shortest arc swaps sides as `a` passes `b`'s antipode and the drawn
+    /// rotation jumps; `continuous_slerp`, fed its own last answer, does not.
+    ///
+    /// Mutation that reds it: return `short` unconditionally.
+    #[test]
+    fn the_held_arc_does_not_swap_sides_at_the_antipode() {
+        let b = glam::Quat::IDENTITY;
+        let step = |i: i32| glam::Quat::from_rotation_y((i as f32) * 2.0f32.to_radians());
+        let mut prev_short = inf_math::pslerp(step(0), b, 0.5);
+        let mut prev_held = prev_short;
+        let (mut worst_short, mut worst_held) = (0.0f32, 0.0f32);
+        // 300 degrees: past the antipode at 180, short of the whole turn at
+        // 360 where the long arc has no plane (and `continuous_slerp` says so).
+        for i in 1..=150 {
+            let a = step(i);
+            let short = inf_math::pslerp(a, b, 0.5);
+            let held = super::continuous_slerp(a, b, 0.5, prev_held);
+            worst_short = worst_short.max(short.angle_between(prev_short).to_degrees());
+            worst_held = worst_held.max(held.angle_between(prev_held).to_degrees());
+            prev_short = short;
+            prev_held = held;
+        }
+        println!(
+            "largest step over the sweep: short arc {worst_short:.1} deg, held {worst_held:.1} deg"
+        );
+        assert!(
+            worst_short > 90.0,
+            "the fixture never crossed the antipode ({worst_short})"
+        );
+        assert!(
+            worst_held < 2.0,
+            "the held arc jumped {worst_held} deg in one 2-degree step"
+        );
+    }
+
     /// **THE PEEK'S LEAN MOVES THE HEAD, AND THE TWO SIDES ARE MIRRORS** — the
     /// arm the COV1 audit found missing.
     ///
