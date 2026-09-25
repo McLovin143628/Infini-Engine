@@ -116,6 +116,13 @@ param(
     # and holds the stick back into a STALL. Every frame triggers on the
     # craft columns (77-84), never on a sleep. `-AudioOnly`'s shape.
     [switch]$AirOnly,
+    # **THE WEAPON FRAMES ON THEIR OWN** (the VEH3f.2a audit). One frame of every
+    # `-ArmHero` id in a LIVING hero's hand, straight after the player is up and
+    # before anything is fired -- the wave's full session lost them because the
+    # WPN2a impact bursts drew a police response that shot the hero dead
+    # (hero.csv t=234.8 s, `Ragdoll` for the remaining 645 s) before WPN2d's leg
+    # began. Needs `-ArmHero`. `-AudioOnly`'s shape.
+    [switch]$WeaponsOnly,
     # **THE EDITOR LOOKS AT A PLACE** (VEH3g audit), `ex,ey,ez;tx,ty,tz`: after
     # the settled-editor frame, `lookat.mjs` stands the editor's 3D camera at
     # the eye looking at the target (the `viewport_look_at` preview door) and
@@ -1500,6 +1507,29 @@ if ($AirOnly) {
     Say "AIR ONLY (-AirOnly): the flight leg, and nothing else"
     Invoke-Veh3gLeg
 }
+if ($WeaponsOnly) {
+    Say "WEAPONS ONLY (-WeaponsOnly): one frame per -ArmHero id in a living hand, nothing fired"
+    if ($armList.Count -eq 0) {
+        Say "WEAPONS ONLY: -ArmHero names nothing -- no weapon to photograph"
+    } else {
+        Restore-PlayerFocus "the weapon frames"
+        Stand-Up "before the weapon frames" | Out-Null
+        # Level the aim (the WPN2d leg's recipe): down to the clamp, then up by
+        # a fixed amount, so the frame looks down the street.
+        [InfInput]::Look(0, 900);  Start-Sleep -Milliseconds 300
+        [InfInput]::Look(0, -440); Start-Sleep -Milliseconds 400
+        $cycleW = [math]::Max(4.0, $ArmDwellS) * ($armList.Count + 1)
+        foreach ($wid in $armList) {
+            $onIt = @(Wait-ForHero -Csv $heroCsv -What "`"$wid`" in a living hand" -TimeoutS $cycleW `
+                -Predicate { param($c) ($c.Count -gt 29) -and ($c[22].Trim() -eq $wid) -and ($c[5].Trim() -ne "Ragdoll") -and ($c[16].Trim() -eq "gameplay") })[-1]
+            if (-not $onIt) { Say "WEAPONS ONLY: no `"$wid`" in a living hand inside $cycleW s -- no frame"; continue }
+            $row = @(Get-Content $heroCsv | Where-Object { $_ -match "^[0-9]" })[-1].Split(",")
+            $cls = $row[29].Trim()
+            & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir ("95-weapon-{0}-{1}.png" -f $cls, $wid)) | ForEach-Object { Say $_ }
+            Say ("WEAPONS ONLY: {0} is class `"{1}`"; mode {2}, boom {3}, holder {4}, heat {5}" -f $wid, $cls, $row[5], $row[13], $row[16], $row[34])
+        }
+    }
+}
 if ($RosterOnly) {
     Say "ROSTER ONLY (-RosterOnly): the roster leg, and nothing else"
     Invoke-Veh3fLeg
@@ -1516,7 +1546,7 @@ if ($AudioOnly) {
     Say "AUDIO ONLY (-AudioOnly): the audio leg, and nothing else"
     Invoke-Veh3eLeg
 }
-if (-not $BoardingOnly -and -not $AudioOnly -and -not $RosterOnly -and -not $GalleryOnly -and -not $AirOnly) {
+if (-not $BoardingOnly -and -not $AudioOnly -and -not $RosterOnly -and -not $GalleryOnly -and -not $AirOnly -and -not $WeaponsOnly) {
 
 # ── 5a. THE ISLAND'S OWN SIDEARM, with no environment variable ───────────────
 #
@@ -3227,7 +3257,7 @@ if (Test-Path $heroCsv) {
 Say ("windows now: " + ((Get-Process | Where-Object { $_.MainWindowTitle -ne "" -and ($_.ProcessName -like "inf*") } |
     ForEach-Object { "$($_.ProcessName)[$($_.Id)] '$($_.MainWindowTitle)'" }) -join " | "))
 
-if (-not $BoardingOnly -and -not $AudioOnly -and -not $RosterOnly -and -not $GalleryOnly -and -not $AirOnly) {
+if (-not $BoardingOnly -and -not $AudioOnly -and -not $RosterOnly -and -not $GalleryOnly -and -not $AirOnly -and -not $WeaponsOnly) {
 # ── 6z. WAVE VEH3a — THE TYRES, AND WHAT THE GROUND UNDER THEM IS ────────────
 #
 # Four frames, every one TRIGGERED on `hero.csv`'s eight new columns rather than
