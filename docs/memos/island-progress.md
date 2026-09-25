@@ -41129,4 +41129,11 @@ the cruise ship have no authored route; the drawn gear leg ends above the
 wheel and the mast is capped by the hull box; DCC hero shells are VEH3f.2's;
 no in-player take-off frame (five sessions: see the report); the VEH3e salt
 collision at guid delta 0x10; `joint_impulse` reads one substep of four.
+**CHAR1b's get-up arm goes red on this island** (`char1b_gate::a_ragdoll_draws_
+the_bodies_and_gets_up_without_a_snap`): at the base level it passes by 12 mm
+(248.8 against a 261 mm ceiling); with the airfield's entities in the level the
+ragdoll settles one step earlier and joint 215 of 342 pops 0.98 m in ONE step
+at hand-off step 8 (982 mm). The pop is the get-up's, the perturbation is
+this wave's; not re-tuned under CHAR1b's arm. Air One moved to pad slot 4 (at
+2 it overlapped VEH3f's Harbour City tractor-trailer).
 
