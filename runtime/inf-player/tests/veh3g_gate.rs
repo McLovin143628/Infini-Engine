@@ -1453,16 +1453,31 @@ fn the_big_hulls_float_where_archimedes_puts_them() {
 #[test]
 fn the_sail_drives_across_the_wind_and_not_into_it() {
     let def = row("dundreary_marquis");
-    let run = |wind: (f32, f32), yaw: f64, name: &str| -> (f64, f64, f64) {
+    let run = |wind: (f32, f32), yaw: f64, name: &str| -> (f64, f64, f64, f64) {
         let mut sim = sea_sim(&def, wind, yaw);
         for _ in 0..240 {
             sim.step_once(Default::default());
         }
         let mut heel = 0.0f64;
         let mut rows = Vec::new();
+        // The FORCE LOG (VEH3g audit): the sail's own force along the keel,
+        // averaged over the last half minute -- what the no-go fill changes.
+        let (mut drive_sum, mut drive_n) = (0.0f64, 0usize);
         for i in 0..(60 * 60) {
             command(&mut sim, CRAFT, VehicleControls::default());
             let (_, r, _) = body_state(&sim, CRAFT);
+            if i >= 60 * 30 {
+                let m = sim
+                    .bridge3d()
+                    .vehicle_of(CRAFT)
+                    .and_then(|v| v.marine())
+                    .unwrap_or_default();
+                let bow = r * DVec3::Z;
+                drive_sum += m
+                    .sail_force
+                    .dot(DVec3::new(bow.x, 0.0, bow.z).normalize_or_zero());
+                drive_n += 1;
+            }
             let right = r * DVec3::X;
             let h = inf_math::patan2_64(right.y.abs(), (r * DVec3::Y).y).to_degrees();
             heel = heel.max(h);
@@ -1493,7 +1508,12 @@ fn the_sail_drives_across_the_wind_and_not_into_it() {
             .vehicle_of(CRAFT)
             .and_then(|v| v.marine())
             .unwrap_or_default();
-        (forward_speed(&sim, CRAFT), heel, m.apparent_wind_deg)
+        (
+            forward_speed(&sim, CRAFT),
+            heel,
+            m.apparent_wind_deg,
+            drive_sum / drive_n.max(1) as f64,
+        )
     };
     // The wind blows TOWARD +Z (it comes from the north, -Z).
     let north = (0.0f32, 8.0f32);
@@ -1506,7 +1526,7 @@ fn the_sail_drives_across_the_wind_and_not_into_it() {
     // blowing toward -X, head to wind for a boat pointing +X.
     let turned = run((-8.0, 0.0), 90.0, "beam_wind_turned");
     println!("THE SAIL (8 m/s wind, engine off, 60 s):");
-    for (name, (v, heel, app)) in [
+    for (name, (v, heel, app, drive)) in [
         ("head to wind", into),
         ("pinching, 20 off the wind", pinch),
         ("close-hauled, 45 off", close),
@@ -1514,8 +1534,40 @@ fn the_sail_drives_across_the_wind_and_not_into_it() {
         ("dead run", runs),
         ("beam heading, wind turned 90", turned),
     ] {
-        println!("  {name:30} {v:6.2} m/s  heel {heel:4.1} deg  apparent {app:5.1} deg");
+        println!(
+            "  {name:30} {v:6.2} m/s  heel {heel:4.1} deg  apparent {app:5.1} deg  sail drive {drive:8.1} N"
+        );
     }
+    // **THE NO-GO ZONE, READ WHERE THE FILL ACTS** (VEH3g audit). The speeds
+    // below stayed green with the no-go fill removed (the wave's own vacuous
+    // item), and so do the drives: measured with `fill` = 1, the pinching
+    // boat is pushed back until its apparent wind is 4.2 deg, where no trimmed
+    // sail draws (CD / CL = atan 6.6 deg) -- the no-go EDGE is the force
+    // geometry's, as the wave said. What the fill does is keep a sail that
+    // cannot be trimmed from making a trimmed sail's SIDE force: with it the
+    // pinching yacht heels 0.1 deg, without it 2.2 (and close-hauled makes
+    // 2.61 m/s, not 0.49). So the heel is asserted. Mutation: `fill` = 1 ->
+    // red (heel 2.2).
+    assert!(
+        pinch.1 < 0.5,
+        "20 deg off the wind the yacht heels {:.2} deg -- a luffing sail makes no side force",
+        pinch.1
+    );
+    assert!(
+        pinch.3 <= 0.0,
+        "20 deg off the wind the sail pulls {:.1} N along the keel -- a sail inside the no-go zone draws",
+        pinch.3
+    );
+    assert!(
+        into.3 < 0.0,
+        "head to wind the sail pulls {:.1} N along the keel",
+        into.3
+    );
+    assert!(
+        close.3 > 0.0,
+        "close-hauled at 45 deg the sail's drive is {:.1} N -- it does not draw",
+        close.3
+    );
     assert!(into.0 < 0.2, "head to wind it made {:.2} m/s", into.0);
     assert!(
         pinch.0 < 0.2,
