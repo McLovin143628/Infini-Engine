@@ -1374,27 +1374,63 @@ function Invoke-Veh3fGallery {
 # frames trigger on the hero log's craft columns: `$c[77]` the chassis height,
 # `$c[78]` the airspeed, `$c[79]` the angle of attack, `$c[80]` CL.
 function Invoke-Veh3gLeg {
+    # The centreline and the steering sense for the heading the -PlaceCar puts
+    # the Dodo on (90: rolling east from the west threshold; the pilot's right
+    # is south, so D steers toward LARGER z).
+    $RunwayZ = 2560.0
+    $SteerSign = 1
     Restore-PlayerFocus "before the flight leg"
     Stand-Up "before the flight leg" | Out-Null
     $isRow = { param($c) $c.Count -gt 84 }
     & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "140-veh3g-threshold.png") | ForEach-Object { Say $_ }
-    $inCraft = $false
-    for ($k = 0; $k -lt 20 -and -not $inCraft; $k++) {
+    # ONE tap, then WAIT: the first session tapped E every two seconds until
+    # the hero was seated, and the tap that landed while he was climbing in
+    # was an EXIT (hero.csv: entering at 26.6 s, exiting at 27.1 s).
+    $began = $false
+    for ($k = 0; $k -lt 10 -and -not $began; $k++) {
         [InfInput]::Down(0x12); Start-Sleep -Milliseconds 70; [InfInput]::Up(0x12)   # E
-        $inCraft = @(Wait-ForHero -Csv $heroCsv -What "in the cockpit (the craft columns live)" -TimeoutS 2.0 `
-            -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^driving") -and ([double]$c[77] -ne 0.0) })[-1]
+        $began = @(Wait-ForHero -Csv $heroCsv -What "the boarding begins" -TimeoutS 1.5 `
+            -Predicate { param($c) (& $isRow $c) -and ($c[54] -notmatch "^-?$") })[-1]
     }
+    $inCraft = $began -and @(Wait-ForHero -Csv $heroCsv -What "in the cockpit (the craft columns live)" -TimeoutS 12.0 `
+        -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^driving") -and ([double]$c[77] -ne 0.0) })[-1]
     if (-not $inCraft) {
-        Say "VEH3g: the hero never reached the Dodo's cockpit in twenty taps of E -- no flight frame in this session"
+        Say "VEH3g: the hero never reached the Dodo's cockpit -- no flight frame in this session"
         return
     }
     $rest = [double](@(Get-Content $heroCsv -ErrorAction Ignore | Where-Object { $_ -match "^[0-9]" } |
         Where-Object { ($_ -split ",").Count -gt 84 })[-1] -split ",")[77]
     Say ("VEH3g: in the cockpit, the chassis at {0:N2} m" -f $rest)
     [InfInput]::Down(0x11)   # W: full throttle
-    Wait-ForHero -Csv $heroCsv -What "the take-off roll (30 m/s through the air)" -TimeoutS 45.0 `
-        -Predicate { param($c) (& $isRow $c) -and ([double]$c[78] -gt 30.0) } `
-        -Out (Join-Path $OutDir "141-veh3g-roll.png") | Out-Null
+    # THE ROLL IS STEERED. The second session let go of the keys and the Dodo
+    # weathervaned 26 deg off the centreline in 15 s under the island's
+    # quartering wind and ran onto the apron into the parked Luxor. A pilot
+    # holds the centreline with the nose wheel: here, taps of A/D against the
+    # chassis's drift off `$RunwayZ`, the runway's centreline (the Harbour City
+    # Runway runs east-west, so its centreline is a z). `$SteerSign` is which
+    # key moves the chassis toward larger z for the heading the leg rolls on.
+    $rolled = $false
+    $deadline = (Get-Date).AddSeconds(45)
+    while ((Get-Date) -lt $deadline -and -not $rolled) {
+        $last = @(Get-Content $heroCsv -ErrorAction Ignore | Where-Object { $_ -match "^[0-9]" } |
+            Where-Object { ($_ -split ",").Count -gt 84 })[-1]
+        if ($null -ne $last) {
+            $c = $last.Split(",")
+            if ([double]$c[78] -gt 30.0) { $rolled = $true; break }
+            $dz = [double]$c[4] - $RunwayZ
+            if ([math]::Abs($dz) -gt 0.8) {
+                $key = if (($dz -lt 0) -eq ($SteerSign -gt 0)) { 0x20 } else { 0x1E }   # D or A
+                [InfInput]::Down($key); Start-Sleep -Milliseconds 90; [InfInput]::Up($key)
+            }
+        }
+        Start-Sleep -Milliseconds 150
+    }
+    if ($rolled) {
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "141-veh3g-roll.png") | ForEach-Object { Say $_ }
+        Say "TRIGGER the take-off roll (30 m/s through the air), steered on the centreline"
+    } else {
+        Say "TRIGGER the take-off roll NEVER reached 30 m/s through the air inside 45 s"
+    }
     [InfInput]::Down(0x39)   # Space: rotate
     Wait-ForHero -Csv $heroCsv -What "airborne (10 m over the runway)" -TimeoutS 20.0 `
         -Predicate { param($c) (& $isRow $c) -and ([double]$c[77] -gt $rest + 10.0) } `

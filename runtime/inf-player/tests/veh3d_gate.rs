@@ -2785,8 +2785,8 @@ fn the_roster_families_board_at_their_sockets_on_the_shipped_host() {
 
 /// **AN AEROPLANE, A HELICOPTER AND A BOAT BOARD AT THEIR SOCKETS ON THE
 /// SHIPPED HOST** (wave VEH3g) -- the air and sea families' cockpit and helm
-/// seats. Only the Maverick has a cabin door: the Dodo wears the biplane family
-/// (an open cockpit) and the Jetmax is a speedboat, so neither has a handle to
+/// seats. Only the Maverick has a cabin door: the Dodo wears the VEH3f aircraft family
+/// (no door part) and the Jetmax is a speedboat, so neither has a handle to
 /// reach and their `outer` column is honestly EMPTY, not zero.
 ///
 /// The same measurement as the roster arm above: the POSED joints against the
