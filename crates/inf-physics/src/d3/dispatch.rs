@@ -688,7 +688,7 @@ fn assign(
         // answers only a response the severity ladder already calls big
         // (`dispatch::AIR_UNIT_MIN_UNITS`).
         let air_wanted = wanted_units(world, res, incident_guid) >= dispatch::AIR_UNIT_MIN_UNITS;
-        let (air_homes, road_homes): (Vec<(Uuid, DVec3)>, Vec<(Uuid, DVec3)>) = homes
+        let (air_homes, road_homes): (Vec<_>, Vec<_>) = homes
             .into_iter()
             .partition(|(chassis, _)| dispatch::is_air_unit(world, *chassis));
         let mut costs = dispatch::route_costs(&graph, dest, &road_homes);

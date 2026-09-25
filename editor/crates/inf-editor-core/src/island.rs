@@ -529,7 +529,7 @@ fn airfield(doc: &mut SceneDoc, name: &str, strips: &[inf_island::AirstripSpec])
                     asset: None,
                 },
             );
-            insert!(doc, g, asphalt.clone());
+            insert!(doc, g, asphalt);
             if !strip.apron {
                 // The centreline, drawn: a stripe down the middle of the segment.
                 let m = derived(
@@ -554,7 +554,7 @@ fn airfield(doc: &mut SceneDoc, name: &str, strips: &[inf_island::AirstripSpec])
                         asset: None,
                     },
                 );
-                insert!(doc, m, paint.clone());
+                insert!(doc, m, paint);
             }
         }
         if !strip.apron {
@@ -584,7 +584,7 @@ fn airfield(doc: &mut SceneDoc, name: &str, strips: &[inf_island::AirstripSpec])
                         asset: None,
                     },
                 );
-                insert!(doc, m, paint.clone());
+                insert!(doc, m, paint);
             }
         } else {
             // The aeroplanes, parked on the apron nose along its long axis.
