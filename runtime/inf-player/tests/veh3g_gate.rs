@@ -332,9 +332,29 @@ struct Circuit {
     level_s: f64,
 }
 
+/// **The screen height**, metres: 35 ft, the obstacle the certified TAKE-OFF
+/// DISTANCE is measured to (the ground roll is only its first part).
+const SCREEN_HEIGHT_M: f64 = 10.7;
+
+/// **The attitude that flies at `vr`**, degrees of pitch: the angle of attack
+/// whose lift coefficient carries the weight at `vr` (CL max / (vr/Vs)^2 on the
+/// wing's own lift slope), less the wing's incidence -- what a pilot rotates
+/// to. A fixed 8 degrees under-rotated the heavies by five to seven degrees and
+/// left them skimming for kilometres (measured: the Luxor reached 35 ft
+/// 2 849 m from brake release at 8 degrees, 1 827 m at its rotate attitude).
+fn rotate_attitude_deg(def: &VehicleDef, vr_over_vs: f64) -> f64 {
+    let wing = inf_ecs::aero::Wing::of(&def.class.to_tuning()).expect("a wing");
+    (wing.cl_max() / (vr_over_vs * vr_over_vs) / wing.lift_slope()).to_degrees()
+        - inf_ecs::aero::WING_INCIDENCE_DEG
+}
+
 #[derive(Debug, Default)]
 struct CircuitReport {
+    /// The ground roll to the LAST wheel contact before the screen height --
+    /// a hop at rotation that comes back down does not end the roll.
     liftoff_roll_m: Option<f64>,
+    /// Brake release to 35 ft ([`SCREEN_HEIGHT_M`]), metres.
+    screen_m: Option<f64>,
     liftoff_ias: f64,
     peak_alt: f64,
     climb_rate: f64,
@@ -372,6 +392,14 @@ fn fly_circuit(mut sim: RuntimeSim, plan: &Circuit, max_s: f64) -> CircuitReport
             1 => {
                 c.throttle = 1.0;
                 c.vertical = pitch_hold(plan.climb_pitch, s.pitch);
+                if s.grounded > 0 && rep.screen_m.is_none() {
+                    // It came back down: the roll was not over.
+                    rep.liftoff_roll_m = Some(s.z - start_z);
+                    rep.liftoff_ias = s.ias;
+                }
+                if s.alt >= SCREEN_HEIGHT_M && rep.screen_m.is_none() {
+                    rep.screen_m = Some(s.z - start_z);
+                }
                 if s.alt >= plan.cruise_alt {
                     phase = 2;
                 }
@@ -446,7 +474,7 @@ fn the_dodo_takes_off_climbs_and_lands_on_a_strip() {
         strip_sim(&def),
         &Circuit {
             vr: vs * 1.1,
-            climb_pitch: 8.0,
+            climb_pitch: rotate_attitude_deg(&def, 1.1),
             cruise_alt: 40.0,
             level_s: 10.0,
         },
@@ -528,8 +556,15 @@ fn a_wing_with_no_area_never_leaves_the_ground() {
 /// **Every aeroplane lifts off inside the island's runway** -- the five rows'
 /// rolls on the flat lab, against the committed recipe's own runway length.
 ///
+/// The ROLL is to the last wheel contact before 35 ft (the first cut ended it
+/// at the first step with no contact, which a rotation hop satisfies: the
+/// heavies' "roll" read 20-80 m short). The distance to 35 ft -- what a
+/// certified take-off distance is -- is printed beside it and NOT asserted
+/// against the runway: the Luxor (1 827 m, against the Global 7500's published
+/// 1 768 m) and the Jetliner reach it past the far threshold. Carried.
+///
 /// **Mutation → red**: the Titan's `max_engine_force_n` back to VEH3f's
-/// 160 kN... measured 1 738 m, over the 1 700 m runway.
+/// 160 kN (measured in the mutation table of the VEH3g report).
 #[test]
 fn every_aeroplane_lifts_off_inside_the_islands_runway() {
     let recipe = inf_island::IslandRecipe::load(std::path::Path::new(concat!(
@@ -543,11 +578,14 @@ fn every_aeroplane_lifts_off_inside_the_islands_runway() {
         .find(|a| !a.apron)
         .expect("the island has a runway");
     println!(
-        "THE TAKE-OFF TABLE (flat lab, sea-level air, full power, rotate at 1.1 Vs, climb at \
-         8 deg) against the {:.0} m {}:",
+        "THE TAKE-OFF TABLE (flat lab, sea-level air, full power, rotate at 1.1 Vs to the \
+         attitude that flies there) against the {:.0} m {}:",
         runway.length_m, runway.name
     );
-    println!("  row                        mass t   Vs m/s   roll m   lift-off m/s   climb m/s");
+    println!(
+        "  row                        mass t   Vs m/s   rotate deg   roll m   to 35 ft m   \
+         lift-off m/s   climb m/s"
+    );
     let mut longest = 0.0f64;
     let mut rows = Vec::new();
     for id in [
@@ -559,11 +597,12 @@ fn every_aeroplane_lifts_off_inside_the_islands_runway() {
     ] {
         let def = row(id);
         let vs = stall_speed(&def);
+        let rotate = rotate_attitude_deg(&def, 1.1);
         let rep = fly_circuit(
             strip_sim(&def),
             &Circuit {
                 vr: vs * 1.1,
-                climb_pitch: 8.0,
+                climb_pitch: rotate,
                 cruise_alt: 30.0,
                 level_s: 0.0,
             },
@@ -577,14 +616,17 @@ fn every_aeroplane_lifts_off_inside_the_islands_runway() {
         let roll = rep
             .liftoff_roll_m
             .unwrap_or_else(|| panic!("{id} never lifted off"));
+        let screen = rep
+            .screen_m
+            .unwrap_or_else(|| panic!("{id} never reached 35 ft"));
         println!(
-            "  {id:26} {:6.1}  {vs:6.1}  {roll:7.0}  {:12.1}  {:9.2}",
+            "  {id:26} {:6.1}  {vs:6.1}  {rotate:10.1}  {roll:7.0}  {screen:10.0}  {:12.1}  {:9.2}",
             def.chassis_mass_kg() / 1000.0,
             rep.liftoff_ias,
             rep.climb_rate
         );
         rows.push(format!(
-            "{id},{:.0},{vs:.2},{roll:.1},{:.2},{:.2}",
+            "{id},{:.0},{vs:.2},{rotate:.2},{roll:.1},{screen:.1},{:.2},{:.2}",
             def.chassis_mass_kg(),
             rep.liftoff_ias,
             rep.climb_rate
@@ -598,7 +640,7 @@ fn every_aeroplane_lifts_off_inside_the_islands_runway() {
     }
     write_csv(
         "takeoff_table",
-        "row,mass_kg,vs_mps,roll_m,liftoff_mps,climb_mps",
+        "row,mass_kg,vs_mps,rotate_deg,roll_m,screen_m,liftoff_mps,climb_mps",
         &rows,
     );
     assert!(
