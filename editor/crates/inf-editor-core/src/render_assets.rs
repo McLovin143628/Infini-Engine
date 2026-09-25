@@ -486,7 +486,7 @@ impl EditorRenderAssets {
                     })
                     .filter(|(_, sid)| {
                         let v = inf_vgeom::derived_vmesh_id(inf_asset::AssetId(*sid)).uuid();
-                        self.resolve_path(v).is_some()
+                        self.probe_path(v).is_some()
                     })
                     .collect();
                 let arc: Arc<[(u32, Uuid)]> = found.into();
@@ -921,7 +921,7 @@ impl EditorRenderAssets {
         for mesh in rigid {
             for s in 0..inf_mesh::MAX_SECTIONS {
                 let mid = inf_mesh::section_material_id(inf_asset::AssetId(mesh), s).uuid();
-                if self.resolve_path(mid).is_some() {
+                if self.probe_path(mid).is_some() {
                     bindings.insert(mid);
                 }
             }
@@ -1111,6 +1111,22 @@ impl EditorRenderAssets {
     /// after it — a fresh import — would otherwise never be found. A GUID that is
     /// genuinely absent is remembered in `rescanned_for`, so a dangling reference
     /// costs one directory walk for the session rather than one per frame.
+    /// **A lookup that never rescans** (wave VEH3f.2a): the section probes ask
+    /// for 48 computed ids per mesh, and nearly all of them name nothing, so
+    /// [`resolve_path`](Self::resolve_path)'s rescan-on-miss re-walked the
+    /// whole content tree once per MISS -- 1 156 entities x 48 slots of
+    /// 7 476-file scans on the island, and the viewport never drew its first
+    /// frame (nor could Play take the document lock it held). The index is
+    /// built once if it is empty; a section written after that is found by
+    /// the next targeted invalidation's rescan, like any other new asset.
+    fn probe_path(&mut self, id: Uuid) -> Option<PathBuf> {
+        if self.index.is_empty() {
+            let root = self.content_root.clone()?;
+            self.index = content_paths_by_guid(&root);
+        }
+        self.index.get(&id).cloned()
+    }
+
     fn resolve_path(&mut self, id: Uuid) -> Option<PathBuf> {
         if let Some(p) = self.index.get(&id) {
             return Some(p.clone());
@@ -1253,6 +1269,33 @@ mod tests {
     use inf_anim::{AnimClip, Joint, JointTrack, JointTransform, QuatTrack};
     use inf_asset::AssetId;
     use inf_mesh::{MeshVertex, SubMesh, VertexSkin};
+
+    /// **The section probes never rescan** (wave VEH3f.2a): on the island,
+    /// every drawn mesh's 48 computed section ids missed through
+    /// `resolve_path`'s rescan-on-miss, one full content walk per miss, and the
+    /// editor viewport never drew its first frame. A thousand meshes with no
+    /// sections now cost no rescan at all.
+    ///
+    /// **Mutation**: `resolve_sections` probing through `resolve_path` -> red
+    /// (48 000 ids queued for a rescan).
+    #[test]
+    fn section_probes_never_rescan_the_content_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ra = EditorRenderAssets::new();
+        ra.set_content_root(Some(dir.path().to_path_buf()));
+        let generation = ra.index_generation();
+        for k in 0..1_000u128 {
+            assert!(ra
+                .resolve_sections(Uuid::from_u128(0xA11_0000 + k))
+                .is_empty());
+        }
+        assert!(
+            ra.rescanned_for.is_empty(),
+            "{} section ids were queued for a rescan",
+            ra.rescanned_for.len()
+        );
+        assert_eq!(ra.index_generation(), generation);
+    }
 
     /// A grid dense enough for a real multi-meshlet DAG, cheap enough for CI.
     fn grid_mesh(n: u32) -> MeshAsset {
