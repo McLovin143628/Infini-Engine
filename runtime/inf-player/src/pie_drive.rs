@@ -1197,6 +1197,12 @@ impl HeroLog {
         }
     }
 
+    /// Whether this log writes anywhere — the switch the input-delivery probe
+    /// (wave VEH3f.2a) rides, so a session nobody reads installs no hook.
+    pub fn enabled(&self) -> bool {
+        self.file.is_some()
+    }
+
     /// **Write one diagnostic line into the same log**, immediately.
     ///
     /// The demo loop reads this file and the editor's Output Log is behind the

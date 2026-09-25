@@ -65,6 +65,34 @@ pub struct InputState {
     axis_positions: BTreeMap<String, f32>,
     axis_deltas: BTreeMap<String, f32>,
     axis_values: BTreeMap<String, f32>,
+    // ── THE TAP LATCH (wave VEH3f.2a, item 0) ──
+    //
+    // What went down in the batch being applied, and what came back up in the
+    // SAME batch. See `apply_dt` for why a release of the second kind waits for
+    // the commit.
+    batch_down: TapSet,
+    batch_up: TapSet,
+}
+
+/// **One frame's worth of button sources** — keys, pad buttons, mouse buttons —
+/// for [`InputState`]'s tap latch.
+#[derive(Clone, Debug, Default)]
+struct TapSet {
+    keys: BTreeSet<String>,
+    buttons: BTreeSet<GamepadButton>,
+    mouse: BTreeSet<MouseButton>,
+}
+
+impl TapSet {
+    fn clear(&mut self) {
+        self.keys.clear();
+        self.buttons.clear();
+        self.mouse.clear();
+    }
+
+    fn is_empty(&self) -> bool {
+        self.keys.is_empty() && self.buttons.is_empty() && self.mouse.is_empty()
+    }
 }
 
 impl InputState {
@@ -83,6 +111,8 @@ impl InputState {
             axis_positions: BTreeMap::new(),
             axis_deltas: BTreeMap::new(),
             axis_values: BTreeMap::new(),
+            batch_down: TapSet::default(),
+            batch_up: TapSet::default(),
         }
     }
 
@@ -109,6 +139,8 @@ impl InputState {
         self.axes_raw.clear();
         self.mouse_down.clear();
         self.mouse_axes.clear();
+        self.batch_down.clear();
+        self.batch_up.clear();
         self.commit_frame();
         // A window losing focus is not a tap. `commit_frame` above fired the
         // release edges on purpose — an ability that ends on one must end — but
@@ -176,12 +208,68 @@ impl InputState {
     /// The duration is measured **here** and never in the sim, so the sim's
     /// input is the same discrete edge set it has always been and a trace stays
     /// byte-exact between the editor's preview and the shipped player.
+    ///
+    /// # A tap shorter than a frame is still a press (wave VEH3f.2a)
+    ///
+    /// The raw sets are LEVEL state and the actions are resolved once, at the
+    /// commit — so a button that goes down and comes back up inside one batch
+    /// used to leave no trace at all: inserted, removed, and resolved as never
+    /// held. The frame is the window of the loss, and on the island a frame is
+    /// not short: the VEH3g audit's sessions lost the boarding key in three of
+    /// four runs, with a 70 ms press against frames that ran longer than that.
+    /// A player's own quick tap of E is the same event.
+    ///
+    /// So a release that arrives in the SAME batch as its press is held back:
+    /// the source counts as down for this commit (the action rises, and the sim
+    /// sees its edge on its next step) and is released immediately after it,
+    /// so the following commit fires the falling edge. A release of something
+    /// pressed in an EARLIER batch is applied at once, exactly as before, and a
+    /// press after an in-batch release re-latches it — the batch's last word on
+    /// the level wins, and only the lost tap is recovered.
     pub fn apply_dt(&mut self, events: &[InputEvent], dt: f64) {
+        self.batch_down.clear();
+        self.batch_up.clear();
         for e in events {
             self.apply_raw(e);
         }
         let dt = if dt.is_finite() && dt > 0.0 { dt } else { 0.0 };
         self.commit_frame_dt(dt);
+        if !self.batch_up.is_empty() {
+            let up = std::mem::take(&mut self.batch_up);
+            for k in &up.keys {
+                self.keys_down.remove(k);
+            }
+            for b in &up.buttons {
+                self.buttons_down.remove(b);
+            }
+            for m in &up.mouse {
+                self.mouse_down.remove(m);
+            }
+        }
+    }
+
+    /// **How many taps the last [`apply_dt`](Self::apply_dt) latched** — sources
+    /// that went down and came back up inside that one batch and were held for
+    /// its commit. The instrument the player's input probe logs; zero on every
+    /// frame whose presses each outlived it.
+    pub fn latched_taps(&self) -> usize {
+        self.batch_down
+            .keys
+            .iter()
+            .filter(|k| !self.keys_down.contains(*k))
+            .count()
+            + self
+                .batch_down
+                .buttons
+                .iter()
+                .filter(|b| !self.buttons_down.contains(*b))
+                .count()
+            + self
+                .batch_down
+                .mouse
+                .iter()
+                .filter(|m| !self.mouse_down.contains(*m))
+                .count()
     }
 
     fn apply_raw(&mut self, event: &InputEvent) {
@@ -189,6 +277,10 @@ impl InputState {
             InputEvent::Key { code, pressed } => {
                 if *pressed {
                     self.keys_down.insert(code.clone());
+                    self.batch_down.keys.insert(code.clone());
+                    self.batch_up.keys.remove(code);
+                } else if self.batch_down.keys.contains(code) {
+                    self.batch_up.keys.insert(code.clone());
                 } else {
                     self.keys_down.remove(code);
                 }
@@ -196,6 +288,10 @@ impl InputState {
             InputEvent::GamepadButton { button, pressed } => {
                 if *pressed {
                     self.buttons_down.insert(*button);
+                    self.batch_down.buttons.insert(*button);
+                    self.batch_up.buttons.remove(button);
+                } else if self.batch_down.buttons.contains(button) {
+                    self.batch_up.buttons.insert(*button);
                 } else {
                     self.buttons_down.remove(button);
                 }
@@ -210,6 +306,10 @@ impl InputState {
             InputEvent::MouseButton { button, pressed } => {
                 if *pressed {
                     self.mouse_down.insert(*button);
+                    self.batch_down.mouse.insert(*button);
+                    self.batch_up.mouse.remove(button);
+                } else if self.batch_down.mouse.contains(button) {
+                    self.batch_up.mouse.insert(*button);
                 } else {
                     self.mouse_down.remove(button);
                 }
@@ -526,5 +626,77 @@ mod tests {
             pressed: true,
         }]);
         assert!(st.pressed("sprint") && st.just_pressed("sprint"));
+    }
+
+    /// **A tap shorter than a frame is a press** (wave VEH3f.2a, item 0).
+    ///
+    /// The VEH3g audit's shipped sessions lost the boarding key in three runs
+    /// of four: the key went down and came back up between two commits, and the
+    /// level state resolved it as never held. Here: a press and its release in
+    /// ONE batch rise the action on that commit and fall it on the next, for a
+    /// key, a pad button and a mouse button; a release of something pressed in
+    /// an EARLIER batch still lands at once; and a press after an in-batch
+    /// release leaves the source held.
+    ///
+    /// **Mutation**: the latch removed (a release always removes at once) → the
+    /// first assertion is red, `interact` never rises.
+    #[test]
+    fn a_tap_inside_one_frame_is_still_a_press() {
+        let mut map = InputMap::default();
+        map.bind_action("interact", ActionSource::Key("KeyE".into()));
+        map.bind_action("jump", ActionSource::GamepadButton(GamepadButton::South));
+        map.bind_action("attack", ActionSource::MouseButton(MouseButton::Left));
+        let mut st = InputState::new(map);
+        let key = |pressed| InputEvent::Key {
+            code: "KeyE".into(),
+            pressed,
+        };
+        let pad = |pressed| InputEvent::GamepadButton {
+            button: GamepadButton::South,
+            pressed,
+        };
+        let mouse = |pressed| InputEvent::MouseButton {
+            button: MouseButton::Left,
+            pressed,
+        };
+        st.apply_dt(
+            &[
+                key(true),
+                key(false),
+                pad(true),
+                pad(false),
+                mouse(true),
+                mouse(false),
+            ],
+            0.1,
+        );
+        for a in ["interact", "jump", "attack"] {
+            assert!(
+                st.just_pressed(a),
+                "`{a}` was tapped inside one frame and never rose"
+            );
+        }
+        assert_eq!(st.latched_taps(), 3);
+        assert!(
+            !st.anything_held(),
+            "a latched tap stayed down after its frame"
+        );
+        st.apply_dt(&[], 0.016);
+        for a in ["interact", "jump", "attack"] {
+            assert!(st.just_released(a), "`{a}` never fell after its tap");
+        }
+        assert_eq!(st.latched_taps(), 0);
+        // A press that OUTLIVES its frame releases at once, as it always did.
+        st.apply_dt(&[key(true)], 0.016);
+        st.apply_dt(&[key(false)], 0.016);
+        assert!(st.just_released("interact") && !st.pressed("interact"));
+        // Down, up, down in one batch: the batch's last word — held.
+        st.apply_dt(&[key(true), key(false), key(true)], 0.016);
+        assert!(st.just_pressed("interact"));
+        st.apply_dt(&[], 0.016);
+        assert!(
+            st.pressed("interact"),
+            "a re-press in the batch was released"
+        );
     }
 }

@@ -194,6 +194,16 @@ pub struct PlayerApp {
     /// The demo loop's hero log (wave FIX1) — inert unless `INF_PIE_HERO_LOG`
     /// names a path. See [`crate::pie_drive::HeroLog`].
     hero_log: crate::pie_drive::HeroLog,
+    /// **The input-delivery probe** (wave VEH3f.2a, item 0): on only when the
+    /// hero log is, it writes one line per key event at each of the three
+    /// places a key can be lost — the OS (`# key OS ...`, off a low-level hook,
+    /// with whether it was injected and who had the foreground), this window
+    /// (`# key WIN ...`, the winit event, with the frame it landed in), and the
+    /// resolved action (`# key ACT ...`, the rising edge the sim will see) —
+    /// plus `# key TAP ...` for a tap the latch recovered inside one frame.
+    key_probe: bool,
+    /// This frame's window key events, for the probe.
+    probe_keys: Vec<(&'static str, bool)>,
     /// **The demo loop's one-shot placement** (CHAR1b.2 audit) — inert unless
     /// `INF_PIE_SPAWN_AT` / `INF_PIE_WEAR_CLOTH` are set, and consulted only in
     /// a PREVIEW session (see the `self.pie.is_some()` guard at its call site,
@@ -363,6 +373,8 @@ impl PlayerApp {
             grab_frames: 0,
             keyboard_grabbed: false,
             hero_log: crate::pie_drive::HeroLog::from_env(),
+            key_probe: false,
+            probe_keys: Vec::new(),
             spawn_override: crate::pie_drive::SpawnOverride::from_env(),
             board_hold: crate::pie_drive::BoardHold::from_env(),
             audio_hold: crate::pie_drive::AudioHold::from_env(),
@@ -386,6 +398,14 @@ impl PlayerApp {
         // own record can be read back beside its frames.
         if let Some(line) = device_line {
             app.hero_log.note(&line);
+        }
+        if app.hero_log.enabled() {
+            app.key_probe = true;
+            let hooked = crate::win_host::start_key_probe();
+            app.hero_log.note(&format!(
+                "key probe ON (window + action lines; OS hook {})",
+                if hooked { "installed" } else { "unavailable" }
+            ));
         }
         app
     }
@@ -1152,6 +1172,59 @@ impl PlayerApp {
         }
     }
 
+    /// **The input-delivery probe's lines for one frame** (wave VEH3f.2a).
+    ///
+    /// OS first (what the keyboard hook saw since the last frame), then the
+    /// window (what winit delivered into this frame), then the actions the
+    /// resolved state raised — so a key that died between two of the three is
+    /// named by where its trail stops. Steps are the sim's, so a line reads
+    /// against hero.csv.
+    fn probe_input(&mut self, dt: f64) {
+        let step = self.sim.steps();
+        let me = std::process::id();
+        for k in crate::win_host::drain_os_keys() {
+            self.hero_log.note(&format!(
+                "key OS vk={:#04x} {} {} t={}ms foreground={} step {step}",
+                k.vk,
+                if k.down { "down" } else { "up" },
+                if k.injected { "INJECTED" } else { "keyboard" },
+                k.time_ms,
+                if k.foreground_pid == me {
+                    "OURS".to_string()
+                } else {
+                    format!("pid {}", k.foreground_pid)
+                }
+            ));
+        }
+        let keys = std::mem::take(&mut self.probe_keys);
+        for (code, down) in &keys {
+            self.hero_log.note(&format!(
+                "key WIN {code} {} frame_dt={:.1}ms focused={} step {step}",
+                if *down { "down" } else { "up" },
+                dt * 1000.0,
+                self.focused
+            ));
+        }
+        let taps = self.input_state.latched_taps();
+        if taps > 0 {
+            self.hero_log.note(&format!(
+                "key TAP {taps} source(s) went down and up inside one {:.1}ms frame; latched for this commit step {step}",
+                dt * 1000.0
+            ));
+        }
+        let risen: Vec<String> = self
+            .input_state
+            .map()
+            .action_names()
+            .filter(|a| self.input_state.just_pressed(a))
+            .map(str::to_string)
+            .collect();
+        for a in risen {
+            self.hero_log
+                .note(&format!("key ACT {a} rises step {step}"));
+        }
+    }
+
     fn frame(&mut self, event_loop: &ActiveEventLoop) {
         // **The window-handle re-attempt** (round-2 finding B7). `resumed`
         // runs its body once per process, so a failed report there had nothing
@@ -1179,6 +1252,9 @@ impl PlayerApp {
         // accumulated by `RuntimeSim` on its fixed step; see
         // `inf_input::HoldClock` for why the two must not be the same number.
         self.input_state.apply_dt(&events, dt);
+        if self.key_probe {
+            self.probe_input(dt);
+        }
         // ── the in-game menu (island wave I5) ──
         //
         //    The `menu` action's edge is read HERE, from the resolved state,
@@ -1647,6 +1723,9 @@ impl ApplicationHandler for PlayerApp {
                         return;
                     }
                     if let Some(name) = input::keycode_to_code(code) {
+                        if self.key_probe && !event.repeat {
+                            self.probe_keys.push((name, pressed));
+                        }
                         // **The dialog gets it first, and what it takes never
                         // reaches the game.** The same press that moves the
                         // cursor would otherwise also fire a weapon — and a key

@@ -271,6 +271,80 @@ mod imp {
             let _ = unsafe { AttachThreadInput(ptid, mytid, false) };
         }
     }
+
+    // ── THE INPUT-DELIVERY PROBE (wave VEH3f.2a, item 0) ──
+
+    use std::sync::Mutex;
+
+    use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CallNextHookEx, GetMessageW, SetWindowsHookExW, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG,
+        WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    };
+
+    use super::OsKey;
+
+    /// What the hook has seen and nobody has drained yet; bounded so a probe
+    /// nobody reads cannot grow for ever.
+    static OS_KEYS: Mutex<Vec<OsKey>> = Mutex::new(Vec::new());
+    static PROBE_STARTED: AtomicBool = AtomicBool::new(false);
+    const OS_KEYS_CAP: usize = 4096;
+
+    unsafe extern "system" fn hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        if code >= 0 {
+            let k = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
+            let msg = wparam.0 as u32;
+            let down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
+            let up = msg == WM_KEYUP || msg == WM_SYSKEYUP;
+            if down || up {
+                let fg = unsafe { GetForegroundWindow() };
+                let mut pid = 0u32;
+                if !fg.0.is_null() {
+                    unsafe { GetWindowThreadProcessId(fg, Some(&mut pid)) };
+                }
+                if let Ok(mut v) = OS_KEYS.lock() {
+                    if v.len() < OS_KEYS_CAP {
+                        v.push(OsKey {
+                            vk: k.vkCode,
+                            down,
+                            injected: (k.flags.0 & LLKHF_INJECTED.0) != 0,
+                            time_ms: k.time,
+                            foreground_pid: pid,
+                        });
+                    }
+                }
+            }
+        }
+        unsafe { CallNextHookEx(None, code, wparam, lparam) }
+    }
+
+    pub fn start_key_probe() -> bool {
+        if PROBE_STARTED.swap(true, Ordering::SeqCst) {
+            return true;
+        }
+        // Its own thread with its own message loop: a low-level hook is called
+        // on the INSTALLING thread's queue, and the window thread spends whole
+        // frames (hundreds of ms on the island) away from its pump -- long
+        // enough for Windows to time the hook out and remove it silently.
+        std::thread::Builder::new()
+            .name("inf-key-probe".into())
+            .spawn(|| {
+                let installed = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook), None, 0) };
+                if installed.is_err() {
+                    return;
+                }
+                let mut msg = MSG::default();
+                while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {}
+            })
+            .is_ok()
+    }
+
+    pub fn drain_os_keys() -> Vec<OsKey> {
+        OS_KEYS
+            .lock()
+            .map(|mut v| std::mem::take(&mut *v))
+            .unwrap_or_default()
+    }
 }
 
 #[cfg(not(windows))]
@@ -293,6 +367,47 @@ mod imp {
     }
 
     pub fn release_keyboard_focus() {}
+
+    pub fn start_key_probe() -> bool {
+        false
+    }
+
+    pub fn drain_os_keys() -> Vec<super::OsKey> {
+        Vec::new()
+    }
+}
+
+/// **One key event as the OPERATING SYSTEM saw it** (wave VEH3f.2a, item 0) —
+/// read by a low-level keyboard hook, before any window's focus decides who
+/// receives it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OsKey {
+    /// The virtual-key code (`0x45` is E).
+    pub vk: u32,
+    /// Down, or up.
+    pub down: bool,
+    /// `LLKHF_INJECTED`: `SendInput` (the demo loop) rather than a keyboard.
+    pub injected: bool,
+    /// The event's own timestamp, milliseconds (the OS tick).
+    pub time_ms: u32,
+    /// Which process owned the foreground window when it happened.
+    pub foreground_pid: u32,
+}
+
+/// **Start the input-delivery probe** (wave VEH3f.2a, item 0): a low-level
+/// keyboard hook on its own thread that records every key event the OS
+/// delivers, whether it was injected, and who had the foreground. `false`
+/// where there is no such hook (every platform but Windows).
+///
+/// Started by the PIE sessions the demo loop drives, never by a shipped game:
+/// a system-wide hook is a diagnosis, not a feature.
+pub fn start_key_probe() -> bool {
+    imp::start_key_probe()
+}
+
+/// Everything the probe has seen since the last drain, in OS order.
+pub fn drain_os_keys() -> Vec<OsKey> {
+    imp::drain_os_keys()
 }
 
 /// The console **window** this process owns, if any. `None` is the shipped
