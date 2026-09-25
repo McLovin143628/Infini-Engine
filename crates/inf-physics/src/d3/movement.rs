@@ -3619,12 +3619,21 @@ fn step_driving(
             )
         }
     } else if at_the_wheel {
-        inf_ecs::vehicle::VehicleControls::from_intent(
+        let c = inf_ecs::vehicle::VehicleControls::from_intent(
             cm.runtime.intent_move,
             forward_mps,
             cm.runtime.want_handbrake,
             cm.runtime.intent_vertical,
-        )
+        );
+        // A wing's W is its power lever, rolling back or not (VEH3g audit).
+        if bridge
+            .vehicle_of(vehicle)
+            .is_some_and(|v| v.flight().is_some())
+        {
+            c.as_power_lever(cm.runtime.intent_move.y)
+        } else {
+            c
+        }
     } else {
         inf_ecs::vehicle::VehicleControls::from_intent(Vec2d::new(0.0, 0.0), forward_mps, true, 0.0)
     };

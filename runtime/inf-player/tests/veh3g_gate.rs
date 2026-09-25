@@ -2744,3 +2744,108 @@ fn no_two_sounds_in_the_world_share_a_source_key() {
         closest.1
     );
 }
+
+/// **D TURNS THE AEROPLANE RIGHT, ON THE GROUND AND IN THE AIR** (VEH3g
+/// audit) -- the stick's lateral sense, read off the heading.
+///
+/// The shipped keyboard binds `D` to `move_x` +1, the steer a car and a
+/// walking hero both read as "toward the body's own +X" (the character's
+/// right; `inf_physics::d3::movement`'s wish basis). Asked of the Dodo: on the
+/// strip at taxi speed the nose wheel must swing the heading toward +X, and at
+/// 300 m and 40 m/s the ailerons (and the rudder on the same stick) must bank
+/// and turn it the SAME way. A keyboard pilot whose D steers right on the
+/// runway and banks left once airborne cannot fly the circuit the frames need.
+///
+/// Mutation that reds it: the aileron's sign flipped back.
+#[test]
+fn d_turns_the_aeroplane_right_on_the_ground_and_in_the_air() {
+    let def = row("mammoth_dodo");
+    let heading = |sim: &RuntimeSim| {
+        let f = body_state(sim, CRAFT).1 * DVec3::Z;
+        inf_math::patan2_64(f.x, f.z).to_degrees()
+    };
+    // The ground: taxi, then full right.
+    let mut sim = strip_sim(&def);
+    for _ in 0..90 {
+        sim.step_once(Default::default());
+    }
+    for _ in 0..240 {
+        command(
+            &mut sim,
+            CRAFT,
+            VehicleControls {
+                throttle: 0.6,
+                ..Default::default()
+            },
+        );
+    }
+    let h0 = heading(&sim);
+    for _ in 0..120 {
+        command(
+            &mut sim,
+            CRAFT,
+            VehicleControls {
+                throttle: 0.6,
+                steer: 1.0,
+                ..Default::default()
+            },
+        );
+    }
+    let ground_turn = heading(&sim) - h0;
+    // The air: level at 300 m and 40 m/s, then full right for three seconds.
+    let mut sim = strip_sim(&def);
+    assert!(sim.place_vehicle(
+        CRAFT,
+        DVec3::new(0.0, 300.0, -STRIP_HALF_L + 200.0),
+        DQuat::IDENTITY
+    ));
+    {
+        let b = sim.bridge3d_mut();
+        let body = b.body_of(CRAFT).expect("a body");
+        b.world_mut()
+            .set_body_linvel(body, DVec3::new(0.0, 0.0, 40.0));
+    }
+    for _ in 0..60 {
+        command(
+            &mut sim,
+            CRAFT,
+            VehicleControls {
+                throttle: 0.8,
+                ..Default::default()
+            },
+        );
+    }
+    let a0 = heading(&sim);
+    let mut bank_right = 0.0f64;
+    for _ in 0..180 {
+        command(
+            &mut sim,
+            CRAFT,
+            VehicleControls {
+                throttle: 0.8,
+                steer: 1.0,
+                ..Default::default()
+            },
+        );
+        // The body's +X wing going DOWN is a bank to the right.
+        let x_wing = body_state(&sim, CRAFT).1 * DVec3::X;
+        bank_right = bank_right.max(-x_wing.y);
+    }
+    let air_turn = heading(&sim) - a0;
+    println!(
+        "D (steer +1): on the ground the heading moved {ground_turn:+.1} deg; in the air {air_turn:+.1} deg, the +X wing down {:.1} deg at most",
+        bank_right.asin().to_degrees()
+    );
+    assert!(
+        ground_turn > 5.0,
+        "the nose wheel turned the heading {ground_turn:+.1} deg under D"
+    );
+    assert!(
+        air_turn > 5.0,
+        "in the air D turned the Dodo {air_turn:+.1} deg -- the other way from the nose wheel"
+    );
+    assert!(
+        bank_right > 0.1,
+        "in the air D did not lower the right (+X) wing"
+    );
+}

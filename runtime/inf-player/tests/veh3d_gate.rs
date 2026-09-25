@@ -4666,3 +4666,153 @@ fn the_roster_families_seat_their_driver_inside_and_the_car_stays_on_its_wheels(
     }
     assert_eq!(rows, 8, "the table did not walk every roster family");
 }
+
+/// **A PILOT ON THE SHIPPED INPUT PATH FLIES THE DODO OFF THE ISLAND'S WIND**
+/// (VEH3g audit, priority b') -- the three defects behind the wave's fourth
+/// and second sessions, read off the aeroplane.
+///
+/// The wave's fourth `-AirOnly` session boarded the Dodo, held W for 45 s and
+/// logged a spool of **0.000 over 392 cockpit rows** while it rolled backwards
+/// at 3 m/s; the second let go of the keys and the parked aeroplane
+/// weathervaned 26 deg onto the apron. Reproduced here on `RuntimeSim`'s own
+/// input door (`RuntimeInput`, the keyboard's `move_x` / `move_y` / `interact`):
+///
+/// * **the wind up the tail** (8 m/s, the island's is 6.3): the elevator's
+///   attitude command read the reversed flow as 180 deg of angle of attack
+///   and pitched at it, and the gear crept BACKWARDS (-0.63 m/s) -- a parked
+///   aeroplane with nobody in it now stands on its parking brake, and the
+///   control surfaces need the air from the nose;
+/// * **W while rolling back**: `VehicleControls::from_intent` read a forward
+///   stick while rolling backwards as the BRAKE (a car driver's rule), so the
+///   engine never spooled -- on a wing W is the power lever;
+/// * **the centreline**: a pilot holding the heading on the nose wheel in the
+///   island's own wind (6.3 m/s, 18 deg off the runway) keeps it within a few
+///   degrees to 30 m/s, into wind and down it.
+///
+/// Mutations that red it: `as_power_lever` not applied (the spool from a
+/// backward roll); the parking brake line removed (the parked creep).
+#[test]
+fn a_shipped_pilot_spools_and_holds_the_dodo_in_the_islands_wind() {
+    use inf_ecs::movement::actions::{INTERACT, MOVE_X, MOVE_Y};
+    use inf_player::runtime_sim::RuntimeInput;
+    let def = catalogue_def("mammoth_dodo");
+    let seat = def
+        .body
+        .parts()
+        .iter()
+        .find(|p| p.name == "seat_r")
+        .map(|p| p.centre.z * def.half_extents.z)
+        .unwrap_or(0.0);
+    // (wind x, wind z, push the aeroplane backwards once seated?)
+    let cases = [
+        ("tail wind 8 m/s", (0.0f32, 8.0f32), true),
+        ("island wind into it", (2.0, -6.0), false),
+        ("island wind down it", (2.0, 6.0), false),
+    ];
+    let mut bad = Vec::new();
+    for (name, wind, push_back) in cases {
+        let mut sim = rigged_runtime_sim_for("mammoth_dodo", DVec3::new(1.6, 0.0, seat - 0.6));
+        {
+            let w = sim.world_mut();
+            let e = w.spawn_with_guid(Uuid::from_u128(0x5C1E), "Sky", None);
+            w.world_mut().entity_mut(e).insert((
+                inf_ecs::components::TimeOfDay::default(),
+                inf_ecs::components::SkyAtmosphere {
+                    weather_enabled: false,
+                    cloud_wind_x: wind.0,
+                    cloud_wind_z: wind.1,
+                    ..Default::default()
+                },
+            ));
+            w.mark_dirty();
+        }
+        let chassis = |sim: &inf_player::runtime_sim::RuntimeSim| {
+            let b = sim.bridge3d().body_of(CHASSIS).expect("a body");
+            let w = sim.bridge3d().world();
+            let r = w.body_rotation(b).expect("r");
+            let fz = r * DVec3::Z;
+            (
+                w.body_linvel(b).expect("v").dot(fz),
+                inf_math::patan2_64(fz.x, fz.z).to_degrees(),
+            )
+        };
+        let (mut creep, mut worst) = (0.0f64, 0.0f64);
+        let (mut driving_at, mut spooled_at) = (None::<u32>, None::<u32>);
+        let mut lifted = false;
+        for i in 0..2100u32 {
+            let e = sim.world().entity_of(HERO).expect("hero");
+            let phase = sim
+                .world()
+                .world()
+                .get::<CharacterMovement>(e)
+                .expect("cm")
+                .runtime
+                .boarding
+                .phase;
+            let mut input = RuntimeInput::default();
+            if i == 360 {
+                input = input.press(INTERACT);
+            }
+            if driving_at.is_none() && phase == BoardPhase::Driving {
+                driving_at = Some(i);
+                if push_back {
+                    // Rolling backwards when the pilot opens the throttle.
+                    let b = sim.bridge3d().body_of(CHASSIS).expect("a body");
+                    let r = sim.bridge3d().world().body_rotation(b).expect("r");
+                    sim.bridge3d_mut()
+                        .world_mut()
+                        .set_body_linvel(b, r * DVec3::new(0.0, 0.0, -3.0));
+                }
+            }
+            let (fwd, h) = chassis(&sim);
+            if driving_at.is_none() && (240..360).contains(&i) {
+                creep = creep.max(fwd.abs());
+            }
+            if let Some(d) = driving_at {
+                if i > d + 5 {
+                    input = input
+                        .axis_at(MOVE_Y, 1.0)
+                        .axis_at(MOVE_X, (-h / 3.0).clamp(-1.0, 1.0) as f32);
+                }
+            }
+            sim.step_once(input);
+            let f = sim
+                .bridge3d()
+                .vehicle_of(CHASSIS)
+                .and_then(|v| v.flight())
+                .unwrap_or_default();
+            if let Some(d) = driving_at {
+                if i > d + 5 && spooled_at.is_none() && f.spool > 0.8 {
+                    spooled_at = Some(i - d - 5);
+                }
+                if f.airspeed_mps < 30.0 && !lifted {
+                    worst = worst.max(chassis(&sim).1.abs());
+                } else {
+                    lifted = true;
+                }
+            }
+        }
+        println!(
+            "  {name:22} parked creep {creep:.3} m/s; spool 0.8 after {} steps of W{}; heading worst {worst:.1} deg to 30 m/s",
+            spooled_at.map(|s| s.to_string()).unwrap_or("NEVER".into()),
+            if push_back { " (rolling back 3 m/s)" } else { "" }
+        );
+        if creep > 0.1 {
+            bad.push(format!("{name}: the parked Dodo crept {creep:.2} m/s"));
+        }
+        if spooled_at.is_none_or(|s| s > 90) {
+            bad.push(format!(
+                "{name}: W did not spool the engine inside 1.5 s ({spooled_at:?})"
+            ));
+        }
+        if !push_back && worst > 10.0 {
+            bad.push(format!(
+                "{name}: the pilot was {worst:.1} deg off the heading"
+            ));
+        }
+        if !lifted {
+            bad.push(format!("{name}: never reached 30 m/s"));
+        }
+    }
+    assert!(bad.is_empty(), "{bad:#?}");
+}

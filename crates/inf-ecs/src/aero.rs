@@ -202,6 +202,13 @@ pub const WING_LEVELLER: f64 = 0.6;
 /// radian of sideslip -- the fin.
 pub const YAW_STIFFNESS: f64 = 1.5;
 
+/// **The rudder's authority IN THE AIR**, degrees of sideslip full rudder
+/// balances (VEH3g audit). Without it full aileron banked the Dodo 19 deg at
+/// 40 m/s and turned it 0.3 deg in three seconds; with it, 5.7 deg the same
+/// way the nose wheel steers (`veh3g_gate::d_turns_the_aeroplane_right_on_the_
+/// ground_and_in_the_air`). Off on the gear -- see `fixed_wing_forces`.
+pub const RUDDER_SLIP_DEG: f64 = 20.0;
+
 /// The yaw mode's damping ratio.
 pub const YAW_DAMPING_RATIO: f64 = 0.8;
 
@@ -228,6 +235,11 @@ pub const JET_SPOOL_S: f64 = 3.0;
 
 /// How much of its static thrust a jet loses by its own top speed (ram drag).
 pub const JET_RAM_DROP: f64 = 0.25;
+
+/// The forward share of the airflow (`u / |air|`) under which the control
+/// surfaces' restoring stiffness fades -- 0.2 is 78 degrees of flow (VEH3g
+/// audit). See `fixed_wing_forces`.
+pub const REVERSE_FLOW_FADE: f64 = 0.2;
 
 /// Below this airspeed, m/s, the model applies no aerodynamic force at all: the
 /// angle of attack of a stationary aeroplane is undefined, not zero.
@@ -449,6 +461,7 @@ pub fn fixed_wing_forces(
     chassis: &ChassisState,
     spool: &mut f64,
     flap: f64,
+    on_gear: bool,
     engine_scale: f64,
     dt: f64,
     out: &mut Vec<WheelForce>,
@@ -506,6 +519,16 @@ pub fn fixed_wing_forces(
     let weight = chassis.mass_kg.max(0.0) * 9.81;
     let q_stall = wing.stall_q(weight);
     let auth = authority(q, q_stall);
+    // **A control surface needs the air to arrive from the NOSE** (VEH3g
+    // audit). With the flow reversed -- a parked aeroplane with the wind up its
+    // tail -- the fuselage angle of attack reads 180 degrees and the elevator's
+    // attitude command tried to pitch the airframe half a turn to "fix" it:
+    // measured on the shipped host, a Dodo standing tail to an 8 m/s wind crept
+    // BACKWARDS on its gear (-0.63 m/s) before anyone touched it. The restoring
+    // stiffnesses (not the damping) fade to nothing between 78 and 90 degrees
+    // of flow, so every attitude this model is flown at keeps them whole.
+    let flow = ((u / v) / REVERSE_FLOW_FADE).clamp(0.0, 1.0);
+    let ctrl = auth * flow;
 
     // ── lift, perpendicular to the air in the plane of symmetry.
     let sym = fwd * u + up * w;
@@ -555,7 +578,7 @@ pub fn fixed_wing_forces(
         elevator * span * PUSH_AUTHORITY
     };
     state.alpha_cmd_deg = (alpha_cmd + incidence).to_degrees();
-    let k = PITCH_STIFFNESS * auth;
+    let k = PITCH_STIFFNESS * ctrl;
     let kd =
         2.0 * PITCH_DAMPING_RATIO * (PITCH_STIFFNESS * auth.max(DAMPING_AUTHORITY_FLOOR)).sqrt();
     // `+right` (the port axis) is nose-DOWN, so nose-up is about starboard.
@@ -572,13 +595,31 @@ pub fn fixed_wing_forces(
     } else {
         -WING_LEVELLER * bank_sin
     };
-    let roll_acc = ROLL_RATE_GAIN * (want_rate - stbd_down_rate) * auth.min(1.0);
+    // ON THE GEAR the wheels, not the ailerons, hold the wings level (VEH3g
+    // audit): the roll servo is a rate command, and standing on its tyres it
+    // rolled a steering Dodo onto its downwind gear -- measured on the shipped
+    // input path in an 8 m/s crosswind, a pilot holding the centreline with
+    // the stick stuck at 40 deg off and 6 m/s. The rudder and the nose wheel
+    // steer it on the ground.
+    let roll_acc = if on_gear {
+        0.0
+    } else {
+        ROLL_RATE_GAIN * (want_rate - stbd_down_rate) * ctrl.min(1.0)
+    };
     // YAW: the weathervane. A slip to starboard (beta > 0) swings the nose to
     // starboard, which is a NEGATIVE rotation about up.
-    let yk = YAW_STIFFNESS * auth;
+    let yk = YAW_STIFFNESS * ctrl;
     let ykd = 2.0 * YAW_DAMPING_RATIO * (YAW_STIFFNESS * auth.max(DAMPING_AUTHORITY_FLOOR)).sqrt();
     let nose_stbd_rate = -chassis.angvel.dot(up);
-    let yaw_acc = yk * beta - ykd * nose_stbd_rate;
+    // THE RUDDER (VEH3g audit): the same stick as the ailerons, a yaw moment
+    // worth [`RUDDER_SLIP_DEG`] of sideslip at full throw -- IN THE AIR. On the
+    // gear the nose wheel steers: measured at 19.5 m/s on the strip, steer 0.3
+    // turned the Dodo 3.23 deg in a second on the nose wheel alone and 2.07
+    // with this couple added (the tyres fight a yaw couple about the centre of
+    // mass), and in an 8 m/s crosswind a heading-holding pilot on the shipped
+    // input path was 53 deg off with it and 13 without.
+    let rudder = if on_gear { 0.0 } else { aileron };
+    let yaw_acc = yk * (beta + RUDDER_SLIP_DEG.to_radians() * rudder) - ykd * nose_stbd_rate;
     let inertia = chassis.inertia;
     let torque =
         stbd * (pitch_acc * inertia.x) + fwd * (roll_acc * inertia.z) - up * (yaw_acc * inertia.y);

@@ -5249,6 +5249,21 @@ pub struct VehicleControls {
 }
 
 impl VehicleControls {
+    /// **On a wing, the stick's fore-aft axis is the POWER LEVER and the WHEEL
+    /// BRAKES**, whichever way the aeroplane is rolling (VEH3g audit).
+    ///
+    /// [`Self::from_intent`] reads a forward stick while rolling BACKWARDS as a
+    /// brake -- a car driver's convention. An aeroplane does not reverse, and on
+    /// the island a Dodo pushed back by the wind heard `W` as its brake for the
+    /// whole of the wave's fourth session: the spool never left 0.000
+    /// (`hero.csv` column 81, 392 rows) while it rolled back at 3 m/s.
+    pub fn as_power_lever(mut self, stick_forward: f64) -> Self {
+        let s = stick_forward.clamp(-1.0, 1.0);
+        self.throttle = s.max(0.0);
+        self.brake = (-s).max(0.0);
+        self
+    }
+
     /// Build controls from a character's movement intent: forward/back is the
     /// throttle **and** the brake, left/right is the steer.
     ///
@@ -8756,6 +8771,14 @@ impl Vehicle for RaycastVehicle {
         if controls.vertical > 0.0 {
             self.controls.handbrake = false;
         }
+        // **A PARKED AEROPLANE HAS ITS PARKING BRAKE ON** (VEH3g audit). With
+        // nobody at the controls the gear used to roll free, so the island's
+        // wind moved the parked aeroplanes: an untended Dodo weathervaned 26
+        // degrees in 15 s onto the apron (the wave's second session) and one
+        // standing tail to the wind rolled backwards (its fourth).
+        if !controls.occupied {
+            self.controls.handbrake = true;
+        }
         self.solve_ground(chassis, dt, out);
         self.controls = controls;
         self.engine_scale = scale;
@@ -8779,6 +8802,7 @@ impl Vehicle for RaycastVehicle {
             &chassis,
             &mut self.spool,
             self.flap,
+            grounded,
             scale,
             dt,
             out,
