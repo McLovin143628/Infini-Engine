@@ -5976,6 +5976,12 @@ pub struct RaycastVehicle {
     /// power lever's lagged answer, the one piece of state the flight model
     /// carries between steps (`crate::aero::fixed_wing_forces`).
     spool: f64,
+    /// **The take-off flap's travel** `[0, 1]` and its lever (VEH3g audit) --
+    /// `crate::aero::flap_step`'s state. Zero and up on a car and on every
+    /// aeroplane until its gear has stood on something slowly.
+    flap: f64,
+    /// See [`Self::flap`].
+    flap_set: bool,
     /// **What the wing did at the last solve** (wave VEH3g), or `None` for every
     /// class whose `wing_area_m2` is zero -- which is every car.
     flight: Option<crate::aero::FlightState>,
@@ -6011,6 +6017,8 @@ impl RaycastVehicle {
             flats: 0,
             skid_relief: 1.0,
             spool: 0.0,
+            flap: 0.0,
+            flap_set: false,
             flight: None,
             tuning,
         }
@@ -8751,12 +8759,26 @@ impl Vehicle for RaycastVehicle {
         self.solve_ground(chassis, dt, out);
         self.controls = controls;
         self.engine_scale = scale;
+        // The flap lever (VEH3g audit): set standing on the gear, up once
+        // flying -- see `crate::aero::flap_step`.
+        let grounded = self.wheels.iter().any(|w| w.contact.is_some());
+        let airspeed = (chassis.linvel - chassis.wind).length();
+        let vs_clean = wing.stall_speed_mps(chassis.mass_kg.max(0.0) * 9.81);
+        crate::aero::flap_step(
+            &mut self.flap,
+            &mut self.flap_set,
+            grounded,
+            airspeed,
+            vs_clean,
+            dt,
+        );
         self.flight = Some(crate::aero::fixed_wing_forces(
             &self.tuning,
             &wing,
             &controls,
             &chassis,
             &mut self.spool,
+            self.flap,
             scale,
             dt,
             out,

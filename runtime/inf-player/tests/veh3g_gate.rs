@@ -344,10 +344,25 @@ const SCREEN_HEIGHT_M: f64 = 10.7;
 /// to. A fixed 8 degrees under-rotated the heavies by five to seven degrees and
 /// left them skimming for kilometres (measured: the Luxor reached 35 ft
 /// 2 849 m from brake release at 8 degrees, 1 827 m at its rotate attitude).
+///
+/// **The pilot keeps this attitude with the TAKE-OFF FLAP set** (VEH3g audit):
+/// every aeroplane that stands on its gear rolls with the flight model's flap
+/// out, so it rotates at 1.1 times the FLAPPED stall speed
+/// ([`takeoff_stall_speed`]) to this same clean attitude, where the flap's
+/// extra lift is its climb. (Rotating to the flapped wing's own Vr attitude
+/// instead -- two degrees flatter -- put the Titan to 35 ft at 1 673 m, worse
+/// than clean: the flap is a lift increment, and a flatter climb spends it.)
 fn rotate_attitude_deg(def: &VehicleDef, vr_over_vs: f64) -> f64 {
     let wing = inf_ecs::aero::Wing::of(&def.class.to_tuning()).expect("a wing");
     (wing.cl_max() / (vr_over_vs * vr_over_vs) / wing.lift_slope()).to_degrees()
         - inf_ecs::aero::WING_INCIDENCE_DEG
+}
+
+/// The stall speed with the take-off flap set -- what a pilot on the gear
+/// rotates against (VEH3g audit).
+fn takeoff_stall_speed(def: &VehicleDef) -> f64 {
+    let wing = inf_ecs::aero::Wing::of(&def.class.to_tuning()).expect("a wing");
+    wing.stall_speed_flapped_mps(def.chassis_mass_kg() * 9.81, 1.0)
 }
 
 #[derive(Debug, Default)]
@@ -471,7 +486,7 @@ const TOUCHDOWN_CEILING_MPS: f64 = 2.5;
 #[test]
 fn the_dodo_takes_off_climbs_and_lands_on_a_strip() {
     let def = row("mammoth_dodo");
-    let vs = stall_speed(&def);
+    let vs = takeoff_stall_speed(&def);
     let rep = fly_circuit(
         strip_sim(&def),
         &Circuit {
@@ -526,7 +541,7 @@ fn the_dodo_takes_off_climbs_and_lands_on_a_strip() {
 #[test]
 fn the_keyboard_pilot_rotates_with_space() {
     let def = row("mammoth_dodo");
-    let vr = stall_speed(&def) * 1.1;
+    let vr = takeoff_stall_speed(&def) * 1.1;
     let mut sim = strip_sim(&def);
     for _ in 0..90 {
         sim.step_once(Default::default());
@@ -603,12 +618,15 @@ fn a_wing_with_no_area_never_leaves_the_ground() {
 /// The ROLL is to the last wheel contact before 35 ft (the first cut ended it
 /// at the first step with no contact, which a rotation hop satisfies: the
 /// heavies' "roll" read 20-80 m short). The distance to 35 ft -- what a
-/// certified take-off distance is -- is printed beside it and NOT asserted
-/// against the runway: the Luxor (1 827 m, against the Global 7500's published
-/// 1 768 m) and the Jetliner reach it past the far threshold. Carried.
+/// certified take-off distance is -- IS asserted since the VEH3g audit, with a
+/// tenth in hand: CLEAN the Luxor (1 827 m, against the Global 7500's published
+/// 1 768 m) and the Jetliner (1 727 m) reached it past the 1 700 m runway's far
+/// threshold; with the flight model's take-off flap (`inf_ecs::aero::
+/// TAKEOFF_FLAP_CL`) set on the gear they reach it at 1 370 m and 1 289 m.
 ///
 /// **Mutation → red**: the Titan's `max_engine_force_n` back to VEH3f's
-/// 160 kN (measured in the mutation table of the VEH3g report).
+/// 160 kN (measured in the mutation table of the VEH3g report); the audit's:
+/// `TAKEOFF_FLAP_CL` 0.
 #[test]
 fn every_aeroplane_lifts_off_inside_the_islands_runway() {
     let recipe = inf_island::IslandRecipe::load(std::path::Path::new(concat!(
@@ -622,14 +640,14 @@ fn every_aeroplane_lifts_off_inside_the_islands_runway() {
         .find(|a| !a.apron)
         .expect("the island has a runway");
     println!(
-        "THE TAKE-OFF TABLE (flat lab, sea-level air, full power, rotate at 1.1 Vs to the attitude that flies there) against the {:.0} m {}:",
+        "THE TAKE-OFF TABLE (flat lab, sea-level air, full power, take-off flap set, rotate at 1.1 Vs(flap) to the clean Vr attitude) against the {:.0} m {}:",
         runway.length_m, runway.name
     );
     println!(
         "  {:26} {:>6}  {:>6}  {:>10}  {:>7}  {:>10}  {:>12}  {:>9}",
         "row",
         "mass t",
-        "Vs m/s",
+        "Vsf m/s",
         "rotate deg",
         "roll m",
         "to 35 ft m",
@@ -637,6 +655,7 @@ fn every_aeroplane_lifts_off_inside_the_islands_runway() {
         "climb m/s"
     );
     let mut longest = 0.0f64;
+    let mut longest_screen = 0.0f64;
     let mut rows = Vec::new();
     for id in [
         "western_duster",
@@ -646,7 +665,7 @@ fn every_aeroplane_lifts_off_inside_the_islands_runway() {
         "flyus_jetliner",
     ] {
         let def = row(id);
-        let vs = stall_speed(&def);
+        let vs = takeoff_stall_speed(&def);
         let rotate = rotate_attitude_deg(&def, 1.1);
         let rep = fly_circuit(
             strip_sim(&def),
@@ -687,11 +706,27 @@ fn every_aeroplane_lifts_off_inside_the_islands_runway() {
             rep.climb_rate
         );
         longest = longest.max(roll);
+        longest_screen = longest_screen.max(screen);
+        // **TO 35 FT BEFORE THE FAR END, WITH A TENTH IN HAND** (VEH3g audit,
+        // priority c'). CLEAN, the Luxor reached it at 1 827 m and the
+        // Jetliner at 1 727 m -- past the 1 700 m runway. With the take-off
+        // flap set on the gear it is asserted: the take-off DISTANCE times
+        // 1.1 inside the strip. Mutation: `TAKEOFF_FLAP_CL` 0 -> red.
+        assert!(
+            screen * 1.1 <= runway.length_m,
+            "{id} reaches 35 ft {screen:.0} m from brake release: with a 10 % margin that is {:.0} m of a {:.0} m runway",
+            screen * 1.1,
+            runway.length_m
+        );
     }
     write_csv(
         "takeoff_table",
         "row,mass_kg,vs_mps,rotate_deg,roll_m,screen_m,liftoff_mps,climb_mps",
         &rows,
+    );
+    println!(
+        "  the longest roll {longest:.0} m, the longest take-off distance {longest_screen:.0} m ({:.0} % of the runway)",
+        longest_screen / runway.length_m * 100.0
     );
     assert!(
         longest < runway.length_m,
@@ -716,6 +751,8 @@ fn every_aeroplane_lifts_off_inside_the_islands_runway() {
 #[test]
 fn the_dodo_floats_and_flies_off_the_water() {
     let def = row("mammoth_dodo");
+    // CLEAN (VEH3g audit): the flap lever is set by the GEAR standing on
+    // something, and on the water no wheel has anything to touch.
     let vs = stall_speed(&def);
     let rotate = rotate_attitude_deg(&def, 1.1);
     let mut sim = sea_sim(&def, (0.0, 0.0), 0.0);
@@ -2544,7 +2581,7 @@ fn the_real_islands_runway_is_flat_and_the_dodo_leaves_it() {
     for _ in 0..90 {
         sim.step_once(Default::default());
     }
-    let vr = stall_speed(&def) * 1.1;
+    let vr = takeoff_stall_speed(&def) * 1.1;
     let mut lifted: Option<f64> = None;
     for _ in 0..(60 * 60) {
         let (p, r, _) = body_state(&sim, CRAFT);

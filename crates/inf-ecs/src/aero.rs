@@ -62,9 +62,22 @@
 //! deg deepest and 5.4 s past it, against 50.3 deg and 7.5 s without). Every
 //! angle is from [`inf_math::portable::patan2_64`]; no std trig is on this path.
 //!
+//! # Take-off flaps (VEH3g audit)
+//!
+//! Every roster aeroplane rolls with its TAKE-OFF FLAP set: [`TAKEOFF_FLAP_CL`]
+//! more lift at every angle below a stall [`FLAP_STALL_SHIFT_DEG`] earlier, and
+//! [`FLAP_CD0`] of extra drag. The flap lever is the flight model's, not a key
+//! -- GTA's aeroplanes have none -- and it follows the schedule a crew flies:
+//! SET on the ground below half the clean stall speed (a parked or taxiing
+//! aeroplane), RETRACTED once airborne past [`FLAP_RETRACT_VS`] times the clean
+//! stall speed, travelling [`FLAP_TRAVEL_S`] end to end ([`flap_step`]). An
+//! aeroplane that starts in the air (the stall arm's) never has them. Measured
+//! on the take-off table: the Luxor and the Jetliner reached 35 ft at 1 827 m
+//! and 1 727 m CLEAN, past the island's 1 700 m runway.
+//!
 //! # What this model does not have, by name
 //!
-//! No flaps (the Luxor's CL max is its row's `stall_deg`), no ground effect, no
+//! No landing flaps, no ground effect, no
 //! propeller torque or P-factor, no spin (a stalled wing drops level), no
 //! compressibility (the Luxor's 120 m/s is Mach 0.35), and the air density is
 //! the sea-level [`AIR_DENSITY_KG_M3`] at every altitude -- the island's highest
@@ -127,6 +140,52 @@ pub const PITCH_DAMPING_RATIO: f64 = 0.8;
 /// **5.4 s** (89 m lost); without it **50.3 deg** and **7.5 s** (155 m lost) --
 /// a deep stall. The stall arm asserts the bound.
 pub const STALL_PITCH_BREAK: f64 = 1.5;
+
+/// **The take-off flap's lift increment** (VEH3g audit): the lift coefficient
+/// the flap adds at every angle of attack below its stall. Half a unit is a
+/// single-slotted flap at a take-off setting.
+pub const TAKEOFF_FLAP_CL: f64 = 0.5;
+
+/// How much EARLIER a flapped wing stalls, degrees of angle of attack.
+pub const FLAP_STALL_SHIFT_DEG: f64 = 1.5;
+
+/// The flap's parasite drag coefficient at full take-off setting (times `q S`).
+pub const FLAP_CD0: f64 = 0.02;
+
+/// Retract above this multiple of the CLEAN stall speed, once airborne.
+pub const FLAP_RETRACT_VS: f64 = 1.3;
+
+/// Set on the ground below this fraction of the clean stall speed.
+pub const FLAP_SET_BELOW_VS: f64 = 0.5;
+
+/// Seconds for the flap to travel end to end.
+pub const FLAP_TRAVEL_S: f64 = 6.0;
+
+/// **The flap lever's schedule** (VEH3g audit): `set` latches ON while the gear
+/// has a contact below [`FLAP_SET_BELOW_VS`] of the clean stall speed and OFF
+/// once no wheel touches above [`FLAP_RETRACT_VS`] of it; `flap` travels toward
+/// the lever at `1 / FLAP_TRAVEL_S` a second. Pure and portable.
+pub fn flap_step(
+    flap: &mut f64,
+    set: &mut bool,
+    grounded: bool,
+    airspeed: f64,
+    vs_clean: f64,
+    dt: f64,
+) {
+    if grounded && airspeed < FLAP_SET_BELOW_VS * vs_clean {
+        *set = true;
+    } else if !grounded && airspeed > FLAP_RETRACT_VS * vs_clean {
+        *set = false;
+    }
+    let want = if *set { 1.0 } else { 0.0 };
+    let step = (dt / FLAP_TRAVEL_S).max(0.0);
+    *flap = if *flap < want {
+        (*flap + step).min(want)
+    } else {
+        (*flap - step).max(want)
+    };
+}
 
 /// The roll rate full aileron commands, rad/s (80 deg/s -- a light aeroplane).
 pub const ROLL_RATE_MAX_RAD_S: f64 = 1.4;
@@ -262,6 +321,42 @@ impl Wing {
         (sign * self.cl_max() * frac * fade, true)
     }
 
+    /// **The lift coefficient with the flap at `flap`** `[0, 1]` (VEH3g audit):
+    /// [`TAKEOFF_FLAP_CL`]` x flap` added below a stall [`FLAP_STALL_SHIFT_DEG`]
+    /// `x flap` earlier, and the same collapse past it from the flapped peak.
+    /// `flap` 0 is [`Self::cl`] exactly.
+    pub fn cl_flapped(&self, alpha: f64, flap: f64) -> (f64, bool) {
+        let f = flap.clamp(0.0, 1.0);
+        if f <= 0.0 || alpha < 0.0 {
+            return self.cl(alpha);
+        }
+        let stall = (self.stall_rad - FLAP_STALL_SHIFT_DEG.to_radians() * f).max(1e-3);
+        let dcl = TAKEOFF_FLAP_CL * f;
+        if alpha <= stall {
+            return (self.lift_slope() * alpha + dcl, false);
+        }
+        let peak = self.lift_slope() * stall + dcl;
+        let quarter = std::f64::consts::FRAC_PI_2;
+        let over = alpha - stall;
+        let brk = STALL_BREAK_DEG.to_radians();
+        let frac = POST_STALL_CL_FRAC + (1.0 - POST_STALL_CL_FRAC) * (1.0 - over / brk).max(0.0);
+        let fade = ((quarter - alpha) / (quarter - stall)).clamp(0.0, 1.0);
+        (peak * frac * fade, true)
+    }
+
+    /// The peak lift coefficient with the flap at `flap`.
+    pub fn cl_max_flapped(&self, flap: f64) -> f64 {
+        let f = flap.clamp(0.0, 1.0);
+        let stall = (self.stall_rad - FLAP_STALL_SHIFT_DEG.to_radians() * f).max(1e-3);
+        self.lift_slope() * stall + TAKEOFF_FLAP_CL * f
+    }
+
+    /// The stall speed with the flap at `flap`, m/s.
+    pub fn stall_speed_flapped_mps(&self, weight_n: f64, flap: f64) -> f64 {
+        let q = (weight_n / (self.area_m2 * self.cl_max_flapped(flap)).max(1e-9)).max(1e-9);
+        (2.0 * q / AIR_DENSITY_KG_M3).sqrt()
+    }
+
     /// The dynamic pressure at which this wing carries `weight_n` at its peak
     /// lift -- the STALL's `q`, the reference every control authority is scaled
     /// against.
@@ -334,6 +429,8 @@ pub struct FlightState {
     pub authority: f64,
     /// The elevator's commanded angle of attack, degrees (wing).
     pub alpha_cmd_deg: f64,
+    /// The take-off flap's travel, `[0, 1]` (VEH3g audit).
+    pub flap: f64,
 }
 
 /// **The aerodynamic step** for a fixed wing: append the lift, drag, side force,
@@ -351,6 +448,7 @@ pub fn fixed_wing_forces(
     controls: &VehicleControls,
     chassis: &ChassisState,
     spool: &mut f64,
+    flap: f64,
     engine_scale: f64,
     dt: f64,
     out: &mut Vec<WheelForce>,
@@ -380,9 +478,11 @@ pub fn fixed_wing_forces(
     let w = air.dot(up);
     let s = air.dot(stbd);
     let v = air.length();
+    let flap = flap.clamp(0.0, 1.0);
     let mut state = FlightState {
         airspeed_mps: v,
         spool: *spool,
+        flap,
         ..FlightState::default()
     };
     let thrust = thrust_n(t, *spool, u, engine_scale);
@@ -402,7 +502,7 @@ pub fn fixed_wing_forces(
     let alpha_body = inf_math::portable::patan2_64(-w, u);
     let alpha = alpha_body + incidence;
     let beta = inf_math::portable::patan2_64(s, (u * u + w * w).sqrt());
-    let (cl, stalled) = wing.cl(alpha);
+    let (cl, stalled) = wing.cl_flapped(alpha, flap);
     let weight = chassis.mass_kg.max(0.0) * 9.81;
     let q_stall = wing.stall_q(weight);
     let auth = authority(q, q_stall);
@@ -423,8 +523,8 @@ pub fn fixed_wing_forces(
     } else {
         0.0
     };
-    let drag =
-        t.drag_n_per_mps2.max(0.0) * v * v + q * wing.area_m2 * (wing.induced_k() * cl * cl + post);
+    let drag = t.drag_n_per_mps2.max(0.0) * v * v
+        + q * wing.area_m2 * (wing.induced_k() * cl * cl + post + FLAP_CD0 * flap);
     let side = -stbd * (q * wing.area_m2 * SIDE_FORCE_PER_RAD * beta);
     let aero = lift_dir * lift - air / v * drag + side;
     if aero != DVec3::ZERO {
@@ -541,6 +641,40 @@ mod tests {
         assert!(edge.abs() < 1e-12, "a flat plate edge-on lifts nothing");
         let (neg, _) = wing.cl(-s * 0.5);
         assert!((neg + half).abs() < 1e-12, "odd in alpha");
+    }
+
+    /// The take-off flap (VEH3g audit): a flap of 0 IS the clean wing, a set
+    /// flap lifts more at every angle below its (earlier) stall, and the lever
+    /// is set on the gear when slow and up once flying fast -- never set in
+    /// the air.
+    #[test]
+    fn the_takeoff_flap_lifts_more_and_follows_its_schedule() {
+        let wing = Wing::of(&dodo_tuning()).unwrap();
+        for a in [-0.2, 0.0, 0.1, 0.25, 0.3, 0.6] {
+            assert_eq!(wing.cl_flapped(a, 0.0), wing.cl(a));
+        }
+        assert!(wing.cl_max_flapped(1.0) > wing.cl_max() + 0.3);
+        let (clean, _) = wing.cl(0.1);
+        let (flapped, st) = wing.cl_flapped(0.1, 1.0);
+        assert!(!st && (flapped - clean - TAKEOFF_FLAP_CL).abs() < 1e-12);
+        let w = 1100.0 * 9.81;
+        assert!(wing.stall_speed_flapped_mps(w, 1.0) < wing.stall_speed_mps(w));
+        let (mut flap, mut set) = (0.0, false);
+        let vs = wing.stall_speed_mps(w);
+        // In the air, slow: never set.
+        flap_step(&mut flap, &mut set, false, 0.8 * vs, vs, 1.0);
+        assert!(!set && flap == 0.0);
+        // On the gear, parked: set, and it travels.
+        for _ in 0..(FLAP_TRAVEL_S as usize + 1) {
+            flap_step(&mut flap, &mut set, true, 0.0, vs, 1.0);
+        }
+        assert!(set && flap == 1.0);
+        // Rolling fast on the gear: it stays set.
+        flap_step(&mut flap, &mut set, true, 1.2 * vs, vs, 1.0);
+        assert!(set);
+        // Airborne past the retract speed: up.
+        flap_step(&mut flap, &mut set, false, 1.4 * vs, vs, 1.0);
+        assert!(!set && flap < 1.0);
     }
 
     #[test]
