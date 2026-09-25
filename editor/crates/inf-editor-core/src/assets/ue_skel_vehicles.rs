@@ -326,6 +326,8 @@ fn min_axis(c: [[f64; 3]; 3]) -> DVec3 {
             a[q][q] = aqq + t * apq;
             a[p][q] = 0.0;
             a[q][p] = 0.0;
+            #[allow(clippy::needless_range_loop)]
+            // a Jacobi rotation reads a[r][p] and writes a[p][r]
             for r in 0..3 {
                 if r != p && r != q {
                     let arp = a[r][p];
@@ -540,7 +542,9 @@ pub fn split_skel_vehicle(i: &SkelVehicleIn) -> Result<SkelVehicleSplit, String>
             e.0.push(tri);
             e.1 += area;
         }
-        let mut big: Vec<(Vec<(usize, usize)>, f64, DVec3, DVec3)> = Vec::new();
+        // (triangles, area, centre, normal) per connected glass piece.
+        type Piece = (Vec<(usize, usize)>, f64, DVec3, DVec3);
+        let mut big: Vec<Piece> = Vec::new();
         for (tris, area) in pieces.into_values() {
             if area < PANE_MIN_AREA_M2 {
                 continue;

@@ -79,8 +79,11 @@ pub struct VmeshRegistry {
     /// ids (`inf_mesh::section_mesh_id`) the first time a mesh is asked about
     /// and remembered: `(slot, vmesh id)` in slot order, empty for a mesh drawn
     /// whole -- which is every mesh an importer did not section.
-    sections: Mutex<HashMap<Uuid, Arc<[(u32, Uuid)]>>>,
+    sections: Mutex<SectionCache>,
 }
+
+/// `(slot, vmesh id)` per mesh, slot order -- see `VmeshRegistry::sections`.
+type SectionCache = HashMap<Uuid, Arc<[(u32, Uuid)]>>;
 
 /// One drawn section of a sectioned mesh: its slot, and its DAG.
 pub type VmeshSection = (u32, u128, Arc<VgeomSource>);

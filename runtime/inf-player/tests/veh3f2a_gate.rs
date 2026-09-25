@@ -89,10 +89,7 @@ fn local_art(arm: &str) -> Option<PathBuf> {
         .as_ref()
         .is_some_and(|c| c.join("UE/Vehicles").join(CALIBRATION_ART).is_dir());
     if !have {
-        eprintln!(
-            "SKIP {arm}: {}",
-            "the pack art is LOCAL-ONLY (Fab content, never committed), and this machine has no island project with it -- CI never has it by design"
-        );
+        eprintln!("SKIP {arm}: the pack art is LOCAL-ONLY (Fab content, never committed), and this machine has no island project with it -- CI never has it by design");
         return None;
     }
     c
@@ -1521,7 +1518,7 @@ fn every_traffic_car_of_an_imported_class_is_an_art_row() {
         .collect();
     let mut by: BTreeMap<RosterClass, (usize, usize)> = BTreeMap::new();
     for k in 0..20_000u128 {
-        let guid = Uuid::from_u128(0x7EA_F0000_0000 + k * 7919);
+        let guid = Uuid::from_u128(0x7EAF_0000_0000 + k * 7919);
         let Some(id) = inf_ecs::traffic::catalogue_row_id(guid) else {
             continue;
         };
