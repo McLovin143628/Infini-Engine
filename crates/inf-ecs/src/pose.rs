@@ -1275,6 +1275,31 @@ pub fn step_pose_evaluation<'c>(
         .world_mut()
         .remove_resource::<crate::anim_bridge::AnimBridgeRes>()
         .unwrap_or_default();
+    // **The pose each GETTING-UP character was drawn in last step** (VEH3g
+    // audit), lifted out before this step's store replaces it. Only characters
+    // whose ragdoll weight is strictly between 0 and 1 are copied -- the get-up
+    // blend's own window -- so a level with nobody getting up pays one probe.
+    // See `continuous_slerp` for why the blend needs it.
+    let getup_prev: BTreeMap<Uuid, Pose> = if bridge
+        .ragdoll_pose
+        .values()
+        .any(|r| r.weight > 0.0 && r.weight < 1.0)
+    {
+        world
+            .world()
+            .get_resource::<PoseStoreRes>()
+            .map(|store| {
+                bridge
+                    .ragdoll_pose
+                    .iter()
+                    .filter(|(_, r)| r.weight > 0.0 && r.weight < 1.0)
+                    .filter_map(|(g, _)| store.0.get(g).map(|e| (*g, e.pose.clone())))
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        BTreeMap::new()
+    };
     bridge.states.clear();
     bridge.root_motion.clear();
     bridge.curves.clear();
@@ -2062,7 +2087,13 @@ pub fn step_pose_evaluation<'c>(
                         // `None`, and a weight of zero never reaches the map at
                         // all because the writer removes the entry instead.
                         if let Some(rp) = bridge.ragdoll_pose.get(&guid) {
-                            corrected |= apply_ragdoll_pose(asset, &mut pose, rp, to_world);
+                            corrected |= apply_ragdoll_pose(
+                                asset,
+                                &mut pose,
+                                rp,
+                                to_world,
+                                getup_prev.get(&guid),
+                            );
                         }
                         if corrected {
                             let n = redrive(asset, &mut pose);
@@ -2976,6 +3007,7 @@ fn apply_ragdoll_pose(
     pose: &mut Pose,
     published: &crate::anim_bridge::RagdollPose,
     model_to_world: glam::DAffine3,
+    previous: Option<&Pose>,
 ) -> bool {
     let weight = published.weight;
     if weight <= 0.0 || weight.is_nan() || published.bones.is_empty() {
@@ -3041,9 +3073,145 @@ fn apply_ragdoll_pose(
     if !touched {
         return false;
     }
-    let physics = Pose { locals };
-    *pose = inf_anim::blend_poses(pose, &physics, weight.clamp(0.0, 1.0));
+    let w = weight.clamp(0.0, 1.0);
+    if w >= 1.0 {
+        // The bodies own the pose: draw them exactly.
+        let physics = Pose { locals };
+        *pose = inf_anim::blend_poses(pose, &physics, w);
+        return true;
+    }
+    // ── **THE GET-UP BLENDS IN MODEL SPACE** (VEH3g audit) ──────────────────
+    //
+    // Until this audit the get-up slerped every joint's LOCAL rotation from the
+    // bodies' toward the clip's. Two things were wrong with that, both measured
+    // on the island's hero (`char1b_gate`'s ragdoll arm, on the level with the
+    // airfield, where the ragdoll settles one step earlier than it did before):
+    //
+    // * **The bodies' locals are far from any clip's.** The ragdoll's joints are
+    //   unlimited spherical joints (`inf_physics::ragdoll`), so a heap on the
+    //   ground carries local gaps of **160-173 degrees** at `spine_03`,
+    //   `spine_04` and `neck_01` against `getup_back`'s first frame -- twists
+    //   that cancel down the chain in MODEL space but compound when each local
+    //   is slerped on its own, so the hands whipped: `middle_02_pip_l` **307 mm
+    //   in one fixed step** with no flip at all.
+    // * **The shortest arc swapped sides.** The physics end is frozen and the
+    //   clip's end animates, so a joint whose two rotations pass through 180
+    //   degrees apart mid-blend swaps arcs in one step: `upperarm_r` swung
+    //   **129.0 degrees** at weight 0.606 and the right hand's
+    //   `middle_03_bulge_r` moved **981.9 mm** -- the battery's one red.
+    //
+    // So each BODY joint's model-space rotation and position blend from the
+    // bodies' to the clip's (the frame UE's own physics blend works in), and
+    // every joint with no body rides its blended parent with the clip's local,
+    // exactly as the bodies' pose treats it. And the arc is HELD: see
+    // `continuous_slerp`.
+    let machine_model = inf_anim::pose::global_transforms(skeleton, pose);
+    let prev_model = previous.map(|p| inf_anim::pose::global_transforms(skeleton, p));
+    let mut blended: Vec<glam::Mat4> = Vec::with_capacity(joints.len());
+    let mut out_locals: Vec<inf_anim::JointTransform> = Vec::with_capacity(joints.len());
+    for (i, joint) in joints.iter().enumerate() {
+        let parent_blended = match joint.parent {
+            Some(p) => blended
+                .get(p as usize)
+                .copied()
+                .unwrap_or(glam::Mat4::IDENTITY),
+            None => glam::Mat4::IDENTITY,
+        };
+        let machine_local = pose.locals[i];
+        let (Some(mm), Some(pm)) = (machine_model.get(i), model.get(i)) else {
+            blended.push(parent_blended * machine_local.to_mat4());
+            out_locals.push(machine_local);
+            continue;
+        };
+        if !by_name.contains_key(joint.name.as_str()) {
+            blended.push(parent_blended * machine_local.to_mat4());
+            out_locals.push(machine_local);
+            continue;
+        }
+        let (_, ra, ta) = mm.to_scale_rotation_translation();
+        let (_, rb, tb) = pm.to_scale_rotation_translation();
+        let r = match prev_model.as_ref().and_then(|v| v.get(i)) {
+            Some(prev) => continuous_slerp(ra, rb, w, prev.to_scale_rotation_translation().1),
+            None => inf_math::pslerp(ra, rb, w),
+        };
+        let t = ta.lerp(tb, w);
+        let m = glam::Mat4::from_scale_rotation_translation(machine_local.scale_vec(), r, t);
+        let (ls, lr, lt) = (parent_blended.inverse() * m).to_scale_rotation_translation();
+        blended.push(m);
+        out_locals.push(inf_anim::JointTransform::from_trs(lt, lr, ls));
+    }
+    *pose = Pose { locals: out_locals };
     true
+}
+
+/// **Slerp from `a` to `b` along whichever arc keeps the joint where it was**
+/// (VEH3g audit) -- the one of the two great-circle arcs whose point at `t` is
+/// nearer (in rotation) to `previous`.
+///
+/// The short arc is `inf_math::pslerp`'s. The long arc is the same textbook form
+/// with `b`'s sign chosen so the quaternion dot is NEGATIVE, which is the path
+/// the other way round; [`inf_math::pacos64`] / [`inf_math::psin64`] keep it on
+/// the portable path (the P14 law, `pslerp`'s own reason). Near the antipode of
+/// the SHORT arc (the long arc a full turn) the long form is undefined and the
+/// short arc is returned.
+fn continuous_slerp(a: glam::Quat, b: glam::Quat, t: f32, previous: glam::Quat) -> glam::Quat {
+    let short = inf_math::pslerp(a, b, t);
+    let (ax, ay, az, aw) = (a.x as f64, a.y as f64, a.z as f64, a.w as f64);
+    let (mut bx, mut by, mut bz, mut bw) = (b.x as f64, b.y as f64, b.z as f64, b.w as f64);
+    let mut dot = ax * bx + ay * by + az * bz + aw * bw;
+    if dot > 0.0 {
+        bx = -bx;
+        by = -by;
+        bz = -bz;
+        bw = -bw;
+        dot = -dot;
+    }
+    // The long arc from `a` to the rotation `b` is the quaternion arc to the
+    // sign of `b` with a NEGATIVE dot. At dot -1 that is a whole turn and has
+    // no plane; stay on the short arc there.
+    if dot < -inf_math::SLERP_LERP_THRESHOLD {
+        return short;
+    }
+    let theta = inf_math::pacos64(dot);
+    let sin_theta = inf_math::psin64(theta);
+    if sin_theta.abs() < 1.0e-12 {
+        return short;
+    }
+    let t = t as f64;
+    let w0 = inf_math::psin64((1.0 - t) * theta) / sin_theta;
+    let w1 = inf_math::psin64(t * theta) / sin_theta;
+    let (x, y, z, w) = (
+        w0 * ax + w1 * bx,
+        w0 * ay + w1 * by,
+        w0 * az + w1 * bz,
+        w0 * aw + w1 * bw,
+    );
+    let len = (x * x + y * y + z * z + w * w).sqrt();
+    if len <= 1.0e-12 {
+        return short;
+    }
+    let long = glam::Quat::from_xyzw(
+        (x / len) as f32,
+        (y / len) as f32,
+        (z / len) as f32,
+        (w / len) as f32,
+    );
+    // How far each candidate is from last step's drawn rotation, radians (q
+    // and -q are one rotation, hence the `abs`). The SHORT arc is the default
+    // and keeps the joint unless it would throw it more than twice as far as the
+    // long arc would, plus two degrees: at the ends of the blend the two
+    // candidates are a degree or two apart and the last drawn pose is itself a
+    // step old, so a bare "nearer wins" picked the long way round on the first
+    // step of a get-up and swung a whole arm through 235 degrees (measured: the
+    // island hero's left hand at 534 mm a step). A real flip is unambiguous --
+    // 126 degrees against 15 on the step `upperarm_r` crossed.
+    let gap = |q: glam::Quat| 2.0 * inf_math::pacos64((q.dot(previous).abs() as f64).min(1.0));
+    let (g_short, g_long) = (gap(short), gap(long));
+    if g_short > 2.0 * g_long + 2.0f64.to_radians() {
+        long
+    } else {
+        short
+    }
 }
 
 /// Solve each foot toward its goal, over the P24.2 chain solver.

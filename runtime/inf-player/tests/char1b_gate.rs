@@ -4631,6 +4631,7 @@ fn a_ragdoll_draws_the_bodies_and_gets_up_without_a_snap() {
     // ── the hand-off ─────────────────────────────────────────────────────────
     let switch = settled_at.expect("the ragdoll never settled into a get-up over 900 steps");
     let mut handoff: Vec<f64> = Vec::new();
+    let mut handoff_limbs: Vec<f64> = Vec::new();
     let mut weights: Vec<f32> = Vec::new();
     let mut prev = last;
     let mut getup_states: std::collections::BTreeSet<String> = Default::default();
@@ -4644,6 +4645,18 @@ fn a_ragdoll_draws_the_bodies_and_gets_up_without_a_snap() {
             now.iter()
                 .zip(prev.iter())
                 .map(|(a, b)| (*a - *b).length())
+                .fold(0.0f64, f64::max),
+        );
+        // The same step over every joint BUT the skeleton's roots (VEH3g
+        // audit): a root carries no skin and no body, and it is where the
+        // capsule being put down at the hand-off shows (226 mm on this island's
+        // first get-up step, before and after the blend below was rebuilt).
+        handoff_limbs.push(
+            now.iter()
+                .zip(prev.iter())
+                .enumerate()
+                .filter(|(i, _)| rig.skeleton.joints()[*i].parent.is_some())
+                .map(|(_, (a, b))| (*a - *b).length())
                 .fold(0.0f64, f64::max),
         );
         weights.push(
@@ -4718,6 +4731,38 @@ fn a_ragdoll_draws_the_bodies_and_gets_up_without_a_snap() {
          cut, not a blend",
         hand_p99 * 1000.0,
         sim_p99 * 1000.0
+    );
+    // **AND NO STEP OF THE BLEND ITSELF THROWS A LIMB** (VEH3g audit). The p99
+    // above is over 41 steps, so its "99th percentile" is the largest step --
+    // and on this island that is the ROOT's 226 mm on the first step of the
+    // hand-off, which is the capsule being put down, not the blend. The steps
+    // the physics pose is PART of (weight strictly between 0 and 1) are asked
+    // on their own, over every joint but the roots, against the ragdoll's own
+    // p99 x 1.5. Measured: the
+    // local-space blend this audit replaced moved `middle_03_bulge_r` 981.9 mm
+    // in one step (`upperarm_r`'s shortest arc swapped sides, 129 degrees) and,
+    // with that flip held, the left hand 307 mm; the model-space blend with the
+    // held arc moves no joint more than 121 mm.
+    let blend_max = handoff_limbs
+        .iter()
+        .zip(weights.iter())
+        .filter(|(_, w)| **w > 0.0 && **w < 1.0)
+        .map(|(d, _)| *d)
+        .fold(0.0f64, f64::max);
+    println!(
+        "  the blend's own steps (0 < weight < 1): largest single-joint step {:.2} mm {}",
+        blend_max * 1000.0,
+        format_args!(
+            "against the ragdoll's p99 x 1.5 = {:.2} mm",
+            sim_p99 * 1500.0
+        )
+    );
+    assert!(
+        blend_max <= sim_p99 * 1.5,
+        "a step of the get-up blend moved one joint {:.2} mm against the ragdoll's own p99 {:.2} mm - {}",
+        blend_max * 1000.0,
+        sim_p99 * 1000.0,
+        "the blend threw a limb (an arc that swapped sides, or locals slerped through a twisted chain)"
     );
     assert!(
         switch > 0,
