@@ -258,7 +258,7 @@ impl AssetProject {
 
     /// [`write_asset`](Self::write_asset), with the GUID a **path function**
     /// (the VEH3f.2a audit): the file lands where `write_asset` would put it
-    /// (a free path under `dir`), and its id is [`path_guid`] of that path --
+    /// (a free path under `dir`), and its id is `path_guid` of that path --
     /// unless another asset already holds that id, in which case one is minted,
     /// so two entries never share a GUID. This is the door every FILE IMPORT
     /// writes through: two imports of the same source into two fresh projects
@@ -287,7 +287,7 @@ impl AssetProject {
 
     /// [`write_tiled_texture`](Self::write_tiled_texture) with the id
     /// [`write_asset_path_keyed`](Self::write_asset_path_keyed) would give it: a
-    /// free path under `dir`, and [`path_guid`] of it unless that id is taken.
+    /// free path under `dir`, and `path_guid` of it unless that id is taken.
     pub fn write_tiled_texture_path_keyed(
         &mut self,
         dir: &Path,

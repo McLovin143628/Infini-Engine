@@ -123,6 +123,9 @@ param(
     # (hero.csv t=234.8 s, `Ragdoll` for the remaining 645 s) before WPN2d's leg
     # began. Needs `-ArmHero`. `-AudioOnly`'s shape.
     [switch]$WeaponsOnly,
+    # How far `-WeaponsOnly` swings the camera round for its front frame, in the
+    # look control's own counts (the `[InfInput]::Look` units).
+    [int]$WeaponOrbit = 1400,
     # **THE EDITOR LOOKS AT A PLACE** (VEH3g audit), `ex,ey,ez;tx,ty,tz`: after
     # the settled-editor frame, `lookat.mjs` stands the editor's 3D camera at
     # the eye looking at the target (the `viewport_look_at` preview door) and
@@ -1527,6 +1530,26 @@ if ($WeaponsOnly) {
             $cls = $row[29].Trim()
             & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir ("95-weapon-{0}-{1}.png" -f $cls, $wid)) | ForEach-Object { Say $_ }
             Say ("WEAPONS ONLY: {0} is class `"{1}`"; mode {2}, boom {3}, holder {4}, heat {5}" -f $wid, $cls, $row[5], $row[13], $row[16], $row[34])
+            # …and from the FRONT: the boom swung round the standing hero, so the
+            # weapon in the hands is in the frame rather than behind the back.
+            [InfInput]::Look($WeaponOrbit, 0); Start-Sleep -Milliseconds 700
+            & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir ("95b-weapon-front-{0}-{1}.png" -f $cls, $wid)) | ForEach-Object { Say $_ }
+            [InfInput]::Look(-$WeaponOrbit, 0); Start-Sleep -Milliseconds 500
+            # …and in FIRST PERSON at the downward pitch clamp (WPN2d audit's
+            # recipe, `90b`): the hero turns with a third-person camera, so the
+            # hands are only ever in the frame from the seat. G is a toggle:
+            # wait for the boom, never count presses.
+            [InfInput]::Down(0x22); Start-Sleep -Milliseconds 150; [InfInput]::Up(0x22)
+            $fpW = @(Wait-ForHero -Csv $heroCsv -What "the first-person seat" -TimeoutS 4 `
+                -Predicate { param($c) ($c.Count -gt 13) -and ([double]$c[13] -lt 0.35) })[-1]
+            if ($fpW) {
+                [InfInput]::Look(0, 900); Start-Sleep -Milliseconds 450
+                & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir ("95c-weapon-first-person-{0}-{1}.png" -f $cls, $wid)) | ForEach-Object { Say $_ }
+                [InfInput]::Look(0, -440); Start-Sleep -Milliseconds 300
+                [InfInput]::Down(0x22); Start-Sleep -Milliseconds 150; [InfInput]::Up(0x22)
+                $null = @(Wait-ForHero -Csv $heroCsv -What "the boom back out" -TimeoutS 4 `
+                    -Predicate { param($c) ($c.Count -gt 13) -and ([double]$c[13] -gt 1.5) })
+            } else { Say "WEAPONS ONLY: no first-person seat for $wid -- no hands frame" }
         }
     }
 }

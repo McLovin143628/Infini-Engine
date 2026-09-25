@@ -2738,6 +2738,12 @@ fn meshlet_census(
         let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
     }
     let report = renderer.vgeom_stream_report();
+    // …and the three page systems' residency (the texture half is the SVT
+    // residency row the brief asked for: pages resident against the budget).
+    println!(
+        "  streaming on frame 0: {}",
+        renderer.stream_report().summary()
+    );
     println!(
         "  streamer over {settle} turning frames: {} loads, {} evictions; now {}",
         report.stats.loads - half.loads,
