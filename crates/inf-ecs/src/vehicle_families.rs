@@ -48,7 +48,8 @@
 
 use crate::math::Vec3d;
 use crate::vehicle::{
-    door_hinge, hood_hinge, trunk_hinge, BodyPart, BodyPartKind, PartSide, DOOR_OPEN_DEG,
+    door_hinge, hood_hinge, trunk_hinge, BodyPart, BodyPartKind, MountPart, PartKind, PartSide,
+    DOOR_OPEN_DEG,
 };
 
 /// A drawn body panel -- a sill, a greenhouse, a track frame, a mast.
@@ -1447,4 +1448,558 @@ pub(crate) const AIRCRAFT_PARTS: &[BodyPart] = &[
         Vec3d::new(0.0, -0.48, 0.35),
         Vec3d::new(0.08, 0.03, 0.08),
     ),
+];
+
+// ── the air and sea families (wave VEH3g) ────────────────────────────────────
+//
+// Seven more silhouettes, for the eighteen air and sea rows VEH3f authored
+// dormant. Held to the same three clauses (inside the hull, filling it on every
+// axis, under seven of its eight units, a narrow top) by the same arm. What the
+// clauses COST an aeroplane, stated once: the hull is the collider box, so a
+// landing gear drawn inside it ends at the box's floor and the wheel hangs
+// below it at the row's `wheel_drop_m` -- the gear is long because a box's tail
+// scrapes the runway at three degrees of rotation otherwise (measured on the
+// Dodo), and the gap between the drawn leg and the tyre is the price of drawing
+// an aeroplane in boxes. A DCC hero shell (VEH3f.2) is what closes it.
+
+/// A loading ramp, hinged at its FORWARD edge and swinging its tail DOWN
+/// (wave VEH3g) -- the Titan's.
+const fn ramp(name: &'static str, centre: Vec3d, half: Vec3d) -> BodyPart {
+    BodyPart {
+        name,
+        centre,
+        half,
+        primitive: crate::components::Primitive::Cube,
+        kind: BodyPartKind::Ramp {
+            hinge: crate::vehicle::ramp_hinge(centre, half),
+        },
+    }
+}
+
+/// A single-engine BIPLANE (the Duster): two full-span wings on struts, an open
+/// cockpit behind a windscreen, a radial's cowl and a tailwheel's fin.
+pub(crate) const BIPLANE_PARTS: &[BodyPart] = &[
+    panel(
+        "fuselage",
+        Vec3d::new(0.0, -0.1, 0.02),
+        Vec3d::new(0.1, 0.32, 0.9),
+    ),
+    panel(
+        "wing_upper",
+        Vec3d::new(0.0, 0.42, 0.25),
+        Vec3d::new(1.0, 0.04, 0.2),
+    ),
+    panel(
+        "wing_lower",
+        Vec3d::new(0.0, -0.35, 0.22),
+        Vec3d::new(0.95, 0.04, 0.2),
+    ),
+    panel(
+        "strut_l",
+        Vec3d::new(-0.7, 0.04, 0.25),
+        Vec3d::new(0.02, 0.36, 0.03),
+    ),
+    panel(
+        "strut_r",
+        Vec3d::new(0.7, 0.04, 0.25),
+        Vec3d::new(0.02, 0.36, 0.03),
+    ),
+    panel(
+        "cowl",
+        Vec3d::new(0.0, -0.05, 0.92),
+        Vec3d::new(0.14, 0.2, 0.06),
+    ),
+    panel(
+        "tailplane",
+        Vec3d::new(0.0, 0.0, -0.86),
+        Vec3d::new(0.32, 0.03, 0.12),
+    ),
+    panel(
+        "fin",
+        Vec3d::new(0.0, 0.58, -0.88),
+        Vec3d::new(0.02, 0.4, 0.1),
+    ),
+    panel(
+        "gear_l",
+        Vec3d::new(-0.25, -0.7, 0.2),
+        Vec3d::new(0.02, 0.28, 0.02),
+    ),
+    panel(
+        "gear_r",
+        Vec3d::new(0.25, -0.7, 0.2),
+        Vec3d::new(0.02, 0.28, 0.02),
+    ),
+    panel(
+        "gear_nose",
+        Vec3d::new(0.0, -0.7, 0.75),
+        Vec3d::new(0.02, 0.28, 0.02),
+    ),
+    glass(
+        "glass_windscreen",
+        Vec3d::new(0.0, 0.28, 0.1),
+        Vec3d::new(0.08, 0.06, 0.01),
+    ),
+    seat(
+        "seat_r",
+        Vec3d::new(0.0, -0.48, -0.05),
+        Vec3d::new(0.06, 0.03, 0.08),
+    ),
+];
+
+/// A JET (the Luxor, the Jetliner): a long fuselage, a low wing, engines on the
+/// tail, a T-tail, a flight-deck glasshouse and a boarding door forward.
+pub(crate) const JET_PARTS: &[BodyPart] = &[
+    panel(
+        "fuselage",
+        Vec3d::new(0.0, -0.2, 0.0),
+        Vec3d::new(0.1, 0.3, 0.98),
+    ),
+    panel(
+        "wing",
+        Vec3d::new(0.0, -0.42, 0.02),
+        Vec3d::new(1.0, 0.04, 0.18),
+    ),
+    panel(
+        "engine_l",
+        Vec3d::new(-0.16, -0.05, -0.55),
+        Vec3d::new(0.05, 0.08, 0.12),
+    ),
+    panel(
+        "engine_r",
+        Vec3d::new(0.16, -0.05, -0.55),
+        Vec3d::new(0.05, 0.08, 0.12),
+    ),
+    panel(
+        "fin",
+        Vec3d::new(0.0, 0.45, -0.85),
+        Vec3d::new(0.02, 0.4, 0.12),
+    ),
+    panel(
+        "tailplane",
+        Vec3d::new(0.0, 0.95, -0.9),
+        Vec3d::new(0.3, 0.03, 0.08),
+    ),
+    panel(
+        "gear_l",
+        Vec3d::new(-0.19, -0.78, -0.07),
+        Vec3d::new(0.02, 0.22, 0.02),
+    ),
+    panel(
+        "gear_r",
+        Vec3d::new(0.19, -0.78, -0.07),
+        Vec3d::new(0.02, 0.22, 0.02),
+    ),
+    panel(
+        "gear_nose",
+        Vec3d::new(0.0, -0.78, 0.74),
+        Vec3d::new(0.02, 0.22, 0.02),
+    ),
+    glass(
+        "glass_flightdeck",
+        Vec3d::new(0.0, 0.0, 0.9),
+        Vec3d::new(0.08, 0.06, 0.04),
+    ),
+    door_right(
+        "door_r",
+        Vec3d::new(0.1, -0.2, 0.78),
+        Vec3d::new(0.01, 0.14, 0.03),
+    ),
+    seat(
+        "seat_r",
+        Vec3d::new(0.03, -0.47, 0.85),
+        Vec3d::new(0.02, 0.02, 0.02),
+    ),
+];
+
+/// A four-engined high-wing CARGO aeroplane (the Titan): a wide fuselage, four
+/// nacelles on the wing, a tall fin and the rear loading RAMP.
+pub(crate) const CARGO_PLANE_PARTS: &[BodyPart] = &[
+    panel(
+        "fuselage",
+        Vec3d::new(0.0, -0.45, 0.02),
+        Vec3d::new(0.12, 0.3, 0.96),
+    ),
+    panel(
+        "wing",
+        Vec3d::new(0.0, -0.05, 0.12),
+        Vec3d::new(1.0, 0.04, 0.14),
+    ),
+    panel(
+        "engine_l1",
+        Vec3d::new(-0.55, -0.12, 0.3),
+        Vec3d::new(0.04, 0.06, 0.1),
+    ),
+    panel(
+        "engine_l2",
+        Vec3d::new(-0.3, -0.12, 0.3),
+        Vec3d::new(0.04, 0.06, 0.1),
+    ),
+    panel(
+        "engine_r1",
+        Vec3d::new(0.3, -0.12, 0.3),
+        Vec3d::new(0.04, 0.06, 0.1),
+    ),
+    panel(
+        "engine_r2",
+        Vec3d::new(0.55, -0.12, 0.3),
+        Vec3d::new(0.04, 0.06, 0.1),
+    ),
+    panel(
+        "tail_boom",
+        Vec3d::new(0.0, -0.2, -0.8),
+        Vec3d::new(0.06, 0.12, 0.18),
+    ),
+    panel(
+        "fin",
+        Vec3d::new(0.0, 0.43, -0.86),
+        Vec3d::new(0.02, 0.55, 0.12),
+    ),
+    panel(
+        "tailplane",
+        Vec3d::new(0.0, -0.1, -0.9),
+        Vec3d::new(0.3, 0.03, 0.08),
+    ),
+    panel(
+        "gear_l",
+        Vec3d::new(-0.11, -0.86, -0.1),
+        Vec3d::new(0.02, 0.13, 0.03),
+    ),
+    panel(
+        "gear_r",
+        Vec3d::new(0.11, -0.86, -0.1),
+        Vec3d::new(0.02, 0.13, 0.03),
+    ),
+    panel(
+        "gear_nose",
+        Vec3d::new(0.0, -0.86, 0.66),
+        Vec3d::new(0.02, 0.13, 0.02),
+    ),
+    ramp(
+        "ramp",
+        Vec3d::new(0.0, -0.72, -0.62),
+        Vec3d::new(0.1, 0.02, 0.12),
+    ),
+    glass(
+        "glass_flightdeck",
+        Vec3d::new(0.0, -0.22, 0.92),
+        Vec3d::new(0.09, 0.06, 0.04),
+    ),
+    door_right(
+        "door_r",
+        Vec3d::new(0.12, -0.5, 0.7),
+        Vec3d::new(0.01, 0.15, 0.03),
+    ),
+    seat(
+        "seat_r",
+        Vec3d::new(0.03, -0.47, 0.86),
+        Vec3d::new(0.02, 0.02, 0.02),
+    ),
+];
+
+/// A HELICOPTER (the Buzzard, Maverick, Volatus, Swift): the VEH2c rotorcraft's
+/// cabin, boom, fin and skids, plus a bubble, a cabin DOOR and a drawn pilot's
+/// seat -- so the boarding pipeline has a handle and a cushion. The island's
+/// own chopper keeps the rotorcraft family byte for byte.
+pub(crate) const HELICOPTER_PARTS: &[BodyPart] = &[
+    panel(
+        "cabin",
+        Vec3d::new(0.0, 0.02, 0.42),
+        Vec3d::new(0.98, 0.84, 0.54),
+    ),
+    panel(
+        "boom",
+        Vec3d::new(0.0, 0.3, -0.57),
+        Vec3d::new(0.2, 0.2, 0.43),
+    ),
+    panel(
+        "fin",
+        Vec3d::new(0.0, 0.6, -0.8),
+        Vec3d::new(0.07, 0.38, 0.14),
+    ),
+    panel(
+        "skid_left",
+        Vec3d::new(-0.62, -0.95, 0.05),
+        Vec3d::new(0.07, 0.05, 0.7),
+    ),
+    panel(
+        "skid_right",
+        Vec3d::new(0.62, -0.95, 0.05),
+        Vec3d::new(0.07, 0.05, 0.7),
+    ),
+    glass(
+        "glass_bubble",
+        Vec3d::new(0.0, 0.35, 0.94),
+        Vec3d::new(0.8, 0.3, 0.04),
+    ),
+    door_right(
+        "door_r",
+        Vec3d::new(0.99, 0.0, 0.5),
+        Vec3d::new(0.01, 0.55, 0.28),
+    ),
+    seat(
+        "seat_r",
+        Vec3d::new(0.4, -0.5, 0.55),
+        Vec3d::new(0.25, 0.05, 0.12),
+    ),
+];
+
+/// A TANDEM-rotor heavy helicopter (the Cargobob): a long box cabin, two rotor
+/// pylons, a flight deck forward, the winch hook below and a crew door.
+pub(crate) const TANDEM_PARTS: &[BodyPart] = &[
+    panel(
+        "cabin",
+        Vec3d::new(0.0, -0.2, 0.0),
+        Vec3d::new(0.98, 0.72, 0.9),
+    ),
+    panel(
+        "pylon_front",
+        Vec3d::new(0.0, 0.62, 0.72),
+        Vec3d::new(0.4, 0.14, 0.2),
+    ),
+    panel(
+        "pylon_rear",
+        Vec3d::new(0.0, 0.7, -0.75),
+        Vec3d::new(0.4, 0.28, 0.24),
+    ),
+    panel(
+        "hook",
+        Vec3d::new(0.0, -0.96, 0.0),
+        Vec3d::new(0.06, 0.04, 0.06),
+    ),
+    panel(
+        "gear_front",
+        Vec3d::new(0.0, -0.95, 0.6),
+        Vec3d::new(0.8, 0.05, 0.06),
+    ),
+    panel(
+        "gear_rear",
+        Vec3d::new(0.0, -0.95, -0.6),
+        Vec3d::new(0.8, 0.05, 0.06),
+    ),
+    glass(
+        "glass_flightdeck",
+        Vec3d::new(0.0, 0.1, 0.94),
+        Vec3d::new(0.8, 0.22, 0.04),
+    ),
+    door_right(
+        "door_r",
+        Vec3d::new(0.99, -0.25, 0.6),
+        Vec3d::new(0.01, 0.45, 0.14),
+    ),
+    seat(
+        "seat_r",
+        Vec3d::new(0.4, -0.5, 0.75),
+        Vec3d::new(0.25, 0.05, 0.1),
+    ),
+];
+
+/// A PERSONAL WATERCRAFT (the Seashark): a planing hull, a saddle and bars.
+pub(crate) const JETSKI_PARTS: &[BodyPart] = &[
+    panel(
+        "hull",
+        Vec3d::new(0.0, -0.55, 0.0),
+        Vec3d::new(1.0, 0.45, 0.98),
+    ),
+    panel(
+        "deck",
+        Vec3d::new(0.0, 0.0, -0.1),
+        Vec3d::new(0.8, 0.1, 0.8),
+    ),
+    panel(
+        "cowl",
+        Vec3d::new(0.0, 0.2, 0.55),
+        Vec3d::new(0.6, 0.2, 0.3),
+    ),
+    panel(
+        "bars",
+        Vec3d::new(0.0, 0.93, 0.35),
+        Vec3d::new(0.7, 0.05, 0.05),
+    ),
+    panel(
+        "column",
+        Vec3d::new(0.0, 0.55, 0.4),
+        Vec3d::new(0.08, 0.38, 0.05),
+    ),
+    seat(
+        "seat_r",
+        Vec3d::new(0.0, -0.55, -0.35),
+        Vec3d::new(0.35, 0.1, 0.35),
+    ),
+];
+
+/// A SPEEDBOAT (the Jetmax, the Speeder, the Dinghy): a planing hull, a
+/// foredeck, gunwales, a windscreen, a cockpit seat and an engine hatch aft.
+pub(crate) const SPEEDBOAT_PARTS: &[BodyPart] = &[
+    panel(
+        "hull",
+        Vec3d::new(0.0, -0.5, 0.0),
+        Vec3d::new(1.0, 0.5, 0.98),
+    ),
+    panel(
+        "deck_fore",
+        Vec3d::new(0.0, 0.05, 0.55),
+        Vec3d::new(0.9, 0.05, 0.43),
+    ),
+    panel(
+        "gunwale_l",
+        Vec3d::new(-0.92, 0.1, -0.35),
+        Vec3d::new(0.08, 0.1, 0.55),
+    ),
+    panel(
+        "gunwale_r",
+        Vec3d::new(0.92, 0.1, -0.35),
+        Vec3d::new(0.08, 0.1, 0.55),
+    ),
+    panel(
+        "engine_hatch",
+        Vec3d::new(0.0, 0.08, -0.82),
+        Vec3d::new(0.7, 0.08, 0.14),
+    ),
+    glass(
+        "glass_windscreen",
+        Vec3d::new(0.0, 0.7, 0.08),
+        Vec3d::new(0.8, 0.28, 0.03),
+    ),
+    seat(
+        "seat_r",
+        Vec3d::new(0.4, -0.5, -0.2),
+        Vec3d::new(0.3, 0.05, 0.12),
+    ),
+];
+
+/// A SAILING YACHT (the Marquis): a hull, a coachroof, a mast stub, a boom and
+/// a keel.
+///
+/// The drawn mast is capped by the hull box (the silhouette law) while the sail
+/// FORCE acts at its own centre of effort (`marine::sail_ce_height_m`, 6.1 m on
+/// this row's 105 m2): a drawn rig the height of the real one would need a
+/// collider box three times the hull's height, and Archimedes on a box that tall
+/// would float a yacht whose centre of mass is eight metres above its keel.
+pub(crate) const SAILBOAT_PARTS: &[BodyPart] = &[
+    panel(
+        "hull",
+        Vec3d::new(0.0, -0.55, 0.0),
+        Vec3d::new(1.0, 0.45, 0.98),
+    ),
+    panel(
+        "deck",
+        Vec3d::new(0.0, -0.05, 0.0),
+        Vec3d::new(0.95, 0.05, 0.95),
+    ),
+    panel(
+        "coachroof",
+        Vec3d::new(0.0, 0.12, -0.05),
+        Vec3d::new(0.55, 0.12, 0.35),
+    ),
+    panel(
+        "mast",
+        Vec3d::new(0.0, 0.5, 0.15),
+        Vec3d::new(0.04, 0.5, 0.02),
+    ),
+    panel(
+        "boom",
+        Vec3d::new(0.0, 0.3, -0.25),
+        Vec3d::new(0.03, 0.03, 0.38),
+    ),
+    panel(
+        "keel",
+        Vec3d::new(0.0, -0.97, 0.0),
+        Vec3d::new(0.05, 0.03, 0.3),
+    ),
+    seat(
+        "seat_r",
+        Vec3d::new(0.35, -0.5, -0.75),
+        Vec3d::new(0.2, 0.05, 0.1),
+    ),
+];
+
+/// A SHIP (the tug, the superyacht, the cruise ship): a hull, three
+/// superstructure tiers stepping in, a bridge and a funnel.
+pub(crate) const SHIP_PARTS: &[BodyPart] = &[
+    panel(
+        "hull",
+        Vec3d::new(0.0, -0.6, 0.0),
+        Vec3d::new(1.0, 0.4, 0.98),
+    ),
+    panel(
+        "tier_1",
+        Vec3d::new(0.0, -0.08, -0.05),
+        Vec3d::new(0.92, 0.12, 0.8),
+    ),
+    panel(
+        "tier_2",
+        Vec3d::new(0.0, 0.18, -0.1),
+        Vec3d::new(0.8, 0.14, 0.6),
+    ),
+    panel(
+        "tier_3",
+        Vec3d::new(0.0, 0.46, -0.05),
+        Vec3d::new(0.65, 0.14, 0.4),
+    ),
+    panel(
+        "funnel",
+        Vec3d::new(0.0, 0.8, -0.35),
+        Vec3d::new(0.18, 0.19, 0.1),
+    ),
+    glass(
+        "glass_bridge",
+        Vec3d::new(0.0, 0.5, 0.36),
+        Vec3d::new(0.6, 0.08, 0.02),
+    ),
+    seat(
+        "seat_r",
+        Vec3d::new(0.2, -0.48, 0.3),
+        Vec3d::new(0.08, 0.03, 0.04),
+    ),
+];
+
+/// The air and sea families' MOUNTS (wave VEH3g). A screw or a jet at the
+/// hull's bottom aft -- deep enough to stay wet on a planing hull whose draught
+/// falls to half its rest value (the launch's, at 0.92 of the half-height, was
+/// measured to lift clear of the water on a jetski at 14 m/s and cap its speed
+/// there).
+pub(crate) const PLANING_MOUNTS: &[MountPart] = &[MountPart {
+    name: "screw",
+    kind: PartKind::Thruster,
+    centre: Vec3d::new(0.0, -1.0, -0.9),
+    half: Vec3d::new(0.12, 0.08, 0.06),
+    primitive: crate::components::Primitive::Cylinder,
+}];
+
+/// A displacement ship's single screw, deep under the stern.
+pub(crate) const SHIP_MOUNTS: &[MountPart] = &[MountPart {
+    name: "screw",
+    kind: PartKind::Thruster,
+    centre: Vec3d::new(0.0, -0.9, -0.9),
+    half: Vec3d::new(0.1, 0.08, 0.05),
+    primitive: crate::components::Primitive::Cylinder,
+}];
+
+/// A single main rotor over the centre of gravity -- the VEH2c rotorcraft's
+/// ruling, verbatim (the mast over the CG, or the machine flies backwards).
+pub(crate) const HELICOPTER_MOUNTS: &[MountPart] = &[MountPart {
+    name: "rotor",
+    kind: PartKind::Rotor,
+    centre: Vec3d::new(0.0, 1.22, 0.0),
+    half: Vec3d::new(3.6, 0.04, 3.6),
+    primitive: crate::components::Primitive::Cylinder,
+}];
+
+/// Two rotors, fore and aft, symmetric about the centre of gravity so their mean
+/// -- the thrust line `RotorVehicle::hub` reads -- is over it.
+pub(crate) const TANDEM_MOUNTS: &[MountPart] = &[
+    MountPart {
+        name: "rotor_front",
+        kind: PartKind::Rotor,
+        centre: Vec3d::new(0.0, 0.85, 0.72),
+        half: Vec3d::new(2.0, 0.03, 2.0),
+        primitive: crate::components::Primitive::Cylinder,
+    },
+    MountPart {
+        name: "rotor_rear",
+        kind: PartKind::Rotor,
+        centre: Vec3d::new(0.0, 1.05, -0.72),
+        half: Vec3d::new(2.0, 0.03, 2.0),
+        primitive: crate::components::Primitive::Cylinder,
+    },
 ];

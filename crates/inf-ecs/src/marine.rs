@@ -51,9 +51,17 @@ pub const PLANING_ONSET_FRAC: f64 = 0.6;
 pub const PLANING_LIFT_FRAC: f64 = 0.6;
 
 /// The immersion below which the planing lift fades out, `[0, 1]`: a hull
-/// skimming on its last fifth still has its bottom in the water; one launched
+/// skimming on its last twentieth still has its bottom in the water; one launched
 /// clear of a wave has none.
-pub const PLANING_WET_FLOOR: f64 = 0.15;
+pub const PLANING_WET_FLOOR: f64 = 0.05;
+
+/// The hull's heave (and pitch) damping ratio against its own heave frequency
+/// `sqrt(g / draught)` -- the water's dashpot beside P20.2's Archimedes spring.
+pub const HULL_HEAVE_DAMPING_RATIO: f64 = 0.7;
+
+/// The hull's roll damping ratio -- lighter than heave, because a yacht is
+/// SUPPOSED to heel under sail and settle back slowly.
+pub const HULL_ROLL_DAMPING_RATIO: f64 = 0.3;
 
 /// How close to the apparent wind a sail can be trimmed to draw, degrees.
 pub const SAIL_NO_GO_DEG: f64 = 30.0;

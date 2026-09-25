@@ -3353,14 +3353,17 @@ mod tests {
         for b in VehicleBody::CIVILIAN {
             assert!(b.wheeled(), "{:?} is in CIVILIAN and has mounts", b.name());
         }
-        // **Twelve families are not kerb families** (wave VEH3f): the launch,
-        // the rotorcraft, and ten of the roster's -- the bus, the semi tractor,
-        // the trailer, the flatbed, the tanker, the APC, the dozer, the
-        // forklift, the wrecker and the aeroplane. A family added to `ALL`
-        // without a decision about the kerb still reds here.
+        // **Twenty-one families are not kerb families**: the launch, the
+        // rotorcraft, ten of the roster's (wave VEH3f) -- the bus, the semi
+        // tractor, the trailer, the flatbed, the tanker, the APC, the dozer, the
+        // forklift, the wrecker and the aeroplane -- and the nine air and sea
+        // families of wave VEH3g (the biplane, the jet, the cargo aeroplane, the
+        // helicopter, the tandem rotor, the jetski, the speedboat, the sailing
+        // yacht and the ship), none of which a town parks at a kerb. A family
+        // added to `ALL` without a decision about the kerb still reds here.
         assert_eq!(
             VehicleBody::ALL.len() - VehicleBody::CIVILIAN.len(),
-            12,
+            21,
             "a family was added to ALL without a decision about the kerb"
         );
 

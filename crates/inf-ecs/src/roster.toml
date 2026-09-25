@@ -4528,6 +4528,7 @@ label = "Western Duster"
 
 [western_duster.vehicle]
 class = "airplane"
+body = "biplane"
 half_width_m = 4.9
 half_height_m = 1.25
 half_length_m = 3.75
@@ -4594,6 +4595,7 @@ label = "Buckingham Luxor Deluxe"
 
 [buckingham_luxor_deluxe.vehicle]
 class = "airplane"
+body = "jet"
 half_width_m = 15.85
 half_height_m = 3.6
 half_length_m = 16.9
@@ -4624,6 +4626,7 @@ label = "Titan Cargo"
 
 [titan_cargo.vehicle]
 class = "airplane"
+body = "cargoplane"
 half_width_m = 20.2
 half_height_m = 5.3
 half_length_m = 14.9
@@ -4655,6 +4658,7 @@ label = "FlyUS Jetliner"
 
 [flyus_jetliner.vehicle]
 class = "airplane"
+body = "jet"
 half_width_m = 34.0
 half_height_m = 9.2
 half_length_m = 38.0
@@ -4745,6 +4749,7 @@ label = "Cargobob"
 
 [cargobob.vehicle]
 class = "helicopter"
+body = "tandem_rotor"
 half_width_m = 2.28
 half_height_m = 1.767
 half_length_m = 4.77
@@ -4760,6 +4765,7 @@ label = "Nagasaki Seashark"
 
 [nagasaki_seashark.vehicle]
 class = "marine"
+body = "jetski"
 half_width_m = 0.65
 half_height_m = 0.6
 half_length_m = 1.75
@@ -4844,6 +4850,7 @@ label = "Buckingham Tug"
 
 [buckingham_tug.vehicle]
 class = "marine"
+body = "ship"
 half_width_m = 4.5
 half_height_m = 3.5
 half_length_m = 12.5
@@ -4864,6 +4871,7 @@ label = "Dundreary Marquis"
 
 [dundreary_marquis.vehicle]
 class = "marine"
+body = "sailboat"
 half_width_m = 2.25
 half_height_m = 1.75
 half_length_m = 7.3
@@ -4885,6 +4893,7 @@ label = "Galaxy Super Yacht"
 
 [galaxy_super_yacht.vehicle]
 class = "marine"
+body = "ship"
 half_width_m = 5.4
 half_height_m = 7.5
 half_length_m = 32.0
@@ -4905,6 +4914,7 @@ label = "Oceanic Odyssey"
 
 [oceanic_odyssey.vehicle]
 class = "marine"
+body = "ship"
 half_width_m = 32.0
 half_height_m = 36.0
 half_length_m = 181.0

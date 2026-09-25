@@ -1655,6 +1655,9 @@ pub enum BodyPartKind {
     /// semi tractor's a metre above a saloon's. A family with no seat part keeps
     /// the hull-fraction seat every family before the roster was measured on.
     Seat,
+    /// **A loading ramp** (wave VEH3g) -- hinged at its forward edge like a
+    /// boot lid, swinging its tail DOWN ([`ramp_hinge`]). The Titan's.
+    Ramp { hinge: Hinge },
 }
 
 /// **A door's hinge**: about the VERTICAL, at the door's own forward edge.
@@ -1693,6 +1696,20 @@ pub const fn trunk_hinge(centre: Vec3d, half: Vec3d) -> Hinge {
     }
 }
 
+/// How far a cargo ramp swings down, degrees (wave VEH3g).
+pub const RAMP_OPEN_DEG: f64 = 28.0;
+
+/// **A loading ramp's hinge** (wave VEH3g): about the LATERAL at its FORWARD
+/// edge, like a boot lid's -- and turning the OTHER way, so its tail swings
+/// DOWN to the ground instead of up. The Titan's rear ramp.
+pub const fn ramp_hinge(centre: Vec3d, half: Vec3d) -> Hinge {
+    Hinge {
+        axis: Vec3d::new(1.0, 0.0, 0.0),
+        at: Vec3d::new(centre.x, centre.y, centre.z + half.z),
+        open_deg: RAMP_OPEN_DEG,
+    }
+}
+
 impl Hinge {
     /// The hinge a part of this wire `kind` with this drawn box would have —
     /// the WORLD-side twin of the three `const fn` above.
@@ -1709,6 +1726,7 @@ impl Hinge {
             }
             KIND_HOOD => Some(hood_hinge(centre, half)),
             KIND_TRUNK => Some(trunk_hinge(centre, half)),
+            KIND_RAMP => Some(ramp_hinge(centre, half)),
             _ => None,
         }
     }
@@ -1749,6 +1767,8 @@ pub const KIND_GLASS: u8 = 5;
 /// The same, for a [`BodyPartKind::Seat`] (wave VEH3f) -- appended, as the
 /// wire numbers always are.
 pub const KIND_SEAT: u8 = 6;
+/// The same, for a [`BodyPartKind::Ramp`] (wave VEH3g) -- appended.
+pub const KIND_RAMP: u8 = 7;
 
 impl BodyPartKind {
     /// The frozen wire number this kind folds as — **append only**, exactly as
@@ -1763,6 +1783,7 @@ impl BodyPartKind {
             BodyPartKind::Bumper => KIND_BUMPER,
             BodyPartKind::Glass => KIND_GLASS,
             BodyPartKind::Seat => KIND_SEAT,
+            BodyPartKind::Ramp { .. } => KIND_RAMP,
         }
     }
 
@@ -1776,6 +1797,7 @@ impl BodyPartKind {
             BodyPartKind::Bumper => "bumper",
             BodyPartKind::Glass => "glass",
             BodyPartKind::Seat => "seat",
+            BodyPartKind::Ramp { .. } => "ramp",
         }
     }
 
@@ -1784,7 +1806,8 @@ impl BodyPartKind {
         match self {
             BodyPartKind::Door { hinge, .. }
             | BodyPartKind::Hood { hinge }
-            | BodyPartKind::Trunk { hinge } => Some(hinge),
+            | BodyPartKind::Trunk { hinge }
+            | BodyPartKind::Ramp { hinge } => Some(hinge),
             _ => None,
         }
     }
@@ -1833,7 +1856,7 @@ impl BodyPartKind {
             BodyPartKind::Panel => 0.0,
             BodyPartKind::Door { .. } => 0.50,
             BodyPartKind::Hood { .. } => 0.20,
-            BodyPartKind::Trunk { .. } => 0.20,
+            BodyPartKind::Trunk { .. } | BodyPartKind::Ramp { .. } => 0.20,
             BodyPartKind::Bumper => 1.00,
             BodyPartKind::Glass => 0.14,
             // Inside the cabin: nothing reaches it that has not gone through a
@@ -1860,6 +1883,8 @@ impl BodyPartKind {
             BodyPartKind::Panel => 0.0,
             BodyPartKind::Door { .. } => 55.0,
             BodyPartKind::Hood { .. } | BodyPartKind::Trunk { .. } => 8.0,
+            // A cargo ramp is a load-bearing floor, not a skin.
+            BodyPartKind::Ramp { .. } => 40.0,
             BodyPartKind::Bumper => 20.0,
             BodyPartKind::Glass => 12.5,
             // Never sheds, so it never needs a mass.
@@ -1933,6 +1958,8 @@ impl BodyPartKind {
             KIND_GLASS
         } else if name.starts_with("seat") {
             KIND_SEAT
+        } else if name.starts_with("ramp") {
+            KIND_RAMP
         } else {
             KIND_PANEL
         };
@@ -1943,7 +1970,15 @@ impl BodyPartKind {
                     at: centre,
                     open_deg: DOOR_OPEN_DEG,
                 }),
-                side: PartSide::of(centre.x),
+                // A DOOR is always on a side -- its sign says which -- even
+                // when the hull is an aeroplane's, whose fuselage is a tenth of
+                // its span (wave VEH3g): every car door sits past
+                // `PART_SIDE_FRAC` and answers exactly as `PartSide::of` would.
+                side: if centre.x < 0.0 {
+                    PartSide::Left
+                } else {
+                    PartSide::Right
+                },
             },
             KIND_HOOD => BodyPartKind::Hood {
                 hinge: Hinge::of(KIND_HOOD, centre, half).unwrap_or(Hinge {
@@ -1962,6 +1997,13 @@ impl BodyPartKind {
             KIND_BUMPER => BodyPartKind::Bumper,
             KIND_GLASS => BodyPartKind::Glass,
             KIND_SEAT => BodyPartKind::Seat,
+            KIND_RAMP => BodyPartKind::Ramp {
+                hinge: Hinge::of(KIND_RAMP, centre, half).unwrap_or(Hinge {
+                    axis: Vec3d::new(1.0, 0.0, 0.0),
+                    at: centre,
+                    open_deg: RAMP_OPEN_DEG,
+                }),
+            },
             _ => BodyPartKind::Panel,
         }
     }
@@ -2324,9 +2366,29 @@ pub enum VehicleBody {
     Forklift,
     /// A wrecker with a boom.
     TowTruck,
-    /// **A light aeroplane, DORMANT until VEH3g**: drawn, rolls on its gear,
-    /// does not fly.
+    /// **A light high-wing aeroplane** -- the Dodo's; flies since VEH3g
+    /// (`crate::aero`).
     Aircraft,
+    // ── the air and sea families (wave VEH3g): `crate::vehicle_families` ──
+    /// A biplane (the Duster).
+    Biplane,
+    /// A jet with engines on the tail (the Luxor, the Jetliner).
+    Jet,
+    /// A four-engined cargo aeroplane with a rear RAMP (the Titan).
+    CargoPlane,
+    /// A light helicopter with a cabin door and a drawn seat (the roster's
+    /// four; the island's own chopper stays [`Rotorcraft`](Self::Rotorcraft)).
+    Helicopter,
+    /// A tandem-rotor heavy lifter with a winch hook (the Cargobob).
+    TandemRotor,
+    /// A personal watercraft (the Seashark).
+    Jetski,
+    /// A planing speedboat (the Jetmax, the Speeder, the Dinghy).
+    Speedboat,
+    /// A sailing yacht (the Marquis).
+    Sailboat,
+    /// A displacement ship (the tug, the superyacht, the cruise ship).
+    Ship,
 }
 
 /// The sedan's parts. `+Z` is forward, `+Y` is up.
@@ -2990,7 +3052,7 @@ const VAN_PARTS: &[BodyPart] = &[
 
 impl VehicleBody {
     /// Every family, in the canonical order.
-    pub const ALL: [VehicleBody; 23] = [
+    pub const ALL: [VehicleBody; 32] = [
         VehicleBody::Sedan,
         VehicleBody::Truck,
         VehicleBody::Sports,
@@ -3014,6 +3076,15 @@ impl VehicleBody {
         VehicleBody::Forklift,
         VehicleBody::TowTruck,
         VehicleBody::Aircraft,
+        VehicleBody::Biplane,
+        VehicleBody::Jet,
+        VehicleBody::CargoPlane,
+        VehicleBody::Helicopter,
+        VehicleBody::TandemRotor,
+        VehicleBody::Jetski,
+        VehicleBody::Speedboat,
+        VehicleBody::Sailboat,
+        VehicleBody::Ship,
     ];
 
     /// **The bodies that belong at a kerb** — the named civilian sub-list
@@ -3077,6 +3148,15 @@ impl VehicleBody {
             VehicleBody::Forklift => "forklift",
             VehicleBody::TowTruck => "tow_truck",
             VehicleBody::Aircraft => "aircraft",
+            VehicleBody::Biplane => "biplane",
+            VehicleBody::Jet => "jet",
+            VehicleBody::CargoPlane => "cargoplane",
+            VehicleBody::Helicopter => "helicopter",
+            VehicleBody::TandemRotor => "tandem_rotor",
+            VehicleBody::Jetski => "jetski",
+            VehicleBody::Speedboat => "speedboat",
+            VehicleBody::Sailboat => "sailboat",
+            VehicleBody::Ship => "ship",
         }
     }
 
@@ -3132,9 +3212,18 @@ impl VehicleBody {
             | VehicleBody::Dozer
             | VehicleBody::Forklift
             | VehicleBody::TowTruck
-            | VehicleBody::Aircraft => &[],
+            | VehicleBody::Aircraft
+            | VehicleBody::Biplane
+            | VehicleBody::Jet
+            | VehicleBody::CargoPlane => &[],
             VehicleBody::Launch => LAUNCH_MOUNTS,
             VehicleBody::Rotorcraft => ROTORCRAFT_MOUNTS,
+            VehicleBody::Helicopter => crate::vehicle_families::HELICOPTER_MOUNTS,
+            VehicleBody::TandemRotor => crate::vehicle_families::TANDEM_MOUNTS,
+            VehicleBody::Jetski | VehicleBody::Speedboat | VehicleBody::Sailboat => {
+                crate::vehicle_families::PLANING_MOUNTS
+            }
+            VehicleBody::Ship => crate::vehicle_families::SHIP_MOUNTS,
         }
     }
 
@@ -3172,6 +3261,15 @@ impl VehicleBody {
             VehicleBody::Forklift => crate::vehicle_families::FORKLIFT_PARTS,
             VehicleBody::TowTruck => crate::vehicle_families::TOW_TRUCK_PARTS,
             VehicleBody::Aircraft => crate::vehicle_families::AIRCRAFT_PARTS,
+            VehicleBody::Biplane => crate::vehicle_families::BIPLANE_PARTS,
+            VehicleBody::Jet => crate::vehicle_families::JET_PARTS,
+            VehicleBody::CargoPlane => crate::vehicle_families::CARGO_PLANE_PARTS,
+            VehicleBody::Helicopter => crate::vehicle_families::HELICOPTER_PARTS,
+            VehicleBody::TandemRotor => crate::vehicle_families::TANDEM_PARTS,
+            VehicleBody::Jetski => crate::vehicle_families::JETSKI_PARTS,
+            VehicleBody::Speedboat => crate::vehicle_families::SPEEDBOAT_PARTS,
+            VehicleBody::Sailboat => crate::vehicle_families::SAILBOAT_PARTS,
+            VehicleBody::Ship => crate::vehicle_families::SHIP_PARTS,
         }
     }
 }
@@ -9540,6 +9638,11 @@ pub const RUDDER_FLOW_GAIN: f64 = 0.006;
 /// sway and leave a boat spinning like a top.
 pub const HULL_DRAG_ARM_FRACTION: f64 = 0.6;
 
+/// The shallowest draught the hull's heave frequency is derived from, metres --
+/// a floor under `sqrt(g / draught)` so a hull skimming on its last centimetre is
+/// not damped as if it had an infinitely stiff spring (wave VEH3g).
+pub const HULL_MIN_DRAUGHT_M: f64 = 0.03;
+
 /// **The boat**: a screw, a rudder and a hull, over the wheel-less rig
 /// (wave VEH2c).
 ///
@@ -9874,6 +9977,48 @@ impl Vehicle for HullVehicle {
                         force: -right * f,
                     });
                 }
+            }
+        }
+
+        // ── heave and pitch DAMPING (wave VEH3g) -- the water's resistance to a
+        //    hull bouncing on its own buoyancy. P20.2's Archimedes is a spring
+        //    with no dashpot, and the planing lift is a second spring on top of
+        //    it: measured without this, the jetski porpoised within four seconds
+        //    of reaching its planing speed, its hull jumping 0.37 m clear of the
+        //    water and pitching 45 degrees. Sized as a damping RATIO against the
+        //    hull's own heave frequency `sqrt(g / draught)`, so a jetski and a
+        //    cruise ship are damped alike; applied only while the hull is wet.
+        if wet > 0.0 {
+            let half = self.half_height();
+            let draught = (wet * 2.0 * half).max(HULL_MIN_DRAUGHT_M);
+            let omega = (9.81 / draught).sqrt();
+            let heave = -chassis.linvel.y
+                * 2.0
+                * crate::marine::HULL_HEAVE_DAMPING_RATIO
+                * chassis.mass_kg
+                * omega;
+            if heave != 0.0 {
+                out.push(WheelForce {
+                    point: chassis.position,
+                    force: DVec3::Y * heave,
+                });
+            }
+            let pitch_rate = chassis.angvel.dot(right);
+            let roll_rate = chassis.angvel.dot(fwd);
+            let tau = -right
+                * (pitch_rate
+                    * 2.0
+                    * crate::marine::HULL_HEAVE_DAMPING_RATIO
+                    * chassis.inertia.x
+                    * omega)
+                - fwd
+                    * (roll_rate
+                        * 2.0
+                        * crate::marine::HULL_ROLL_DAMPING_RATIO
+                        * chassis.inertia.z
+                        * omega);
+            if let Some(pair) = torque_pair(chassis.position, tau, 1.0) {
+                out.extend_from_slice(&pair);
             }
         }
 
@@ -14122,7 +14267,7 @@ mod tests {
     #[test]
     fn every_authored_part_is_recognised_as_the_kind_it_declares() {
         let mut seen = 0usize;
-        let mut kinds = [0usize; 7];
+        let mut kinds = [0usize; 8];
         for body in VehicleBody::ALL {
             for part in body.parts() {
                 let got = BodyPartKind::of(part.name, part.centre, part.half);
@@ -14148,7 +14293,7 @@ mod tests {
             }
         }
         eprintln!(
-            "parts: {seen} over {} families — panel {} door {} hood {} trunk {} bumper {} glass {} seat {}",
+            "parts: {seen} over {} families — panel {} door {} hood {} trunk {} bumper {} glass {} seat {} ramp {}",
             VehicleBody::ALL.len(),
             kinds[0],
             kinds[1],
@@ -14156,13 +14301,16 @@ mod tests {
             kinds[3],
             kinds[4],
             kinds[5],
-            kinds[6]
+            kinds[6],
+            kinds[7]
         );
         // The engagement count: this is not a test of an empty list.
         assert!(seen >= 60, "only {seen} parts over seven families");
-        for (i, name) in ["panel", "door", "hood", "trunk", "bumper", "glass", "seat"]
-            .into_iter()
-            .enumerate()
+        for (i, name) in [
+            "panel", "door", "hood", "trunk", "bumper", "glass", "seat", "ramp",
+        ]
+        .into_iter()
+        .enumerate()
         {
             assert!(kinds[i] > 0, "no part of any family is a {name}");
         }

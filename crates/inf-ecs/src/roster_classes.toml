@@ -759,7 +759,7 @@ firing_order_variant = 0.0
 # Helicopters: on VEH2c's RotorVehicle (attitude-commanded, one main disc over the CG).
 # Voiced by VEH3g's ROTOR voice (engine_voice_kind 5): blade-pass at rpm x blades.
 [helicopter.vehicle]
-body = "rotorcraft"
+body = "helicopter"
 max_steer_deg = 26.0
 min_steer_deg = 14.0
 steer_rate_deg_per_s = 60.0
@@ -773,7 +773,7 @@ engine_voice_kind = 5.0
 # cavitation are VEH3g's; `planing_speed_mps` and `sail_area_m2` are authored here,
 # dormant.
 [marine.vehicle]
-body = "launch"
+body = "speedboat"
 max_steer_deg = 35.0
 min_steer_deg = 20.0
 steer_rate_deg_per_s = 90.0
