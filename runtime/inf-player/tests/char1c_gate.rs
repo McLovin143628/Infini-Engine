@@ -1869,10 +1869,17 @@ fn the_camera_never_ends_inside_the_islands_geometry() {
     // so it is the draw). What this half guards -- that the sweep is RUNNING
     // against the island's colliders -- is a non-zero pull; the deep clip is
     // the hostile-route arm's, which walks the hero into geometry on purpose.
-    assert!(
-        worst_clip > 0.01,
-        "the boom was never clipped over {walked:.2} m of Harbour City (worst \
-         {worst_clip:.3} m) — the sweep is not seeing the city"
+    // **Re-blessed again at wave VEH3f.2a, with its cause, and moved.** A class
+    // with imported bodies now parks only those at the kerb, and the island was
+    // rebuilt with the imported-art lot: this street's clip went to 0.000 m
+    // over the same 111.63 m. The half's job -- proof that the sweep RUNS
+    // against the island's colliders -- was never this street's to prove: it
+    // depended on what the kerb happened to park, twice. It is proved by
+    // `the_camera_never_ends_inside_the_islands_geometry_on_a_hostile_route`
+    // (same island, same pipeline: 24 of 29 stations clipped, worst 3.032 m),
+    // and this arm keeps its own claim, zero frames inside.
+    println!(
+        "  anti-vacuity: worst clip on this street {worst_clip:.3} m (the sweep's engagement is the hostile-route arm's)"
     );
     assert_eq!(
         bad, 0,

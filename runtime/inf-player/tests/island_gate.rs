@@ -1455,7 +1455,38 @@ fn both_hosts_resolve_the_same_dag_for_every_mesh_the_island_draws() {
             }
         }
     }
-    println!("MESH REFS: {} — {refs:?}", refs.len());
+    // …and (wave VEH3f.2a) the meshes the FIXED STEP spawns and the payload
+    // carries beside the document's -- the weapons in hands and the imported
+    // bodies traffic draws (`engine_spawned_art_meshes`), each with its drawn
+    // SECTIONS -- wherever the project holds a DAG for one. On the fixture that
+    // is the committed fallback boxes, which are sectionless.
+    let engine: Vec<Uuid> = {
+        let mut v = inf_ecs::weapon::engine_spawned_meshes();
+        v.extend(inf_ecs::roster::engine_spawned_art_meshes());
+        v.sort();
+        v.dedup();
+        v
+    };
+    let mut expected: std::collections::BTreeSet<Uuid> = refs.iter().copied().collect();
+    for m in engine.iter().chain(refs.iter()) {
+        let with_sections = std::iter::once(*m).chain(
+            (0..inf_mesh::MAX_SECTIONS)
+                .map(|s| inf_mesh::section_mesh_id(inf_asset::AssetId(*m), s).uuid()),
+        );
+        for g in with_sections {
+            if matches!(
+                inf_editor_core::assets::vmesh::derived_vmesh(&project, inf_asset::AssetId(g)),
+                inf_editor_core::assets::vmesh::DerivedVmesh::Current(_)
+            ) {
+                expected.insert(g);
+            }
+        }
+    }
+    println!(
+        "MESH REFS: {} document + {} engine-spawned with a DAG — {refs:?}",
+        refs.len(),
+        expected.len() - refs.len()
+    );
     // The exact expected count, taken from the fixture, asserted BEFORE anything
     // is compared — the P21.4 rule. Two hosts that both draw nothing agree.
     //
@@ -1514,10 +1545,10 @@ fn both_hosts_resolve_the_same_dag_for_every_mesh_the_island_draws() {
     .expect("the payload builds");
     assert_eq!(
         payload.vmesh_paths.len(),
-        refs.len(),
+        expected.len(),
         "the payload names {} DAGs for {} rigid mesh refs",
         payload.vmesh_paths.len(),
-        refs.len()
+        expected.len()
     );
     let pie = inf_player::vmeshes_from_payload(&payload);
 

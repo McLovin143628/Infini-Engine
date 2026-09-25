@@ -796,6 +796,12 @@ fn the_hero_pulls_a_commuter_out_of_a_moving_car_and_drives_off_in_it() {
 
     // …and the seat the hero now walks up to is a free one, answered by the
     // ordinary enter door.
+    // The car was MOVING when it was jacked, and it rolls to a stop: the
+    // hero walks up to where it STOPPED (wave VEH3f.2a: the imported box van
+    // this town now draws rolled 2.26 m and left the stale point 3.02 m from
+    // its seat, over the 3.0 m reach). Same door side, same 2 m off the seat.
+    let seat_stopped = inf_physics::d3::vehicle::seat_pose(&town.bridge, chassis).expect("a seat");
+    let feet = seat_stopped.0 + (seat_stopped.1 * DVec3::X) * 2.0;
     let seat_now = inf_physics::d3::vehicle::try_enter(&town.bridge, feet, &Default::default());
     assert_eq!(seat_now, Some(chassis));
 

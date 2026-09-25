@@ -708,7 +708,12 @@ pub fn split_skel_vehicle(i: &SkelVehicleIn) -> Result<SkelVehicleSplit, String>
             let x = (DVec3::NEG_X - z * DVec3::NEG_X.dot(z)).normalize_or_zero();
             let y = z.cross(x);
             // Rake: the column's tilt from horizontal is the rim's from vertical.
-            pack_rake_deg = Some((-z.y).clamp(-1.0, 1.0).asin().to_degrees());
+            // asin(x) = pi/2 - acos(x), through the portable acos: this number
+            // is COMMITTED content (the art table's `hub_rake_deg`).
+            pack_rake_deg = Some(
+                (std::f64::consts::FRAC_PI_2 - inf_math::pacos64((-z.y).clamp(-1.0, 1.0)))
+                    .to_degrees(),
+            );
             let (mut lo, mut hi) = (DVec3::splat(f64::MAX), DVec3::splat(f64::MIN));
             for p in &pts {
                 let d = *p - mean;
@@ -1140,7 +1145,7 @@ pub mod fixture {
         // The steering disc: rim plane raked so its face turns up at the
         // driver (behind it, glTF -X), by RAKE_DEG.
         let rake = RAKE_DEG.to_radians();
-        let axis = DVec3::new(-rake.cos(), -rake.sin(), 0.0).normalize();
+        let axis = DVec3::new(-inf_math::pcos64(rake), -inf_math::psin64(rake), 0.0).normalize();
         prism(j[7].1, axis, 0.18, 0.02, 7, &mut plain);
         MeshAsset::new(
             vec![submesh(paint, 0), submesh(glass, 1), submesh(plain, 2)],
