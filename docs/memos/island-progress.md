@@ -41351,3 +41351,99 @@ rim; two lot rows (`obey_rocoto`, `declasse_yosemite_rancher`) found no kerb
 vertex at Harbour City; the generic glTF door's fresh GUIDs (26 sidecars per
 calibration import); the pack LODs 1-3 are recorded, not drawn -- every
 section is a meshlet DAG.
+
+
+## WAVE VEH3f.2a — THE AUDIT (2026-09-25)
+
+Range `17ec0cd0..` over the wave's fourteen commits; report
+`campaign-briefs/veh3f2a-audit-report.md`; frames and traces
+`AUDIT-VEH3f2a-FINAL/`. Scene schema unmoved (v28, `EXPECTED_LEVELS` 24);
+the PIE IPC envelope moved 13 -> 14 (`texture_paths`, below); goldens 66,
+none re-blessed (126 golden runs pass under `INF_GOLDEN_STRICT` after the
+vgeom pass change); `Cargo.lock` unchanged; the island level not moved.
+
+### audit: the frame
+
+Measured at 1080p, release, shipped settings, on the island's own packs
+(the local project cooked with the art, and the same project with the
+committed fallback bodies), the hero at the Harbour City crossroads with
+400 traffic records (52 resident within 150 m, 47 of them art rows), the
+camera in the road looking out and turning (`fps_instrument::
+the_island_in_imported_traffic`):
+
+* **The art first panicked the renderer.** The vertex pool reached
+  137 362 176 bytes against the device's 134 217 728-byte storage binding
+  and `create_bind_group` refused it: the four meshlet pools shared a
+  256 MiB budget with no per-pool bound. Every pool is now capped at its
+  device's `max_storage_buffer_binding_size` (a pool at its cap fails like
+  a pool out of budget: softer detail, never a hole).
+* **The art's price was per ASSET.** A sectioned body is one meshlet asset
+  per material slot (336 assets vs 182), and the vgeom node began a compute
+  pass and a render pass per asset, twice a frame: 1 344 passes. Now one of
+  each per phase. SHIPPED p50/p95: art 100.6/104.1 -> **67.5/71.1 ms**,
+  fallback 73.2/77.1 -> 58.7/61.8; art/fallback x1.374 -> **x1.150**
+  (asserted <= x1.25, release, real adapter, off CI). `submit` 22.4 -> 4.5
+  ms, `vgeom` GPU 14.9 -> 2.9 ms; the 126 goldens unchanged.
+* **`SHIPPING_FRAME_CEILING_MS` (38) does not hold on this world** and is
+  printed as a distance, not asserted: the FALLBACK island is 58.7 ms p50
+  (1 024 skinned townsfolk 10.9 ms of GPU, an 11.2 ms fixed step, a 6.8 ms
+  depth prepass) -- PERF1's, by name. The DAG cut engages (22 meshlets an
+  instance on average; 544 of 1 006 pages resident, 130.1 MiB); the pack's
+  LOD1-3 are redundant with it. Texture residency: 7.8 MiB of pages
+  resident, 57 of 60 landed a frame, 103 virtual textures.
+
+### audit: what the shipped host showed
+
+* **The "Out of Memory" panel is not the editor's.** It is another
+  application's TOPMOST window -- `any-video-downloader.exe`'s
+  "Notifications" (WS_EX_TOPMOST, 400x460 at 1145,495) -- whose WebView2
+  renderer died when the machine's commit charge neared its 36.2 GB limit
+  (32 GB of RAM, a 4.5 GB pagefile); no Infinity window is topmost. The
+  audit's sessions peaked at 25.96 GB committed (editor 3.6 GB private,
+  player 4.5, the editor's WebView2 tree 0.3-0.4) and the panel did not
+  return. `screenshot.ps1` can now capture a window's own pixels
+  (`INF_SHOT_PRINTWINDOW`), so a frame of the game is a frame of the game.
+* **Play draws what the cook draws**: textures ride BY PATH (payload v14);
+  257 materials name 103 textures, 103 by path, 0 as bytes, each
+  byte-identical to the cook's.
+* **The hero was not killed by the art**: the WPN2a impact leg fired about
+  ten shotgun presses with a responding unit 1.8-6.4 m away and the police
+  shot him dead at t=234.8 s; death has no get-up. `demo.ps1 -WeaponsOnly`
+  takes the frames before anything is fired: the shotgun, the Stinger and
+  the Glock in a living hand, heat 0.
+* **The pedals' 41.9 mm is one row per boarding**, the first `driving` row
+  after the seat (1 of 132 in the wave's session, 1 of 108 in the audit's,
+  the same 41.9 mm), 0.0000 on every other row. `RuntimeSim` holds 0.00 mm
+  through the same hand-over with W held; the cause in the windowed host is
+  not isolated (carried).
+* The editor relaunched on the final tree: the imported sedan at the
+  crossroads, its `door_l` selected, `Mesh Asset dd_sedan_door_l`.
+
+### audit: built, not carried
+
+Content-derived ids on every file import (`write_asset_path_keyed`,
+`write_tiled_texture_path_keyed`, the cache manifest a `BTreeMap`): two
+imports of the calibration pack agree on 920 of 920 files (the wave forgave
+26), and a CI arm compares every file of two imports of a static glTF, a
+skinned glTF and a PNG. The two lot rows the wave carried as unplaced
+(`obey_rocoto`, `declasse_yosemite_rancher`) are in the committed level
+(their art bodies are level dependencies). The licence wall re-scanned by
+64-byte windows at every offset of all 463 committed blobs (345 of them
+under the 4 KiB the wave's chunk scan could see) against 12.55 GB of the
+four packs, the local art and the exports: 0 pack content bytes committed
+(the matches are sequential index runs, asset-path TEXT in `export.py` and
+the tool's own comments).
+
+### carried, by name
+
+The island's own frame (58.7 ms with the fallback bodies: the crowd's
+skinned pass, the fixed step, the depth prepass) -- PERF1; the vgeom
+node's remaining per-asset CPU (`graph` 11.1 vs 7.7 ms, `cluster wants`
+6.2 vs 4.0: six buffer writes and four bind groups an asset a frame);
+the pedals' one row at the seat's hand-over; the licence tier relabel the
+user asked for (refused by the permission classifier to this session --
+the user must confirm it in person); PIE == shipping on a drive and a
+boarding of the art car (no arm); the Play player holds the by-path
+textures in RAM (921 MB; the cooked player maps them); the weapon art
+reads light and flat in PIE's third-person frames (materials not
+inspected); every carried item of the wave's own list not named above.
