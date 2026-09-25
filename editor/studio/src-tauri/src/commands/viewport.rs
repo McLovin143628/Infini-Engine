@@ -992,6 +992,29 @@ pub async fn viewport_frame_start(
     Ok(())
 }
 
+/// **Stand the editor's 3D camera at `eye` looking at `target`** (VEH3g audit)
+/// -- a preview door (`tools/demo/lookat.mjs`), so a relaunched editor can be
+/// photographed looking at a named place rather than only at the player start.
+/// Nothing in the document changes; a non-finite or degenerate pair is ignored
+/// by the viewport thread.
+#[tauri::command]
+pub async fn viewport_look_at(
+    eye: [f64; 3],
+    target: [f64; 3],
+    viewport: Option<String>,
+    state: tauri::State<'_, ViewportState>,
+) -> Result<(), String> {
+    let (e, t) = (
+        glam::DVec3::from_array(eye),
+        glam::DVec3::from_array(target),
+    );
+    state.with(
+        viewport.map_or(Target::All, |v| Target::from_arg(Some(v))),
+        |h| h.look_at(e, t),
+    );
+    Ok(())
+}
+
 /// Push the 3D transform-gizmo snap increments (translate/rotate/scale +
 /// always-on) from the toolbar (Wave 2).
 #[tauri::command]

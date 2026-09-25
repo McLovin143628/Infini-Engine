@@ -116,6 +116,13 @@ param(
     # and holds the stick back into a STALL. Every frame triggers on the
     # craft columns (77-84), never on a sleep. `-AudioOnly`'s shape.
     [switch]$AirOnly,
+    # **THE EDITOR LOOKS AT A PLACE** (VEH3g audit), `ex,ey,ez;tx,ty,tz`: after
+    # the settled-editor frame, `lookat.mjs` stands the editor's 3D camera at
+    # the eye looking at the target (the `viewport_look_at` preview door) and
+    # `01e-editor-lookat.png` is taken once the streams around it have had
+    # `-LookAtSettleS` to load. Empty is off.
+    [string]$EditorLookAt = "",
+    [int]$LookAtSettleS = 25,
     # **WRITE THE SESSION'S AUDIO TO A WAV** (wave VEH3e), `INF_RENDER_AUDIO`:
     # the player's mixer renders to this file (through the same kira mixer the
     # device path uses) instead of to a device. Empty is off.
@@ -651,6 +658,22 @@ if ($PlaceFemale -and (Get-Command node -ErrorAction Ignore)) {
 }
 & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "01b-editor-settled.png") -WindowTitle "Infini" -Foreground |
     ForEach-Object { Say $_ }
+
+# ── 2b. THE EDITOR LOOKS AT A PLACE (VEH3g audit) ───────────────────────────
+if ($EditorLookAt -ne "" -and (Get-Command node -ErrorAction Ignore)) {
+    $parts = $EditorLookAt.Split(";")
+    if ($parts.Count -eq 2) {
+        Say "editor camera: eye $($parts[0]) looking at $($parts[1])"
+        & node (Join-Path $PSScriptRoot "lookat.mjs") $Port "--eye=$($parts[0])" "--at=$($parts[1])" 2>&1 |
+            ForEach-Object { Say "  cdp: $_" }
+        if ($LASTEXITCODE -ne 0) { Say "  lookat.mjs exit $LASTEXITCODE" }
+        Start-Sleep -Seconds $LookAtSettleS
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "01e-editor-lookat.png") -WindowTitle "Infini" -Foreground |
+            ForEach-Object { Say $_ }
+    } else {
+        Say "  -EditorLookAt '$EditorLookAt' is not 'ex,ey,ez;tx,ty,tz'"
+    }
+}
 
 # ── 3. press Play ────────────────────────────────────────────────────────────
 $pressed = $false
@@ -1375,10 +1398,13 @@ function Invoke-Veh3fGallery {
 # `$c[78]` the airspeed, `$c[79]` the angle of attack, `$c[80]` CL.
 function Invoke-Veh3gLeg {
     # The centreline and the steering sense for the heading the -PlaceCar puts
-    # the Dodo on (90: rolling east from the west threshold; the pilot's right
-    # is south, so D steers toward LARGER z).
+    # the Dodo on (90: rolling east from the west threshold). **D steers
+    # toward SMALLER z on that heading** (VEH3g audit): `move_x` +1 turns a
+    # body from +Z toward +X (`veh3g_gate::d_turns_the_aeroplane_right_on_the_
+    # ground_and_in_the_air`, +17.3 deg), so from +X it turns toward -Z. The
+    # wave's `1` steered AWAY from the centreline on every tap.
     $RunwayZ = 2560.0
-    $SteerSign = 1
+    $SteerSign = -1
     Restore-PlayerFocus "before the flight leg"
     Stand-Up "before the flight leg" | Out-Null
     $isRow = { param($c) $c.Count -gt 84 }

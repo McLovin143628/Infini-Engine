@@ -195,6 +195,12 @@ enum Cmd {
     /// path itself. That last caller is why this is a *latched* command rather
     /// than a straight one: see `pending_home` in the loop.
     FrameStart,
+    /// **Stand the 3D camera at `eye` looking at `target`** (VEH3g audit) -- a
+    /// jump cut, the level-open latch's `set_pose` rather than `Home`'s
+    /// interpolated move. The preview door a demo uses to put a named place
+    /// (the Harbour City airfield) in the relaunched editor's frame: the
+    /// editor opens on the player start, 510 m from the strip and facing away.
+    LookAt(glam::DVec3, glam::DVec3),
     /// Set the shading view mode (Lit / Unlit / Wireframe) from the toolbar
     /// (R-P2). The renderer clamps Wireframe→Unlit if unsupported.
     SetViewMode(ViewMode),
@@ -373,6 +379,12 @@ impl ViewportHandle {
     /// reported this wave was looking at.
     pub fn frame_player_start(&self) {
         let _ = self.tx.send(Cmd::FrameStart);
+    }
+
+    /// Stand the 3D camera at `eye` looking at `target` (VEH3g audit) -- see
+    /// [`Cmd::LookAt`].
+    pub fn look_at(&self, eye: glam::DVec3, target: glam::DVec3) {
+        let _ = self.tx.send(Cmd::LookAt(eye, target));
     }
 
     /// Set the shading view mode (Lit / Unlit / Wireframe) from the toolbar
@@ -1438,6 +1450,24 @@ fn thread_main(
                     // The SAME queue the F key pushes onto, so the two paths
                     // cannot drift: one focus implementation, two doors.
                     INPUT.with(|s| s.borrow_mut().actions.push(Action::Focus));
+                }
+                Ok(Cmd::LookAt(eye, target)) => {
+                    // The camera's own convention (`EngineHost::
+                    // player_start_pose`): forward is `(sin yaw, 0, -cos yaw)`
+                    // tilted by `pitch`. A degenerate direction is a refusal:
+                    // the camera stays where it was.
+                    let d = target - eye;
+                    let flat = (d.x * d.x + d.z * d.z).sqrt();
+                    if d.length() > 1e-6 && eye.is_finite() && target.is_finite() {
+                        let yaw = inf_math::patan2_64(d.x, -d.z) as f32;
+                        let pitch = inf_math::patan2_64(d.y, flat) as f32;
+                        camera.set_pose(crate::camera::CameraPose {
+                            pos: eye,
+                            yaw,
+                            pitch,
+                        });
+                        pending_home = 0;
+                    }
                 }
                 Ok(Cmd::FrameStart) => {
                     // **Latched, not immediate**, and this is the whole reason

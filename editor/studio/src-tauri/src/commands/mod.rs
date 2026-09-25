@@ -231,6 +231,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         viewport::viewport_set_interaction,
         viewport::viewport_focus,
         viewport::viewport_frame_start,
+        viewport::viewport_look_at,
         pcg_stream::pcg_stream_status,
         viewport::viewport_set_view_mode,
         scene::scene_snapshot,

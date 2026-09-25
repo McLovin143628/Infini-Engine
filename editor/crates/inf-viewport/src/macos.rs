@@ -255,6 +255,11 @@ impl ViewportHandle {
         let _ = self.tx.send(Cmd::FrameStart);
     }
 
+    /// Stand the camera at `eye` looking at `target` (VEH3g audit) -- the
+    /// Windows viewport's preview door. macOS input and its camera commands are
+    /// not wired yet (see `set_view_mode`), so this is a no-op here, stated.
+    pub fn look_at(&self, _eye: glam::DVec3, _target: glam::DVec3) {}
+
     /// Set the shading view mode (Lit / Unlit / Wireframe) (R-P2). macOS input
     /// isn't wired yet, but the mode still drives the renderer (it's not input).
     pub fn set_view_mode(&self, mode: ViewModeDto) {

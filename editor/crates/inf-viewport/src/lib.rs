@@ -233,6 +233,8 @@ impl ViewportHandle {
     pub fn focus_selection(&self) {}
     /// Wave EDIT1: nothing to frame, and no camera to frame it with.
     pub fn frame_player_start(&self) {}
+    /// VEH3g audit: no camera to stand anywhere.
+    pub fn look_at(&self, _eye: glam::DVec3, _target: glam::DVec3) {}
     pub fn set_view_mode(&self, _mode: inf_editor_core::ipc::ViewModeDto) {}
     pub fn set_content_root(&self, _root: Option<std::path::PathBuf>) {}
     pub fn refresh_asset_index(&self) {}
