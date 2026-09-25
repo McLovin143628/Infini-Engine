@@ -5270,6 +5270,24 @@ pub struct ChassisState {
     /// `None` on every level with no water, which is every level written before
     /// P20 and most of them since — so a wheeled vehicle never pays for this.
     pub water_y: Option<f64>,
+    /// **The wind at the chassis**, world m/s (wave VEH3g) -- the P17 weather's
+    /// own vector (`sky::water_environment`, the one the sea's waves already
+    /// answer), read once a step by the door for every vehicle in the level.
+    ///
+    /// Horizontal (`y = 0`), because that is all the weather carries. What reads
+    /// it: a WING (its airspeed is the chassis velocity minus this) and a SAIL
+    /// (its apparent wind is this minus the hull's velocity). A car does not --
+    /// its drag is still against the ground, as it was.
+    pub wind: DVec3,
+    /// **The chassis body's principal moments of inertia**, kg·m², in the
+    /// chassis frame -- `x` about the right axis (pitch), `y` about up (yaw),
+    /// `z` about forward (roll) (wave VEH3g).
+    ///
+    /// Rapier's own, from the collider's exact mass properties, so a class that
+    /// turns an angular ACCELERATION into a torque multiplies by the airframe it
+    /// actually has rather than by a gyradius it guessed -- the fixed wing's
+    /// control moments. A box chassis's principal axes are its own axes.
+    pub inertia: DVec3,
 }
 
 impl ChassisState {
@@ -5533,6 +5551,19 @@ pub trait Vehicle: Send + Sync + 'static {
     fn voice(&self) -> Option<crate::vehicle_audio::VoiceTelemetry> {
         None
     }
+
+    /// **What this class's wing did at its last solve** (wave VEH3g), or `None`
+    /// for a class with no wing -- the flight instruments' and the traces' one
+    /// door, on the trait for [`drivetrain`](Self::drivetrain)'s reason.
+    fn flight(&self) -> Option<crate::aero::FlightState> {
+        None
+    }
+
+    /// **What this class's hull and sail did at its last solve** (wave VEH3g),
+    /// or `None` for a class that does not float on purpose.
+    fn marine(&self) -> Option<crate::marine::MarineState> {
+        None
+    }
 }
 
 // ── the engine loop (island wave VEH1a) ─────────────────────────────────────
@@ -5695,6 +5726,13 @@ pub struct RaycastVehicle {
     /// **This step's lateral relief** (wave VEH3f): `1` unless the class skid
     /// steers and the driver is steering -- see [`SKID_LATERAL_KEEP`].
     skid_relief: f64,
+    /// **The engine's spool** for a fixed wing, `[0, 1]` (wave VEH3g) -- the
+    /// power lever's lagged answer, the one piece of state the flight model
+    /// carries between steps (`crate::aero::fixed_wing_forces`).
+    spool: f64,
+    /// **What the wing did at the last solve** (wave VEH3g), or `None` for every
+    /// class whose `wing_area_m2` is zero -- which is every car.
+    flight: Option<crate::aero::FlightState>,
 }
 
 impl RaycastVehicle {
@@ -5726,8 +5764,16 @@ impl RaycastVehicle {
             engine_scale: 1.0,
             flats: 0,
             skid_relief: 1.0,
+            spool: 0.0,
+            flight: None,
             tuning,
         }
+    }
+
+    /// **What the wing did at the last solve** (wave VEH3g) -- `None` for a
+    /// class with no wing.
+    pub fn flight_state(&self) -> Option<crate::aero::FlightState> {
+        self.flight
     }
 
     /// **How big wheel `i` is right now**, metres -- the authored radius, less a
@@ -8398,7 +8444,51 @@ impl Vehicle for RaycastVehicle {
         })
     }
 
+    /// **The step** -- and, for a class with a wing (wave VEH3g), the flight
+    /// model on top of the gear.
+    ///
+    /// A fixed wing's gear is this same wheel rig, so the ground solve runs for
+    /// it unchanged EXCEPT that nothing drives the wheels: an aeroplane is pushed
+    /// by its propeller, so the throttle and the driveline are withheld from the
+    /// tyres (`engine_scale` 0 is "no torque and no idle creep", VEH3c's own
+    /// door) and handed to `crate::aero::fixed_wing_forces` instead. The brakes,
+    /// the nose-wheel steering and the struts are a car's.
     fn solve(&mut self, chassis: ChassisState, dt: f64, out: &mut Vec<WheelForce>) {
+        let Some(wing) = crate::aero::Wing::of(&self.tuning) else {
+            self.flight = None;
+            self.solve_ground(chassis, dt, out);
+            return;
+        };
+        if !dt.is_finite() || dt <= 0.0 {
+            return;
+        }
+        let (controls, scale) = (self.controls, self.engine_scale);
+        self.controls.throttle = 0.0;
+        self.engine_scale = 0.0;
+        self.solve_ground(chassis, dt, out);
+        self.controls = controls;
+        self.engine_scale = scale;
+        self.flight = Some(crate::aero::fixed_wing_forces(
+            &self.tuning,
+            &wing,
+            &controls,
+            &chassis,
+            &mut self.spool,
+            scale,
+            dt,
+            out,
+        ));
+    }
+
+    fn flight(&self) -> Option<crate::aero::FlightState> {
+        self.flight
+    }
+}
+
+impl RaycastVehicle {
+    /// The wheeled solve: steering rack, driveline, tyres, struts and -- for a
+    /// class with no wing -- the air.
+    fn solve_ground(&mut self, chassis: ChassisState, dt: f64, out: &mut Vec<WheelForce>) {
         if !dt.is_finite() || dt <= 0.0 {
             return;
         }
@@ -9343,7 +9433,9 @@ impl Vehicle for RaycastVehicle {
         // Once, at the centre of gravity — not per wheel, because a car in the
         // air has no wheels on the ground and still has air on it.
         let cog = chassis.position + up * self.tuning.cog_height_m;
-        if speed > 1e-6 {
+        // A WING carries its own air (`crate::aero`): the car's drag is against
+        // the ground and its lateral term would be a vertical brake on a climb.
+        if speed > 1e-6 && crate::aero::Wing::of(&self.tuning).is_none() {
             // **Anisotropic.** A car's flank is two to three times its nose, and
             // the difference is the whole reason a slide feels like a slide
             // rather than like ice: sideways motion is what the air resists most.
@@ -9507,6 +9599,8 @@ pub struct HullVehicle {
     /// Nothing. A hull has no wheels, and the trait's wheel channel is the
     /// suspension's; answering an empty slice is the honest shape.
     no_wheels: Vec<WheelState>,
+    /// **What the hull and its sail did at the last solve** (wave VEH3g).
+    marine: crate::marine::MarineState,
 }
 
 impl HullVehicle {
@@ -9519,7 +9613,25 @@ impl HullVehicle {
             rudder_deg: 0.0,
             immersion: 0.0,
             no_wheels: Vec::new(),
+            marine: crate::marine::MarineState::default(),
         }
+    }
+
+    /// What the hull and its sail did at the last solve (wave VEH3g).
+    pub fn marine_state(&self) -> crate::marine::MarineState {
+        self.marine
+    }
+
+    /// **The hull's half-height**, metres -- derived from the seat, which every
+    /// family places at [`crate::boarding::SEAT_FLOOR_FRAC_Y`] of it (wave VEH3g).
+    ///
+    /// VEH2c read the seat's height AS the half-height, which was exact while
+    /// the seat was the collider's top face and stopped being so when VEH3d
+    /// moved the driver down into the foot well: from then on every hull's
+    /// immersion was measured over 80 % of its real depth. Divided back out
+    /// here, so the draught this wave's planing table reads is the box's own.
+    fn half_height(&self) -> f64 {
+        (self.rig.seat_local.y.abs() / crate::boarding::SEAT_FLOOR_FRAC_Y.abs()).max(1e-6)
     }
 
     /// The tuning, for a test or a UI to read.
@@ -9563,7 +9675,7 @@ impl HullVehicle {
         let Some(surface) = chassis.water_y else {
             return 0.0;
         };
-        let half = self.rig.seat_local.y.abs().max(1e-6);
+        let half = self.half_height();
         ((surface - (chassis.position.y - half)) / (2.0 * half)).clamp(0.0, 1.0)
     }
 }
@@ -9635,6 +9747,10 @@ impl Vehicle for HullVehicle {
     fn part_pose(&self, index: usize) -> Option<Vec3d> {
         let part = self.rig.parts.get(index)?;
         (part.kind == PartKind::Thruster).then(|| Vec3d::new(0.0, self.rudder_deg, 0.0))
+    }
+
+    fn marine(&self) -> Option<crate::marine::MarineState> {
+        Some(self.marine)
     }
 
     fn solve(&mut self, chassis: ChassisState, dt: f64, out: &mut Vec<WheelForce>) {
@@ -9760,6 +9876,55 @@ impl Vehicle for HullVehicle {
                 }
             }
         }
+
+        // ── the planing lift (wave VEH3g). Vertical, at the centre, and only
+        //    while the bottom is in the water: the hull RISES until buoyancy and
+        //    this carry the weight between them, and that rise is the draught
+        //    table the gate reads off the world.
+        let up_world = DVec3::Y;
+        let weight = chassis.mass_kg * 9.81;
+        let lift = crate::marine::planing_lift_n(
+            self.tuning.planing_speed_mps,
+            forward_mps,
+            weight,
+            self.immersion,
+        );
+        if lift > 0.0 {
+            out.push(WheelForce {
+                point: chassis.position,
+                force: up_world * lift,
+            });
+        }
+        // ── the sail (wave VEH3g), from the P17 wind the door handed in, at the
+        //    centre of effort up the mast -- so its sideways half HEELS the boat.
+        let (_, _, up) = chassis.basis();
+        let (sail, apparent_deg) = crate::marine::sail_force(
+            fwd,
+            up,
+            chassis.linvel,
+            chassis.wind,
+            self.tuning.sail_area_m2,
+        );
+        if sail != DVec3::ZERO {
+            out.push(WheelForce {
+                point: chassis.position
+                    + up * crate::marine::sail_ce_height_m(self.tuning.sail_area_m2),
+                force: sail,
+            });
+        }
+        let half = self.half_height();
+        self.marine = crate::marine::MarineState {
+            forward_mps,
+            immersion: self.immersion,
+            draught_m: chassis
+                .water_y
+                .map(|w| (w - (chassis.position.y - half)).max(0.0))
+                .unwrap_or(0.0),
+            planing_lift_n: lift,
+            sail_force: sail,
+            apparent_wind_deg: apparent_deg,
+            heel_deg: inf_math::portable::patan2_64(-right.y, up.y).to_degrees(),
+        };
     }
 }
 
@@ -10258,6 +10423,8 @@ mod tests {
             angvel,
             mass_kg: 2_000.0,
             water_y: Some(0.0),
+            wind: DVec3::ZERO,
+            inertia: DVec3::ONE,
         }
     }
 
@@ -10606,6 +10773,8 @@ mod tests {
             angvel,
             mass_kg: 1_500.0,
             water_y: None,
+            wind: DVec3::ZERO,
+            inertia: DVec3::ONE,
         }
     }
 
@@ -11204,6 +11373,8 @@ mod tests {
             angvel: DVec3::ZERO,
             mass_kg: mass,
             water_y: None,
+            wind: DVec3::ZERO,
+            inertia: DVec3::ONE,
         }
     }
 

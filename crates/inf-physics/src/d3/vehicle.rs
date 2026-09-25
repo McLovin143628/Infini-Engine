@@ -131,6 +131,11 @@ pub fn step_vehicles(
     // The weather, read ONCE for every vehicle in the level rather than once per
     // wheel: it is the same sky.
     let (wetness, ambient_c) = inf_ecs::vehicle::weather_at(world);
+    // …and the WIND (wave VEH3g), the P17 weather's own vector -- the one the
+    // sea's waves answer -- for a wing's airspeed and a sail's apparent wind.
+    // Read once for the level, from the sim clock's state, never a wall clock.
+    let (_, (wind_x, wind_z)) = inf_ecs::sky::water_environment(world);
+    let wind = DVec3::new(wind_x, 0.0, wind_z);
     let mut out = Vec::with_capacity(guids.len());
     let mut forces: Vec<WheelForce> = Vec::new();
     // **What every drivetrain did, gathered for the trace** (wave VEH3b). The
@@ -141,7 +146,14 @@ pub fn step_vehicles(
     let mut drivetrains: Vec<(Uuid, inf_ecs::vehicle::DrivetrainState, f64)> =
         Vec::with_capacity(guids.len());
     for chassis in guids {
-        if let Some(o) = step_one(world, bridge, chassis, dt, wetness, ambient_c, &mut forces) {
+        if let Some(o) = step_one(
+            world,
+            bridge,
+            chassis,
+            dt,
+            (wetness, ambient_c, wind),
+            &mut forces,
+        ) {
             if let Some(v) = bridge.vehicle_of(chassis) {
                 if let Some(state) = v.drivetrain() {
                     drivetrains.push((chassis, state, v.idle_rpm()));
@@ -254,8 +266,7 @@ fn step_one(
     bridge: &mut PhysicsBridge3D,
     chassis: Uuid,
     dt: f64,
-    wetness: f64,
-    ambient_c: f64,
+    (wetness, ambient_c, wind): (f64, f64, DVec3),
     forces: &mut Vec<WheelForce>,
 ) -> Option<VehicleOutcome> {
     let body = bridge.body_of(chassis)?;
@@ -275,6 +286,8 @@ fn step_one(
             angvel: w.body_angvel(body).unwrap_or(DVec3::ZERO),
             mass_kg: w.body_mass(body).unwrap_or(0.0),
             water_y,
+            wind,
+            inertia: w.body_principal_inertia(body).unwrap_or(DVec3::ONE),
         }
     };
     let (_, _, up) = state.basis();

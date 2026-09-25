@@ -107,6 +107,10 @@ pub mod transform;
 // P29.7: the raycast vehicle model — the `movement` of vehicles, with the
 // fixed-step door in `inf_physics::d3::vehicle`.
 pub mod vehicle;
+// VEH3g: the fixed wing (lift, stall, control surfaces, thrust) and the planing
+// hull + sail -- the air and sea halves of the roster's dormant rows.
+pub mod aero;
+pub mod marine;
 // VEH3e: what a car sounds like -- the layer stack both hosts' audio fences
 // map onto the P12.3 queue.
 pub mod vehicle_audio;

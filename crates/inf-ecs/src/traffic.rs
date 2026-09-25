@@ -3441,6 +3441,8 @@ mod tests {
                 angvel: DVec3::ZERO,
                 mass_kg: mass,
                 water_y: None,
+                wind: DVec3::ZERO,
+                inertia: DVec3::ONE,
             };
             let mut out: Vec<WheelForce> = Vec::new();
             // Ground every wheel at its own rest, so the model has a contact to

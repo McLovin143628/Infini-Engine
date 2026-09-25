@@ -729,28 +729,35 @@ cylinders = 6.0
 engine_voice_kind = 0.0
 firing_order_variant = 0.0
 
-# Airplanes -- DORMANT until VEH3g. The doc's profile is a flight model (lift, drag, an
-# oleo strut); what ships here is the airframe drawn over its gear, rolling on it, with
-# the prop/jet voice falling back to VEH1a's loop (engine_voice_kind 3).
+# Airplanes -- FLY since VEH3g (`crate::aero`): a wheeled chassis whose class carries a
+# wing area. The gear is the wheel rig and the engine does NOT drive it (the propeller or
+# the jet pushes the airframe); `max_engine_force_n` is the STATIC thrust,
+# `max_speed_mps` the speed a propeller's thrust falls to zero at, `drag_n_per_mps2` the
+# parasite drag (half rho CD0 S). No stability control: the aids are a car's and would
+# brake a wheel against the rudder.
 [airplane.vehicle]
 body = "aircraft"
 drivetrain = "fwd"
 differential = "open"
-travel_m = 0.2
+travel_m = 0.25
 rest_length_m = 0.5
 max_steer_deg = 30.0
-min_steer_deg = 10.0
+min_steer_deg = 4.0
+steer_rate_deg_per_s = 90.0
+steer_return_deg_per_s = 120.0
+stability_control = 0.0
+traction_control_slip = 0.0
+drag_lateral_n_per_mps2 = 0.0
 idle_rpm = 700.0
 gear_count = 1.0
 gear_1_ratio = 1.0
 reverse_ratio = 1.0
 cylinders = 4.0
-engine_voice_kind = 3.0
+engine_voice_kind = 4.0
 firing_order_variant = 0.0
 
 # Helicopters: on VEH2c's RotorVehicle (attitude-commanded, one main disc over the CG).
-# Rotor blade-slap and turbine voices are VEH3g's; the voice falls back to VEH1a's loop
-# (engine_voice_kind 4).
+# Voiced by VEH3g's ROTOR voice (engine_voice_kind 5): blade-pass at rpm x blades.
 [helicopter.vehicle]
 body = "rotorcraft"
 max_steer_deg = 26.0
@@ -760,7 +767,7 @@ steer_return_deg_per_s = 90.0
 drag_n_per_mps2 = 2.2
 enter_time_s = 0.72
 cylinders = 0.0
-engine_voice_kind = 4.0
+engine_voice_kind = 5.0
 
 # Boats: on VEH2c's HullVehicle (a screw, a keel, buoyancy). Planing hulls, sails and
 # cavitation are VEH3g's; `planing_speed_mps` and `sail_area_m2` are authored here,

@@ -962,6 +962,16 @@ impl PhysicsWorld3D {
         self.bodies.get(body.0).map(|rb| rb.mass())
     }
 
+    /// **The body's principal moments of inertia**, kg·m², in its own local
+    /// frame (wave VEH3g) -- rapier's exact per-shape mass properties, so a
+    /// vehicle class that turns an angular acceleration into a torque (the fixed
+    /// wing's control moments) multiplies by the body it actually has.
+    pub fn body_principal_inertia(&self, body: BodyId3D) -> Option<DVec3> {
+        self.bodies
+            .get(body.0)
+            .map(|rb| rb.mass_properties().local_mprops.principal_inertia())
+    }
+
     /// Add a force applied at `point` (world space). A force off the centre of
     /// mass produces a torque as well as an acceleration, which is the whole
     /// reason P20.2's buoyancy is sampled at several points rather than one: a

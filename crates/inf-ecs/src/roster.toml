@@ -4520,7 +4520,9 @@ engine_voice_kind = 1.0
 turbo_boost_max = 0.6
 
 # Western Duster -- inspired by the Stearman Model 75 -- a single-engine biplane crop duster.
-# DORMANT until VEH3g: drawn and rolling on its gear; no lift.
+# VEH3g: FLIES. Both wings' area (27.6 m2), a biplane's effective aspect ratio,
+# 3.2 kN of static thrust from a 220 hp radial; tricycle gear stands in for its
+# tailwheel (stated: the rig's axles are a nose and a main pair).
 [western_duster]
 label = "Western Duster"
 
@@ -4531,19 +4533,29 @@ half_height_m = 1.25
 half_length_m = 3.75
 mass_kg = 1200.0
 wheel_radius_m = 0.3
-half_track_m = 1.47
-half_wheelbase_m = 2.25
-wheel_drop_m = -1.25
-stiffness_n_per_m = 38720.0
-damping_ns_per_m = 3410.0
-max_engine_force_n = 1440.0
-max_speed_mps = 12.0
+half_track_m = 1.2
+half_wheelbase_m = 1.275
+wheel_offset_z_m = 0.925
+wheel_drop_m = -1.85
+stiffness_n_per_m = 53000.0
+damping_ns_per_m = 4200.0
+max_engine_force_n = 3200.0
+max_speed_mps = 90.0
+drag_n_per_mps2 = 0.59
 brake_force_n = 3530.0
 handbrake_force_n = 1770.0
 peak_torque_nm = 600.0
+wing_area_m2 = 27.6
+wing_aspect_ratio = 5.0
+stall_deg = 15.0
+cylinders = 7.0
+engine_voice_kind = 4.0
 
 # Mammoth Dodo -- inspired by the Cessna 172 Skyhawk on floats -- a single-engine amphibious utility plane.
-# DORMANT until VEH3g: drawn and rolling on its gear; no lift.
+# VEH3g: FLIES, and FLOATS -- a wheeled fixed wing (the recogniser) that also
+# carries a Buoyancy (its floats): on the strip the gear holds it, on the water
+# P20.2's Archimedes does, in the air the wing does; the wing model runs in all
+# three and the handover is whichever of the three is carrying the weight.
 [mammoth_dodo]
 label = "Mammoth Dodo"
 
@@ -4554,19 +4566,29 @@ half_height_m = 1.2
 half_length_m = 4.15
 mass_kg = 1100.0
 wheel_radius_m = 0.3
-half_track_m = 1.65
-half_wheelbase_m = 2.49
-wheel_drop_m = -1.2
-stiffness_n_per_m = 35500.0
-damping_ns_per_m = 3120.0
-max_engine_force_n = 1320.0
-max_speed_mps = 12.0
+half_track_m = 1.3
+half_wheelbase_m = 1.475
+wheel_offset_z_m = 1.125
+wheel_drop_m = -1.9
+stiffness_n_per_m = 47500.0
+damping_ns_per_m = 3800.0
+max_engine_force_n = 2800.0
+max_speed_mps = 100.0
+drag_n_per_mps2 = 0.27
 brake_force_n = 3240.0
 handbrake_force_n = 1620.0
 peak_torque_nm = 550.0
+wing_area_m2 = 16.2
+wing_aspect_ratio = 7.4
+stall_deg = 16.0
+buoyancy_density_kg_m3 = 107.0
+buoyancy_linear_drag = 0.05
+cylinders = 4.0
+engine_voice_kind = 4.0
 
 # Buckingham Luxor Deluxe -- inspired by the Bombardier Global 7500 -- an ultra-long-range business jet.
-# DORMANT until VEH3g: drawn and rolling on its gear; no lift.
+# VEH3g: FLIES. 95 m2 of wing at aspect 10.6, two 73.4 kN turbofans; its
+# stall_deg (22) is its slats-and-flaps take-off CL max, flaps not being modelled.
 [buckingham_luxor_deluxe]
 label = "Buckingham Luxor Deluxe"
 
@@ -4577,19 +4599,26 @@ half_height_m = 3.6
 half_length_m = 16.9
 mass_kg = 52000.0
 wheel_radius_m = 0.6
-half_track_m = 4.755
-half_wheelbase_m = 10.14
-wheel_drop_m = -4.0
-stiffness_n_per_m = 1678030.0
-damping_ns_per_m = 147700.0
-max_engine_force_n = 62400.0
-max_speed_mps = 12.0
+half_track_m = 3.0
+half_wheelbase_m = 6.85
+wheel_offset_z_m = 5.65
+wheel_drop_m = -5.8
+stiffness_n_per_m = 2330000.0
+damping_ns_per_m = 188000.0
+max_engine_force_n = 147000.0
+max_speed_mps = 150.0
+drag_n_per_mps2 = 1.16
 brake_force_n = 153040.0
 handbrake_force_n = 76520.0
 peak_torque_nm = 26000.0
+wing_area_m2 = 95.0
+wing_aspect_ratio = 10.6
+stall_deg = 22.0
+cylinders = 0.0
+engine_voice_kind = 2.0
 
 # Titan Cargo -- inspired by the Lockheed C-130 Hercules -- a four-turboprop heavy cargo plane with a rear ramp.
-# DORMANT until VEH3g: drawn and rolling on its gear; no lift.
+# VEH3g: FLIES; the rear RAMP is a hinged body part (VEH3c) that swings down.
 [titan_cargo]
 label = "Titan Cargo"
 
@@ -4600,19 +4629,27 @@ half_height_m = 5.3
 half_length_m = 14.9
 mass_kg = 75000.0
 wheel_radius_m = 0.6
-half_track_m = 6.06
-half_wheelbase_m = 8.94
-wheel_drop_m = -5.7
-stiffness_n_per_m = 2420230.0
-damping_ns_per_m = 213020.0
-max_engine_force_n = 90000.0
-max_speed_mps = 12.0
+half_track_m = 2.2
+half_wheelbase_m = 5.75
+wheel_offset_z_m = 4.25
+wheel_drop_m = -6.8
+stiffness_n_per_m = 3200000.0
+damping_ns_per_m = 258000.0
+max_engine_force_n = 210000.0
+max_speed_mps = 180.0
+drag_n_per_mps2 = 2.48
 brake_force_n = 220720.0
 handbrake_force_n = 110360.0
 peak_torque_nm = 37500.0
+wing_area_m2 = 162.0
+wing_aspect_ratio = 10.1
+stall_deg = 22.0
+cylinders = 0.0
+engine_voice_kind = 4.0
 
 # FlyUS Jetliner -- inspired by the Boeing 747-8 / Airbus A380 blend -- a multi-deck airliner.
-# DORMANT until VEH3g: drawn and rolling on its gear; no lift.
+# VEH3g: a landmark that TAXIS (it can fly; the island's strip is shorter than
+# an airliner's field length at its weight, so the island's own one never does).
 [flyus_jetliner]
 label = "FlyUS Jetliner"
 
@@ -4623,16 +4660,23 @@ half_height_m = 9.2
 half_length_m = 38.0
 mass_kg = 300000.0
 wheel_radius_m = 0.6
-half_track_m = 10.2
-half_wheelbase_m = 22.8
-wheel_drop_m = -9.6
-stiffness_n_per_m = 9680920.0
-damping_ns_per_m = 852100.0
-max_engine_force_n = 360000.0
-max_speed_mps = 12.0
+half_track_m = 5.5
+half_wheelbase_m = 15.0
+wheel_offset_z_m = 12.0
+wheel_drop_m = -14.5
+stiffness_n_per_m = 13200000.0
+damping_ns_per_m = 1070000.0
+max_engine_force_n = 1000000.0
+max_speed_mps = 150.0
+drag_n_per_mps2 = 6.37
 brake_force_n = 882900.0
 handbrake_force_n = 441450.0
 peak_torque_nm = 150000.0
+wing_area_m2 = 520.0
+wing_aspect_ratio = 8.9
+stall_deg = 20.0
+cylinders = 0.0
+engine_voice_kind = 2.0
 
 # Nagasaki Buzzard -- inspired by the MD Little Bird -- a highly manoeuvrable light helicopter.
 # On VEH2c's RotorVehicle: 1.76x hover thrust, the chopper row's precedent.
