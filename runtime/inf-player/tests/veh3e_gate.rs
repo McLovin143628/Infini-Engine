@@ -973,6 +973,7 @@ fn telemetry(slip: f64, speed: f64, surface: SurfaceClass) -> VoiceTelemetry {
                 grounded: true,
             },
         ],
+        craft: Default::default(),
     }
 }
 

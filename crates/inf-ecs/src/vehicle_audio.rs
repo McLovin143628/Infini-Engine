@@ -64,7 +64,7 @@ pub const WHINE_REF_RPM: f64 = 3_000.0;
 
 /// **Every vehicle clip, by index** — `inf_audio::vehicle_synth::
 /// VEHICLE_CLIP_NAMES` restated, and asserted equal by `veh3e_gate`.
-pub const VEHICLE_CLIP_NAMES: [&str; 31] = [
+pub const VEHICLE_CLIP_NAMES: [&str; 36] = [
     "Grain_P4_Idle",
     "Grain_P4_Mid",
     "Grain_P4_Full",
@@ -96,7 +96,21 @@ pub const VEHICLE_CLIP_NAMES: [&str; 31] = [
     "Roll_Asphalt",
     "Roll_Gravel",
     "Roll_Soft",
+    // ── the craft (wave VEH3g) -- appended.
+    "Rotor_BladePass",
+    "Prop_BladePass",
+    "Jet_Spool",
+    "Hull_Slap",
+    "Hull_Spray",
 ];
+
+/// **A rotor's blade-pass at a pitch of one**, hertz --
+/// `inf_audio::vehicle_synth::ROTOR_REF_HZ` restated (wave VEH3g).
+pub const ROTOR_REF_HZ: f64 = 15.0;
+
+/// **A propeller's blade-pass at a pitch of one**, hertz --
+/// `inf_audio::vehicle_synth::PROP_REF_HZ` restated (wave VEH3g).
+pub const PROP_REF_HZ: f64 = 90.0;
 
 /// The clip at `index` into [`VEHICLE_CLIP_NAMES`].
 pub fn vehicle_clip(index: u8) -> Uuid {
@@ -278,6 +292,31 @@ pub fn door_clip(layer: DoorLayer) -> Uuid {
     vehicle_clip(24 + layer as u8)
 }
 
+/// A rotor's blade-pass loop (wave VEH3g).
+pub fn rotor_clip() -> Uuid {
+    vehicle_clip(31)
+}
+
+/// A propeller's blade-pass loop (wave VEH3g).
+pub fn prop_clip() -> Uuid {
+    vehicle_clip(32)
+}
+
+/// A turbine's spool loop (wave VEH3g).
+pub fn jet_clip() -> Uuid {
+    vehicle_clip(33)
+}
+
+/// A hull's slap on the water (wave VEH3g).
+pub fn hull_slap_clip() -> Uuid {
+    vehicle_clip(34)
+}
+
+/// A planing hull's spray (wave VEH3g).
+pub fn hull_spray_clip() -> Uuid {
+    vehicle_clip(35)
+}
+
 // ── the keys ────────────────────────────────────────────────────────────────
 
 /// **The layers one car sings on** — one voice per layer, one key per voice.
@@ -306,11 +345,21 @@ pub enum VoiceLayer {
     /// The tyres ROLLING on the road (VEH3e audit) — appended, so every key
     /// above keeps its salt.
     Roll,
+    /// A rotor's blade-pass (wave VEH3g) -- appended, as are the four below.
+    Rotor,
+    /// A propeller's blade-pass.
+    Prop,
+    /// A turbine's spool.
+    Jet,
+    /// A hull's slap on the water.
+    HullSlap,
+    /// A planing hull's spray.
+    HullSpray,
 }
 
 impl VoiceLayer {
     /// Every layer, in the order the planner addresses them.
-    pub const ALL: [VoiceLayer; 11] = [
+    pub const ALL: [VoiceLayer; 16] = [
         VoiceLayer::GrainIdle,
         VoiceLayer::GrainMid,
         VoiceLayer::GrainFull,
@@ -322,6 +371,11 @@ impl VoiceLayer {
         VoiceLayer::ImpulseFront,
         VoiceLayer::ImpulseRear,
         VoiceLayer::Roll,
+        VoiceLayer::Rotor,
+        VoiceLayer::Prop,
+        VoiceLayer::Jet,
+        VoiceLayer::HullSlap,
+        VoiceLayer::HullSpray,
     ];
 
     /// Its index into [`Self::ALL`].
@@ -334,7 +388,7 @@ impl VoiceLayer {
 /// LAYER_SALTS`' construction and its reason: eleven voices need eleven keys
 /// (the rolling road's the eleventh, VEH3e audit), none of which may be the
 /// chassis's own emitter key.
-pub const VOICE_SALTS: [u64; 11] = [
+pub const VOICE_SALTS: [u64; 16] = [
     0x5645_4833_0000_0001,
     0x5645_4833_0000_0002,
     0x5645_4833_0000_0003,
@@ -346,6 +400,15 @@ pub const VOICE_SALTS: [u64; 11] = [
     0x5645_4833_0000_0009,
     0x5645_4833_0000_000a,
     0x5645_4833_0000_000b,
+    // The craft (wave VEH3g) -- in their own range, bit 16, and NOT in the gap
+    // under the door salts: the first cut took `…000c` to `…0010`, and the VEH3e
+    // course's car and hero guids differ by two, so `car ^ …0010` was
+    // `hero ^ …0012` and a door's creak read as the car's hull spray.
+    0x5645_4833_0001_0001,
+    0x5645_4833_0001_0002,
+    0x5645_4833_0001_0003,
+    0x5645_4833_0001_0004,
+    0x5645_4833_0001_0005,
 ];
 
 /// The key one layer of one car plays on.
@@ -437,6 +500,115 @@ pub struct VoiceTelemetry {
     pub speed_mps: f64,
     /// Front axle, then rear.
     pub axles: [AxleVoice; 2],
+    /// **What a CRAFT sings** (wave VEH3g) -- a rotor, a propeller, a turbine,
+    /// a hull -- all zero for a car.
+    pub craft: CraftVoice,
+}
+
+/// **A craft's voice** (wave VEH3g): the rotor / jet / hull voice kinds on the
+/// VEH3e planner's own shape -- each a function of what the class published
+/// this step, never of a clock.
+///
+/// | layer | voiced by | pitched by |
+/// |---|---|---|
+/// | rotor | the collective | blade-pass: `rpm x blades / 60` over [`ROTOR_REF_HZ`] |
+/// | propeller | the throttle | blade-pass over [`PROP_REF_HZ`] |
+/// | turbine | the spool | the spool |
+/// | hull slap | speed through the water, fading as the hull planes | speed |
+/// | hull spray | the planing share | fixed |
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CraftVoice {
+    /// A rotor's blade-pass frequency, hertz; `0` for no rotor.
+    pub rotor_hz: f64,
+    /// A propeller's blade-pass frequency, hertz; `0` for no propeller.
+    pub prop_hz: f64,
+    /// Whether a turbine turns.
+    pub jet: bool,
+    /// The turbine's spool, `[0, 1]`.
+    pub jet_spool: f64,
+    /// How hard the rotor or the propeller is working, `[0, 1]`.
+    pub load: f64,
+    /// Whether a hull is in the water.
+    pub hull_wet: bool,
+    /// Speed through the water, m/s.
+    pub hull_speed_mps: f64,
+    /// The share of the weight the planing lift carries, `[0, 1]`.
+    pub planing: f64,
+    /// **The craft has no wheels** -- a hull or a rotorcraft -- so its stack
+    /// carries no gearbox whine, no squeal and no rolling road: four voices a
+    /// car's stack would hold silent for ever on a boat.
+    pub wheelless: bool,
+}
+
+impl CraftVoice {
+    /// Whether there is anything to sing.
+    pub fn any(&self) -> bool {
+        self.rotor_hz > 0.0 || self.prop_hz > 0.0 || self.jet || self.hull_wet
+    }
+}
+
+/// How loud a rotor is at full collective.
+pub const ROTOR_GAIN: f64 = 0.6;
+/// How loud a propeller is at full throttle.
+pub const PROP_GAIN: f64 = 0.45;
+/// How loud a turbine is at full spool.
+pub const JET_GAIN: f64 = 0.5;
+/// How loud a hull slaps at speed.
+pub const HULL_SLAP_GAIN: f64 = 0.4;
+/// How loud a planing hull's spray is.
+pub const HULL_SPRAY_GAIN: f64 = 0.35;
+
+/// **A craft's loops** this step: (layer, clip, volume, pitch), before the
+/// emitter's own volume -- the rotor, propeller, turbine and hull voice kinds.
+pub fn craft_voices(c: &CraftVoice) -> Vec<(VoiceLayer, Uuid, f64, f64)> {
+    let mut out = Vec::with_capacity(4);
+    let load = finite01(c.load);
+    if c.rotor_hz > 0.0 && c.rotor_hz.is_finite() {
+        out.push((
+            VoiceLayer::Rotor,
+            rotor_clip(),
+            ROTOR_GAIN * (0.4 + 0.6 * load),
+            (c.rotor_hz / ROTOR_REF_HZ).clamp(PITCH_MIN, PITCH_MAX),
+        ));
+    }
+    if c.prop_hz > 0.0 && c.prop_hz.is_finite() {
+        out.push((
+            VoiceLayer::Prop,
+            prop_clip(),
+            PROP_GAIN * (0.35 + 0.65 * load),
+            (c.prop_hz / PROP_REF_HZ).clamp(PITCH_MIN, PITCH_MAX),
+        ));
+    }
+    if c.jet {
+        let sp = finite01(c.jet_spool);
+        out.push((
+            VoiceLayer::Jet,
+            jet_clip(),
+            JET_GAIN * (0.2 + 0.8 * sp),
+            0.5 + 0.7 * sp,
+        ));
+    }
+    if c.hull_wet {
+        let v = if c.hull_speed_mps.is_finite() {
+            c.hull_speed_mps.abs()
+        } else {
+            0.0
+        };
+        let plane = finite01(c.planing);
+        out.push((
+            VoiceLayer::HullSlap,
+            hull_slap_clip(),
+            HULL_SLAP_GAIN * (v / 10.0).clamp(0.0, 1.0) * (1.0 - 0.6 * plane),
+            0.8 + 0.4 * (v / 20.0).clamp(0.0, 1.0),
+        ));
+        out.push((
+            VoiceLayer::HullSpray,
+            hull_spray_clip(),
+            HULL_SPRAY_GAIN * plane * (v / 25.0).clamp(0.0, 1.0),
+            1.0,
+        ));
+    }
+    out
 }
 
 impl VoiceTelemetry {
@@ -854,10 +1026,13 @@ impl VoiceMemory {
             let Some(src) = world.world().get::<AudioSource>(e).cloned() else {
                 continue;
             };
-            let Some(family) = GrainFamily::for_engine(t.cylinders, t.voice_kind, t.firing_order)
-            else {
+            // A combustion engine sings its grains; a CRAFT (wave VEH3g) sings
+            // its rotor, propeller, turbine or hull -- and a boat with a petrol
+            // engine sings both. Neither is a car the stack cannot voice.
+            let family = GrainFamily::for_engine(t.cylinders, t.voice_kind, t.firing_order);
+            if family.is_none() && !t.craft.any() {
                 continue;
-            };
+            }
             seen.insert(*chassis);
             let at = src.spatial.then(|| position_of(world, *chassis));
             let near =
@@ -1175,6 +1350,38 @@ fn car_loops(
     out
 }
 
+/// The loops a craft with no combustion engine sings from its wheels (wave
+/// VEH3g): the two squeals and the rolling road, exactly as a car's.
+fn tyre_loops(t: &VoiceTelemetry, src: &AudioSource) -> Vec<(VoiceLayer, Uuid, f64, f64)> {
+    let base = if src.volume.is_finite() {
+        src.volume.max(0.0)
+    } else {
+        1.0
+    };
+    let mut out = Vec::with_capacity(3);
+    for (axle, layer) in [
+        (0usize, VoiceLayer::SquealFront),
+        (1, VoiceLayer::SquealRear),
+    ] {
+        let a = t.axles[axle];
+        let (sv, sp) = squeal_voice(a.slip);
+        out.push((
+            layer,
+            squeal_clip(SurfaceVoice::of(a.surface)),
+            base * sv,
+            sp,
+        ));
+    }
+    let (rv, rp) = roll_voice(t);
+    out.push((
+        VoiceLayer::Roll,
+        roll_clip(SurfaceVoice::of(t.axles[1].surface)),
+        base * rv,
+        rp,
+    ));
+    out
+}
+
 /// **How often a NEAR voice is re-told**, fixed steps (VEH3e audit). A driven
 /// traffic car's grain changes pitch and its emitter moves on every step, so a
 /// loop told everything would cost up to three commands a step a car; told
@@ -1242,7 +1449,7 @@ fn plan_car(
     mem: &mut CarMemory,
     chassis: Uuid,
     t: &VoiceTelemetry,
-    family: GrainFamily,
+    family: Option<GrainFamily>,
     src: &AudioSource,
     at: Option<DVec3>,
     dt: f64,
@@ -1257,11 +1464,35 @@ fn plan_car(
     let first = !mem.seen;
     mem.seen = true;
     if t.running() {
-        let loops = if mem.near {
-            near_loops(t, family, src)
-        } else {
-            car_loops(t, family, src)
+        let mut loops = match (family, mem.near) {
+            (Some(f), true) => near_loops(t, f, src),
+            (Some(f), false) => car_loops(t, f, src),
+            // A craft with no combustion engine still has its gear or its
+            // skids: the tyre layers alone (a jet rolling out on the strip).
+            (None, _) => tyre_loops(t, src),
         };
+        // **THE CRAFT** (wave VEH3g) -- on top, at the emitter's own volume.
+        // Never NEAR: an air or sea craft is never a traffic record, so the
+        // rule is the full stack whenever it runs.
+        let craft_base = if src.volume.is_finite() {
+            src.volume.max(0.0)
+        } else {
+            1.0
+        };
+        if t.craft.wheelless {
+            loops.retain(|l| {
+                !matches!(
+                    l.0,
+                    VoiceLayer::Whine
+                        | VoiceLayer::SquealFront
+                        | VoiceLayer::SquealRear
+                        | VoiceLayer::Roll
+                )
+            });
+        }
+        for (layer, clip, v, p) in craft_voices(&t.craft) {
+            loops.push((layer, clip, craft_base * v, p));
+        }
         // A loop the stack no longer has (a traffic car the player got out
         // of drops to the NEAR stack) is stopped, in key order.
         let keep: BTreeSet<u64> = loops.iter().map(|l| voice_key(key, l.0)).collect();
@@ -1417,6 +1648,7 @@ mod tests {
             quiet: false,
             speed_mps: 10.0,
             axles: [AxleVoice::default(); 2],
+            craft: CraftVoice::default(),
         }
     }
 
@@ -1509,8 +1741,38 @@ mod tests {
         ] {
             keys.insert(door_key(k, d));
         }
-        assert_eq!(keys.len(), 15);
+        // Sixteen layers (the five craft voices of wave VEH3g appended) and
+        // four door layers.
+        assert_eq!(keys.len(), 20);
         assert!(!keys.contains(&k));
+        // …and no CRAFT voice is another NEARBY entity's door (wave VEH3g):
+        // fixtures mint guids a few apart, and a craft salt in the door salts'
+        // own neighbourhood made a car's hull spray read as a hero's creak.
+        // Only the craft layers: VEH3e's own eleven sit `0x10` under the four
+        // door salts, so `car ^ …0001 == hero ^ …0011` whenever two guids
+        // differ by sixteen (carried in the wave's ledger).
+        for delta in 1u64..=0x40 {
+            for l in [
+                VoiceLayer::Rotor,
+                VoiceLayer::Prop,
+                VoiceLayer::Jet,
+                VoiceLayer::HullSlap,
+                VoiceLayer::HullSpray,
+            ] {
+                for d in [
+                    DoorLayer::Latch,
+                    DoorLayer::Creak,
+                    DoorLayer::Slam,
+                    DoorLayer::Thud,
+                ] {
+                    assert_ne!(
+                        voice_key(k, l),
+                        door_key(k ^ delta, d),
+                        "{l:?} vs {d:?} at {delta}"
+                    );
+                }
+            }
+        }
         for s in crate::weapon::LAYER_SALTS {
             assert!(!keys.contains(&(k ^ s)));
         }

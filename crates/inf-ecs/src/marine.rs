@@ -172,6 +172,9 @@ pub struct MarineState {
     pub draught_m: f64,
     /// The planing lift, newtons.
     pub planing_lift_n: f64,
+    /// The planing lift as a share of its full-plane value, `[0, 1]` -- the
+    /// hull spray's voice.
+    pub planing_share: f64,
     /// The sail's force, world newtons (zero for a hull with no sail).
     pub sail_force: DVec3,
     /// The apparent wind's angle off the bow, degrees.

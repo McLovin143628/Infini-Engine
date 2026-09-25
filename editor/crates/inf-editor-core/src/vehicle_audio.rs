@@ -78,12 +78,13 @@ pub fn write_vehicle_audio_library(dir: &std::path::Path) -> Result<(), String> 
 mod tests {
     use super::*;
 
-    /// Thirty-one clips, thirty-one GUIDs, thirty-one names, each one
+    /// Thirty-six clips (the five craft voices of wave VEH3g appended), as many
+    /// GUIDs, as many names, each one
     /// decoding — and the names are the generator's, index for index.
     #[test]
     fn the_library_is_twenty_eight_distinct_resolvable_clips() {
         let clips = vehicle_audio_clips();
-        assert_eq!(clips.len(), 31);
+        assert_eq!(clips.len(), 36);
         assert_eq!(
             inf_ecs::vehicle_audio::VEHICLE_CLIP_NAMES,
             inf_audio::vehicle_synth::VEHICLE_CLIP_NAMES,
@@ -102,6 +103,6 @@ mod tests {
             clips.len(),
             bytes as f64 / 1024.0
         );
-        assert_eq!(vehicle_audio_files().len(), 62);
+        assert_eq!(vehicle_audio_files().len(), 72);
     }
 }

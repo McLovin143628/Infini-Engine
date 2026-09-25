@@ -811,106 +811,119 @@ fn the_launchs_engine_is_heard_where_the_launch_is() {
         "the log is a tail, so the first command in it is not the first command"
     );
 
-    // BY SOURCE KEY, which is the audit's correction. The first cut filtered
-    // `SetPosition` with `{ position, .. }` and threw the source away, so the
-    // arm was reading every emitter in the world at once and only stayed about
-    // the launch because the fixture had silenced the other craft. A stream is
-    // per-source or it is a mixture.
-    let key_of = |guid: Uuid| guid.as_u128() as u64;
-    let moves_of = |want: u64| -> Vec<DVec3> {
-        sim.audio_command_log()
+    // BY SOURCE KEY, which is the audit's correction -- and since wave VEH3g
+    // by the craft's LAYER keys: the launch is no longer VEH1a's one pitched
+    // loop on its chassis key but the VEH3e planner's stack (its engine's
+    // grains, the hull's slap and spray), each voice on `voice_key(chassis,
+    // layer)`, each `Move`d when its emitter moves by more than
+    // `MOVE_EPS_M`. The claim is unchanged: every voice the launch sings is
+    // where the hull is, and the voices travel the crossing.
+    use inf_ecs::vehicle_audio::{entity_key, voice_key, VoiceLayer, MOVE_EPS_M};
+    let keys_of = |guid: Uuid| -> Vec<u64> {
+        VoiceLayer::ALL
             .iter()
+            .map(|l| voice_key(entity_key(guid), *l))
+            .collect()
+    };
+    let log = sim.audio_command_log();
+    let plays_of = |want: &[u64]| -> usize {
+        log.iter()
+            .filter(|c| matches!(c, AudioCommand::Play(p) if want.contains(&p.source)))
+            .count()
+    };
+    let moves_of = |want: &[u64]| -> Vec<(u64, DVec3)> {
+        log.iter()
             .filter_map(|c| match c {
-                AudioCommand::SetPosition { source, position } if *source == want => {
-                    Some(*position)
+                AudioCommand::SetPosition { source, position } if want.contains(source) => {
+                    Some((*source, *position))
                 }
                 _ => None,
             })
             .collect()
     };
-    let plays_of = |want: u64| -> usize {
-        sim.audio_command_log()
-            .iter()
-            .filter(|c| matches!(c, AudioCommand::Play(p) if p.source == want))
-            .count()
-    };
-    let spread_of = |moves: &[DVec3]| -> f64 {
-        match moves.first() {
-            Some(first) => moves
-                .iter()
-                .map(|p| (*p - *first).length())
-                .fold(0.0f64, f64::max),
-            None => 0.0,
-        }
-    };
-
-    let (boat_key, heli_key) = (key_of(LAUNCH), key_of(CHOPPER));
-    let (boat_moves, heli_moves) = (moves_of(boat_key), moves_of(heli_key));
+    let (boat_keys, heli_keys) = (keys_of(LAUNCH), keys_of(CHOPPER));
+    let boat_moves = moves_of(&boat_keys);
     let (hull, chopper) = (look(sim.world(), LAUNCH).1, look(sim.world(), CHOPPER).1);
-    let (boat_spread, heli_spread) = (spread_of(&boat_moves), spread_of(&heli_moves));
-    println!(
-        "THE LAUNCH'S VOICE: {} Play(s), {} SetPosition(s) spanning {boat_spread:.1} m; \
-         the last is {:.3} m from the hull",
-        plays_of(boat_key),
-        boat_moves.len(),
-        (boat_moves.last().copied().unwrap_or(DVec3::ZERO) - hull).length()
-    );
-    println!(
-        "THE HELICOPTER'S VOICE: {} Play(s), {} SetPosition(s) spanning {heli_spread:.3} m; \
-         the last is {:.3} m from the airframe",
-        plays_of(heli_key),
-        heli_moves.len(),
-        (heli_moves.last().copied().unwrap_or(DVec3::ZERO) - chopper).length()
-    );
-
-    // ONE voice each, and each one really is being repositioned — every step it
-    // is stepped, which on this script is every step there is.
-    for (what, key, moves) in [
-        ("launch", boat_key, &boat_moves),
-        ("helicopter", heli_key, &heli_moves),
-    ] {
-        assert_eq!(
-            plays_of(key),
-            1,
-            "the {what} was given {} voices",
-            plays_of(key)
-        );
-        assert_eq!(
-            moves.len(),
-            s.len(),
-            "the {what}'s emitter was moved on {} of {} steps",
-            moves.len(),
-            s.len()
-        );
+    let first = boat_moves.first().map(|m| m.1).unwrap_or(DVec3::ZERO);
+    let boat_spread = boat_moves
+        .iter()
+        .map(|(_, p)| (*p - first).length())
+        .fold(0.0f64, f64::max);
+    // Each of the launch's AUDIBLE voices, at its last position the stream
+    // carried. A voice at volume zero is not re-told until it is heard
+    // (`update_loop`'s own rule), so a hull spray that never sounded on a
+    // launch that never planed keeps the position it started at -- the
+    // AUDIBLE ones are the claim.
+    let mut last: BTreeMap<u64, DVec3> = BTreeMap::new();
+    let mut level: BTreeMap<u64, f64> = BTreeMap::new();
+    for c in log.iter() {
+        match c {
+            AudioCommand::Play(p) if boat_keys.contains(&p.source) => {
+                level.insert(p.source, p.volume);
+                if let Some(at) = p.position {
+                    last.insert(p.source, at);
+                }
+            }
+            AudioCommand::SetVolume { source, volume } if boat_keys.contains(source) => {
+                level.insert(*source, *volume);
+            }
+            AudioCommand::SetPosition { source, position } if boat_keys.contains(source) => {
+                last.insert(*source, *position);
+            }
+            _ => {}
+        }
     }
-
-    // EACH IS WHERE ITS OWN CRAFT IS — the emitter's own transform, not a guess,
-    // and not the other craft's. Two sources reading one position would satisfy
-    // the launch's clause and fail the helicopter's.
-    let last_boat = *boat_moves.last().expect("a last launch position");
+    let audible: Vec<u64> = level
+        .iter()
+        .filter(|(_, v)| **v > inf_ecs::vehicle_audio::VOICE_FLOOR)
+        .map(|(k, _)| *k)
+        .collect();
     assert!(
-        (last_boat - hull).length() < 1e-6,
-        "the engine is at {last_boat:?} and the hull is at {hull:?}"
+        !audible.is_empty(),
+        "no voice of the launch is audible at the end"
     );
-    let last_heli = *heli_moves.last().expect("a last helicopter position");
+    let worst = audible
+        .iter()
+        .filter_map(|k| last.get(k))
+        .map(|p| (*p - hull).length())
+        .fold(0.0f64, f64::max);
+    println!(
+        "THE LAUNCH'S VOICES: {} Play(s) over {} layer key(s), {} SetPosition(s) spanning \
+         {boat_spread:.1} m; the furthest last position is {worst:.4} m from the hull",
+        plays_of(&boat_keys),
+        last.len(),
+        boat_moves.len()
+    );
+    println!(
+        "THE HELICOPTER NOBODY FLEW: {} Play(s), {} SetPosition(s)",
+        plays_of(&heli_keys),
+        moves_of(&heli_keys).len()
+    );
+    // The launch SINGS: its grains and its hull, every voice a Play once.
     assert!(
-        (last_heli - chopper).length() < 1e-6,
-        "the rotor is at {last_heli:?} and the airframe is at {chopper:?}"
+        plays_of(&boat_keys) >= 2,
+        "the launch was given {} voices",
+        plays_of(&boat_keys)
     );
-
-    // …and the launch's MOVED, over the distance the boat covered. A
-    // `SetPosition` that shipped a constant would pass every claim above and
-    // fail this one. The helicopter's is the control: nobody flew it, so its
-    // emitter is issued every step and goes nowhere — which is what says the
-    // span above is the hull's motion and not the stream's own shape.
+    // EACH VOICE IS WHERE THE HULL IS -- within the planner's own move
+    // threshold, since a voice is re-told only when its emitter has moved.
+    assert!(
+        worst <= MOVE_EPS_M + 1e-9,
+        "a launch voice was last told {worst:.4} m from the hull at {hull:?}"
+    );
+    // …and they MOVED over the crossing. A stream that shipped a constant
+    // would pass the clause above and fail this one.
     assert!(
         boat_spread > 40.0,
-        "the emitter spanned {boat_spread:.1} m over a crossing of the bay"
+        "the launch's voices spanned {boat_spread:.1} m over a crossing of the bay"
     );
-    assert!(
-        heli_spread < 0.05,
-        "nobody flew the helicopter and its emitter still wandered \
-         {heli_spread:.3} m"
+    // The helicopter nobody flew is the CONTROL: a parked craft nobody is in
+    // is silent (its rotor has not spooled), which is VEH3g's NEAR rule for
+    // air and sea -- the full stack while it runs, nothing while it does not.
+    assert_eq!(
+        plays_of(&heli_keys),
+        0,
+        "the helicopter nobody is in sang, at {chopper:?}"
     );
 }
 

@@ -62,7 +62,7 @@ pub const LOAD_NAMES: [&str; 3] = ["Idle", "Mid", "Full"];
 /// **Every clip this module generates, by index** — the order
 /// `inf_ecs::vehicle_audio::VehicleClip::ALL` publishes. The first fifteen are
 /// the grains, family-major.
-pub const VEHICLE_CLIP_NAMES: [&str; 31] = [
+pub const VEHICLE_CLIP_NAMES: [&str; 36] = [
     "Grain_P4_Idle",
     "Grain_P4_Mid",
     "Grain_P4_Full",
@@ -94,7 +94,25 @@ pub const VEHICLE_CLIP_NAMES: [&str; 31] = [
     "Roll_Asphalt",
     "Roll_Gravel",
     "Roll_Soft",
+    // ── the craft (wave VEH3g) -- appended, so every clip above keeps its GUID.
+    "Rotor_BladePass",
+    "Prop_BladePass",
+    "Jet_Spool",
+    "Hull_Slap",
+    "Hull_Spray",
 ];
+
+/// **A rotor's blade-pass at a pitch of one**, hertz (wave VEH3g): 22 050 /
+/// 1 470, so one pass is exactly 1 470 samples -- a two-bladed main rotor at
+/// 450 rpm, the thump a helicopter is heard by before it is seen.
+pub const ROTOR_REF_HZ: f64 = 15.0;
+
+/// **A propeller's blade-pass at a pitch of one**, hertz (wave VEH3g): 22 050 /
+/// 245 -- a two-bladed propeller at 2 700 rpm, the buzz of a light aeroplane.
+pub const PROP_REF_HZ: f64 = 90.0;
+
+/// **A turbine's whine at a pitch of one**, hertz (wave VEH3g): 22 050 / 10.
+pub const JET_HZ: f64 = 2_205.0;
 
 /// **The gear-whine tone at a pitch of one**, hertz: 22 050 / 18, so one cycle
 /// is exactly eighteen samples and the loop closes on itself.
@@ -539,6 +557,87 @@ pub fn blow_off_pcm() -> Vec<f64> {
     normalize(out)
 }
 
+/// **A blade-pass loop** (wave VEH3g): one pulse every `1 / hz` seconds -- a
+/// decaying resonance under a slap of low-passed noise -- over `passes` whole
+/// periods, so the loop closes on itself and the period is in the file (what
+/// the engine pitches by `rpm x blades / hz`).
+fn blade_pass(
+    hz: f64,
+    passes: usize,
+    resonance_hz: f64,
+    decay_s: f64,
+    slap: f64,
+    slap_cutoff: f64,
+    seed: u64,
+) -> Vec<f64> {
+    let rate = f64::from(SYNTH_RATE);
+    let period = (rate / hz).round() as usize;
+    let len = period * passes;
+    let k = decay_per_sample(decay_s, SYNTH_RATE);
+    let noise = seamless_noise(len, slap_cutoff, seed);
+    let mut out = vec![0.0f64; len];
+    for p in 0..passes {
+        let start = p * period;
+        let mut env = 1.0;
+        for j in 0..period {
+            let t = j as f64 / rate;
+            let att = (t / 0.0015).min(1.0);
+            let tone = psine(resonance_hz * t) + 0.35 * psine(2.0 * resonance_hz * t + 0.2);
+            out[(start + j) % len] += (tone + slap * 2.0 * noise[(start + j) % len]) * env * att;
+            env *= k;
+        }
+    }
+    normalize(out)
+}
+
+/// **A hull on water** (wave VEH3g) -- `0` the slap (a dark water body with a
+/// hull-slap every ~0.15 s at a deterministic strength, wrapped round the
+/// loop), `1` the spray (a bright hiss, high-passed: a planing hull's sheet of
+/// water). Six tenths of a second, seamless.
+pub fn hull_pcm(which: u8) -> Vec<f64> {
+    let rate = f64::from(SYNTH_RATE);
+    let len = (0.6 * rate).round() as usize;
+    let seed = 0x5645_4833_0000_0600u64 + u64::from(which);
+    match which {
+        0 => {
+            let body = seamless_noise(len, 380.0, seed);
+            let mut out: Vec<f64> = body.iter().map(|x| x * 1.2).collect();
+            let step = (0.15 * rate) as usize;
+            let k = decay_per_sample(0.025, SYNTH_RATE);
+            let mut g = 0usize;
+            while g * step < len {
+                let amp = 0.6 + 0.4 * pnoise(seed ^ 0x51, g as u64).abs();
+                let start = g * step;
+                let mut env = amp;
+                let mut lp = OnePole::new(700.0, SYNTH_RATE);
+                for j in 0..(0.08 * rate) as usize {
+                    let t = j as f64 / rate;
+                    let v = psine(95.0 * t) + lp.step(pnoise(seed ^ 0x52, (g * 4096 + j) as u64));
+                    out[(start + j) % len] += env * v;
+                    env *= k;
+                }
+                g += 1;
+            }
+            normalize(out)
+        }
+        1 => {
+            let hiss = seamless_noise(len, 8_000.0, seed);
+            let mut hp = OnePole::new(1_600.0, SYNTH_RATE);
+            let out = hiss
+                .iter()
+                .enumerate()
+                .map(|(i, x)| {
+                    let t = i as f64 / rate;
+                    let lo = hp.step(*x);
+                    (x - lo) * (0.85 + 0.15 * psine(10.0 * t))
+                })
+                .collect();
+            normalize(out)
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// **One vehicle clip's samples, by index** into [`VEHICLE_CLIP_NAMES`]. Out of
 /// range answers an empty clip.
 pub fn vehicle_clip_pcm(index: u8) -> Vec<f64> {
@@ -565,6 +664,31 @@ pub fn vehicle_clip_pcm(index: u8) -> Vec<f64> {
         21..=23 => impulse_pcm(index - 21),
         24..=27 => door_pcm(index - 24),
         28..=30 => roll_pcm(index - 28),
+        31 => blade_pass(
+            ROTOR_REF_HZ,
+            6,
+            70.0,
+            0.022,
+            0.55,
+            900.0,
+            0x5645_4833_0000_001f,
+        ),
+        32 => blade_pass(
+            PROP_REF_HZ,
+            18,
+            180.0,
+            0.004,
+            0.35,
+            2_500.0,
+            0x5645_4833_0000_0020,
+        ),
+        33 => tone_loop(
+            &[(JET_HZ, 1.0), (2.0 * JET_HZ, 0.3), (1_470.0, 0.25)],
+            0.8,
+            3_000.0,
+            0x5645_4833_0000_0021,
+        ),
+        34..=35 => hull_pcm(index - 34),
         _ => Vec::new(),
     }
 }

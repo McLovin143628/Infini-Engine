@@ -165,6 +165,19 @@ pub const JET_RAM_DROP: f64 = 0.25;
 /// angle of attack of a stationary aeroplane is undefined, not zero.
 pub const MIN_AIRSPEED_MPS: f64 = 0.5;
 
+/// A propeller's rpm at idle and at full power (wave VEH3g) -- what its voice's
+/// blade-pass is pitched by, a light aeroplane's 700 to 2 700.
+pub const PROP_IDLE_RPM: f64 = 700.0;
+/// See [`PROP_IDLE_RPM`].
+pub const PROP_MAX_RPM: f64 = 2_700.0;
+/// How many blades the voiced propeller has.
+pub const PROP_BLADES: f64 = 2.0;
+
+/// A propeller's rpm at a spool `[0, 1]`.
+pub fn prop_rpm(spool: f64) -> f64 {
+    PROP_IDLE_RPM + (PROP_MAX_RPM - PROP_IDLE_RPM) * spool.clamp(0.0, 1.0)
+}
+
 /// `engine_voice_kind` for a turbine -- the one kind whose thrust is a JET's.
 pub const TURBINE_VOICE_KIND: f64 = 2.0;
 

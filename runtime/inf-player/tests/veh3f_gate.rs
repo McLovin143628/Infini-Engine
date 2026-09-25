@@ -2535,6 +2535,7 @@ fn the_engine_clip_override_reaches_the_command_stream() {
         quiet: false,
         speed_mps: 10.0,
         axles: [axle, axle],
+        craft: Default::default(),
     };
     let mut mem = VoiceMemory::new();
     let cues = mem.plan(&world, &[(CAR, t)], DT);

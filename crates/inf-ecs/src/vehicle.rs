@@ -8548,9 +8548,33 @@ impl Vehicle for RaycastVehicle {
     /// the gearbox input shaft as the DRIVEN wheels imply it, and each axle's
     /// worst normalised slip and deepest strut over its grounded wheels.
     fn voice(&self) -> Option<crate::vehicle_audio::VoiceTelemetry> {
-        use crate::vehicle_audio::{AxleVoice, GrainFamily, VoiceTelemetry};
+        use crate::vehicle_audio::{AxleVoice, CraftVoice, GrainFamily, VoiceTelemetry};
         let t = &self.tuning;
-        GrainFamily::for_engine(t.cylinders, t.engine_voice_kind, t.firing_order_variant)?;
+        let family =
+            GrainFamily::for_engine(t.cylinders, t.engine_voice_kind, t.firing_order_variant);
+        // **A fixed wing sings its propeller or its turbine** (wave VEH3g), off
+        // the spool the flight model integrates -- and its gear's tyres, which
+        // are this class's own.
+        let craft = match self.flight {
+            Some(f) => {
+                let jet = crate::aero::is_jet(t);
+                CraftVoice {
+                    prop_hz: if jet {
+                        0.0
+                    } else {
+                        crate::aero::prop_rpm(f.spool) / 60.0 * crate::aero::PROP_BLADES
+                    },
+                    jet,
+                    jet_spool: f.spool,
+                    load: self.controls.throttle.clamp(0.0, 1.0),
+                    ..CraftVoice::default()
+                }
+            }
+            None => CraftVoice::default(),
+        };
+        if family.is_none() && !craft.any() {
+            return None;
+        }
         let split = if t.front_torque_split.is_finite() {
             t.front_torque_split.clamp(0.0, 1.0)
         } else {
@@ -8599,8 +8623,12 @@ impl Vehicle for RaycastVehicle {
             a.grounded = true;
         }
         let state = self.drivetrain_state();
+        let spooled = self.flight.is_some_and(|f| f.spool > 0.02);
         Some(VoiceTelemetry {
-            rpm: self.rpm,
+            rpm: match self.flight {
+                Some(f) => crate::aero::prop_rpm(f.spool),
+                None => self.rpm,
+            },
             idle_rpm: t.idle_rpm,
             redline_rpm: t.redline_rpm,
             throttle: self.controls.throttle.abs().clamp(0.0, 1.0),
@@ -8613,9 +8641,10 @@ impl Vehicle for RaycastVehicle {
             voice_kind: t.engine_voice_kind,
             firing_order: t.firing_order_variant,
             occupied: self.controls.occupied,
-            quiet: state.is_quiet(t.idle_rpm),
+            quiet: state.is_quiet(t.idle_rpm) && !spooled,
             speed_mps: 0.0,
             axles,
+            craft,
         })
     }
 
@@ -9933,6 +9962,40 @@ impl Vehicle for HullVehicle {
         Some(self.marine)
     }
 
+    /// **The hull's voice** (wave VEH3g): its engine's grains when it has a
+    /// combustion engine (the same families a car sings), and the hull's own
+    /// slap and spray off its speed through the water and its planing share.
+    fn voice(&self) -> Option<crate::vehicle_audio::VoiceTelemetry> {
+        use crate::vehicle_audio::{CraftVoice, VoiceTelemetry};
+        let t = &self.tuning;
+        let top = t.max_speed_mps.max(1e-6);
+        let speed = self.marine.forward_mps.abs();
+        let load = (self.controls.throttle - self.controls.brake)
+            .abs()
+            .min(1.0);
+        let revs = (speed / top).max(load * 0.3).clamp(0.0, 1.0);
+        Some(VoiceTelemetry {
+            rpm: t.idle_rpm + (t.redline_rpm - t.idle_rpm).max(0.0) * revs,
+            idle_rpm: t.idle_rpm,
+            redline_rpm: t.redline_rpm,
+            throttle: load,
+            cylinders: t.cylinders,
+            voice_kind: t.engine_voice_kind,
+            firing_order: t.firing_order_variant,
+            occupied: self.controls.occupied,
+            quiet: !self.controls.occupied && speed < 0.3,
+            speed_mps: self.marine.forward_mps,
+            craft: CraftVoice {
+                hull_wet: self.immersion > 0.0,
+                hull_speed_mps: speed,
+                planing: self.marine.planing_share,
+                wheelless: true,
+                ..CraftVoice::default()
+            },
+            ..VoiceTelemetry::default()
+        })
+    }
+
     fn solve(&mut self, chassis: ChassisState, dt: f64, out: &mut Vec<WheelForce>) {
         if !dt.is_finite() || dt <= 0.0 || !(chassis.mass_kg.is_finite() && chassis.mass_kg > 0.0) {
             return;
@@ -10143,6 +10206,11 @@ impl Vehicle for HullVehicle {
                 .map(|w| (w - (chassis.position.y - half)).max(0.0))
                 .unwrap_or(0.0),
             planing_lift_n: lift,
+            planing_share: if weight > 0.0 {
+                (lift / (crate::marine::PLANING_LIFT_FRAC * weight)).clamp(0.0, 1.0)
+            } else {
+                0.0
+            },
             sail_force: sail,
             apparent_wind_deg: apparent_deg,
             heel_deg: inf_math::portable::patan2_64(-right.y, up.y).to_degrees(),
@@ -10270,6 +10338,17 @@ pub const HELI_ATTITUDE_KD: f64 = 2.2;
 /// would strobe.
 pub const ROTOR_SPIN_DEG_PER_S: f64 = 1_440.0;
 
+/// **A main rotor's governed speed in flight**, rpm (wave VEH3g) -- a light
+/// helicopter's, about 450. Constant in flight, which is what a governor is
+/// for; the voice's blade-pass is this times [`ROTOR_BLADES`] over sixty.
+pub const ROTOR_FLIGHT_RPM: f64 = 450.0;
+
+/// How many blades the voiced rotor has (the Buzzard's two).
+pub const ROTOR_BLADES: f64 = 2.0;
+
+/// The rotor's spool time constant, seconds -- a turbine winding a rotor up.
+pub const ROTOR_SPOOL_S: f64 = 4.0;
+
 /// **The helicopter**: a governed collective, a commanded attitude and a tail
 /// rotor, over the wheel-less rig (wave VEH2c).
 ///
@@ -10347,6 +10426,12 @@ pub struct RotorVehicle {
     /// The rotor thrust the last solve asked for, newtons — published for a
     /// readout and a test.
     thrust_n: f64,
+    /// **The rotor's spool**, `[0, 1]` (wave VEH3g) -- governed rotor speed
+    /// over its flight rpm, rising while somebody is at the controls and
+    /// winding down when nobody is. What the rotor VOICE's blade-pass is
+    /// pitched by; the thrust model does not read it (its collective is
+    /// governed, VEH2c's ruling).
+    spool: f64,
     /// Nothing: a rotorcraft has no wheels.
     no_wheels: Vec<WheelState>,
 }
@@ -10361,6 +10446,7 @@ impl RotorVehicle {
             pitch_cmd_deg: 0.0,
             azimuth_deg: 0.0,
             thrust_n: 0.0,
+            spool: 0.0,
             no_wheels: Vec::new(),
         }
     }
@@ -10483,10 +10569,42 @@ impl Vehicle for RotorVehicle {
         (part.kind == PartKind::Rotor).then(|| Vec3d::new(0.0, self.azimuth_deg, 0.0))
     }
 
+    /// **The rotor's voice** (wave VEH3g): its blade-pass at the governed
+    /// rotor speed times the spool, the collective as its load, and the
+    /// turbine that drives it.
+    fn voice(&self) -> Option<crate::vehicle_audio::VoiceTelemetry> {
+        use crate::vehicle_audio::{CraftVoice, VoiceTelemetry};
+        let t = &self.tuning;
+        Some(VoiceTelemetry {
+            rpm: ROTOR_FLIGHT_RPM * self.spool,
+            idle_rpm: 0.0,
+            redline_rpm: ROTOR_FLIGHT_RPM,
+            throttle: (0.5 + 0.5 * self.controls.vertical).clamp(0.0, 1.0),
+            cylinders: t.cylinders,
+            voice_kind: t.engine_voice_kind,
+            firing_order: t.firing_order_variant,
+            occupied: self.controls.occupied,
+            quiet: self.spool < 0.02,
+            craft: CraftVoice {
+                rotor_hz: ROTOR_FLIGHT_RPM * self.spool / 60.0 * ROTOR_BLADES,
+                jet: self.spool > 0.0,
+                jet_spool: self.spool,
+                load: (0.5 + 0.5 * self.controls.vertical).clamp(0.0, 1.0),
+                wheelless: true,
+                ..CraftVoice::default()
+            },
+            ..VoiceTelemetry::default()
+        })
+    }
+
     fn solve(&mut self, chassis: ChassisState, dt: f64, out: &mut Vec<WheelForce>) {
         if !dt.is_finite() || dt <= 0.0 || !(chassis.mass_kg.is_finite() && chassis.mass_kg > 0.0) {
             return;
         }
+        // The rotor spools up while somebody is at the controls and winds down
+        // when nobody is (wave VEH3g) -- the voice's input; see `spool`.
+        let want = if self.controls.occupied { 1.0 } else { 0.0 };
+        self.spool += (want - self.spool) * (dt / ROTOR_SPOOL_S).clamp(0.0, 1.0);
         let (fwd, right, up) = chassis.basis();
         let forward_mps = chassis.linvel.dot(fwd);
         let (hub_local, disc_r) = self.hub();
