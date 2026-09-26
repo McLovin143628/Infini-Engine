@@ -987,9 +987,15 @@ fn the_flywheel_sentinel_restores_the_pre_veh3b_feel_table() {
     /// printed beside it in the arm, where the size of the spring's own
     /// contribution stays readable: the sports row's stop went 31.1 m to 28.3 m
     /// on the rigid driveline for no reason but its rate.
+    ///
+    /// `audit(VEH3f.2b)` -- the SALOON's row re-measured again, for the same
+    /// kind of reason: its wheels were raised 0.08 m into its shell's arches
+    /// (`wheel_drop_m` -0.62 -> -0.54, a CONTENT change to the ride height,
+    /// not to the drivetrain), and on that ride the rigid driveline sprints
+    /// 7.23 s and stops in 35.4 m where it measured 7.33 s / 35.5 m.
     const RIGID_ON_TODAYS_SPRINGS: [(&str, f64, f64); 5] = [
         ("sports", 3.92, 28.3),
-        ("sedan", 7.33, 35.5),
+        ("sedan", 7.23, 35.4),
         ("suv", 7.35, 42.5),
         ("van", 17.20, 56.6),
         ("truck", 6.62, 36.7),
