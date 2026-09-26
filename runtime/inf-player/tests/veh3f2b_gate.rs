@@ -790,3 +790,196 @@ fn the_island_traffic_makes_no_moving_contact_and_its_hero_classes_draw_shells()
         contacts.len()
     );
 }
+
+// ── the tandem's brakes ─────────────────────────────────────────────────────
+
+const SLAB: Uuid = Uuid::from_u128(0x5E3F_2B20);
+const RIG: Uuid = Uuid::from_u128(0x5E3F_2B21);
+
+/// A shipped host holding one row at rest on a 6 km slab, nose `+Z`.
+fn slab_sim(def: &VehicleDef) -> inf_player::runtime_sim::RuntimeSim {
+    let mut world = EcsWorld::new();
+    let e = world.spawn_with_guid(SLAB, "Slab", None);
+    world.world_mut().entity_mut(e).insert((
+        Transform {
+            translation: Vec3d::new(0.0, -0.5, 0.0),
+            ..Default::default()
+        },
+        Visibility::default(),
+        RigidBody3D {
+            kind: BodyKind3D::Static,
+            ..Default::default()
+        },
+        Collider3D {
+            shape_kind: ColliderShape3DKind::Box,
+            half_extents: Vec3d::new(3_000.0, 0.5, 3_000.0),
+            friction: 0.9,
+            ..Default::default()
+        },
+    ));
+    car(
+        &mut world,
+        RIG,
+        DVec3::new(
+            0.0,
+            inf_ecs::vehicle::resting_origin_y(def, 0.0),
+            -2_900.0,
+        ),
+        0.0,
+        def,
+    );
+    world.propagate();
+    inf_player::runtime_sim::RuntimeSim::new(world, Vec::new(), glam::DVec2::new(0.0, -9.81), 60.0)
+}
+
+fn command(sim: &mut inf_player::runtime_sim::RuntimeSim, c: inf_ecs::vehicle::VehicleControls) {
+    if let Some(v) = sim.bridge3d_mut().vehicle_mut(RIG) {
+        v.control(inf_ecs::vehicle::VehicleControls {
+            occupied: true,
+            ..c
+        });
+    }
+    sim.step_once(Default::default());
+}
+
+fn rig_speed(sim: &inf_player::runtime_sim::RuntimeSim) -> f64 {
+    let b = sim.bridge3d();
+    b.body_of(RIG)
+        .and_then(|body| b.world().body_linvel(body))
+        .map(|v| DVec3::new(v.x, 0.0, v.z).length())
+        .unwrap_or(0.0)
+}
+
+/// One hard stop from `from_mps`: `(stop distance m, per axle (z, mean load
+/// share while braking, worst slip, first lock s or NaN))`, axles front to rear.
+fn hard_stop(def: &VehicleDef, from_mps: f64) -> (f64, Vec<(f64, f64, f64, f64)>) {
+    use inf_ecs::vehicle::VehicleControls;
+    let mut sim = slab_sim(def);
+    for _ in 0..120 {
+        command(&mut sim, VehicleControls::default());
+    }
+    for _ in 0..3_000 {
+        if rig_speed(&sim) >= from_mps {
+            break;
+        }
+        command(
+            &mut sim,
+            VehicleControls {
+                throttle: 1.0,
+                ..Default::default()
+            },
+        );
+    }
+    let start = sim
+        .bridge3d()
+        .body_of(RIG)
+        .and_then(|b| sim.bridge3d().world().body_translation(b))
+        .unwrap_or(DVec3::ZERO);
+    let mounts: Vec<f64> = sim
+        .bridge3d()
+        .vehicle_of(RIG)
+        .map(|v| v.rig().wheels.iter().map(|m| m.mount_local.z).collect())
+        .unwrap_or_default();
+    let key = |z: f64| (z * 100.0).round() as i64;
+    let mut axles: std::collections::BTreeMap<i64, (f64, f64, f64, f64, usize)> =
+        std::collections::BTreeMap::new();
+    let mut t = 0.0f64;
+    for _ in 0..2_400 {
+        command(
+            &mut sim,
+            VehicleControls {
+                brake: 1.0,
+                ..Default::default()
+            },
+        );
+        t += 1.0 / 60.0;
+        let v = rig_speed(&sim);
+        if let Some(rig) = sim.bridge3d().vehicle_of(RIG) {
+            let wheels = rig.wheels();
+            let total: f64 = wheels.iter().map(|w| w.load_n.max(0.0)).sum::<f64>().max(1.0);
+            let radius = def.wheel_radius_m;
+            for (w, z) in wheels.iter().zip(&mounts) {
+                let e = axles.entry(key(*z)).or_insert((*z, 0.0, 0.0, f64::NAN, 0));
+                e.1 += w.load_n.max(0.0) / total;
+                e.4 += 1;
+                if v > 1.0 {
+                    let slip = (v - w.omega_rad_s * radius).abs() / v;
+                    e.2 = e.2.max(slip);
+                    if slip > 0.95 && e.3.is_nan() {
+                        // The SPEED it locked at, not the time: a wheel near a
+                        // standstill reads a large slip on any brake.
+                        e.3 = v;
+                    }
+                }
+            }
+        }
+        if v < 0.1 {
+            break;
+        }
+    }
+    let end = sim
+        .bridge3d()
+        .body_of(RIG)
+        .and_then(|b| sim.bridge3d().world().body_translation(b))
+        .unwrap_or(DVec3::ZERO);
+    let dist = DVec3::new(end.x - start.x, 0.0, end.z - start.z).length();
+    let per: Vec<(f64, f64, f64, f64)> = axles
+        .values()
+        .rev()
+        .map(|(z, share, slip, lock, n)| (*z, share / (*n).max(1) as f64 * 2.0, *slip, *lock))
+        .collect();
+    (dist, per)
+}
+
+/// **THE TANDEM BRAKES BY AXLE LOAD** -- READS the shipped host's own rig: a
+/// hard stop from 20 m/s on a slab, ABS off (so a wheel CAN lock and the
+/// order is visible), per axle the load share the struts carried while
+/// braking, the worst slip and the SPEED each axle first locked at (slip >
+/// 0.95), and the stop distance. The claims: on the rows with a rear TANDEM
+/// (the 6x4 semi tractor, the tag-axle coach, the 6x6), no rear axle locks in
+/// the first 30 % of the stop's speed (above 14 m/s from 20); the semi
+/// tractor stops inside its class's stop band (freight, 0.60-0.78 g, the VEH3f
+/// table). Pre-wave split (a group's budget EVEN over its wheels): the semi's
+/// light third axle locked at 16.3 m/s (0.55 s into the stop) and it stopped
+/// at 0.654 g; the 6x6's third axle at ~17.8 m/s (0.28 s) -- FAILS. The 6x6's
+/// FRONT axle locks at once either way (an overbraked row, carried). Printed:
+/// every row's table, the lock order traced by speed. Mutation -> red: the
+/// group budget split evenly in `solve_ground`.
+#[test]
+fn the_tandem_brakes_by_axle_load_and_no_rear_axle_locks_first() {
+    let mut bad = Vec::new();
+    for id in ["jobuilt_hauler", "dashhound", "caracara_6x6", "sedan"] {
+        let mut def = catalogue_def(id);
+        def.class.abs_slip = 0.0;
+        let from = 20.0;
+        let (dist, per) = hard_stop(&def, from);
+        let g = from * from / (2.0 * dist) / 9.81;
+        println!("BRAKE {id}: {from} m/s to rest in {dist:.2} m ({g:.3} g), ABS off");
+        for (z, share, slip, lock) in &per {
+            println!(
+                "    axle z {z:+.2} m: load share {:.1} %, worst slip {slip:.2}, first lock {}",
+                100.0 * share,
+                if lock.is_nan() {
+                    "never".to_string()
+                } else {
+                    format!("at {lock:.1} m/s")
+                }
+            );
+        }
+        let rear: Vec<&(f64, f64, f64, f64)> = per.iter().filter(|a| a.0 < 0.0).collect();
+        if rear.len() >= 2 {
+            for a in &rear {
+                if a.3 > 0.7 * from {
+                    bad.push(format!(
+                        "{id}: the rear axle at z {:+.2} m locked at {:.1} m/s",
+                        a.0, a.3
+                    ));
+                }
+            }
+        }
+        if id == "jobuilt_hauler" && !(0.60..=0.78).contains(&g) {
+            bad.push(format!("{id}: stopped at {g:.3} g, outside its 0.60-0.78 g band"));
+        }
+    }
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+}

@@ -9645,6 +9645,56 @@ impl RaycastVehicle {
             }
         }
 
+        // ── **THE TANDEM'S SPLIT, BY AXLE LOAD** (wave VEH3f.2b) ─────────────
+        //
+        // A group's brake budget (`brake_share`) was split EVENLY over its
+        // wheels, so a 6x4's rear tandem braked its lightly-loaded third axle
+        // as hard as its second and locked it first (the VEH3f audit's "the rear
+        // group's brake budget splits evenly", carried). Within a group of MORE
+        // than one axle, each axle now takes the group's budget in proportion to
+        // the load its two wheels carry this step -- the loads are final here
+        // -- and its wheels split that evenly. A one-axle group (every two-axle
+        // car) keeps `brake_share` exactly, byte for byte.
+        let axle_key = |m: &WheelMount| (m.mount_local.z * 1000.0).round() as i64;
+        let mut brake_of: Vec<f64> = Vec::with_capacity(self.rig.wheels.len());
+        for mount in self.rig.wheels.iter() {
+            let group = mount.steered();
+            let key = axle_key(mount);
+            let mut axles: Vec<i64> = self
+                .rig
+                .wheels
+                .iter()
+                .filter(|m| m.steered() == group)
+                .map(axle_key)
+                .collect();
+            axles.sort_unstable();
+            axles.dedup();
+            let even = brake_share(group);
+            if axles.len() < 2 {
+                brake_of.push(even);
+                continue;
+            }
+            let (mut axle_load, mut group_load, mut on_axle) = (0.0f64, 0.0f64, 0usize);
+            for (j, m) in self.rig.wheels.iter().enumerate() {
+                if m.steered() != group {
+                    continue;
+                }
+                let l = self.wheels.get(j).map(|w| w.load_n.max(0.0)).unwrap_or(0.0);
+                group_load += l;
+                if axle_key(m) == key {
+                    axle_load += l;
+                    on_axle += 1;
+                }
+            }
+            let n_group = if group { front_wheels } else { rear_wheels };
+            if !(group_load > 0.0) || on_axle == 0 || n_group == 0 {
+                brake_of.push(even);
+                continue;
+            }
+            let group_budget = even * n_group as f64;
+            brake_of.push(group_budget * (axle_load / group_load) / on_axle as f64);
+        }
+
         let flats = self.flats;
         for (i, mount) in self.rig.wheels.iter().enumerate() {
             let Some(state) = self.wheels.get_mut(i) else {
@@ -9712,7 +9762,7 @@ impl RaycastVehicle {
             // (`aid_torque_cap_nm`). The HANDBRAKE is deliberately outside it: a
             // handbrake that could not lock a wheel would not be a handbrake.
             let abs = self.tuning.abs_slip;
-            let mut modulated = brake_share(mount.steered()) * radius
+            let mut modulated = brake_of.get(i).copied().unwrap_or(0.0) * radius
                 + rolling
                 + engine_brake_total * axle_share(mount.steered());
             if abs.is_finite() && abs > 0.0 {
