@@ -9691,7 +9691,7 @@ impl RaycastVehicle {
                 }
             }
             let n_group = if group { front_wheels } else { rear_wheels };
-            if !(group_load > 0.0) || on_axle == 0 || n_group == 0 {
+            if group_load.is_nan() || group_load <= 0.0 || on_axle == 0 || n_group == 0 {
                 brake_of.push(even);
                 continue;
             }

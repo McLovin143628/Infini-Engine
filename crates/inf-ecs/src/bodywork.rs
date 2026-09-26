@@ -377,7 +377,7 @@ impl PartState {
     /// so a car hit in the nose and then clipped on a corner crumples mostly
     /// in the nose.
     pub fn take_dent(&mut self, inc_m: f64, dir: Vec3d) {
-        if !(inc_m > 0.0) {
+        if inc_m.is_nan() || inc_m <= 0.0 {
             return;
         }
         let was = self.dent_m;
@@ -1017,7 +1017,7 @@ pub fn dent_mesh_positions(
     };
     let l = (dir.x * dir.x + dir.y * dir.y + dir.z * dir.z).sqrt();
     let depth = depth_m.min(MAX_DENT_M);
-    if positions.is_empty() || l <= 1e-12 || !(depth > 0.0) {
+    if positions.is_empty() || l <= 1e-12 || depth.is_nan() || depth <= 0.0 {
         return out;
     }
     let d = [dir.x / l, dir.y / l, dir.z / l];

@@ -263,7 +263,7 @@ fn the_inner_latch_waits_for_the_reach_and_the_hand_holds_to_the_shut() {
             worst * 1000.0
         );
         let reach = inf_ecs::boarding::HAND_REACH_S + inf_ecs::boarding::HANDLE_HOLD_S;
-        if !(latch_s >= reach - 1e-9) {
+        if latch_s.is_nan() || latch_s < reach - 1e-9 {
             bad.push(format!(
                 "{row}: the door latched at {latch_s:.3} s, before the reach ({reach:.2} s)"
             ));
@@ -731,36 +731,38 @@ fn the_island_traffic_makes_no_moving_contact_and_its_hero_classes_draw_shells()
         sim.step_once(Default::default());
         for &(a, b) in sim.solid_contacts_started() {
             solid_events += 1;
-            if chassis(a, &sim) && chassis(b, &sim) && (moving(a, &sim) || moving(b, &sim)) {
-                if contacts.insert((a, b)) {
-                    let say = |g: Uuid| {
-                        let (p, yaw) = pose(g, &sim).unwrap_or((DVec3::ZERO, 0.0));
-                        let v = last
-                            .get(&g)
-                            .map(|q| (p - *q).length() * 60.0)
-                            .unwrap_or(-1.0);
-                        let (home, tier) = inf_ecs::traffic::traffic_of(sim.world())
-                            .and_then(|t| t.records.get(&g))
-                            .map(|r| (r.home, format!("{:?}/{:?}", r.tier, r.detail)))
-                            .unwrap_or((DVec3::ZERO, "-".into()));
-                        format!(
-                            "{:?} day {:?} {tier} at ({:.1}, {:.1}) home ({:.1}, {:.1}) yaw {yaw:.0} {v:.2} m/s, resident {:.1} s",
-                            inf_ecs::traffic::catalogue_row_id(g),
-                            inf_ecs::traffic::day_of(g),
-                            p.x,
-                            p.z,
-                            home.x,
-                            home.z,
-                            born.get(&g).map(|b| (s - b) as f64 / 60.0).unwrap_or(-1.0)
-                        )
-                    };
-                    eprintln!(
-                        "  MOVING CONTACT at island second {:.1}: {} x {}",
-                        s as f64 / 60.0,
-                        say(a),
-                        say(b)
-                    );
-                }
+            if chassis(a, &sim)
+                && chassis(b, &sim)
+                && (moving(a, &sim) || moving(b, &sim))
+                && contacts.insert((a, b))
+            {
+                let say = |g: Uuid| {
+                    let (p, yaw) = pose(g, &sim).unwrap_or((DVec3::ZERO, 0.0));
+                    let v = last
+                        .get(&g)
+                        .map(|q| (p - *q).length() * 60.0)
+                        .unwrap_or(-1.0);
+                    let (home, tier) = inf_ecs::traffic::traffic_of(sim.world())
+                        .and_then(|t| t.records.get(&g))
+                        .map(|r| (r.home, format!("{:?}/{:?}", r.tier, r.detail)))
+                        .unwrap_or((DVec3::ZERO, "-".into()));
+                    format!(
+                        "{:?} day {:?} {tier} at ({:.1}, {:.1}) home ({:.1}, {:.1}) yaw {yaw:.0} {v:.2} m/s, resident {:.1} s",
+                        inf_ecs::traffic::catalogue_row_id(g),
+                        inf_ecs::traffic::day_of(g),
+                        p.x,
+                        p.z,
+                        home.x,
+                        home.z,
+                        born.get(&g).map(|b| (s - b) as f64 / 60.0).unwrap_or(-1.0)
+                    )
+                };
+                eprintln!(
+                    "  MOVING CONTACT at island second {:.1}: {} x {}",
+                    s as f64 / 60.0,
+                    say(a),
+                    say(b)
+                );
             }
         }
         if let Some(pop) = inf_ecs::traffic::traffic_of(sim.world()) {
