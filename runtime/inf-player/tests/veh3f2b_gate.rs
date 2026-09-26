@@ -2653,3 +2653,95 @@ fn every_shell_hangs_on_a_car_in_the_committed_island() {
         .collect();
     assert!(bare.is_empty(), "no island car wears {bare:?}");
 }
+
+/// **FRAME (ignored): the saloon after a 60 km/h wall, through the SHIPPED
+/// projector** -- the player's own `project_scene` over the committed shells'
+/// DAGs, rendered by the engine's renderer headless at 1024 x 1024, the whole
+/// car and the dented one side by side (the control run beside the crash run).
+/// `INF_VEH3F2B_FRAMES=<dir>` names where the PNGs go.
+#[test]
+#[ignore = "writes frames; set INF_VEH3F2B_FRAMES"]
+fn frame_the_dented_saloon() {
+    let Some(dir) = std::env::var_os("INF_VEH3F2B_FRAMES") else {
+        println!("SKIP: INF_VEH3F2B_FRAMES not set");
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let Ok(gpu) = inf_render::GpuContext::headless() else {
+        println!("SKIP: no adapter");
+        return;
+    };
+    let def = catalogue_def("sedan");
+    for (name, wall) in [("whole", false), ("dented-60kmh", true)] {
+        let sim = crash_run(&def, 60.0, wall);
+        let mut reg = inf_player::vmesh::VmeshRegistry::new();
+        let w = sim.world();
+        let ce = w.entity_of(CRASH_CAR).unwrap();
+        let mut stack = vec![ce];
+        while let Some(e) = stack.pop() {
+            for c in w.children_of(e) {
+                stack.push(c);
+                if let Some(g) = w
+                    .world()
+                    .get::<inf_ecs::components::MeshRef>(c)
+                    .and_then(|m| m.asset)
+                {
+                    let mesh = committed_shell_mesh(g);
+                    let (p, n, u, t, i) = mesh.vgeom_streams();
+                    let dag = inf_vgeom::build_vgeom(
+                        &p,
+                        &n,
+                        &u,
+                        &t,
+                        &i,
+                        inf_vgeom::BuildParams::default(),
+                    );
+                    reg.insert_mesh(inf_player::vmesh::derived_vmesh_id(g), &dag)
+                        .unwrap();
+                }
+            }
+        }
+        let at = w
+            .world()
+            .get::<inf_ecs::components::GlobalTransform>(ce)
+            .map(|t| t.translation())
+            .unwrap();
+        let mut scene = inf_render::RenderScene {
+            grid_enabled: false,
+            ..Default::default()
+        };
+        inf_player::render::project_scene(&mut scene, &sim, 1.0, &reg);
+        // Square: the editor's thumbnail encoder is the PNG door this crate has.
+        let (wd, ht) = (1024u32, 1024u32);
+        let target = inf_render::HeadlessTarget::new(&gpu, wd, ht);
+        let mut renderer = inf_render::EngineRenderer::new(&gpu, inf_render::HEADLESS_FORMAT);
+        let eye = at + DVec3::new(3.4, 1.6, 4.6);
+        let view = inf_render::RenderView {
+            origin: inf_math::FloatingOrigin::new(at),
+            eye_world: eye,
+            forward: (at + DVec3::new(0.0, 0.2, 1.0) - eye).as_vec3().normalize(),
+            up: glam::Vec3::Y,
+            fov_y: 45f32.to_radians(),
+            near: 0.05,
+            width: wd,
+            height: ht,
+            ortho: None,
+        };
+        for _ in 0..4 {
+            renderer.render(&gpu, &scene, &view, &target.view, (wd, ht));
+        }
+        let rgba = target.read_rgba(&gpu).unwrap();
+        let path = dir.join(format!("frame-saloon-{name}.png"));
+        std::fs::write(
+            &path,
+            inf_editor_core::thumbnail::encode_png(wd, &rgba).unwrap(),
+        )
+        .unwrap();
+        println!(
+            "wrote {} ({} crumpled DAGs)",
+            path.display(),
+            reg.dent_builds()
+        );
+    }
+}

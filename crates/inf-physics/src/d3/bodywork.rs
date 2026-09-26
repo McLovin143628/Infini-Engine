@@ -60,6 +60,11 @@ pub const CRASH_MIN_NS: f64 = 300.0;
 /// about 4 cm at 15 km/h, 9 at 30, 19 at 60 and the 22 cm cap at 90.
 pub const HULL_DENT_SHARE: f64 = 1.0;
 
+/// **How squarely a blow must face a trim panel for it to ride the crumple**
+/// (`BodyPartKind::face`, the cosine between its offset and the blow): a
+/// headlamp at the nose faces a wall at 0.9, a door mirror 0.2.
+pub const TRIM_FACE_MIN: f64 = 0.6;
+
 /// **The thinnest half-extent a shed bumper's collider keeps**, metres (wave
 /// VEH3f.2b) -- a cover in the road is a sheet, whatever box its wrap drew.
 pub const SHED_BUMPER_HALF_M: f64 = 0.03;
@@ -384,6 +389,8 @@ pub fn step_bodywork(
         row.hull_j += energy * HULL_CRASH_FRAC;
 
         let parts: Vec<Uuid> = row.parts.keys().copied().collect();
+        let has_hull = row.parts.values().any(|p| p.hull);
+        let hull_inc = j * HULL_DENT_SHARE * 1e-3 * inf_ecs::bodywork::DENT_M_PER_KNS;
         for guid in parts {
             let Some(p) = row.parts.get_mut(&guid) else {
                 continue;
@@ -392,6 +399,21 @@ pub fn step_bodywork(
                 continue;
             }
             let kind = kind_of_state(p);
+            // **The trim rides the crumple** (wave VEH3f.2b): on a car whose
+            // body is one mesh, a PANEL the blow faces (a lamp, the grille)
+            // is dressing on that mesh's skin, and it goes back with the skin
+            // -- the first frame of a crumpled saloon had both headlamps
+            // hanging 19 cm in front of a nose that was no longer there.
+            // `part_pose` translates a `trim` part by its dent and never
+            // shrinks it.
+            if has_hull && !p.hull && kind == BodyPartKind::Panel {
+                let face = BodyPartKind::face(p.centre_frac, dir);
+                if face > TRIM_FACE_MIN {
+                    p.trim = true;
+                    p.take_dent(hull_inc * face, dir);
+                }
+                continue;
+            }
             // **THE HULL CRUMPLES** (wave VEH3f.2b). A car's whole body sits
             // at the chassis centre, so it faces no direction and a panel's
             // share is nothing -- which drew a car that hit a wall at 60 with
@@ -399,10 +421,7 @@ pub fn step_bodywork(
             // the blow whole ([`HULL_DENT_SHARE`]) along the direction it came
             // from, and its mesh crumples by it (`dent_mesh_positions`).
             if p.hull {
-                p.take_dent(
-                    j * HULL_DENT_SHARE * 1e-3 * inf_ecs::bodywork::DENT_M_PER_KNS,
-                    dir,
-                );
+                p.take_dent(hull_inc, dir);
                 continue;
             }
             let face = BodyPartKind::face(p.centre_frac, dir);

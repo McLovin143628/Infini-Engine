@@ -324,6 +324,12 @@ pub struct PartState {
     /// ([`dent_mesh_positions`]) and never a shrink of its box. Authored (it
     /// comes from the part's name), so not folded.
     pub hull: bool,
+    /// **A trim panel riding its hull's crumple** (wave VEH3f.2b): a panel
+    /// on a car whose body is one mesh, dented by the blow that crumpled it
+    /// -- [`part_pose`] TRANSLATES it back by its dent along the blow and
+    /// never shrinks it. Set by the crash; derived from `dent_dir` and the
+    /// car, so not folded.
+    pub trim: bool,
 }
 
 impl Default for PartState {
@@ -341,6 +347,7 @@ impl Default for PartState {
             half_frac: Vec3d::ZERO,
             dent_dir: Vec3d::ZERO,
             hull: false,
+            trim: false,
         }
     }
 }
@@ -833,7 +840,15 @@ pub fn part_pose(
     // pushed through the far side of its own car.
     // A HULL's dent is its mesh's (`dent_mesh_positions`): its box keeps its
     // authored size, or the whole car would shrink in the direction it was hit.
-    if part.dent_m > 0.0 && !part.hull {
+    if part.trim && part.dent_m > 0.0 {
+        let d = part.dent_m.min(MAX_DENT_M);
+        let dd = part.dent_dir;
+        centre = Vec3d::new(
+            centre.x - dd.x * d,
+            centre.y - dd.y * d,
+            centre.z - dd.z * d,
+        );
+    } else if part.dent_m > 0.0 && !part.hull {
         let (axis, sign) = part.facing();
         let base = [scale.x, scale.y, scale.z][axis];
         let d = part.dent_m.min(MAX_DENT_M).min(0.8 * base);
