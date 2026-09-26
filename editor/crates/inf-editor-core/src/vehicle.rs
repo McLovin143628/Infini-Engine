@@ -1556,9 +1556,17 @@ mod tests {
                         .copied()
                 })
                 .unwrap_or_else(|| panic!("{id}: the chassis has no collider"));
+            // A row that DRAWS its seats (a VEH3f.2b shell) takes the seat's
+            // plan position from its drawn cushion -- `seat_local_with`, the
+            // one door `rig_of` reads; an undrawn row is `seat_local_of`.
+            let drawn = doc
+                .world()
+                .entity_of(chassis)
+                .map(|e| inf_ecs::vehicle::seat_geoms(doc.world(), e, &collider))
+                .unwrap_or_default();
             assert_eq!(
                 rig.seat_local,
-                inf_ecs::vehicle::seat_local_of(&collider),
+                inf_ecs::vehicle::seat_local_with(&collider, &drawn),
                 "{id}: the seat is derived from the chassis collider"
             );
             assert!(
@@ -1596,7 +1604,17 @@ mod tests {
             // size — the defect this door exists to close.
             let world = doc.world();
             let mut drawn = 0usize;
-            for part in def.body.parts() {
+            // The parts the RIG hangs: a VEH3f.2b shell row's are its art's.
+            let shell = def.art.is_some_and(|k| k.shell());
+            let parts: &[inf_ecs::vehicle::BodyPart] = match def.art {
+                Some(k) if !k.parts().is_empty() => k.parts(),
+                _ => def.body.parts(),
+            };
+            // A shell's mirrors and bumper skins stand proud of the box collider
+            // by design (0.186 m, the mirror pair, measured); a UNIT box -- the
+            // defect this door closes -- is refused by the scale check below.
+            let slack = if shell { 0.20 } else { 1e-9 };
+            for part in parts {
                 let guid = inf_ecs::vehicle::body_part_guid(chassis, part.name);
                 let e = world
                     .entity_of(guid)
@@ -1621,7 +1639,7 @@ mod tests {
                         part.name
                     );
                     assert!(
-                        c.abs() + s / 2.0 <= hull + 1e-9,
+                        c.abs() + s / 2.0 <= hull + slack,
                         "{id}/{}: axis {axis} reaches {} past a hull half-extent \
                          of {hull}",
                         part.name,
@@ -1802,10 +1820,29 @@ mod tests {
         let mut b = SceneDoc::new();
         spawn_vehicle(&mut b, chassis, &def, spawn);
         assert_eq!(ids(&a), ids(&b));
+        // The RIG's nodes: a VEH3f.2b shell row hangs its shell's parts, its
+        // body and a rim beside each tyre, not the family's boxes.
+        let nodes = inf_ecs::vehicle::rig_nodes(
+            chassis,
+            &def,
+            &inf_ecs::vehicle::RigSpawn {
+                name: "Car".into(),
+                at: DVec3::ZERO,
+                yaw_deg: 0.0,
+                paint: Color::WHITE,
+                clip: None,
+                engine_voice: true,
+                livery: None,
+            },
+        );
         assert_eq!(
             ids(&a).len(),
-            1 + def.body.parts().len() + 8,
+            nodes.len(),
             "a car is its chassis, its parts, four wheels and four tyres"
+        );
+        assert!(
+            def.art.is_some_and(|k| k.shell()) && nodes.len() > 1 + def.body.parts().len() + 8,
+            "the saloon no longer wears its shell"
         );
     }
 }

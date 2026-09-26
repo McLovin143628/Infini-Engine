@@ -825,10 +825,17 @@ fn a_rig_parked_on_a_graded_heightfield_holds_its_own_weight() {
     let held = (rig.chassis().translation.to_dvec3() - before).length();
 
     // …and the free roll, so the handbrake number above has a control.
+    //
+    // **Released EXPLICITLY** (re-ruled with cause, wave VEH3f.2b): a car
+    // nobody speaks to now holds its parking brake below walking pace, so a
+    // bare `step` is the handbrake too and the control measured the same
+    // 0.0792 m as the held car. The control drives neutral controls every
+    // step -- a driver's foot off everything -- which is what "nothing
+    // applied" means.
     let mut loose = Rig::new(8.0, 8.0, 0.0);
-    loose.step(300);
+    loose.drive(VehicleControls::default(), 300);
     let before = loose.chassis().translation.to_dvec3();
-    loose.step(120);
+    loose.drive(VehicleControls::default(), 120);
     let rolled = (loose.chassis().translation.to_dvec3() - before).length();
     println!(
         "A GRADED PARK: the handbrake held it to {held:.4} m in two seconds; \
