@@ -3635,7 +3635,28 @@ fn step_driving(
             c
         }
     } else {
-        inf_ecs::vehicle::VehicleControls::from_intent(Vec2d::new(0.0, 0.0), forward_mps, true, 0.0)
+        let held = inf_ecs::vehicle::VehicleControls::from_intent(
+            Vec2d::new(0.0, 0.0),
+            forward_mps,
+            true,
+            0.0,
+        );
+        // **A HULL HAS NO WHEEL TO HOLD** (`audit(VEH3f.2b)`). Since wave
+        // VEH3f.2b a hold at a standstill is every brake as well as the
+        // handbrake (`from_intent`), and a boat's brake is its screw ASTERN
+        // (`HULL_ASTERN_FRACTION`): the launch backed away under full astern
+        // for the whole of its boarding, and `veh2c_harbour_gate`'s emitter
+        // arm read 10.0 m of travel over its 800 beats where it had read
+        // 49.4. A wheel-less craft keeps the hold it had -- the handbrake,
+        // which it does not have, and no screw.
+        if bridge
+            .vehicle_of(vehicle)
+            .is_some_and(|v| v.wheels().is_empty())
+        {
+            inf_ecs::vehicle::VehicleControls { brake: 0.0, ..held }
+        } else {
+            held
+        }
     };
     // What the feet press — the controls the car was actually given.
     b.throttle_in = controls.throttle.max(0.0);
