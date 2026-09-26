@@ -118,6 +118,12 @@ fn cook_error_to_dto(err: CookError) -> PackageErrorDto {
             dto.class = "mod".into();
             dto.message = message;
         }
+        // VEH3f.2b: the licence wall -- content whose licence row says it may
+        // not ship. Its own class, so the dialog names the assets rather than
+        // an internal error.
+        CookError::Licence { .. } => {
+            dto.class = "licence".into();
+        }
         CookError::Mesh { guid, message } => {
             dto.class = "mesh".into();
             dto.message = message;
