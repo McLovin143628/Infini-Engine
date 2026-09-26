@@ -34,18 +34,22 @@ five, as the house conditioning asserts them).
 
 | | rows |
 |---|---|
-| ✓ | **99** |
-| PARTIAL | **13** |
-| ✗ | **10** |
+| ✓ | **103** |
+| PARTIAL | **12** |
+| ✗ | **9** |
+
+(The cert counted 99 / 13 / 10. The VEH3h audit CLOSED two ✗ — the parked vehicle beyond
+the collider band and the Demon row — added two ✓ rows for the stall it diagnosed (a fixed
+step beside every body kind; a crowd pile set aside), and moved the parked-car cost row from
+PARTIAL to ✗: conditioned, its ceiling is not held.)
 
 The ✗ rows and where they go: the island's frame (**PERF1**), the lit driving frame with
-64 shells (**PERF1**), a parked vehicle beyond the collider band (**PERF1** sim LOD),
-headlight cones (**PAR1** on **PAR0**), tyre smoke / exhaust / dust (**PAR2**), clearcoat
-paint (**PAR** arc, ~2.5 d), the per-sample granular synth (VEH3-carried, ~1.5 d), the
-art-machine cab doors (VEH3-carried, ~1 d a machine), the template rig's knee and elbow
-limits (VEH3-carried, a rig + clip re-bless, ~1 d), the Demon row against its
-drag-radial Forza figure (VEH3-carried, a roster retune, ~0.5 d). Counted over the
-five-column checklist tables of §1-§6; the tables after them are measurements, not rows.
+64 shells (**PERF1**), the parked-car cost ceiling (**PERF1**), headlight cones (**PAR1** on
+**PAR0**), tyre smoke / exhaust / dust (**PAR2**), clearcoat paint (**PAR** arc, ~2.5 d),
+the per-sample granular synth (VEH3-carried, ~1.5 d), the art-machine cab doors
+(VEH3-carried, ~1 d a machine), the template rig's knee and elbow limits (VEH3-carried, a
+rig + clip re-bless, ~1 d). Counted over the five-column checklist tables of §1-§6; the
+tables after them are measurements, not rows.
 
 ---
 
@@ -56,7 +60,7 @@ five-column checklist tables of §1-§6; the tables after them are measurements,
 | **sub-stepping at 300-400 Hz** | `veh3a_gate::the_substep_loop_runs_and_one_is_what_ships` | end positions of two rigs over 600 contact-steps at N = 1 and N = 4, and `SubstepAdvance::Shipped` against `Frozen` | **substep loop present, N = 1 shipped, 300 Hz not reached.** N = 1 and N = 4 end **19.796 m** apart; the between-substep chassis advance is worth **2.825 m**. VEH3a's price for N = 4: the sports row's sprint 3.98 → 6.77 s, i.e. the vehicle phase doubled. The fixed step is 60 Hz; the tyres are solved once in it | **PARTIAL** — N is PERF1's to buy (the frame the island does not yet hold, §11) |
 | the Pacejka **magic formula** on slip ratio κ and slip angle α | `veh3a_gate::the_magic_formula_is_not_the_old_curve` | two pure curve functions over 400 samples (the arm that tells "the table held" from "the model was never wired") | **0.2127** of peak grip apart from the pre-VEH3a curve at 0.34 × peak slip, **0.0** at the peak | ✓ |
 | …and it is the model the cars drive on | `vehicle_grade::every_catalogue_row_sprints_stops_and_tops_out_inside_its_own_spec` | sprint, stop and top speed off the rapier body for every island row, ±5 % bands | sports **3.70 s**, stops **28.8 m**, tops out **60.9 m/s**; sedan **7.53 s / 36.9 m / 33.6 m/s** | ✓ |
-| κ and α **per wheel, every step** | `veh3h_gate::the_lap_logs_at_sixty_hertz_and_pie_equals_shipping` | `WheelState::slip_ratio`/`slip_lat` per corner at 60 Hz on the shipped host | logged in `slip_fl..rr` / `slip_lat_fl..rr` over **3161** rows of the lap (§10) | ✓ |
+| κ and α **per wheel, every step** | `veh3h_gate::the_lap_logs_at_sixty_hertz_and_pie_equals_shipping` | `WheelState::slip_ratio`/`slip_lat` per corner at 60 Hz on the shipped host | logged in `slip_fl..rr` / `slip_lat_fl..rr` over **1958** rows of the lap (§10) | ✓ |
 | **multi-contact sensing**, 4-8 casts a tyre | `veh3a_gate::four_casts_do_not_make_a_kerb_worse` | chassis vertical acceleration off `body_linvel` over a 12 cm kerb at three approach speeds, `Footprint::CENTRE` as the control | four casts a wheel; the four/one ratio spans **1.00×–1.02×** (11.8 / 11.6 m/s² at 14.6 km/h). Four casts, at the 60 Hz step — not 360-400 Hz | **PARTIAL** — the rate is the sub-step row's |
 | the contact normal feeds the tyre | `veh3a_gate::a_garbage_contact_normal_changes_the_trace` | `tyre_force_with` through `TyreContext::camber_at` | level **0 N**, then **−3 028 / 2 463 / −2 463 N** as the plane tilts | ✓ |
 | …and the heightfield's own normal | `vehicle_ground::a_wheel_ray_normal_snaps_at_a_heightfield_cell_diagonal` | a wheel ray across a cell diagonal | a levelled road: worst normal step **0.0643°**; 0.15 m of relief: **15.69°** — which is why the solve reads the cast, not the triangle's normal (VEH1a's disposition) | ✓ |
@@ -74,7 +78,7 @@ five-column checklist tables of §1-§6; the tables after them are measurements,
 | **weight transfer** `F_z = F_static − m·a·h/L` | `veh3b_gate::the_axle_loads_are_the_formulas_on_the_shipped_rows` | `WheelState::load_n` per axle on the SHIPPED springs | sedan braking **7.3 %** from the formula, launching **8.4 %**; truck **2.2 % / 3.0 %**; **0 of 150** braked steps pinned at travel | ✓ |
 | …with a bump stop, not a clamp | `veh3b_gate::the_bump_stop_is_a_rate_that_rises_and_the_rows_are_sprung_for_it` | the strut's force past 85 % of travel; the nine rows' standing fractions | a millimetre at the stop costs **370 N** against **20 N** mid-travel (19×); all nine rows stand on **45 %** of their travel | ✓ |
 | nose-dive and squat | `veh3b_gate::the_nose_dives_and_the_tail_squats` | front and rear compression | fixture **45.6 / 8.9 mm**; the shipped sedan **118.5 / 14.1 mm** | ✓ |
-| the lap's own load transfer | `veh3h_gate::the_lap_logs_at_sixty_hertz_and_pie_equals_shipping` | four `load_n` per step on the shipped host | front axle **48.4 %** standing → **70.3 %** braking (§10) | ✓ |
+| the lap's own load transfer | `veh3h_gate::the_lap_logs_at_sixty_hertz_and_pie_equals_shipping` | four `load_n` per step on the shipped host | front axle **49.6 %** standing → **73.6 %** braking (§10) | ✓ |
 | **turbo boost** | `veh3b_gate::the_boost_spools_and_blows_off` | `DrivetrainState::boost` over 240 steps, instant and N/A controls, the re-armed dead time | peak **0.70**, half after **202** steps, **0.70** dumped in six steps; dead time **9 steps** at 0.15 s, 0 without | ✓ |
 | the tyre model's cost | `veh3a_gate::the_vehicle_phase_costs_what_it_prints` | the vehicle phase alone, 64 cars, min of five, a no-car control | **0.4036 ms** release (**6.31 µs a car**) against 0.5 ms | ✓ |
 | a missed ray is AIR, not asphalt | `veh3b_gate::a_car_with_no_wheel_on_the_ground_says_air` | `surface_census` over `WheelState::contact` | 4 of 4 → asphalt µ 1.000; 0 of 4 → **air** µ 0.000 | ✓ |
@@ -99,7 +103,7 @@ five-column checklist tables of §1-§6; the tables after them are measurements,
 | engine health, fire | `veh3c_gate::a_car_with_no_hull_left_burns` | `fire_step` beside the hull | lights at **36 000 J** of a 36 000 J hull | ✓ |
 | a hurt engine / a flat | `veh3c_gate::a_dead_engine_stalls_and_a_hurt_one_is_slower`, `veh3c_gate::a_flat_tyre_pulls` | 0-100 whole vs half; rpm after five seconds; drift and yaw | whole **3.70 s**, half **6.52 s**; dead **851 → 0 rpm**; a flat drifts **−8.542 m / 1.46°**, rides **17.8 mm** lower | ✓ |
 | PIE == shipping on a crash | `veh3c_gate::pie_equals_shipping_on_a_crash_course`, `veh3f2b_gate::pie_equals_shipping_on_a_shell_crash` | both hosts' damage folds | equal; the shell drop's hull dent **0.1960 m** on both | ✓ |
-| cheap when nothing happens | `veh3c_gate::a_thousand_parked_cars_with_parts_cost_what_they_cost_without_them` | 1 000 parked cars with and without parts, min of five, release | **×1.020 / ×1.029 / ×1.032 / ×1.051** over four release runs against a ×1.05 ceiling — **one run of four over**, the ceiling sits on this machine's noise band | **PARTIAL** — CARRIED (a ceiling at the noise edge, see the report) |
+| cheap when nothing happens | `veh3c_gate::a_thousand_parked_cars_with_parts_cost_what_they_cost_without_them` | 1 000 parked cars with and without parts, release, min of five INTERLEAVED rounds of twenty steps a side (the VEH3h audit's conditioning; it was the min of five single steps) | **×1.054 / ×1.068 / ×1.041 / ×1.072 / ×1.058 / ×1.044 / ×1.066** over seven audit runs, median **×1.058** against a ×1.05 ceiling — **NOT held** (the cert read ×1.020-×1.051 on the unconditioned clock). Printed, not re-minted; the arm asserts a ×1.25 tripwire | **✗** — **PERF1** (the latched parts' per-row work in `step_bodywork`, not attributed further) |
 | **the art machines' cab doors** | — | — | not built: an art row keeps only its seats | **✗** — VEH3-carried, ~1 d a machine |
 | the crumple in the editor's Simulate viewport | — | — | the builder is in `inf-player::vmesh`; `inf-viewport` cannot reach it without a lockfile move | **PARTIAL** — VEH3-carried, ~0.5 d |
 
@@ -185,23 +189,25 @@ five-column checklist tables of §1-§6; the tables after them are measurements,
 | aircraft parked are chocked | `veh3f2b_gate::a_parked_aircraft_is_chocked` | a parked Dodo on a 3° slab | **0.040 m** in ten seconds (saloon control 0.150) | ✓ |
 | **streaming at aircraft speed** | `veh3g_gate::streaming_holds_at_120_mps_over_the_real_island` | the player's loader, both streamers (LOCAL) | **0** blocking loads; **15** activations; closest arrival **252.0 m**; the worst step **288 ms** when two cells arrive together | **PARTIAL** — the 288 ms activation step is **PERF1**'s |
 | a moving vehicle is never deleted by streaming | `cell_stream::a_mover_over_an_empty_cell_is_rehomed_not_despawned`, `veh3g_gate::the_islands_dodo_flies_off_the_apron_and_stays_in_the_world` | the mover's entity after its birth cell leaves | the Dodo moved **900 m** east and is still in the world | ✓ |
-| **a parked vehicle beyond the collider band** | `veh3h_gate::a_parked_vehicle_beyond_the_collider_band_rolls_off_its_pad` | the CI island's camp fire appliance's body over 15 s | **36.63 m** rolled (3.65 m of fall) with the hero 120 m away; **1.51 m** with the hero 20 m away. The pad it stands on is banded out at 64 m; the vehicle is not | **✗** — a cert FINDING; **PERF1**'s sim LOD (a parked rig outside the band frozen), ~0.5 d |
+| **a parked vehicle beyond the collider band** | `veh3h_gate::a_parked_vehicle_beyond_the_collider_band_holds_its_pad` | the CI island's camp fire appliance's body over 15 s; `PhysicsBridge3D::parked_beyond_band` | **CLOSED by the VEH3h audit** (a parking-hold defect, not sim LOD): **0.00 m** and 0.00 m of fall with the hero 120 m away, held kinematic (was **36.63 m**, 3.65 m of fall); **1.51 m** with the hero 20 m away (inside the band, simulated: the in-band creep, §13) | ✓ |
+| **a fixed step beside every body kind** (the cert's "Harbour City cruiser stall") | `veh3h_gate::a_fixed_step_beside_every_body_kind_is_a_fixed_step`, `veh3h_gate::the_harbour_city_pile_is_set_aside_on_the_real_island` | the whole fixed step and `queries` per step with the hero 2.5 m off each side of five shells, two imported rows and a primitive, against the hero 20 m off; LOCAL: the real island's Harbour City cruiser | CI island: the dearest spot **1.30×** its control, queries equal; the real island: **50.0 ms** a step beside the cruiser against **34.0** at 20 m (1.47×) — it was **266.0** (`character move` 232.8 ms; 358.7 on an earlier dwell). The cause was not the car (`shell_body` carries no collider) but a crowd PILE, the next row | ✓ |
+| **a crowd pile does not stall the step** | `character_move_cost::a_pile_of_characters_is_set_aside_and_one_in_the_way_still_blocks` | 64 steered capsules inside a quarter metre vs a 2 m lattice; `pawns_set_aside`; a body 1.0 m ahead of a walker | the mover sets aside the NPCs it overlaps: **4 032** on the pile's first step, 0 on the lattice; release **2.99 ms** against **1.80** (1.67×; fought: 135.99 ms, 76×); a body in the way still blocks (the walker stops at **0.62 m**) | ✓ — the pile itself (the society's nearest-desk assignment) is carried, §13 |
 | **traffic makes no moving contact** | `veh3f2b_gate::the_island_traffic_makes_no_moving_contact_and_its_hero_classes_draw_shells` | contact events | **0** moving pairs in 10 island minutes | ✓ |
 | **the arrival snap** (VEH3f.2b carried, 4.47 m) | `traffic_3d::a_car_whose_leg_closes_short_of_its_slot_is_not_snapped_onto_it` | each Full commuter's record against its chassis; the per-step XZ jump across the hand-off | **CLOSED by this wave** (the arrival hold): the jump was the whole shortfall (**112.54 m** under the arm's accelerated clock); now within the half-lane bound | ✓ |
 | the driving hand-off moves nothing | `traffic_3d::a_car_leaving_the_steered_tier_lands_where_its_body_already_was` | the body across the 64 m boundary | within the half-lane + two steps bound | ✓ |
 | **PIE == shipping on the island** | `island_gate::pie_equals_shipping_on_an_island_drive` | both hosts' `state_bytes` over 900 steps | **900** steps, **900** distinct states of **11 358** bytes, equal; **337** posed characters on both hosts | ✓ |
-| …over the whole lap | `veh3h_gate::the_lap_logs_at_sixty_hertz_and_pie_equals_shipping` | both hosts' 60 Hz rows and every step's state digest | **3 161** rows and **3 394** digests equal | ✓ |
+| …over the whole lap | `veh3h_gate::the_lap_logs_at_sixty_hertz_and_pie_equals_shipping` | both hosts' 60 Hz rows and every step's state digest | **1 958** rows and **2 189** digests equal | ✓ |
 | …over the whole lap in an imported car | `veh3h_gate::the_imported_row_drives_the_same_lap_on_both_hosts` | the same, `obey_rocoto` (`dd_suv`) | equal (§10) | ✓ |
 | **two cooks** | `veh3h_gate::the_lap_logs_at_sixty_hertz_and_pie_equals_shipping` | every file of two cooks of the CI island | byte-identical | ✓ |
-| **GPU instancing, mesh LOD** for high-poly vehicles | `veh3f2b_gate::sixty_four_shell_cars_cost_what_they_cost` | the projector's wall time and instance count; the GPU frame | 64 shells: **0.461 ms** projected, **2 048** instances, **17 876** LOD-0 triangles a car, GPU **2.721 ms** (min of 30) — the meshlet DAG decides the tiers; there are no pack LODs for a shell and no HLOD | **PARTIAL** — vehicle LOD/HLOD is **PERF1**'s |
-| **the island's frame** at 1080p | the ignored `fps_instrument` island arm (`the_island_in_imported_traffic`, needs a local cook) | 1080p release at the Harbour City crossroads | §11 — SHIPPED p50 **68.5** / p95 **71.0 ms** against a 38 ms ceiling | **✗** — **PERF1** |
-| **the driving frame**, 64 cars + an occupied car, the composed city | `fps_instrument::sixty_four_cars_drive_the_composed_city_at_shipping_resolution` | the frame, the GPU clock, the in-frame vehicle and audio phases, min of five sessions | §11 — SHIPPED p95 **24.7 ms** held; LIT p95 **39.6 ms** over 38 | **✗** (lit) — **PERF1** |
+| **GPU instancing, mesh LOD** for high-poly vehicles | `veh3f2b_gate::sixty_four_shell_cars_cost_what_they_cost` | the projector's wall time and instance count; the GPU frame | 64 shells: **0.463 ms** projected (the cert: 0.461), **2 048** instances, **17 876** LOD-0 triangles a car, GPU **0.326 ms** (min of 30; the cert quoted 2.721 ms, the VEH3f.2a audit 2.274 — the GPU column does not reproduce across sessions and is printed, never asserted) — the meshlet DAG decides the tiers; there are no pack LODs for a shell and no HLOD | **PARTIAL** — vehicle LOD/HLOD is **PERF1**'s |
+| **the island's frame** at 1080p | the ignored `fps_instrument` island arm (`the_island_in_imported_traffic`, needs a local cook) | 1080p release at the Harbour City crossroads | §11 — SHIPPED p50 **69.2** / p95 **72.2 ms** (the audit's run; the cert's 68.5 / 71.0) against a 38 ms ceiling | **✗** — **PERF1** |
+| **the driving frame**, 64 cars + an occupied car, the composed city | `fps_instrument::sixty_four_cars_drive_the_composed_city_at_shipping_resolution` | the frame, the GPU clock, the in-frame vehicle and audio phases, min of five sessions | §11 — SHIPPED p95 **25.8 ms** held; LIT p95 **39.2 ms** over 38 (the cert's 24.7 / 39.6) | **✗** (lit) — **PERF1** |
 | **headlight cones** at night | `veh3h_gate::a_headlamp_is_an_emissive_lens_and_no_car_carries_a_light` | every catalogue and roster row spawned; lamp parts, their `Material`, any `Light` | **59** front lamps across **166** rows, all emissive; **0** `Light` components on any rig — there is no cone | **✗** — **PAR1** (vehicle lamps on **PAR0**'s many-lights substrate; `MAX_LIGHTS` is 16 a frame) |
 | tyre smoke, exhaust, dust | — | — | no particle system | **✗** — **PAR2** |
 | clearcoat / flake paint | — | — | one PBR layer | **✗** — the **PAR** arc, ~2.5 d |
 | **the licence wall** | `veh3f2b_gate::the_cook_refuses_content_whose_licence_may_not_ship`, `veh3f_gate::nothing_from_unreal_is_committed` | the cook's result; `git ls-files` | refuses `UE5_Mannequins: Mannequin_Ref`; **3 063** tracked paths, **0** Unreal-shaped | ✓ |
 | the v28 vehicle schema (the doc's `VehicleDataProfile`) | `veh3a_gate::every_v28_tunable_survives_the_wire` | real bytes through the editor's codec | **100** tunables authored, encoded, decoded, read back by name | ✓ |
-| **the Demon row against Forza** | `veh3h_gate::three_classes_against_their_forza_inspirations` | 0-60 mph off the body on the shipped host | **3.72 s** against FH5's **2.293 s** (+62 %) — OUTSIDE the band (§4 of the tables) | **✗** — VEH3-carried: the row authors 652.5 N·m against the Demon's 1 044 and road tyres against drag radials, ~0.5 d |
+| **the Demon row against Forza** | `veh3h_gate::three_classes_against_their_forza_inspirations` | 0-60 mph off the body on the shipped host | **CLOSED by the VEH3h audit**: retuned to the Demon's own 1 044 N·m and a drag-radial launch (`longitudinal_grip` 2.0): **2.48 s** against FH5's **2.259 s** (+10 %, WITHIN); it was 3.72 s (+65 % against the sheet as it reads today) | ✓ |
 
 ---
 
@@ -263,14 +269,14 @@ over the art rows).
 |---|---|
 | 120 m/s over the real island (LOCAL) | **0** blocking loads, **15** activations, closest arrival **252.0 m**, the cell ahead missing on **10 of 1 280** steps; worst step **288 ms** (two cells on one step) — **PERF1** |
 | a mover over an empty cell | re-homed, not despawned (`cell_stream::a_mover_over_an_empty_cell_is_rehomed_not_despawned`) |
-| a parked vehicle outside the collider band | rolls **36.63 m** in 15 s (the finding above) — **PERF1** |
+| a parked vehicle outside the collider band | holds: **0.00 m** in 15 s (was 36.63 m) — CLOSED by the VEH3h audit's parking hold |
 
 ---
 
 ## §4 of the tables — the feel against Forza
 
 The published figures are Forza Horizon 5's own acceleration test for the STOCK car, read
-off the `forza.labsgg.com` FH5 car sheets on 2026-09-26. The band is **25 %**, justified
+off the `forza.labsgg.com` FH5 car sheets' "simulation results" — RE-READ by the VEH3h audit on 2026-09-26: the cert's figures (2.293 / 5.615 / 2.500 s) were each 1-2.5 % off what the sheets print, and the gate now carries the page's own numbers. The band is **25 %**, justified
 per class rather than chosen: a roster row authors its inspiration's mass and engine on
 one gearbox shape per class, on a µ 0.9 slab against Forza's dry asphalt, with no launch
 control and no drag-radial compound — the surface alone is worth ~10 % of a traction-limited
@@ -280,13 +286,24 @@ re-derives each line and compares it to the digit):
 
 | row (body) | inspiration | engine 0-60 mph | FH5 0-60 | engine 0-100 mph | FH5 0-100 | verdict |
 |---|---|---|---|---|---|---|
-| `bravado_gauntlet_hellfire` (shell) | 2018 Dodge Challenger SRT Demon | **3.72 s** | 2.293 s | **6.67 s** | 5.980 s | OUTSIDE (+62 %) |
-| `karin_asterope_gz` (imported) | 2023 Toyota Camry TRD | **6.40 s** | 5.615 s | **13.42 s** | 13.916 s | WITHIN (+14 %) |
-| `pegassi_zentorno` (shell) | 2011 Lamborghini Sesto Elemento | **2.35 s** | 2.500 s | **4.57 s** | 5.200 s | WITHIN (−6 %) |
+| `bravado_gauntlet_hellfire` (shell) | 2018 Dodge Challenger SRT Demon | **2.48 s** | 2.259 s | **4.37 s** | 5.847 s | WITHIN (+10 %) — retuned by the audit (1 044 N·m, drag-radial `longitudinal_grip` 2.0); was 3.72 s OUTSIDE. Past 60 mph it out-runs FH5 by 25 %: the compound is no longer the limit there |
+| `karin_asterope_gz` (imported) | 2023 Toyota Camry TRD | **6.40 s** | 5.555 s | **13.42 s** | 13.785 s | WITHIN (+15 %) |
+| `pegassi_zentorno` (shell) | 2011 Lamborghini Sesto Elemento | **2.35 s** | 2.442 s | **4.57 s** | 5.088 s | WITHIN (−4 %) |
 
 FEEL-VS-FORZA bravado_gauntlet_hellfire: 0-60 mph 2.48 s -- WITHIN the band (retuned by the VEH3h audit: the Demon's own 1 044 N.m and a drag-radial launch, longitudinal_grip 2.0; it was 3.72 s OUTSIDE at 652.5 N.m on road tyres).
 FEEL-VS-FORZA karin_asterope_gz: 0-60 mph 6.40 s -- WITHIN the band.
 FEEL-VS-FORZA pegassi_zentorno: 0-60 mph 2.35 s -- WITHIN the band.
+
+**Three more rows, drawn at random by the audit** (the counter-hash: the smallest
+`sha256("VEH3h-audit-2026-09-26:" + row)` per body kind among the road classes, the gate's
+three excluded), sprinted by the same `sprint` on the shipped host, FH5 figures read off the
+same sheets the same day:
+
+| row (body) | inspiration | engine 0-60 mph | FH5 0-60 | engine 0-100 mph | FH5 0-100 | verdict |
+|---|---|---|---|---|---|---|
+| `gallivanter_baller_st_d` (shell) | 2015 Range Rover Sport SVR | **4.75 s** | 4.228 s | **11.62 s** | 10.266 s | WITHIN (+12 %) |
+| `dinka_sugoi` (imported) | 2018 Honda Civic Type R | **6.22 s** | 4.872 s | **12.92 s** | 11.334 s | **OUTSIDE (+28 %)** — a front-drive launch the traction aid holds at ~0.44 g; 400 N·m (the car's own) reaches only 5.83 s. VEH3-carried (§13) |
+| `karin_rebel` (primitive) | 2019 Toyota Tacoma TRD Pro | **7.03 s** | 7.617 s | **21.57 s** | 23.271 s | WITHIN (−8 %) |
 
 The whole catalogue's bands (VEH3f's, re-derived by its audit on the chassis's own lateral
 acceleration) hold today (`veh3f_gate::every_class_drives_inside_its_feel_band`): coupe
@@ -370,9 +387,12 @@ at **24.61 m/s**, |slip| 2.03 → **0.480** — loud because it slides, not beca
 
 The island's circuit, driven at 60 Hz on the SHIPPED host
 (`veh3h_gate::the_lap_logs_at_sixty_hertz_and_pie_equals_shipping`): the CI island cooked
-(twice — byte-identical) and booted as `run_headless` boots it; the settlement's largest
-circuit — the street centreline round its 2 × 2 blocks, **609.6 m**, four corners, **20 m**
-of climb across it; the crowd, the traffic and the level's two parked vehicles set aside (a
+(twice — byte-identical) and booted as `run_headless` boots it; the first of the
+settlement's circuits (largest block group first, nearest the centre) whose line stays on
+GRADED ground — no half metre of it climbing more than 0.20 rise over run
+(`clear_circuit`'s `steepest_grade`; the VEH3h audit moved the lap there, see below) —
+the street centreline round a 2 × 1 block group, **304.2 m**, four corners, **5.3 m** of
+climb across it; the crowd, the traffic and the level's two parked vehicles set aside (a
 scripted driver has no eyes); a shell muscle coupe (`bravado_gauntlet_hellfire`, turbo,
 rear drive) spawned on the start line through the rig door; the hero boarded through
 VEH3d's pipeline (one interact press); a three-second burnout at the line with the traction
@@ -384,22 +404,32 @@ LAP-FACTS: 1958 rows at 60 Hz; the burnout took the rear tyres +4.11 C; the cool
 The columns (the CSV's SHAPE is the arm's): `t, phase, x, z, s_m, speed_mps, long_g, lat_g,
 throttle, brake, rpm, gear, boost, slip_fl..rr, slip_lat_fl..rr, load_fl..rr, temp_fl..rr,
 surface` — 30 columns, corners named off each wheel's own mount. The bytes live in the
-session scratchpad (`VEH3h-FINAL\lap.csv`); the PLOT (`VEH3h-FINAL\lap.png`, never
-committed) shows the rear tyres climbing **20.1 → 26.6 °C** through the burnout's staircase
-of slip, both axles heating at every braking zone and cooling on every straight (the fronts
-peak at **38.5 °C** after the fourth corner), the boost spooling to **0.965** in the burnout
-and to 0.6-0.7 on every straight, dumping to 0 on every lift, and the front axle's share of
-the wheel loads jumping from ~48 % to **~65-70 %** in each braking zone. One step on the west
-street reads **−36.75 g**: the car striking the fire hall's pad edge at 13.8 m/s (7.7 m/s
-after) — an impact in the telemetry, not a brake.
+session scratchpad (`AUDIT-VEH3h-FINAL\lap.csv`); the PLOT (`AUDIT-VEH3h-FINAL\lap.png`,
+never committed) shows the rear tyres climbing **20.1 → 24.2 °C** through the burnout's
+staircase of slip (the fronts flat), both axles heating at every braking zone and cooling on
+every straight (the fronts peak at **33.6 °C** after the third corner), the boost spooling to
+**0.971** in the burnout and to ~0.55-0.59 on every straight, dumping to 0 on every lift, and
+the front axle's share of the wheel loads jumping from ~49 % to **~65-74 %** in each braking
+zone. The steepest one-step deceleration of the lap is its braking (**1.69 g**) — asserted.
+
+**The cert's lap struck a terrace bank.** Its circuit (the settlement's largest, 609.6 m)
+read one step at **−36.75 g** on its west street, which the cert called "the fire hall's pad
+edge". The audit mapped it with a ray grid over the impact point: every ray answers the
+TERRAIN collider, which rises **1.5 m at ~39°** (0.804 rise over run) between z −262 and −264
+on x 354 where two levelled block rows meet. Neither a kerb nor a collider seam — a line a
+road car should not be driven on — so the LAP LINE moved (four of the nine candidate
+circuits cross the bank at 0.804; the chosen one's steepest half metre is 0.109). The
+Demon row was retuned in the same commit (§4 of the tables), so every lap number above is
+new: the cert's lap read 3 161 rows / 44.68 s, +6.35 °C, 2.99 °C, boost 0.965, 48.4 → 70.3 %,
+1.37 g.
 
 PIE == shipping over the whole lap: the editor's loose-level host drives the same lap and
-its **3 161** rows and **3 394** step digests of `state_bytes` are equal to the shipped
+its **1 958** rows and **2 189** step digests of `state_bytes` are equal to the shipped
 host's, bit for bit. The same lap in the IMPORTED `obey_rocoto`
 (`veh3h_gate::the_imported_row_drives_the_same_lap_on_both_hosts`) is equal on both hosts
-too: **3 598** rows, the lap **51.97 s**, the burnout **+1.45 °C** (all four tyres share
-an all-wheel-drive launch), boost **0.961**, the front axle **45.8 % → 78.6 %** braking.
-Its CSV and plot are `VEH3h-FINAL\lap-imported.csv` / `.png`.
+too: **2 356** rows, the lap **31.27 s**, the burnout **+1.46 °C** (all four tyres share
+an all-wheel-drive launch), boost **0.952**, the front axle **47.9 % → 80.8 %** braking.
+Its CSV and plot are `AUDIT-VEH3h-FINAL\lap-imported.csv` / `.png`.
 
 ## §11 THE FPS ROW
 
@@ -412,20 +442,26 @@ sessions**, each a fresh fixture and three rounds of 120 frames after a discarde
 
 | configuration | p50 | p95 | worst | GPU frame | in-frame vehicle phase | audio |
 |---|---|---|---|---|---|---|
-| composed city, no cars, SHIPPED (`fps_instrument::the_frame_at_shipping_resolution`) | 11.53 ms | 16.69 ms | 17.15 ms | 4.10 ms | — | — |
-| composed city, no cars, LIT | 17.05 ms | 22.61 ms | — | 6.03 ms | — | — |
-| **64 + 1 cars, SHIPPED** | **21.96 ms** | **24.67 ms** | **25.23 ms** | 9.30 ms | 0.858 ms (13.20 µs a car) | 0.126 ms, 712.5 commands a frame |
-| **64 + 1 cars, LIT** | **37.11 ms** | **39.56 ms** | **40.56 ms** | 17.79 ms | 1.071 ms | 0.132 ms |
-| the island, Harbour City crossroads, the art, SHIPPED (400 traffic records, 16 Full / 34 Near, 1 027 skinned) — min of five sessions by p50 | **68.47 ms** | **70.96 ms** | **72.78 ms** | 26.3 ms | 0.599 ms | 0.120 ms |
-| the island, LIT — min of five | 81.14 ms | 86.30 ms | 89.66 ms | — | — | — |
+| composed city, no cars, SHIPPED (`fps_instrument::the_frame_at_shipping_resolution`) — the audit's three runs, min by p50 (the first, straight after the driving frame, read p50 17.81) | 11.58 ms | 12.49 ms | 13.47 ms | 3.13 ms | — | — |
+| composed city, no cars, LIT (the audit's first run) | 16.90 ms | 18.63 ms | — | 5.59 ms | — | — |
+| **64 + 1 cars, SHIPPED** (the audit, min of five) | **23.51 ms** | **25.75 ms** | **26.66 ms** | 10.37 ms | 0.903 ms (13.89 µs a car) | 0.134 ms, 710.8 commands a frame |
+| **64 + 1 cars, LIT** (the audit, min of five) | **37.36 ms** | **39.20 ms** | **41.12 ms** | 17.91 ms | — | — |
+| the island, Harbour City crossroads, the art, SHIPPED (400 traffic records, 1 027 skinned) — the audit's re-run, ONE session (the cert: min of five, 68.47 / 70.96 / 72.78) | **69.21 ms** | **72.16 ms** | **79.98 ms** | 27.05 ms | — | — |
+| the island, LIT — the audit's one session (the cert: 81.14 / 86.30 / 89.66) | 82.27 ms | 86.69 ms | 91.97 ms | — | — | — |
 
-**`SHIPPING_FRAME_CEILING_MS` (38)**: held by the driving frame SHIPPED (p95 **24.7**);
-**NOT held** by the driving frame LIT (**+1.6 ms**) nor by the island (**+33.0 ms** SHIPPED p95).
+**`SHIPPING_FRAME_CEILING_MS` (38)** — UNCHANGED: held by the driving frame SHIPPED (p95
+**25.75** on the audit's run, 24.67 on the cert's); **NOT held** by the driving frame LIT
+(**+1.2 ms** on the audit's run, **+1.6 ms** on the cert's — over, PERF1, never less than
+over) nor by the island (**+34.2 ms** SHIPPED p95 on the audit's run, +33.0 on the cert's).
+The audit's re-run of the driving frame is the SECOND of two: the first read the vehicle
+phase at 0.334 ms and 80.2 audio commands a frame because the audit's own parking hold had
+frozen the harness's cars (their throttle carried no `occupied`) — fixed
+(`VehicleControls::commands`) before the numbers above were taken.
 The ceiling is not re-minted. The breakdown, routed to **PERF1** by name:
 
-* the island (SHIPPED, GPU 26.3 ms): the crowd's skinned pass **11.1 ms**, the depth
-  prepass **6.9 ms**, vgeom **3.2 ms** (record **7.5 ms** CPU), scatter 2.4 ms; the CPU:
-  the fixed step **11.7 ms** (physics sync 3.4, solver 3.3, animation 1.1, gameplay 0.7,
+* the island (SHIPPED, GPU 27.0 ms on the audit's run): the crowd's skinned pass
+  **11.4 ms**, the depth prepass **7.2 ms**, vgeom **3.3 ms** (record **7.5 ms** CPU),
+  scatter 2.4 ms; the CPU: the fixed step **11.1 ms** (the cert: 11.7) (physics sync 3.4, solver 3.3, animation 1.1, gameplay 0.7,
   vehicle 0.6), projection 5.6 ms, render record 24.2 ms — the VEH3f.2a audit's breakdown,
   a little dearer;
 * the lit driving frame (GPU **17.8 ms** against 6.0 without the cars): scatter
@@ -441,31 +477,31 @@ no-car control):
 
 | rung | what a car is | per car |
 |---|---|---|
-| Full (≤ 64 m) | a rig: four wheels, four rays each, the drivetrain, a handbrake | **14.13 µs** |
-| Near (64-128 m) | a `Body`: chassis and panels, kinematic, placed by its clock | **3.60 µs** |
-| Far | unreachable for a car (`TRAFFIC_RADII` near == far) | — |
+| Full (≤ 64 m) | a rig: four wheels, four rays each, the drivetrain, a handbrake | **13.94 µs** (the cert: 14.13) |
+| Near (64-128 m) | a `Body`: chassis and panels, kinematic, placed by its clock | **3.54 µs** (3.60) |
 | Dormant (> 128 m) | a record, nothing built | **0.03 µs** |
+
+A car has THREE rungs (the VEH3h audit, priority d'): the `Far` rung is the crowd's, and `TRAFFIC_RADII` sets near == far so no car can reach it — by design since VEH2b (`TRAFFIC_NEAR_M`'s doc: a car has no impostor path). The arm now asserts that no car reached it on any rung; there is no table row for a rung nothing reaches.
 
 ## §12 THE REFERENCE FRAMES
 
-The engine's frames are the hands-on's (`VEH3h-FINAL\130..136`), photographed on the
-shipped player inside the real editor's Play in New Window (`demo.ps1 -CertOnly`, every
-frame triggered on a hero.csv column). The car the hero reached at Harbour City was the
-nearest one, a roster `Coil Brawler` wearing `shell_pickup` (the cruiser leg is the
-finding below). Taken: the door phase (38°), at the wheel, the burnout beat (its
-trigger row read squeal ≥ 0.2 at slip > 1.5 and the audio hold froze `burnout` at
-squeal **0.500** at 2.24 m/s — the photograph landed after the hold, and its HUD reads
-idle), the drive with the telemetry HUD (27 km/h, 4 117 rpm), the crash (hull **88 %**,
-**1** part shed, the front tyres **23 °C**) and after it. **Not taken: the kerb** —
-`thumps` stayed 0 over both taps (the VEH3e audit's carried item: the island's kerbs are
-not reachable by a blind tap; the arm is `veh3e_gate::the_kerb_thumps_front_then_rear`).
-Session: 255 car rows, the hottest tyre **24.1 °C** from 20.1, squeal up to 0.50, the audio
-device `Speakers (Steam Streaming Speakers) 48000 Hz` opened. **The cruiser leg could not
-be driven**: with the hero against the Harbour City cruiser the player's frames ran at
-**2.5 s** (`frame_dt` in hero.csv), and a headless probe of the real island puts the fixed
-step's `character move` phase at **356-372 ms** with the hero stood 2.5 m off the
-cruiser's centre on its long axis, against a few ms 2.5 m off its side or beside the
-saloon — undiagnosed, a cert finding (CARRIED below). The reference is
+The engine's frames are the hands-on's, retaken by the VEH3h audit ON THE CRUISER
+(`AUDIT-VEH3h-FINAL\130..136`): the real editor relaunched on the audit's tree, the island
+open, the Harbour City cruiser's `shell_body` selected (`01f`), Play in New Window, the hero
+placed 2.5 m off the cruiser's flank facing it, and `demo.ps1 -CertOnly` firing every frame
+on a hero.csv column. Taken: the door phase (**130**: `BOARDING opening`, the `[KeyE] Enter
+vehicle` prompt on the cruiser's door), at the wheel (**131**), the burnout (**132**: the rear
+tyres **20.4 → 26.9 °C**), the drive with the telemetry HUD (**133**), the crash (**135**: hull
+**94 %**, **2** parts shed, 21/26/26/21 °C on the HUD) and after it (**136**). The cert's
+three attempts at the cruiser ran at 2.5 s a frame; this session boarded it in the time the
+pipeline takes (the stall was the crowd pile, closed). **Not taken: the kerb** — `thumps`
+stayed 0 (the leg's blind tap does not reach a kerb; the arm is
+`veh3e_gate::the_kerb_thumps_front_then_rear`). **The cruiser is SILENT**: the island's EMS
+fleet is spawned with `engine_voice: false` (EMS1's reason — idle loops at the kerb — is
+retired since VEH3e silences an unoccupied car anyway), so the squeal column read **0.00**
+over the session and the leg now reads an engine as RUNNING off its rpm (column 45) when it
+has no voice. Carried, §13. The audio device line: `Speakers (Steam Streaming Speakers)
+48000 Hz opened`. The reference is
 `docs/reference_videos/frames/driving/0006-0030` and `steal-car/` (never committed). The
 contact sheet is `VEH3h-FINAL\reference-contact-sheet.png`. The honest sentence on each:
 
@@ -497,9 +533,8 @@ contact sheet is `VEH3h-FINAL\reference-contact-sheet.png`. The honest sentence 
 | gap | cause | closes it | price |
 |---|---|---|---|
 | the sub-step rate (N = 1 of a 300 Hz ask) | N = 4 doubles the vehicle phase and the island's frame is already over its ceiling | **PERF1** (the budget that would pay for N) | — |
-| the island's frame (p95 71.0 ms / 38) | crowd skinned 11.1 ms GPU, depth prepass 6.9, the fixed step 11.7, vgeom per-asset record | **PERF1** | ≥ 3 d |
-| the lit driving frame with 64 shells (p95 39.6 / 38) | 64 shells' parts through vgeom + VSM casters | **PERF1** (vehicle LOD/HLOD) | — |
-| a parked vehicle outside the band rolls off its pad (36.63 m / 15 s) | the band drops the pad's colliders and not the vehicle | **PERF1** (sim LOD) | ~0.5 d |
+| the island's frame (p95 72.2 ms / 38 on the audit's run) | crowd skinned 11.4 ms GPU, depth prepass 7.2, the fixed step 11.1, vgeom per-asset record | **PERF1** | ≥ 3 d |
+| the lit driving frame with 64 shells (p95 39.2 / 38 on the audit's run, 39.6 on the cert's) | 64 shells' parts through vgeom + VSM casters | **PERF1** (vehicle LOD/HLOD) | — |
 | the 288 ms two-cell activation step | activation is not amortised over steps | **PERF1** | ~1-2 d |
 | headlight cones, underglow | no vehicle carries a `Light`; `MAX_LIGHTS` 16 a frame | **PAR1** on **PAR0** | — |
 | tyre smoke, exhaust flames, dust | no particle system | **PAR2** | — |
@@ -511,12 +546,14 @@ contact sheet is `VEH3h-FINAL\reference-contact-sheet.png`. The honest sentence 
 | the arch daylight on the coupe / SUV / pickup (0.272 / 0.253 / 0.361 m) | one body per shell serves rows whose settled tyres sit 13-25 cm apart | VEH3-carried: a second body per ride-height cluster, the island rows re-pointed, both levels re-blessed | ~1 d (re-priced from 0.5 d: three bodies, their table rows, six arms that name five shells) |
 | the four shells under the 25 % side-outline bar | a measured ruling (VEH3f.2b audit): the bar does not measure car-ness | — (pinned, not carried as a defect) | — |
 | the semi's outer handle 15.55 mm, rim 2.42 mm | the cab-step climb's hand target on a 0.737 m step | VEH3-carried | ~0.5 d |
-| the Demon row vs its FH5 time (+62 %) | 652.5 N·m authored against 1 044; road tyres against drag radials | VEH3-carried (a roster retune + a drag compound) | ~0.5 d |
 | a drawn steering wheel on the shells and primitives | only the art cars draw a wheel | VEH3-carried | ~0.5 d |
 | a surface drag term | rolling resistance is per row | VEH3-carried | ~0.25 d |
 | the template rig's knee / elbow limits | inverted in `template.rs` | VEH3-carried (a rig + clip re-bless) | ~1 d |
-| the parked-car cost ceiling at ×1.05 | the ratio spreads ×1.020-×1.051 run to run on this machine | VEH3-carried (a wider control, or a ceiling with its spread) | ~0.25 d |
-| **the fixed step's `character move` at 356-372 ms with the hero against the Harbour City cruiser** (frames at 2.5 s; the hands-on could not board it) | undiagnosed; not the arrival hold (the probe reads the same on `919fa34a`'s traffic) | VEH3-carried, the audit's first look | ~0.5 d to isolate |
-| the island kerb frame | a blind tap does not reach a kerb on the island's streets | VEH3-carried (VEH3e's placement door) | ~2 h |
+| the parked-car cost ceiling at ×1.05 NOT held (median ×1.058 over seven conditioned release runs) | the latched parts' per-row work in `step_bodywork`, not attributed further | **PERF1** | — |
+| **the crowd pile** the cert found as the "Harbour City cruiser stall" — its COST is closed (`character_move_cost::a_pile_of_characters_is_set_aside_and_one_in_the_way_still_blocks`); the PILE remains: 204 residents on four points of one building, 80 on one quarter metre | `society::plan_day` sends every resident to the NEAREST workplace and its errand, unclaimed (the night shift and the evening are claimed; the day is not) | VEH3-carried to the society's owner (a claimed or capacity-bounded desk, and the NPC1d/VEN1 counts re-blessed) | ~0.5 d |
+| the in-band creep of the CI island's camp appliance (**1.51 m** in 15 s, ~0.11 m/s) | the generator parks it 6 m off its lane's centreline on a 7.8° grade between two buildings; it rolls 18.6° within 2 s with one wheel hanging (`island.rs`'s apron placement reads no ground by law) | VEH3-carried (the apron placement) | ~0.5 d |
+| `dinka_sugoi` (imported, Civic Type R) against FH5 — **+28 %**, OUTSIDE the band (the audit's random row) | a front-drive launch the traction aid holds at ~0.44 g; the car's own 400 N·m reaches only 5.83 s | VEH3-carried (a front-drive launch model) | ~0.5 d |
+| the island kerb frame | a blind tap does not reach a kerb on the island's streets (the audit's cruiser session: thumps 0 again) | VEH3-carried (VEH3e's placement door) | ~2 h |
+| **the boarded fleet car is silent** (the Harbour City cruiser: squeal 0.00, no grain) | the island's EMS fleet spawns with `engine_voice: false` (EMS1); VEH3e already silences an unoccupied car | VEH3-carried: the fleet spawned with a voice, both committed island levels re-blessed with that cause, the island audio arms re-read | ~0.5 d |
 | the fallback-body island frame | not re-measured this wave (the art cook only) | PERF1's baseline row | ~1 h |
 | NPC road-rage barks, a carjack victim who fights | dialogue and melee, not driving | no wave in the mandate names them | — |

@@ -41703,3 +41703,31 @@ machine), the Simulate-viewport crumple (~0.5 d), the coupe/SUV/pickup arch dayl
 (~1 d, re-priced), the semi's cab-step handle (15.55 mm), the Demon row, a drawn wheel on
 the shells, a surface drag term, the template knee/elbow limits, the cruiser's character
 move, the island kerb frame, the fallback-island frame.
+
+## WAVE VEH3h — THE AUDIT (2026-09-26)
+
+The cert re-run as a set of citations. **Found and FIXED:** the "Harbour City cruiser
+stall" was not the car -- a per-sub-pass profile on the real island put 344.9 of 358.7 ms
+of `character move` inside rapier's controller, 225 calls, every one a crowd agent in a
+PILE (204 residents on four points of one building, 80 on one quarter metre; the society
+sends every resident to the nearest desk). The mover now sets aside the NPCs it overlaps
+(`stacked_pawns`, a player never), `PhysicsWorld3D::move_character_setting_aside` +
+`pawns_set_aside`; the dwell beside the cruiser 266.0 -> 50.0 ms a step (1.47x the 20 m
+control). A parked vehicle beyond the collider band is held kinematic where it stands
+(`hold_beyond_band`; the camp appliance 36.63 -> 0.00 m) -- a parking-hold defect,
+CLOSED rather than routed. The Demon row retuned (1 044 N.m, drag-radial
+`longitudinal_grip` 2.0: 2.48 s against FH5's 2.259, WITHIN); the FH5 figures re-read
+(each of the cert's three was 1-2.5 % off the sheet). The lap's -36.75 g spike was a 39 deg
+TERRACE BANK in the terrain, not a pad edge or seam; the lap moved to the first graded
+circuit (1 958 rows, 304.2 m, no one-step deceleration above its braking). The audit's
+own hold froze the frame instrument's harness cars (a throttle with no `occupied`) --
+caught by the re-run, fixed (`VehicleControls::commands`). **Not held, printed, PERF1:**
+the parked-car cost ceiling (median x1.058 conditioned). The checklist now 103 / 12 / 9.
+
+### carried, by name
+
+The crowd pile itself (the society's unclaimed nearest-desk assignment, ~0.5 d); the camp
+appliance's in-band creep (1.51 m / 15 s, parked on a 7.8 deg lane, ~0.5 d); the boarded
+fleet car is silent (`engine_voice: false` on the EMS fleet, a level re-bless, ~0.5 d);
+`dinka_sugoi` +28 % against FH5 (a front-drive launch, ~0.5 d); the arch daylight of the
+coupe / SUV / pickup (0.272 / 0.253 / 0.361 m, ~1 d); the island kerb frame (~2 h).

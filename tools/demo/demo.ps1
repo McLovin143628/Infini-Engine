@@ -1559,8 +1559,11 @@ function Invoke-Veh3hLeg {
     Wait-ForHero -Csv $heroCsv -What "the door phase (VEH3d's pipeline: opening or entering)" -TimeoutS 8.0 `
         -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^(opening|entering)") } `
         -Out (Join-Path $OutDir "130-veh3h-boarding.png") | Out-Null
+    # The engine is RUNNING when its grain sings (column 66) or, for a car
+    # spawned without a voice (the island's EMS fleet -- the VEH3h audit's
+    # cruiser), when its crank turns (column 45, rpm).
     $atWheel = @(Wait-ForHero -Csv $heroCsv -What "at the wheel, the engine started" -TimeoutS 30.0 `
-        -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^driving") -and ([double]$c[66] -gt 0.0) } `
+        -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^driving") -and (([double]$c[66] -gt 0.0) -or ([double]$c[45] -gt 0.0)) } `
         -Out (Join-Path $OutDir "131-veh3h-at-the-wheel.png"))[-1]
     if (-not $atWheel) {
         Say "VEH3h: the hero never reached a running engine -- the drive frames are not in this session"
@@ -1579,7 +1582,7 @@ function Invoke-Veh3hLeg {
     $t0 = @(Get-Content $heroCsv -ErrorAction Ignore | Where-Object { $_ -match "^[0-9]" })[-1] -split ","
     [InfInput]::Down(0x11)   # W
     Wait-ForHero -Csv $heroCsv -What "the burnout (slip past the peak, squeal loud, below 5 m/s)" -TimeoutS 4.0 `
-        -Predicate { param($c) (& $isRow $c) -and ([math]::Max([double]$c[63], [double]$c[64]) -gt 1.5) -and ([double]$c[6] -lt 5.0) -and ([math]::Max([double]$c[68], [double]$c[69]) -gt 0.2) } `
+        -Predicate { param($c) (& $isRow $c) -and ([math]::Max([math]::Abs([double]$c[42]), [math]::Max([double]$c[63], [double]$c[64])) -gt 1.5) -and ([double]$c[6] -lt 5.0) -and (([math]::Max([double]$c[68], [double]$c[69]) -gt 0.2) -or ([double]$c[66] -eq 0.0)) } `
         -Out (Join-Path $OutDir "132-veh3h-burnout.png") | Out-Null
     Wait-ForHero -Csv $heroCsv -What "driving with the telemetry HUD (over 5 m/s)" -TimeoutS 10.0 `
         -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^driving") -and ([double]$c[6] -gt 5.0) } `
