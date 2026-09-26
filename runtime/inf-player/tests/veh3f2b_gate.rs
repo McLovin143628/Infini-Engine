@@ -2635,7 +2635,11 @@ fn every_shell_hangs_on_a_car_in_the_committed_island() {
                     .is_some_and(|m| m.asset == Some(body))
             })
             .filter_map(|e| w.parent_of(e.id()))
-            .filter_map(|p| w.name_of(p).map(str::to_string))
+            .filter_map(|p| {
+                let t = w.world().get::<Transform>(p)?.translation;
+                w.name_of(p)
+                    .map(|n| format!("{n} at ({:.1}, {:.1}, {:.1})", t.x, t.y, t.z))
+            })
             .collect();
         worn.insert(key, cars);
     }
