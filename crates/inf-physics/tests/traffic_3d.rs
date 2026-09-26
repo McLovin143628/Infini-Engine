@@ -1525,7 +1525,8 @@ fn a_car_whose_leg_closes_short_of_its_slot_is_not_snapped_onto_it() {
             break;
         }
     }
-    let (target, short) = subject.expect("a commuter stopped short of its slot at the end of its leg");
+    let (target, short) =
+        subject.expect("a commuter stopped short of its slot at the end of its leg");
     let at = |t: &Town| {
         t.world
             .entity_of(target)

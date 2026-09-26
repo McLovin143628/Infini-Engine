@@ -116,6 +116,10 @@ param(
     # and holds the stick back into a STALL. Every frame triggers on the
     # craft columns (77-84), never on a sleep. `-AudioOnly`'s shape.
     [switch]$AirOnly,
+    # **THE DRIVING CERT'S LEG ON ITS OWN** (wave VEH3h). Runs `Invoke-Veh3hLeg`:
+    # board, a burnout, a drive with the HUD up, a kerb and a crash, every frame
+    # triggered on a hero.csv column. `-AudioOnly`'s shape.
+    [switch]$CertOnly,
     # **THE WEAPON FRAMES ON THEIR OWN** (the VEH3f.2a audit). One frame of every
     # `-ArmHero` id in a LIVING hero's hand, straight after the player is up and
     # before anything is fired -- the wave's full session lost them because the
@@ -1523,6 +1527,93 @@ function Invoke-Veh3gLeg {
     }
 }
 
+# ── THE CERT LEG (wave VEH3h) ────────────────────────────────────────────────
+#
+# The driving cert's hands-on, on the shipped player inside the real editor's
+# Play in New Window: board the car nearest `-SpawnAt` through VEH3d's
+# pipeline (one E at a time), back off the kerb, a full-throttle launch (the
+# burnout), a drive with the telemetry HUD up, a kerb (the right-hand tap), and
+# a crash (the throttle held into whatever is ahead until a part is shed).
+# EVERY frame is triggered on a hero.csv column -- the board state, the axle
+# slip and its squeal, the speed, `thumps`, `parts_shed` -- never on a sleep.
+function Invoke-Veh3hLeg {
+    Restore-PlayerFocus "before the cert leg"
+    Stand-Up "before the cert leg" | Out-Null
+    $isRow = { param($c) $c.Count -gt 71 }
+    $began = $false
+    for ($k = 0; $k -lt 30 -and -not $began; $k++) {
+        [InfInput]::Down(0x12); Start-Sleep -Milliseconds 70; [InfInput]::Up(0x12)   # E
+        $began = @(Wait-ForHero -Csv $heroCsv -What "the boarding begins" -TimeoutS 1.0 `
+            -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^(locked|unlocking|opening)") })[-1]
+        if (-not $began -and $k -ge 3) {
+            if (($k % 3) -eq 0) {
+                for ($i = 0; $i -lt 14; $i++) { [InfInput]::Look(15, 0); Start-Sleep -Milliseconds 16 }
+            }
+            [InfInput]::Down(0x11); Start-Sleep -Milliseconds 300; [InfInput]::Up(0x11)   # W
+        }
+    }
+    if (-not $began) {
+        Say "VEH3h: NO BOARDING began in thirty taps of E -- none of the cert frames is in this session"
+        return
+    }
+    Wait-ForHero -Csv $heroCsv -What "the door opening on its hinge (VEH3d's pipeline)" -TimeoutS 6.0 `
+        -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^opening") -and ([double]$c[57] -gt 15.0) } `
+        -Out (Join-Path $OutDir "130-veh3h-boarding.png") | Out-Null
+    $atWheel = @(Wait-ForHero -Csv $heroCsv -What "at the wheel, the engine started" -TimeoutS 10.0 `
+        -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^driving") -and ([double]$c[66] -gt 0.0) } `
+        -Out (Join-Path $OutDir "131-veh3h-at-the-wheel.png"))[-1]
+    if (-not $atWheel) {
+        Say "VEH3h: the hero never reached a running engine -- the drive frames are not in this session"
+        return
+    }
+    Start-Sleep -Milliseconds 800
+    if (-not $NoBackoff) {
+        [InfInput]::Down(0x1F); [InfInput]::Down(0x1E)   # S + A: reverse, steering away
+        Start-Sleep -Milliseconds 2200
+        [InfInput]::Up(0x1E); [InfInput]::Up(0x1F)
+        Wait-ForHero -Csv $heroCsv -What "stopped after backing off" -TimeoutS 4.0 `
+            -Predicate { param($c) (& $isRow $c) -and ([math]::Abs([double]$c[6]) -lt 0.4) } | Out-Null
+    }
+    # THE BURNOUT: a full-throttle launch -- an axle's slip past its peak below
+    # 5 m/s with its squeal loud, and a tyre warmer than it started.
+    $t0 = @(Get-Content $heroCsv -ErrorAction Ignore | Where-Object { $_ -match "^[0-9]" })[-1] -split ","
+    [InfInput]::Down(0x11)   # W
+    Wait-ForHero -Csv $heroCsv -What "the burnout (slip past the peak, squeal loud, below 5 m/s)" -TimeoutS 4.0 `
+        -Predicate { param($c) (& $isRow $c) -and ([math]::Max([double]$c[63], [double]$c[64]) -gt 1.5) -and ([double]$c[6] -lt 5.0) -and ([math]::Max([double]$c[68], [double]$c[69]) -gt 0.2) } `
+        -Out (Join-Path $OutDir "132-veh3h-burnout.png") | Out-Null
+    Wait-ForHero -Csv $heroCsv -What "driving with the telemetry HUD (over 8 m/s, a gear up)" -TimeoutS 10.0 `
+        -Predicate { param($c) (& $isRow $c) -and ([double]$c[6] -gt 8.0) -and ([int]$c[61] -ge 2) } `
+        -Out (Join-Path $OutDir "133-veh3h-drive-hud.png") | Out-Null
+    # THE KERB: a short right-hand tap at speed.
+    [InfInput]::Down(0x20); Start-Sleep -Milliseconds 350; [InfInput]::Up(0x20)   # D
+    Wait-ForHero -Csv $heroCsv -What "a kerb (a surface impulse played at speed)" -TimeoutS 6.0 `
+        -Predicate { param($c) (& $isRow $c) -and ([int]$c[71] -gt 0) -and ([double]$c[6] -gt 3.0) } `
+        -Out (Join-Path $OutDir "134-veh3h-kerb.png") | Out-Null
+    # THE CRASH: the throttle stays down until a part comes off.
+    $crash = @(Wait-ForHero -Csv $heroCsv -What "the crash (a part shed)" -TimeoutS 25.0 `
+        -Predicate { param($c) (& $isRow $c) -and ([int]$c[53] -gt 0) } `
+        -Out (Join-Path $OutDir "135-veh3h-crash.png"))[-1]
+    [InfInput]::Up(0x11)
+    if (-not $crash) {
+        Say "VEH3h: nothing was shed in 25 s of throttle -- the crash frame is not in this session"
+    }
+    Wait-ForHero -Csv $heroCsv -What "stopped" -TimeoutS 8.0 `
+        -Predicate { param($c) (& $isRow $c) -and ([double]$c[6] -lt 0.4) } `
+        -Out (Join-Path $OutDir "136-veh3h-after-the-crash.png") | Out-Null
+    $all = @(Get-Content $heroCsv -ErrorAction Ignore | Where-Object { $_ -match "^[0-9]" } |
+        Where-Object { ($_ -split ",").Count -gt 71 })
+    $hot = ($all | ForEach-Object { $x = $_ -split ","; [math]::Max([math]::Max([double]$x[37], [double]$x[38]), [math]::Max([double]$x[39], [double]$x[40])) } | Measure-Object -Maximum).Maximum
+    $shed = ($all | ForEach-Object { [int](($_ -split ",")[53]) } | Measure-Object -Maximum).Maximum
+    $thumps = ($all | ForEach-Object { [int](($_ -split ",")[71]) } | Measure-Object -Sum).Sum
+    $squeal = ($all | ForEach-Object { $x = $_ -split ","; [math]::Max([double]$x[68], [double]$x[69]) } | Measure-Object -Maximum).Maximum
+    Say ("VEH3h COLUMNS: {0} car rows; hottest tyre {1:N1} C (started {2}); squeal up to {3:N2}; thumps {4}; parts shed {5}" -f $all.Count, $hot, $t0[37], $squeal, $thumps, $shed)
+}
+
+if ($CertOnly) {
+    Say "CERT ONLY (-CertOnly): the driving cert's leg, and nothing else"
+    Invoke-Veh3hLeg
+}
+
 if ($AirOnly) {
     Say "AIR ONLY (-AirOnly): the flight leg, and nothing else"
     Invoke-Veh3gLeg
@@ -1586,7 +1677,7 @@ if ($AudioOnly) {
     Say "AUDIO ONLY (-AudioOnly): the audio leg, and nothing else"
     Invoke-Veh3eLeg
 }
-if (-not $BoardingOnly -and -not $AudioOnly -and -not $RosterOnly -and -not $GalleryOnly -and -not $AirOnly -and -not $WeaponsOnly) {
+if (-not $BoardingOnly -and -not $AudioOnly -and -not $RosterOnly -and -not $GalleryOnly -and -not $AirOnly -and -not $WeaponsOnly -and -not $CertOnly) {
 
 # ── 5a. THE ISLAND'S OWN SIDEARM, with no environment variable ───────────────
 #
@@ -3297,7 +3388,7 @@ if (Test-Path $heroCsv) {
 Say ("windows now: " + ((Get-Process | Where-Object { $_.MainWindowTitle -ne "" -and ($_.ProcessName -like "inf*") } |
     ForEach-Object { "$($_.ProcessName)[$($_.Id)] '$($_.MainWindowTitle)'" }) -join " | "))
 
-if (-not $BoardingOnly -and -not $AudioOnly -and -not $RosterOnly -and -not $GalleryOnly -and -not $AirOnly -and -not $WeaponsOnly) {
+if (-not $BoardingOnly -and -not $AudioOnly -and -not $RosterOnly -and -not $GalleryOnly -and -not $AirOnly -and -not $WeaponsOnly -and -not $CertOnly) {
 # ── 6z. WAVE VEH3a — THE TYRES, AND WHAT THE GROUND UNDER THEM IS ────────────
 #
 # Four frames, every one TRIGGERED on `hero.csv`'s eight new columns rather than

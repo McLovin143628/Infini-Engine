@@ -45,8 +45,7 @@ fn build_project(tmp: &Path) -> PathBuf {
 
 /// Cook it, exactly as `inf cook` does.
 fn cook(proj: &Path, out: &Path) -> PathBuf {
-    inf_packager::cook(proj, out, &inf_packager::CookOptions::default())
-        .expect("the island cooks");
+    inf_packager::cook(proj, out, &inf_packager::CookOptions::default()).expect("the island cooks");
     out.to_path_buf()
 }
 
@@ -102,12 +101,12 @@ fn loose_sim(content: &Path, slug: &str) -> RuntimeSim {
 /// The car the lap is driven in: a guid no level mints.
 const LAP_CAR: Uuid = Uuid::from_u128(0x5645_4833_4c41_5000_0000_0000_0000_0001);
 
-/// The row the CI lap drives -- a SHELL car with a turbo and all-wheel drive,
-/// so the burnout (handbrake + throttle: the rear axle locked, the front one
-/// driven) heats a tyre, the throttle spools a compressor and the brakes move
-/// load onto the front axle, all on one car. `annis_elegy_rh8` is the doc's
-/// "AWD Japanese twin-turbo" coupe (the Nissan GT-R Nismo) and wears
-/// `shell_coupe`.
+/// The row the CI lap drives -- a SHELL muscle coupe with a turbocharger and
+/// rear drive (the doc's Dodge Challenger SRT Demon, `shell_coupe`): with the
+/// traction aid off, a full-throttle launch spins its rear axle (the burnout
+/// heats the tyres), the throttle spools the compressor, and the brakes move
+/// load onto the front axle -- all three on one car. (The first choice, the
+/// AWD `annis_elegy_rh8`, never let its tyres go: +0.06 C in the burnout.)
 const LAP_ROW: &str = "bravado_gauntlet_hellfire";
 
 /// The lap's speed limit on the straights, m/s -- the driver's (`traffic::
@@ -149,10 +148,36 @@ struct LapRow {
 /// The CSV's header -- the SHAPE the plot reads and `the_lap_logs_at_sixty_
 /// hertz_...` pins.
 const LAP_COLUMNS: [&str; 30] = [
-    "t", "phase", "x", "z", "s_m", "speed_mps", "long_g", "lat_g", "throttle", "brake", "rpm",
-    "gear", "boost", "slip_fl", "slip_fr", "slip_rl", "slip_rr", "slip_lat_fl", "slip_lat_fr",
-    "slip_lat_rl", "slip_lat_rr", "load_fl", "load_fr", "load_rl", "load_rr", "temp_fl",
-    "temp_fr", "temp_rl", "temp_rr", "surface",
+    "t",
+    "phase",
+    "x",
+    "z",
+    "s_m",
+    "speed_mps",
+    "long_g",
+    "lat_g",
+    "throttle",
+    "brake",
+    "rpm",
+    "gear",
+    "boost",
+    "slip_fl",
+    "slip_fr",
+    "slip_rl",
+    "slip_rr",
+    "slip_lat_fl",
+    "slip_lat_fr",
+    "slip_lat_rl",
+    "slip_lat_rr",
+    "load_fl",
+    "load_fr",
+    "load_rl",
+    "load_rr",
+    "temp_fl",
+    "temp_fr",
+    "temp_rl",
+    "temp_rr",
+    "surface",
 ];
 
 impl LapRow {
@@ -243,32 +268,43 @@ fn put_hero(sim: &mut RuntimeSim, at: DVec3) {
 /// the settlement's centre.
 fn circuits(design: &inf_island::IslandDesign) -> (DVec2, Vec<Vec<DVec2>>) {
     let mut plans = inf_editor_core::settlement::settlements(design);
-    plans.sort_by(|a, b| b.blocks.len().cmp(&a.blocks.len()).then(a.name.cmp(&b.name)));
-    let s = plans.into_iter().next().expect("the fixture has a settlement");
+    plans.sort_by(|a, b| {
+        b.blocks
+            .len()
+            .cmp(&a.blocks.len())
+            .then(a.name.cmp(&b.name))
+    });
+    let s = plans
+        .into_iter()
+        .next()
+        .expect("the fixture has a settlement");
     let mut found: Vec<(f64, [f64; 4])> = Vec::new();
     for (w, h) in [(2, 2), (2, 1), (1, 2), (1, 1)] {
-    for b in &s.blocks {
-        let group: Vec<_> = s
-            .blocks
-            .iter()
-            .filter(|o| {
-                (b.col..b.col + w).contains(&o.col) && (b.row..b.row + h).contains(&o.row)
-            })
-            .collect();
-        if group.len() != (w * h) as usize {
-            continue;
+        for b in &s.blocks {
+            let group: Vec<_> = s
+                .blocks
+                .iter()
+                .filter(|o| {
+                    (b.col..b.col + w).contains(&o.col) && (b.row..b.row + h).contains(&o.row)
+                })
+                .collect();
+            if group.len() != (w * h) as usize {
+                continue;
+            }
+            let (mut x0, mut x1, mut z0, mut z1) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+            for o in &group {
+                x0 = x0.min(o.centre.x - o.half.x);
+                x1 = x1.max(o.centre.x + o.half.x);
+                z0 = z0.min(o.centre.y - o.half.y);
+                z1 = z1.max(o.centre.y + o.half.y);
+            }
+            let c = DVec2::new((x0 + x1) * 0.5, (z0 + z1) * 0.5);
+            // Bigger groups first, then nearest the centre.
+            found.push((
+                f64::from(4 - w * h) * 1.0e6 + (c - s.centre).length(),
+                [x0, x1, z0, z1],
+            ));
         }
-        let (mut x0, mut x1, mut z0, mut z1) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
-        for o in &group {
-            x0 = x0.min(o.centre.x - o.half.x);
-            x1 = x1.max(o.centre.x + o.half.x);
-            z0 = z0.min(o.centre.y - o.half.y);
-            z1 = z1.max(o.centre.y + o.half.y);
-        }
-        let c = DVec2::new((x0 + x1) * 0.5, (z0 + z1) * 0.5);
-        // Bigger groups first, then nearest the centre.
-        found.push((f64::from(4 - w * h) * 1.0e6 + (c - s.centre).length(), [x0, x1, z0, z1]));
-    }
     }
     found.sort_by(|a, b| a.0.total_cmp(&b.0));
     let g = s.street_m * 0.5;
@@ -325,7 +361,14 @@ fn clear_circuit(sim: &mut RuntimeSim, design: &inf_island::IslandDesign) -> (Ve
 
 /// A step's telemetry off the car the hero is driving -- the bridge's own
 /// `WheelState` and `DrivetrainState`, the rapier body's velocity.
-fn sample(sim: &RuntimeSim, prev_v: DVec3, t: f64, phase: u8, s_m: f64, input: (f64, f64)) -> (LapRow, DVec3) {
+fn sample(
+    sim: &RuntimeSim,
+    prev_v: DVec3,
+    t: f64,
+    phase: u8,
+    s_m: f64,
+    input: (f64, f64),
+) -> (LapRow, DVec3) {
     let bridge = sim.bridge3d();
     let body = bridge.body_of(LAP_CAR).expect("the lap car has a body");
     let w = bridge.world();
@@ -335,7 +378,9 @@ fn sample(sim: &RuntimeSim, prev_v: DVec3, t: f64, phase: u8, s_m: f64, input: (
     let fwd = rot * DVec3::Z;
     let right = rot * DVec3::X;
     let a = (v - prev_v) * 60.0;
-    let veh = bridge.vehicle_of(LAP_CAR).expect("the lap car is a vehicle");
+    let veh = bridge
+        .vehicle_of(LAP_CAR)
+        .expect("the lap car is a vehicle");
     let wheels = veh.wheels();
     let dt = veh.drivetrain().unwrap_or_default();
     let mut row = LapRow {
@@ -397,7 +442,11 @@ fn drive_lap(sim: &mut RuntimeSim, design: &inf_island::IslandDesign, row: &str)
     // The car on the start line, pointing down the first leg (+X).
     let start = corners[0];
     let ground = start.y;
-    let at = DVec3::new(start.x, inf_ecs::vehicle::resting_origin_y(&def, ground), start.z);
+    let at = DVec3::new(
+        start.x,
+        inf_ecs::vehicle::resting_origin_y(&def, ground),
+        start.z,
+    );
     let yaw = 90.0; // +Z rotated to +X.
     inf_ecs::vehicle::spawn_rig_at(
         sim.world_mut(),
@@ -453,7 +502,11 @@ fn drive_lap(sim: &mut RuntimeSim, design: &inf_island::IslandDesign, row: &str)
             break;
         }
     }
-    assert!(boarded, "the hero never reached the wheel: {:?}", hero_mode(sim));
+    assert!(
+        boarded,
+        "the hero never reached the wheel: {:?}",
+        hero_mode(sim)
+    );
     let mut t = 0.0f64;
     let mut prev_v = DVec3::ZERO;
     // ── the burnout: the handbrake locks the rear axle and the throttle is
@@ -556,7 +609,11 @@ fn ladder_sim(n: usize, centre: DVec3) -> RuntimeSim {
         BodyKind3D, Collider3D, ColliderShape3DKind, RigidBody3D, StreamingSource,
     };
     let mut world = inf_ecs::EcsWorld::new();
-    let g = world.spawn_with_guid(Uuid::from_u128(0x5645_4833_4c41_4400_0000_0000_0000_0001), "Ground", None);
+    let g = world.spawn_with_guid(
+        Uuid::from_u128(0x5645_4833_4c41_4400_0000_0000_0000_0001),
+        "Ground",
+        None,
+    );
     let mut t = Transform::IDENTITY;
     t.translation = Vec3d::new(300.0, -0.5, 0.0);
     world.world_mut().entity_mut(g).insert((
@@ -572,7 +629,11 @@ fn ladder_sim(n: usize, centre: DVec3) -> RuntimeSim {
             ..Default::default()
         },
     ));
-    let a = world.spawn_with_guid(Uuid::from_u128(0x5645_4833_4c41_4400_0000_0000_0000_0002), "Anchor", None);
+    let a = world.spawn_with_guid(
+        Uuid::from_u128(0x5645_4833_4c41_4400_0000_0000_0000_0002),
+        "Anchor",
+        None,
+    );
     world
         .world_mut()
         .entity_mut(a)
@@ -772,10 +833,7 @@ fn lap_facts(lap: &Lap) -> LapFacts {
         .map(|x| -x.long_g)
         .fold(0.0, f64::max);
     let peak_impact_g = r.iter().map(|x| -x.long_g).fold(0.0, f64::max);
-    let peak_temp_c = r
-        .iter()
-        .flat_map(|x| x.temp)
-        .fold(f64::MIN, f64::max);
+    let peak_temp_c = r.iter().flat_map(|x| x.temp).fold(f64::MIN, f64::max);
     LapFacts {
         rows: r.len(),
         lap_s: lapped.len() as f64 / 60.0,
@@ -870,8 +928,33 @@ fn the_lap_logs_at_sixty_hertz_and_pie_equals_shipping() {
     );
     // The header is the plot's contract.
     assert_eq!(LAP_COLUMNS.len(), shipped.rows[0].csv().split(',').count());
-    assert!(f.burnout_rear_rise_c > 3.0, "the burnout heated nothing: {f:?}");
-    assert!(f.straight_rear_fall_c > 0.3, "nothing cooled on the straight: {f:?}");
+    // THE MEMO QUOTES THIS LAP: its `LAP-FACTS` line carries the numbers this
+    // arm just measured, digit for digit, or the memo is red.
+    let memo = memo_text();
+    let line = memo
+        .lines()
+        .find(|l| l.starts_with("LAP-FACTS:"))
+        .expect("the memo prints no LAP-FACTS line");
+    for want in [
+        format!("{} rows", f.rows),
+        format!("+{:.2} C", f.burnout_rear_rise_c),
+        format!("{:.2} C", f.straight_rear_fall_c),
+        format!("boost {:.3}", f.boost_peak),
+        format!("{:.1} %", f.braking_front * 100.0),
+    ] {
+        assert!(
+            line.contains(&want),
+            "the memo's LAP-FACTS line does not say {want:?}: {line}"
+        );
+    }
+    assert!(
+        f.burnout_rear_rise_c > 3.0,
+        "the burnout heated nothing: {f:?}"
+    );
+    assert!(
+        f.straight_rear_fall_c > 0.3,
+        "nothing cooled on the straight: {f:?}"
+    );
     assert!(f.boost_peak > 0.5, "the compressor never spooled: {f:?}");
     assert!(
         f.boost_after_lift < 0.5 * f.boost_peak,
@@ -882,9 +965,18 @@ fn the_lap_logs_at_sixty_hertz_and_pie_equals_shipping() {
         "braking moved no load forward: {f:?}"
     );
     // PIE == SHIPPING, the whole lap.
-    assert_eq!(shipped.rows.len(), previewed.rows.len(), "the laps differ in length");
+    assert_eq!(
+        shipped.rows.len(),
+        previewed.rows.len(),
+        "the laps differ in length"
+    );
     for (i, (a, b)) in shipped.rows.iter().zip(&previewed.rows).enumerate() {
-        assert!(a == b, "PIE and shipping diverge at lap row {i}:\n{}\n{}", a.csv(), b.csv());
+        assert!(
+            a == b,
+            "PIE and shipping diverge at lap row {i}:\n{}\n{}",
+            a.csv(),
+            b.csv()
+        );
     }
     assert_eq!(shipped.digests.len(), previewed.digests.len());
     let first = shipped
@@ -940,6 +1032,7 @@ fn citation_roots() -> Vec<PathBuf> {
         m.join("../../crates/inf-audio/tests"),
         m.join("../../editor/crates/inf-editor-core/tests"),
         m.join("../../editor/crates/inf-editor-core/src"),
+        m.join("src"),
     ]
 }
 
@@ -1021,9 +1114,19 @@ fn every_arm_the_driving_memo_cites_exists_and_is_not_ignored() {
         missing.len(),
         ignored.len()
     );
-    assert!(cites.len() >= 60, "the memo cites only {} arms", cites.len());
-    assert!(missing.is_empty(), "the memo cites arms that do not exist: {missing:?}");
-    assert!(ignored.is_empty(), "the memo cites IGNORED arms: {ignored:?}");
+    assert!(
+        cites.len() >= 60,
+        "the memo cites only {} arms",
+        cites.len()
+    );
+    assert!(
+        missing.is_empty(),
+        "the memo cites arms that do not exist: {missing:?}"
+    );
+    assert!(
+        ignored.is_empty(),
+        "the memo cites IGNORED arms: {ignored:?}"
+    );
     for must in ["PAR1", "PAR2", "PERF1", "N = 1", "NOT MET", "CARRIED"] {
         assert!(memo.contains(must), "the memo never says {must:?}");
     }
@@ -1198,7 +1301,7 @@ fn three_classes_against_their_forza_inspirations() {
     for (row, t60, verdict, line) in measured {
         let pinned = memo
             .lines()
-            .find(|l| l.contains("FEEL-VS-FORZA") && l.contains(row))
+            .find(|l| l.starts_with("FEEL-VS-FORZA") && l.contains(row))
             .unwrap_or_else(|| panic!("the memo prints no FEEL-VS-FORZA line for {row}"));
         assert!(
             pinned.contains(&format!("{t60:.2} s")) && pinned.contains(verdict),
@@ -1272,5 +1375,170 @@ fn a_parked_vehicle_beyond_the_collider_band_rolls_off_its_pad() {
         f0.y - f1.y
     );
     assert!(far > 10.0, "the appliance held beyond the band ({far:.2} m) -- the defect is fixed; rewrite the memo row");
-    assert!(near < 3.0, "the control moved {near:.2} m with the hero beside it");
+    assert!(
+        near < 3.0,
+        "the control moved {near:.2} m with the hero beside it"
+    );
+}
+
+// ── the headlamps ───────────────────────────────────────────────────────────
+
+/// **A HEADLAMP IS A LENS, NOT A LIGHT** -- the cert's PAR1 routing, measured
+/// rather than assumed.
+///
+/// READS the world: every row of the island catalogue and the roster spawned
+/// through the one rig door (`spawn_rig`) into one world, then every entity
+/// under every chassis -- the drawn `lamp_front` parts and their `Material`
+/// (the emissive lens VEH3f.2b gave them), and any `Light` component at all.
+/// ASSERTS: lamp parts exist and glow (emissive > 0) and NOT ONE rig entity
+/// carries a `Light` -- there is no cone for a night frame to show, which is
+/// PAR1's (street lighting and vehicle lamps on PAR0's many-lights substrate:
+/// `MAX_LIGHTS` is 16 for the whole frame). The day a car grows a light this
+/// arm reds and the memo row is rewritten. A tree with no VEH3 arc has no lamp
+/// parts and fails the first assertion.
+#[test]
+fn a_headlamp_is_an_emissive_lens_and_no_car_carries_a_light() {
+    let mut world = inf_ecs::EcsWorld::new();
+    let mut rows: Vec<VehicleDef> = inf_editor_core::vehicle::island_vehicles()
+        .0
+        .values()
+        .copied()
+        .collect();
+    rows.extend(inf_ecs::roster::roster().0.values().copied());
+    let mut chassis = Vec::new();
+    for (k, def) in rows.iter().enumerate() {
+        let g = Uuid::from_u128(0x5645_4833_4c41_4d00_0000_0000_0001_0000 + k as u128);
+        inf_ecs::vehicle::spawn_rig(
+            &mut world,
+            g,
+            def,
+            &inf_ecs::vehicle::RigSpawn {
+                name: "Car".into(),
+                at: DVec3::new(k as f64 * 20.0, 5.0, 0.0),
+                yaw_deg: 0.0,
+                paint: inf_ecs::math::Color::new(0.5, 0.5, 0.5, 1.0),
+                clip: None,
+                engine_voice: false,
+                livery: None,
+            },
+        );
+        chassis.push(g);
+    }
+    world.propagate();
+    let (mut lamps, mut glowing, mut lights) = (0usize, 0usize, 0usize);
+    for g in &chassis {
+        let Some(root) = world.entity_of(*g) else {
+            continue;
+        };
+        for e in world.subtree(root) {
+            if world.world().get::<inf_ecs::components::Light>(e).is_some() {
+                lights += 1;
+            }
+            if world
+                .name_of(e)
+                .is_some_and(|n| n.starts_with("lamp_front"))
+            {
+                lamps += 1;
+                if world
+                    .world()
+                    .get::<inf_ecs::components::Material>(e)
+                    .is_some_and(|m| m.emissive_intensity > 0.0)
+                {
+                    glowing += 1;
+                }
+            }
+        }
+    }
+    println!(
+        "HEADLAMPS: {} rows spawned, {lamps} front lamp part(s), {glowing} of them emissive, {lights} Light component(s) on any rig",
+        chassis.len()
+    );
+    assert!(
+        lamps > 0 && glowing == lamps,
+        "no glowing front lamp to speak of"
+    );
+    assert_eq!(
+        lights, 0,
+        "a car carries a Light now -- rewrite the memo's headlight row"
+    );
+}
+
+/// The IMPORTED row the second lap drives: the doc's Pegassi Toros (the
+/// Lamborghini Urus) wears `dd_suv`, one of the Fab packs' cars the island
+/// commits as a level dependency, and carries a turbocharger. CI draws its
+/// committed fallback; the physics is the row either way.
+const IMPORTED_LAP_ROW: &str = "obey_rocoto";
+
+/// **THE SAME LAP IN AN IMPORTED CAR, ON BOTH HOSTS** -- the circuit, the
+/// boarding, the burnout, the lane driver and the cool-down of
+/// `the_lap_logs_at_sixty_hertz_and_pie_equals_shipping`, driven in
+/// [`IMPORTED_LAP_ROW`].
+///
+/// READS what that arm reads. ASSERTS: the lap completes, the compressor
+/// spools past 0.3, braking moves load onto the front axle, and the two
+/// hosts' 60 Hz rows and state digests are equal. (The burnout's heat is
+/// printed, not asserted: an all-wheel-drive SUV with its aid off spreads the
+/// launch over four tyres.) `VEH3H_LAP_CSV_IMPORTED=<file>` writes its CSV. A
+/// tree with no VEH3 arc has no such row (VEH3f) and no art table (VEH3f.2a).
+#[test]
+fn the_imported_row_drives_the_same_lap_on_both_hosts() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let proj = build_project(tmp.path());
+    let pack = cook(&proj, &tmp.path().join("out"));
+    let recipe = inf_island::IslandRecipe::load(&fixture_recipe()).expect("recipe");
+    let design = inf_island::read_design(&recipe).expect("design");
+    let slug = inf_island::slug(&recipe.name);
+    let def = inf_ecs::roster::roster()
+        .get(IMPORTED_LAP_ROW)
+        .copied()
+        .expect("the imported row");
+    assert!(
+        def.art.is_some_and(|k| !k.shell()),
+        "{IMPORTED_LAP_ROW} no longer wears imported art"
+    );
+    let mut ship = pack_sim(&pack);
+    let shipped = drive_lap(&mut ship, &design, IMPORTED_LAP_ROW);
+    let mut pie = loose_sim(&proj.join("Content"), &slug);
+    let previewed = drive_lap(&mut pie, &design, IMPORTED_LAP_ROW);
+    if let Some(p) = std::env::var_os("VEH3H_LAP_CSV_IMPORTED") {
+        let mut s = LAP_COLUMNS.join(",");
+        s.push('\n');
+        for r in &shipped.rows {
+            s.push_str(&r.csv());
+            s.push('\n');
+        }
+        std::fs::write(p, s).expect("write the imported lap CSV");
+    }
+    assert!(shipped.completed, "the imported car never got round");
+    let r = &shipped.rows;
+    let rear = |x: &LapRow| x.temp[2].max(x.temp[3]);
+    let burn: Vec<&LapRow> = r.iter().filter(|x| x.phase == 1).collect();
+    let boost = r.iter().map(|x| x.boost).fold(0.0, f64::max);
+    let braking = r
+        .iter()
+        .filter(|x| x.brake > 0.5 && x.long_g < -0.8)
+        .map(front_share)
+        .fold(0.0, f64::max);
+    let lap_s = r.iter().filter(|x| x.phase == 2).count() as f64 / 60.0;
+    println!(
+        "IMPORTED LAP ({IMPORTED_LAP_ROW}, art {}): {} rows, lap {lap_s:.2} s; burnout rear +{:.2} C; boost peak {boost:.3}; front axle {:.1} % standing, {:.1} % braking",
+        def.art.map_or("-", |k| k.name()),
+        r.len(),
+        rear(burn[burn.len() - 1]) - rear(burn[0]),
+        front_share(&r[0]) * 100.0,
+        braking * 100.0
+    );
+    assert!(boost > 0.3, "the imported car's compressor never spooled");
+    assert!(
+        braking > front_share(&r[0]) + 0.05,
+        "braking moved no load forward on the imported car"
+    );
+    assert_eq!(shipped.rows.len(), previewed.rows.len());
+    for (i, (a, b)) in shipped.rows.iter().zip(&previewed.rows).enumerate() {
+        assert!(a == b, "PIE and shipping diverge at imported lap row {i}");
+    }
+    assert!(
+        shipped.digests == previewed.digests,
+        "the imported lap's state digests diverge"
+    );
 }
