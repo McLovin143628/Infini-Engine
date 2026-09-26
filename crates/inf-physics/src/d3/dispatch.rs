@@ -760,7 +760,7 @@ fn run_units(
     stats: &mut DispatchStats,
 ) {
     let archetype = inf_ecs::society::level_archetype(world);
-    let mut obstacles: Option<Vec<(Uuid, DVec3)>> = None;
+    let mut obstacles: Option<Vec<super::traffic::Obstacle>> = None;
     let chassis_list: Vec<Uuid> = res.runs.keys().copied().collect();
     for chassis in chassis_list {
         let Some(run) = res.runs.get(&chassis).cloned() else {
@@ -988,7 +988,7 @@ fn send_home_air(res: &mut DispatchRes, chassis: Uuid, step: u64) {
 ///
 /// `O(world)` and built at most once per fixed step, only on a step something is
 /// actually driving.
-fn obstacles_for_units(world: &EcsWorld, res: &DispatchRes) -> Vec<(Uuid, DVec3)> {
+fn obstacles_for_units(world: &EcsWorld, res: &DispatchRes) -> Vec<super::traffic::Obstacle> {
     let parked: std::collections::BTreeSet<Uuid> = res
         .runs
         .iter()
@@ -997,7 +997,7 @@ fn obstacles_for_units(world: &EcsWorld, res: &DispatchRes) -> Vec<(Uuid, DVec3)
         .collect();
     let mut out = super::traffic::obstacles_of(world);
     if !parked.is_empty() {
-        out.retain(|(g, _)| !parked.contains(g));
+        out.retain(|o| !parked.contains(&o.guid));
     }
     out
 }
@@ -1102,7 +1102,7 @@ fn steer(
     chassis: Uuid,
     crew: Uuid,
     run: &UnitRun,
-    obstacles: &[(Uuid, DVec3)],
+    obstacles: &[super::traffic::Obstacle],
 ) -> bool {
     let Some(path) = run.path.as_ref() else {
         return false;
@@ -1141,7 +1141,23 @@ fn steer(
         // drove through traffic but one that drove INTO it and stopped there,
         // permanently, half a mile short of a fire. Measured on this wave's own
         // gate.
-        gap_m: super::traffic::gap_ahead(path, s_m, chassis, crew, obstacles),
+        gap_m: super::traffic::gap_ahead(
+            path,
+            s_m,
+            &super::traffic::Mover {
+                guid: chassis,
+                driver: crew,
+                at,
+                forward,
+                forward_mps: linvel.dot(forward),
+                half: world
+                    .entity_of(chassis)
+                    .and_then(|e| world.world().get::<inf_ecs::components::Collider3D>(e))
+                    .map(inf_ecs::vehicle::chassis_half_extents)
+                    .unwrap_or(inf_ecs::math::Vec3d::new(1.0, 0.8, 2.4)),
+            },
+            obstacles,
+        ),
         loops: false,
     };
     let intent = traffic::drive_intent(&view);

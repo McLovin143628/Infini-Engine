@@ -677,8 +677,19 @@ fn step_one(
     //    After `engine_state`, which reads the controls this step was solved
     //    with: the sound a vehicle makes is a function of the decision that was
     //    just taken, which is P12's own doctrine.
+    //
+    //    **And a car at rest that nobody speaks to holds its PARKING brake**
+    //    (wave VEH3f.2b): silence at walking pace or below is the handbrake,
+    //    not a free-rolling chassis. Measured on the CI island: an authored
+    //    saloon parked on the lot's grade crept at 0.03 m/s for 48 s and rolled
+    //    into a traffic car stopped beside it -- the one moving contact left
+    //    once the following rule read footprints. A car in motion keeps coasting
+    //    exactly as it did (a bailed-out car still rolls on).
     if let Some(v) = bridge.vehicle_mut(chassis) {
-        v.control(inf_ecs::vehicle::VehicleControls::default());
+        v.control(inf_ecs::vehicle::VehicleControls {
+            handbrake: forward_mps.abs() < inf_ecs::vehicle::PARK_HOLD_MPS,
+            ..inf_ecs::vehicle::VehicleControls::default()
+        });
     }
     Some(VehicleOutcome {
         chassis,

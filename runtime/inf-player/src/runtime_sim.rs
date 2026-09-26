@@ -306,6 +306,11 @@ pub struct RuntimeSim {
     /// Sensor-pair overlaps drained this fixed step (canonical `a < b`, sorted) —
     /// MIRROR of `SimSession::drained_overlaps`.
     drained_overlaps: Vec<OverlapEvent>,
+    /// **The SOLID contacts that began this fixed step** (wave VEH3f.2b), each a
+    /// canonical `a < b` `Guid` pair, sorted -- the physics world's own contact
+    /// events, not a distance table: what a traffic census counts a collision
+    /// by. An instrument; nothing in the sim reads it.
+    solid_contacts: Vec<(Uuid, Uuid)>,
     /// Accumulated `debug.print` output.
     ///
     /// **Bounded** (Hardening D). This is the shipped player, the only consumers
@@ -609,6 +614,7 @@ impl RuntimeSim {
             bindings: BTreeMap::new(),
             dispatch_queue: VecDeque::new(),
             drained_overlaps: Vec::new(),
+            solid_contacts: Vec::new(),
             logs: BoundedLog::default(),
             grounded: BTreeMap::new(),
             // **No device here** (VEH3e audit): a `RuntimeSim` is built by
@@ -1359,6 +1365,13 @@ impl RuntimeSim {
     /// consume.
     pub fn drained_overlaps(&self) -> &[OverlapEvent] {
         &self.drained_overlaps
+    }
+
+    /// **The solid (non-sensor) contacts that BEGAN during the most recent
+    /// fixed step** (wave VEH3f.2b), canonical `a < b` pairs, sorted -- read off
+    /// the physics world's contact events.
+    pub fn solid_contacts_started(&self) -> &[(Uuid, Uuid)] {
+        &self.solid_contacts
     }
 
     /// Interpolated world translation of `guid` for rendering: the previous and
@@ -3158,6 +3171,13 @@ impl RuntimeSim {
         }
         self.drained_overlaps.sort();
         self.drained_overlaps.dedup();
+        self.solid_contacts = resolved
+            .iter()
+            .filter(|(_, _, phase, sensor)| !*sensor && *phase == ContactPhase::Started)
+            .map(|&(a, b, _, _)| (a, b))
+            .collect();
+        self.solid_contacts.sort();
+        self.solid_contacts.dedup();
 
         // (a) Blueprint `Collision` events — Started only, sensors INCLUDED.
         let mut pairs: Vec<(Uuid, Uuid)> = resolved

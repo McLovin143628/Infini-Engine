@@ -160,7 +160,7 @@ pub fn step_traffic(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64)
     //    a street where every car is parked, which is most streets at most
     //    hours — so it is built the first time something actually steers and
     //    not at all otherwise.
-    let mut obstacles: Option<Vec<(Uuid, DVec3)>> = None;
+    let mut obstacles: Option<Vec<Obstacle>> = None;
     // ── and the sirens, on the same terms and for the same reason (EMS2). The
     //    yield rule is `O(hot)` per steered car; gathering the list per car
     //    would be `O(cars x units)`, and gathering it unconditionally would walk
@@ -489,8 +489,65 @@ fn seat_riders(
     n
 }
 
+/// **One thing a traffic car must not drive into, as its FOOTPRINT** (wave
+/// VEH3f.2b): where it is, which way it faces, and how big it is in plan -- a
+/// chassis its collider's box, a character its capsule's disc.
+///
+/// # Why a footprint and not a centre
+///
+/// The following rule used to see an obstacle as its centre, in a 2.5 m
+/// corridor either side of the lane, with a 6 m origin-to-origin standing gap.
+/// The VEH3f audit measured the three moving contacts its 10-minute census
+/// found: all three were STOPPED cars whose bodies met 3.87-4.15 m apart -- a
+/// car parked askew, a car turning at a junction, a car pulling out past its
+/// neighbour -- each intruding with its LENGTH while its centre stood outside
+/// the corridor, or standing its own length closer than a centre-to-centre
+/// gap allows for. A footprint is what is actually in the road.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Obstacle {
+    /// The body's guid.
+    pub guid: Uuid,
+    /// Its centre, world metres.
+    pub centre: DVec3,
+    /// Its own `+X`, world, unit.
+    pub axis_x: DVec3,
+    /// Its own `+Z`, world, unit.
+    pub axis_z: DVec3,
+    /// Half its plan box along its own `X`, metres (0 for a disc).
+    pub half_x: f64,
+    /// Half its plan box along its own `Z`, metres (0 for a disc).
+    pub half_z: f64,
+    /// A disc's radius (a character's capsule), metres; 0 for a box.
+    pub radius: f64,
+}
+
+impl Obstacle {
+    /// The footprint's sample points: its centre, its four plan corners and
+    /// the middles of its four sides.
+    fn points(&self) -> [DVec3; 9] {
+        let (x, z) = (self.axis_x * self.half_x, self.axis_z * self.half_z);
+        let c = self.centre;
+        [
+            c,
+            c + x + z,
+            c + x - z,
+            c - x + z,
+            c - x - z,
+            c + x,
+            c - x,
+            c + z,
+            c - z,
+        ]
+    }
+}
+
+/// **The clearance a moving car keeps beside its own flank**, metres (wave
+/// VEH3f.2b): a footprint point closer than the car's own half-width plus
+/// this to the lane's centre line is IN its way.
+pub const FLANK_CLEAR_M: f64 = 0.45;
+
 /// Everything a traffic car has to not drive into: every solid body in the
-/// world with a position, in `Guid` order.
+/// world with a position, as its footprint, in `Guid` order.
 ///
 /// Vehicles **and characters**, and the second half is deliberate: a town whose
 /// traffic drove through its pedestrians would kill a resident a minute, and
@@ -498,14 +555,21 @@ fn seat_riders(
 /// its lane. The visible consequence is stated rather than hidden — **a hero
 /// standing in the road stops the street**, which is a thing a player will do
 /// and a thing this rule answers honestly.
-pub(crate) fn obstacles_of(world: &EcsWorld) -> Vec<(Uuid, DVec3)> {
-    let mut out: Vec<(Uuid, DVec3)> = Vec::new();
+pub(crate) fn obstacles_of(world: &EcsWorld) -> Vec<Obstacle> {
+    let mut out: Vec<Obstacle> = Vec::new();
     for e in world.world().iter_entities() {
         let Some(g) = e.get::<inf_ecs::components::Guid>() else {
             continue;
         };
-        let is_body = e.get::<CharacterMovement>().is_some()
-            || (e.get::<RigidBody3D>().is_some() && e.get::<Collider3D>().is_some());
+        let character = e.get::<CharacterMovement>().is_some();
+        let collider = e.get::<Collider3D>();
+        // A MOVABLE body: the static world (the ground slab, a wall, a
+        // building's collider) is what the lane network is built around, and as
+        // a footprint its plan is the size of the town.
+        let movable = e
+            .get::<RigidBody3D>()
+            .is_some_and(|b| b.kind != BodyKind3D::Static);
+        let is_body = character || (movable && collider.is_some());
         if !is_body {
             continue;
         }
@@ -513,44 +577,193 @@ pub(crate) fn obstacles_of(world: &EcsWorld) -> Vec<(Uuid, DVec3)> {
             continue;
         };
         let p = t.translation();
-        if p.is_finite() {
-            out.push((g.0, p));
+        if !p.is_finite() {
+            continue;
+        }
+        let ax = t.0.transform_vector3(DVec3::X).normalize_or(DVec3::X);
+        let az = t.0.transform_vector3(DVec3::Z).normalize_or(DVec3::Z);
+        let (half_x, half_z, radius) = match collider {
+            Some(c)
+                if !character
+                    && c.shape_kind == inf_ecs::components::ColliderShape3DKind::Box =>
+            {
+                let h = inf_ecs::vehicle::chassis_half_extents(c);
+                (h.x.abs(), h.z.abs(), 0.0)
+            }
+            Some(c) => (0.0, 0.0, c.radius.max(0.0)),
+            None => (0.0, 0.0, 0.3),
+        };
+        out.push(Obstacle {
+            guid: g.0,
+            centre: p,
+            axis_x: ax,
+            axis_z: az,
+            half_x,
+            half_z,
+            radius,
+        });
+    }
+    // **A traffic car that has no body right now is still in its space** (wave
+    // VEH3f.2b): a record at a tier that builds no collider stands where its
+    // record last put it, at its own row's size -- measured on the CI island, a
+    // circuit car drove into a parked neighbour's space while the neighbour was
+    // below the tier that builds a body, and the contact began the step the
+    // neighbour's body was built round it.
+    if let Some(pop) = traffic::traffic_of(world) {
+        let bodies: std::collections::BTreeSet<Uuid> = out.iter().map(|o| o.guid).collect();
+        for (g, rec) in pop.records.iter() {
+            if bodies.contains(g) || !rec.last.is_finite() {
+                continue;
+            }
+            let yaw = rec.yaw_deg.to_radians();
+            let (sn, cs) = (inf_math::psin64(yaw), inf_math::pcos64(yaw));
+            out.push(Obstacle {
+                guid: *g,
+                centre: rec.last,
+                axis_x: DVec3::new(cs, 0.0, -sn),
+                axis_z: DVec3::new(sn, 0.0, cs),
+                half_x: rec.def.half_extents.x.abs(),
+                half_z: rec.def.half_extents.z.abs(),
+                radius: 0.0,
+            });
         }
     }
-    out.sort_by_key(|(g, _)| *g);
+    out.sort_by_key(|o| o.guid);
     out
 }
 
-/// **The gap in front**, metres along the car's own path — `None` for a clear
-/// road.
+/// **The car asking** (wave VEH3f.2b): who it is (so it never sees itself or
+/// its own driver), where it is and which way it faces, how fast it goes and
+/// how big it is -- what the near-field half of [`gap_ahead`] sweeps.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Mover {
+    /// The chassis.
+    pub guid: Uuid,
+    /// Its driver (a body inside the car is not in its way).
+    pub driver: Uuid,
+    /// The chassis centre, world metres.
+    pub at: DVec3,
+    /// Its heading, world (only the plan part is read).
+    pub forward: DVec3,
+    /// Its forward speed, m/s.
+    pub forward_mps: f64,
+    /// Its half-extents, metres (`x` width, `z` length).
+    pub half: Vec3d,
+}
+
+/// **How far ahead of its own nose a car sweeps its own box**, seconds of its
+/// speed (wave VEH3f.2b) -- with [`NEAR_SWEEP_MIN_M`] at walking pace.
+pub const NEAR_SWEEP_S: f64 = 0.6;
+
+/// The near-field sweep's shortest reach, metres.
+pub const NEAR_SWEEP_MIN_M: f64 = 0.3;
+
+/// The clearance the near-field sweep keeps round the car's flanks, metres.
+pub const NEAR_CLEAR_M: f64 = 0.12;
+
+/// Do two plan rectangles overlap? Each `(centre, unit x axis, unit z axis,
+/// half x, half z)` on the ground plane -- the separating-axis test over the
+/// four edge normals.
+fn boxes_overlap_xz(a: (DVec3, DVec3, DVec3, f64, f64), b: (DVec3, DVec3, DVec3, f64, f64)) -> bool {
+    let flat = |v: DVec3| DVec3::new(v.x, 0.0, v.z);
+    let d = flat(b.0 - a.0);
+    for axis in [flat(a.1), flat(a.2), flat(b.1), flat(b.2)] {
+        let n = axis.normalize_or_zero();
+        if n == DVec3::ZERO {
+            continue;
+        }
+        let ra = a.3 * flat(a.1).dot(n).abs() + a.4 * flat(a.2).dot(n).abs();
+        let rb = b.3 * flat(b.1).dot(n).abs() + b.4 * flat(b.2).dot(n).abs();
+        if d.dot(n).abs() > ra + rb {
+            return false;
+        }
+    }
+    true
+}
+
+/// **The gap in front**, metres of CLEAR ROAD from the car's own front bumper
+/// -- `None` for a clear road. Two halves, the nearer answer wins:
 ///
-/// Every obstacle is projected onto the path; one that is inside
-/// [`CORRIDOR_HALF_M`] of it and ahead of the car by less than
-/// [`LOOK_AHEAD_M`] is in the way, and the nearest such is the gap. Parked cars
-/// are five metres off the lane and never qualify, which is what
-/// [`inf_ecs::traffic::KERB_PARK_OFFSET_M`] is sized for.
+/// * **along the path**: every obstacle's FOOTPRINT is sampled
+///   ([`Obstacle::points`]) and projected onto the path; a point closer to the
+///   lane's centre line than the car's own half-width plus [`FLANK_CLEAR_M`]
+///   is in the way, and the nearest such point ahead of the car's origin, less
+///   its own half-length (and a disc's radius), is the gap. A car parked square
+///   at the kerb keeps its whole footprint outside the swept lane; one parked
+///   askew, turning across or pulling out qualifies by the corner in the road.
+/// * **the near field**: the car's OWN box, swept [`NEAR_SWEEP_S`] of its
+///   speed ahead of its nose (at least [`NEAR_SWEEP_MIN_M`]) and
+///   [`NEAR_CLEAR_M`] wider -- a body (whose centre is not behind the car's
+///   tail) it would touch in that stride answers a gap of zero. The path can
+///   run straight while the car is still swinging out of a kerb space, and a
+///   corner met by the car's flank is behind the path's origin where the first
+///   half never looks.
 pub(crate) fn gap_ahead(
     path: &traffic::LanePath,
     s_m: f64,
-    self_guid: Uuid,
-    driver: Uuid,
-    obstacles: &[(Uuid, DVec3)],
+    me: &Mover,
+    obstacles: &[Obstacle],
 ) -> Option<f64> {
+    let own_half = me.half;
+    let lane = own_half.x.abs() + FLANK_CLEAR_M;
+    let nose = own_half.z.abs();
+    let fwd = DVec3::new(me.forward.x, 0.0, me.forward.z).normalize_or(DVec3::Z);
+    let right = DVec3::new(fwd.z, 0.0, -fwd.x);
+    let stride = (me.forward_mps.max(0.0) * NEAR_SWEEP_S).max(NEAR_SWEEP_MIN_M);
+    // The WHOLE car and a stride past its nose -- a corner met by the car's
+    // rear quarter as it passes is as much a contact as one met by its nose.
+    // What is BEHIND its tail is not this car's to avoid (a car behind may be
+    // touching it without this one being able to do anything about it), so an
+    // obstacle whose centre is behind the rear bumper is skipped below.
+    let reach_ahead = nose + stride;
+    let swept = (
+        me.at + fwd * (0.5 * stride),
+        right,
+        fwd,
+        own_half.x.abs() + NEAR_CLEAR_M,
+        0.5 * (reach_ahead + nose),
+    );
     let mut best: Option<f64> = None;
-    for (g, p) in obstacles {
-        if *g == self_guid || *g == driver {
+    for o in obstacles {
+        if o.guid == me.guid || o.guid == me.driver {
             continue;
         }
-        let proj = path.project(*p);
-        if proj.distance_m > CORRIDOR_HALF_M {
+        let reach = o.half_x.max(o.half_z) * std::f64::consts::SQRT_2 + o.radius;
+        // The near field: the swept box against the footprint (a disc as its
+        // bounding square, which errs toward stopping).
+        let rel = DVec3::new(o.centre.x - me.at.x, 0.0, o.centre.z - me.at.z);
+        let flat_d = rel.length();
+        if flat_d < reach + nose + stride + own_half.x.abs() + 1.0 && rel.dot(fwd) > -nose {
+            let theirs = (
+                o.centre,
+                o.axis_x,
+                o.axis_z,
+                o.half_x + o.radius,
+                o.half_z + o.radius,
+            );
+            if boxes_overlap_xz(swept, theirs) {
+                best = Some(0.0);
+                continue;
+            }
+        }
+        // Along the path. A far obstacle's centre alone says it is out of reach.
+        let pc = path.project(o.centre);
+        if pc.distance_m - reach > lane || pc.s_m - s_m + reach <= 0.0 {
             continue;
         }
-        let ahead = proj.s_m - s_m;
-        if ahead <= 0.0 || ahead > LOOK_AHEAD_M {
-            continue;
-        }
-        if best.is_none_or(|b| ahead < b) {
-            best = Some(ahead);
+        for p in o.points() {
+            let proj = path.project(p);
+            if proj.distance_m - o.radius > lane {
+                continue;
+            }
+            let ahead = proj.s_m - s_m;
+            if ahead <= 0.0 || ahead > LOOK_AHEAD_M + nose {
+                continue;
+            }
+            let clear = (ahead - nose - o.radius).max(0.0);
+            if best.is_none_or(|b| clear < b) {
+                best = Some(clear);
+            }
         }
     }
     best
@@ -565,8 +778,8 @@ pub(crate) fn gap_ahead(
 /// arguments than a reader can hold (and more than `clippy` allows).
 #[derive(Clone, Copy)]
 pub(crate) struct Around<'a> {
-    /// Every solid body with a position, in `Guid` order.
-    pub obstacles: &'a [(Uuid, DVec3)],
+    /// Every solid body with a position, as its footprint, in `Guid` order.
+    pub obstacles: &'a [Obstacle],
     /// Every unit running with its lights and siren on.
     pub hot: &'a [(Uuid, DVec3)],
 }
@@ -602,7 +815,19 @@ fn view_of<'a>(
         path,
         s_m,
         speed_limit_mps: traffic::street_speed_mps(),
-        gap_m: gap_ahead(path, s_m, chassis, driver, around.obstacles),
+        gap_m: gap_ahead(
+            path,
+            s_m,
+            &Mover {
+                guid: chassis,
+                driver,
+                at,
+                forward,
+                forward_mps: linvel.dot(forward),
+                half: rec.def.half_extents,
+            },
+            around.obstacles,
+        ),
         lateral_bias_m: yield_bias,
         loops: rec.circuit.is_some(),
     })

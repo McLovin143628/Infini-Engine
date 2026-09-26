@@ -722,13 +722,16 @@ pub const SPEED_BAND_MPS: f64 = 3.0;
 /// every time the car ahead slowed would be a queue of cars nose-diving.
 pub const COMFORT_DECEL_MPS2: f64 = 3.5;
 
-/// The gap a stopped car keeps to the one in front, metres.
+/// The gap a stopped car keeps to the one in front, metres of CLEAR ROAD from
+/// its own bumper to the nearest point of whatever is ahead (wave VEH3f.2b).
 ///
-/// Six metres from origin to origin is about a metre and a half of clear air
-/// between a saloon's bumper and the next one's, which is what a queue looks
-/// like. It is measured origin to origin because that is what the step can
-/// measure without asking every car for its own length.
-pub const STANDING_GAP_M: f64 = 6.0;
+/// A metre and a half, which is what a queue looks like. It was six metres
+/// ORIGIN TO ORIGIN until the following rule learned footprints
+/// (`inf_physics::d3::traffic::gap_ahead`): "because that is what the step can
+/// measure without asking every car for its own length" -- and a car that is
+/// not a saloon's length, or not square in the lane, stood its own length's
+/// error closer than it meant to (the VEH3f audit's three stopped contacts).
+pub const STANDING_GAP_M: f64 = 1.5;
 
 /// How hard traffic is willing to corner, m/s².
 ///
@@ -937,6 +940,14 @@ pub fn drive_intent(view: &DriveView<'_>) -> DriveIntent {
     // ── 3. the pedal.
     let (fwd, handbrake) = if target <= STOPPED_MPS && v.abs() <= STOPPED_MPS {
         (0.0, true)
+    } else if target <= STOPPED_MPS {
+        // **Asked to STOP, and still rolling: brake, not ease** (wave VEH3f.2b).
+        // The proportional pedal gave a car creeping at the stop threshold an
+        // 18 % brake against its own idle creep -- measured on the CI island, an
+        // AWD wagon asked for zero for three seconds rolled on at 0.5 m/s into
+        // the car beside it. A target of zero is reached only AT the standing
+        // gap or at a body the near field says is about to be touched.
+        (-v.signum(), false)
     } else {
         (((target - v) / SPEED_BAND_MPS).clamp(-1.0, 1.0), false)
     };
@@ -2143,6 +2154,27 @@ fn plan_batch(world: &mut EcsWorld) -> usize {
         };
         pop.pending.remove(&guid);
         planned += 1;
+        // **A car is never sent to a space another car calls home** (wave
+        // VEH3f.2b): the destination is drawn from the kerb slots no OTHER
+        // record parks in (its own home stays in the list, so its yaw is found).
+        // Measured on the CI island: a commuter at work at the session's start
+        // hour stood in the very space a parked car occupied -- a contact at
+        // island second 0, both bodies at one point.
+        let slots: Vec<(DVec3, f64)> = slots
+            .iter()
+            .copied()
+            .filter(|(p, _)| {
+                let near = |q: &DVec3| {
+                    let d = *p - *q;
+                    (d.x * d.x + d.z * d.z).sqrt() < 0.5
+                };
+                near(&home)
+                    || !pop
+                        .records
+                        .iter()
+                        .any(|(g, r)| *g != guid && near(&r.home))
+            })
+            .collect();
         // **Which kind of day**, from the car's own seed and nothing else — so a
         // level derives the same mix on both hosts, a re-derivation does not
         // reshuffle the street, and the two fields are exclusive by
@@ -2909,11 +2941,12 @@ mod tests {
         assert_eq!(i.target_mps, 0.0);
         assert_eq!(i.move_input.y, 0.0, "{i:?}");
         assert!(i.handbrake);
-        // And what `from_intent` makes of it: nothing at all, rather than a
-        // reverse gear.
+        // And what `from_intent` makes of it: a HOLD -- every brake and the
+        // handbrake (wave VEH3f.2b: an AWD car's idle creep rolled through the
+        // handbrake alone) -- rather than a reverse gear.
         let c = crate::vehicle::VehicleControls::from_intent(i.move_input, 0.0, i.handbrake, 0.0);
         assert_eq!(c.throttle, 0.0);
-        assert_eq!(c.brake, 0.0);
+        assert_eq!(c.brake, 1.0);
         assert!(c.handbrake);
     }
 
@@ -2991,7 +3024,7 @@ mod tests {
             drive_intent(&v).target_mps
         };
         let far = ask(100.0);
-        let mid = ask(30.0);
+        let mid = ask(25.0);
         let near = ask(10.0);
         let touching = ask(STANDING_GAP_M);
         assert!(
@@ -3002,8 +3035,11 @@ mod tests {
         // The limit still binds on an open road far behind a queue.
         assert_eq!(far, 14.0);
         // …and the arithmetic is the stopping distance, not a curve somebody
-        // liked: at 30 m the clear road is 24 m and sqrt(2*3.5*24) = 12.96.
-        assert!((mid - (2.0 * COMFORT_DECEL_MPS2 * 24.0).sqrt()).abs() < 1e-12);
+        // liked: at 25 m of gap the clear road is 25 less the standing gap
+        // (23.5 m since the gap became bumper to bumper, wave VEH3f.2b).
+        assert!(
+            (mid - (2.0 * COMFORT_DECEL_MPS2 * (25.0 - STANDING_GAP_M)).sqrt()).abs() < 1e-12
+        );
     }
 
     /// A car that has run out of lane stops at the end of it rather than

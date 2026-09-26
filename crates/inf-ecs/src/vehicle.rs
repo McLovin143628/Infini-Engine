@@ -4831,6 +4831,11 @@ pub const TYRE_WIDTH_FRAC: f64 = 0.62;
 /// child supplies the roll, and the door's write is untouched.
 pub const TYRE_ROLL_DEG: f64 = 90.0;
 
+/// **Below this forward speed an uncommanded vehicle holds its parking brake**,
+/// m/s (wave VEH3f.2b) -- `inf_physics::d3::vehicle`'s silence rule: a car at
+/// rest that nobody drives does not creep down a grade into its neighbour.
+pub const PARK_HOLD_MPS: f64 = 0.5;
+
 // ── the catalogue (island wave VEH1a) ───────────────────────────────────────
 
 /// **A vehicle class as content** — the geometry a spawner builds and the
@@ -5488,6 +5493,12 @@ impl VehicleControls {
             (0.0, -fwd)
         } else if fwd > 0.0 && rolling_back {
             (0.0, fwd)
+        } else if handbrake && fwd == 0.0 && !rolling_forward && !rolling_back {
+            // **Held at a standstill: every wheel's brake with the handbrake**
+            // (wave VEH3f.2b). The handbrake is the REAR axle's, and an
+            // all-wheel-drive car's idle creep through its front wheels rolled
+            // a stopped traffic car on at 0.5 m/s into the one beside it.
+            (0.0, 1.0)
         } else {
             (fwd, 0.0)
         };

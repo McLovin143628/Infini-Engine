@@ -495,7 +495,16 @@ fn a_car_leaving_the_steered_tier_lands_where_its_body_already_was() {
     let mut town = Town::new(DVec3::new(50.0, 0.0, 50.0));
     town.set_hour(8.5);
     town.step(240);
-    // A car that is being STEERED — the only kind the hand-off is about.
+    // A car that is being STEERED — the only kind the hand-off is about — IN
+    // its lane (within half a lane of the centreline, the driver's own
+    // `lateral_m`) and with road still ahead of it (`remaining_m`). A car at the
+    // very end of its leg is another case: once its leg's window has closed the
+    // record stands at its destination slot, and a car still short of the slot
+    // is placed there at the hand-off -- measured 4.47 m on the commuter this
+    // fixture drew once destinations stopped being other cars' homes (wave
+    // VEH3f.2b). That arrival snap is pre-existing, carried by name in the
+    // wave's report, and not this arm's rephase.
+    let half_lane = inf_ecs::traffic::DEFAULT_LANE_WIDTH_M * 0.5;
     let (target, _) = inf_physics::d3::traffic::records(&town.world)
         .into_iter()
         .find(|(g, r)| {
@@ -510,8 +519,10 @@ fn a_car_leaving_the_steered_tier_lands_where_its_body_already_was() {
                             .get::<CharacterMovement>(e)
                             .is_some_and(|cm| cm.runtime.seat.vehicle == *g)
                     })
+                && inf_physics::d3::traffic::probe_intent(&town.world, &town.bridge, *g, DT)
+                    .is_some_and(|i| i.lateral_m.abs() < half_lane && i.remaining_m > 30.0)
         })
-        .expect("a steered commuter");
+        .expect("a steered commuter in its lane, mid-leg");
     let at = |t: &Town| {
         t.world
             .entity_of(target)
@@ -1092,9 +1103,10 @@ fn a_body_in_the_lane_is_a_gap_the_car_slows_for() {
         loops: false,
     });
     assert_eq!(clear.target_mps, 8.4);
-    // A pedestrian twelve metres up the lane.
+    // A pedestrian six metres of clear road up the lane (the gap is bumper to
+    // body since wave VEH3f.2b; it was twelve metres origin to origin).
     let blocked = traffic::drive_intent(&traffic::DriveView {
-        gap_m: Some(12.0),
+        gap_m: Some(6.0),
         ..clear_view(&lane)
     });
     assert!(blocked.target_mps < clear.target_mps, "{blocked:?}");
