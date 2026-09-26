@@ -67,8 +67,10 @@ function Say($m) { Write-Host ("[{0}] {1}" -f (Get-Date -Format "HH:mm:ss"), $m)
 # `-SyncVehicles` (wave VEH3f) puts the construction machines' REAL art at the
 # GUIDs the roster's art rows name: `inf-import --vehicles` over the
 # ConstructionVehiclesPack1 export, into `Content/UE/Vehicles/<machine>/`, and it
-# removes the committed fallback the recipe copied at those GUIDs. LOCAL ONLY
-# (Fab Standard -- the user confirms the licence before anything ships). A plain
+# removes the committed fallback the recipe copied at those GUIDs. LOCAL ONLY,
+# never committed. THIS pack's tier is still unconfirmed (export.py `ship: False`):
+# its sidecars say licence_may_ship = false and `inf cook` REFUSES them unless it
+# is told --local-reference (wave VEH3f.2b's licence wall). A plain
 # `inf island build` copies the fallback back; run this after it.
 if ($SyncVehicles) {
     $manifest = Join-Path $holder "$UeOut/veh3f/manifest.json"
@@ -83,8 +85,10 @@ if ($SyncVehicles) {
     # **The car packs and the weapon pack** (wave VEH3f.2a): the three v3
     # manifests tools/ue-export/export.py writes for them (one per uproject the
     # packs live in), split by bone and written at the GUIDs the art table and
-    # the weapon table name. Textures at 4096, their real resolution. LOCAL ONLY,
-    # like everything above: Fab Standard -- the user confirms the tier first.
+    # the weapon table name. Textures at 4096, their real resolution. Never
+    # committed; the user CONFIRMED these four packs' commercial tier on
+    # 2026-09-25 -- they ship in cooked builds (licence_may_ship = true, the
+    # derived .inf_vmesh sidecars re-stamped with their source's row).
     $cars = @(
         @{ M = "veh3f2a-dd/manifest.json";   P = @("DrivableCarsBasicVehicleS") },
         @{ M = "veh3f2a-vvp2/manifest.json"; P = @("VehicleVarietyPackVolume2") },

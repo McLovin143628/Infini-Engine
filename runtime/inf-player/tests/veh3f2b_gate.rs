@@ -276,3 +276,271 @@ fn the_inner_latch_waits_for_the_reach_and_the_hand_holds_to_the_shut() {
     assert!(held_rows >= 3, "only {held_rows} row(s) ever held the pull");
     assert!(bad.is_empty(), "{}", bad.join("\n"));
 }
+
+// ── the licence: derived sidecars and the cook's wall ───────────────────────
+
+/// A one-quad glTF (two triangles) plus its `.bin`, the ASSET0 gate's.
+fn quad_gltf(dir: &std::path::Path, stem: &str) -> std::path::PathBuf {
+    let positions: [f32; 12] = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0];
+    let indices: [u16; 6] = [0, 1, 2, 0, 2, 3];
+    let mut buf: Vec<u8> = Vec::new();
+    for v in positions {
+        buf.extend_from_slice(&v.to_le_bytes());
+    }
+    let pos_len = positions.len() * 4;
+    let idx_off = buf.len();
+    for v in indices {
+        buf.extend_from_slice(&v.to_le_bytes());
+    }
+    while !buf.len().is_multiple_of(4) {
+        buf.push(0);
+    }
+    let bin = format!("{stem}.bin");
+    let json = serde_json::json!({
+        "asset": { "version": "2.0" },
+        "scene": 0,
+        "scenes": [{ "nodes": [0] }],
+        "nodes": [{ "mesh": 0 }],
+        "meshes": [{ "name": stem, "primitives": [{ "attributes": { "POSITION": 0 }, "indices": 1 }] }],
+        "buffers": [{ "uri": bin, "byteLength": buf.len() }],
+        "bufferViews": [
+            { "buffer": 0, "byteOffset": 0, "byteLength": pos_len },
+            { "buffer": 0, "byteOffset": idx_off, "byteLength": 12 }
+        ],
+        "accessors": [
+            { "bufferView": 0, "componentType": 5126, "count": 4, "type": "VEC3",
+              "min": [0, 0, 0], "max": [1, 1, 0] },
+            { "bufferView": 1, "componentType": 5123, "count": 6, "type": "SCALAR" }
+        ]
+    });
+    std::fs::write(dir.join(&bin), &buf).unwrap();
+    let path = dir.join(format!("{stem}.gltf"));
+    std::fs::write(&path, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+    path
+}
+
+/// A one-pack manifest (`licence`, `ship`) naming two meshes.
+fn licence_manifest(dir: &std::path::Path, licence: &str, ship: bool) -> std::path::PathBuf {
+    let meshes = dir.join("meshes");
+    std::fs::create_dir_all(&meshes).unwrap();
+    quad_gltf(&meshes, "Prop_A");
+    quad_gltf(&meshes, "Prop_B");
+    let manifest = serde_json::json!({
+        "schema_version": 1,
+        "generator": "the VEH3f.2b gate",
+        "packs": [{ "name": "GatePack", "license": licence, "ship": ship }],
+        "textures": [],
+        "materials": [],
+        "meshes": [
+            { "key": "Gate_A", "pack": "GatePack", "nanite": false, "material_slots": [],
+              "lods": [{ "level": 0, "file": "meshes/Prop_A.gltf", "screen_size": 1.0 }] },
+            { "key": "Gate_B", "pack": "GatePack", "nanite": false, "material_slots": [],
+              "lods": [{ "level": 0, "file": "meshes/Prop_B.gltf", "screen_size": 1.0 }] }
+        ],
+        "errors": []
+    });
+    let path = dir.join("manifest.json");
+    std::fs::write(&path, serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
+    path
+}
+
+/// Every sidecar under `dir` that names a licence pack: `(file, licence,
+/// may ship)`.
+fn licence_rows(dir: &std::path::Path) -> Vec<(String, String, Option<bool>)> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            if p.extension().is_none_or(|x| x != "toml") {
+                continue;
+            }
+            let Ok(side) = inf_asset::AssetSidecar::load(&p.with_extension("")) else {
+                continue;
+            };
+            let Some(t) = side.import.as_ref() else {
+                continue;
+            };
+            if !t.contains_key(inf_asset::licence::LICENCE_PACK_KEY) {
+                continue;
+            }
+            out.push((
+                p.file_name().unwrap().to_string_lossy().into_owned(),
+                t.get(inf_asset::licence::LICENCE_KEY)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                inf_asset::licence::may_ship(&side),
+            ));
+        }
+    }
+    out.sort();
+    out
+}
+
+/// **AFTER AN IMPORT, EVERY SIDECAR OF A PACK READS ITS MANIFEST ROW, DERIVED
+/// ONES INCLUDED** -- READS every `.toml` under the project's content that
+/// carries a licence row, `.inf_vmesh.toml` included, after the REAL bridge
+/// (`import_manifest`) re-imports a pack whose licence row changed between
+/// two runs (the 2026-09-25 relabel, in miniature: "user to confirm",
+/// `ship = false` -> "confirmed", `ship = true`), with the editor's vmesh
+/// sweep run between them so the derived sidecars exist and are cache hits
+/// the second time. The claim: every row -- produced AND derived -- is the
+/// second manifest's. Pre-wave importer: the derived `.inf_vmesh.toml` keep
+/// the first row (a cache hit re-derives nothing) -- FAILS, as the island's
+/// 487 did. Mutation -> red: the `sync_derived_licences` call removed from
+/// `import_manifest`.
+#[test]
+fn after_an_import_every_sidecar_of_a_pack_reads_its_manifest_row_derived_ones_too() {
+    use inf_editor_core::assets::ue_import::{import_manifest, UeImportOptions};
+    use inf_editor_core::assets::AssetProject;
+    let dir = tempfile::tempdir().unwrap();
+    let content = dir.path().join("project").join("Content");
+    let first = licence_manifest(dir.path(), "Fab Standard -- user to confirm", false);
+    let mut project = AssetProject::open(&content).expect("a project opens");
+    import_manifest(&mut project, &first, &UeImportOptions::default()).expect("the first import");
+    // The editor's own sweep, as a project open runs it: whatever the import
+    // did not derive already is derived now.
+    let _ = inf_editor_core::assets::vmesh::sweep(&mut project);
+    let before = licence_rows(&content);
+    let derived_before = before
+        .iter()
+        .filter(|r| r.0.ends_with(".inf_vmesh.toml"))
+        .count();
+    assert!(derived_before >= 2, "{before:?}");
+    assert!(before.iter().all(|r| r.2 == Some(false)), "{before:?}");
+    drop(project);
+
+    let second = licence_manifest(dir.path(), "Fab Standard (commercial tier), confirmed", true);
+    let mut project = AssetProject::open(&content).expect("it re-opens");
+    let report = import_manifest(&mut project, &second, &UeImportOptions::default())
+        .expect("the second import");
+    let after = licence_rows(&content);
+    let derived_after = after
+        .iter()
+        .filter(|r| r.0.ends_with(".inf_vmesh.toml"))
+        .count();
+    println!(
+        "LICENCE: {} sidecar(s) carry the pack's row after the re-import, {derived_after} derived; advisories {:?}",
+        after.len(),
+        report.advisories
+    );
+    for (file, licence, ship) in &after {
+        assert_eq!(
+            (licence.as_str(), *ship),
+            ("Fab Standard (commercial tier), confirmed", Some(true)),
+            "{file} kept the first import's licence row"
+        );
+    }
+    assert_eq!(derived_after, derived_before, "a derived sidecar lost its row");
+}
+
+/// A cookable project whose content is one mesh per `(name, licence row)`.
+fn licence_project(
+    root: &std::path::Path,
+    rows: &[(&str, Option<(&str, bool)>)],
+) -> Vec<inf_asset::AssetId> {
+    inf_project::ProjectManifest::new("licence-wall", "blank-3d")
+        .save(root)
+        .expect("scaffold");
+    let content = root.join("Content");
+    std::fs::create_dir_all(&content).unwrap();
+    let (mesh, _) = inf_dcc::to_mesh_asset(&inf_dcc::cube(1.0), &Default::default());
+    let mut ids = Vec::new();
+    for (name, row) in rows {
+        let bytes = inf_asset::encode(&mesh).unwrap();
+        let path = content.join(format!("{name}.inf_mesh"));
+        std::fs::write(&path, &bytes).unwrap();
+        let mut side = inf_asset::AssetSidecar::new(
+            inf_asset::AssetId::new(),
+            inf_asset::AssetKind::Mesh,
+            inf_asset::ContentHash::of(&bytes),
+        );
+        if let Some((pack, ship)) = row {
+            let mut t = toml::Table::new();
+            t.insert(inf_asset::licence::LICENCE_KEY.into(), "gate".into());
+            t.insert(inf_asset::licence::LICENCE_SHIP_KEY.into(), (*ship).into());
+            t.insert(inf_asset::licence::LICENCE_PACK_KEY.into(), (*pack).into());
+            side.import = Some(t);
+        }
+        side.save(&path).unwrap();
+        ids.push(side.guid);
+    }
+    ids
+}
+
+/// **THE COOK REFUSES CONTENT WHOSE LICENCE MAY NOT SHIP** -- READS the cook's
+/// verdict (`inf_packager::cook`) and the pack it writes, over a project whose
+/// closure reaches: (a) a mesh stamped as the UE-only reference mannequins are
+/// (`licence_pack = "UE5_Mannequins"`, `licence_may_ship = false`); (b) one
+/// stamped as a confirmed Fab pack (`true`); (c) one of this repository's own
+/// with no row. The claims: (a) in the closure -> the default cook REFUSES
+/// (`CookError::Licence`) and writes no pack; the same closure with
+/// `local_reference` -> a pack, reported BLOCKING; (b) + (c) alone -> a clean
+/// cook, not blocking. Pre-wave cook: no reader of `licence_may_ship` -- packs
+/// (a) silently -- FAILS. Mutation -> red: the wall's `return Err` removed from
+/// `cook` (the refusal becomes a clean cook).
+#[test]
+fn the_cook_refuses_content_whose_licence_may_not_ship() {
+    let dir = tempfile::tempdir().unwrap();
+    let proj = dir.path().join("p");
+    let ids = licence_project(
+        &proj,
+        &[
+            ("Mannequin_Ref", Some(("UE5_Mannequins", false))),
+            ("Fab_Car", Some(("DrivableCarsBasicVehicleS", true))),
+            ("Ours", None),
+        ],
+    );
+    let out = dir.path().join("out");
+    let opts = |roots: Vec<inf_asset::AssetId>, local: bool| inf_packager::CookOptions {
+        roots: Some(roots),
+        local_reference: local,
+        ..Default::default()
+    };
+    let refused = inf_packager::cook(&proj, &out, &opts(ids.clone(), false));
+    match &refused {
+        Err(inf_packager::CookError::Licence { count, listing }) => {
+            println!("LICENCE WALL: refused {count} asset(s): {listing}");
+            assert_eq!(*count, 1);
+            assert!(listing.contains("UE5_Mannequins"), "{listing}");
+        }
+        other => panic!("the cook did not refuse the reference mannequin: {other:?}"),
+    }
+    assert!(
+        !out.join(inf_packager::DEFAULT_PACK_NAME).exists(),
+        "a refused cook wrote a pack"
+    );
+    let local = inf_packager::cook(&proj, &out, &opts(ids.clone(), true)).expect("a local cook");
+    assert!(
+        local.has_blocking(),
+        "a local-reference pack must report itself blocking"
+    );
+    assert!(
+        local
+            .blocking
+            .iter()
+            .any(|b| b.contains("LOCAL REFERENCE ONLY")),
+        "{:?}",
+        local.blocking
+    );
+    let out2 = dir.path().join("out2");
+    let clean = inf_packager::cook(&proj, &out2, &opts(ids[1..].to_vec(), false))
+        .expect("the confirmed pack and our own content cook");
+    assert!(
+        !clean
+            .blocking
+            .iter()
+            .any(|b| b.contains("LOCAL REFERENCE ONLY")),
+        "{:?}",
+        clean.blocking
+    );
+    println!("LICENCE WALL: the confirmed pack + ours cook clean; the local cook is blocking");
+}

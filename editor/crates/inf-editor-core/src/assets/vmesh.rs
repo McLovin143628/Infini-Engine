@@ -265,6 +265,8 @@ pub fn ensure_vmesh(project: &mut AssetProject, mesh_id: AssetId) -> Result<Vmes
         // Either not a mesh, or already current. Distinguish for the caller.
         let derived = inf_vgeom::derived_vmesh_id(mesh_id);
         return Ok(if project.db().contains(derived) {
+            // A cache hit still answers for its licence (wave VEH3f.2b).
+            sync_derived_licence(project, derived, mesh_id);
             VmeshDerivation::Cached(derived)
         } else {
             VmeshDerivation::Skipped
@@ -453,6 +455,92 @@ fn derived_import_table(
         }
     }
     t
+}
+
+/// **A derived `.inf_vmesh` carries its SOURCE's licence row, whenever it is
+/// asked** (wave VEH3f.2b) -- the one door for the licence of a derivation.
+///
+/// # The defect it closes, measured
+///
+/// [`derived_import_table`] COPIES the source's row at derivation time, and a
+/// derivation re-runs only when the source's BYTES change. A licence is not in
+/// the bytes: when the user confirmed the four Fab packs' commercial tier on
+/// 2026-09-25 and the island was re-imported, every produced sidecar was
+/// re-stamped `licence_may_ship = true` and every `.inf_vmesh.toml` derived at
+/// the first import kept `false` and the old licence string (dd_ 209, vvp1 145,
+/// vvp2 115, the weapon pack 18) -- cache hits, so nothing re-wrote them.
+///
+/// So the row is re-derived from the source by this function, not at
+/// derivation time only: the importer calls it after it stamps
+/// (`ue_import::import_manifest`), and [`ensure_vmesh`]'s cache hit calls it
+/// for the one mesh it was asked about. A source with no row leaves its
+/// derived sidecar's keys REMOVED (a derivation of unlicensed content has no
+/// licence of its own). Returns how many derived sidecars were rewritten.
+pub fn sync_derived_licences(project: &mut AssetProject) -> usize {
+    let derived: Vec<(AssetId, AssetId)> = project
+        .db()
+        .iter()
+        .filter(|e| e.kind() == AssetKind::MeshletMesh)
+        .filter_map(|e| {
+            let src = e.sidecar.import.as_ref()?.get(SOURCE_MESH_KEY)?.as_str()?;
+            Some((e.id(), src.parse::<AssetId>().ok()?))
+        })
+        .collect();
+    let mut n = 0usize;
+    for (d, src) in derived {
+        if sync_derived_licence(project, d, src) {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// [`sync_derived_licences`] for one derived asset `d` of source `src`;
+/// `true` when its sidecar was rewritten.
+fn sync_derived_licence(project: &mut AssetProject, d: AssetId, src: AssetId) -> bool {
+    // The source's row as it is ON DISK: the importer stamps sidecars by path
+    // (`stamp_licences` saves and does not re-register), so the database's
+    // copy of a source stamped this run is the one it had when it opened.
+    let src_row = project
+        .db()
+        .get(src)
+        .and_then(|e| {
+            inf_asset::AssetSidecar::load(&e.path)
+                .ok()
+                .map(|s| s.import)
+                .unwrap_or_else(|| e.sidecar.import.clone())
+        })
+        .unwrap_or_default();
+    let Some(entry) = project.db().get(d) else {
+        return false;
+    };
+    let mut side = entry.sidecar.clone();
+    let mut t = side.import.take().unwrap_or_default();
+    let mut changed = false;
+    for key in super::ue_import::LICENCE_KEYS {
+        match src_row.get(key) {
+            Some(v) if t.get(key) != Some(v) => {
+                t.insert(key.to_string(), v.clone());
+                changed = true;
+            }
+            None if t.contains_key(key) => {
+                t.remove(key);
+                changed = true;
+            }
+            _ => {}
+        }
+    }
+    if !changed {
+        return false;
+    }
+    side.import = Some(t);
+    match project.replace_sidecar(d, side) {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!("inf-editor-core: the licence row of {d} was not re-stamped: {e}");
+            false
+        }
+    }
 }
 
 /// The source-mesh hash a derived sidecar records, if it is one of ours.

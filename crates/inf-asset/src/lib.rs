@@ -28,6 +28,7 @@ pub mod hash;
 pub mod id;
 pub mod import_cache;
 pub mod kind;
+pub mod licence;
 pub mod pack;
 pub mod payload;
 pub mod sidecar;

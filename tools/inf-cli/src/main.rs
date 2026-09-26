@@ -185,6 +185,7 @@ fn cmd_cook(args: &[String]) -> ExitCode {
     // `zstd` decodes through the pure-Rust `ruzstd` in a browser, 7.3x slower
     // than the C zstd a desktop links.
     let mut terrain_codec: Option<inf_asset::BlockCodec> = None;
+    let mut local_reference = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -241,6 +242,10 @@ fn cmd_cook(args: &[String]) -> ExitCode {
                     }
                 }
             }
+            // The licence wall's developer door (wave VEH3f.2b): pack content
+            // whose licence row says it may not ship, and report the pack as
+            // blocking -- a local build of a project holding reference art.
+            "--local-reference" => local_reference = true,
             "--block-codec" | "--terrain-codec" => {
                 i += 1;
                 terrain_codec = match args.get(i).map(String::as_str) {
@@ -285,6 +290,7 @@ fn cmd_cook(args: &[String]) -> ExitCode {
 
     let mut opts = CookOptions {
         roots,
+        local_reference,
         ..Default::default()
     };
     if let Some(codec) = terrain_codec {

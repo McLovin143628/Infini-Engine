@@ -1490,6 +1490,16 @@ pub fn import_manifest(
     let mut stamped = stamp_licences(project, &mut report);
     let (swept, exact) = sweep_licences(project, &dest, &mut report);
     stamped += swept;
+    // …and every DERIVED `.inf_vmesh` of a stamped source, which a cache hit
+    // never re-derives (wave VEH3f.2b: a re-import after the licence relabel
+    // left 487 derived sidecars on the old row).
+    let derived = super::vmesh::sync_derived_licences(project);
+    stamped += derived;
+    if derived > 0 {
+        report.advisories.push(format!(
+            "{derived} derived .inf_vmesh sidecar(s) re-stamped with their source's licence"
+        ));
+    }
     if swept > 0 {
         report.advisories.push(format!(
             "{swept} asset(s) in {} were produced by the import and are the \
@@ -1633,23 +1643,15 @@ fn dependency_closure(project: &AssetProject, roots: &[AssetId]) -> Vec<AssetId>
 
 /// The sidecar `import` keys the licence position is written to.
 ///
-/// Named once, here, because a gate reads them back: **carried item 96** was
+/// Named once -- in Ring 0 since wave VEH3f.2b (`inf_asset::licence`), where
+/// the COOK reads them too -- because a gate reads them back: **carried item 96** was
 /// that the MetaHuman licence row existed in the export manifest and in the
 /// printed import report and **nowhere on disk** — a grep for `licen` over all
 /// 272 imported sidecars returned nothing. A licence that travels only in a
 /// console line is a licence nobody can find six months later, which for content
 /// that MAY SHIP and MAY NOT BE COMMITTED is the one fact that has to be
 /// attached to the bytes.
-pub const LICENCE_KEY: &str = "licence";
-/// Whether the pack's licence permits SHIPPING this asset — see [`LICENCE_KEY`].
-pub const LICENCE_SHIP_KEY: &str = "licence_may_ship";
-/// Which pack the asset came from — see [`LICENCE_KEY`].
-pub const LICENCE_PACK_KEY: &str = "licence_pack";
-
-/// The three keys a licence row is written as, together — so a reader that has
-/// to CARRY one (a derivation, a rebind) copies all three rather than the one it
-/// happened to remember.
-pub const LICENCE_KEYS: [&str; 3] = [LICENCE_KEY, LICENCE_SHIP_KEY, LICENCE_PACK_KEY];
+pub use inf_asset::licence::{LICENCE_KEY, LICENCE_KEYS, LICENCE_PACK_KEY, LICENCE_SHIP_KEY};
 
 /// **Write the pack's licence position into every asset this run produced.**
 ///
@@ -1813,12 +1815,27 @@ fn sweep_licences(
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
-        if text.contains(LICENCE_PACK_KEY) {
-            continue;
-        }
         let Ok(mut side) = inf_asset::AssetSidecar::load(&path.with_extension("")) else {
             continue;
         };
+        if text.contains(LICENCE_PACK_KEY) {
+            // Stamped already -- by this run's per-asset pass, or by an earlier
+            // run. An earlier run's row for THIS run's single pack is re-stamped
+            // when the licence moved (wave VEH3f.2b: the relabel); anything else
+            // keeps the row it has.
+            let row = side.import.as_ref();
+            let same_pack = row
+                .and_then(|t| t.get(LICENCE_PACK_KEY))
+                .and_then(|v| v.as_str())
+                == Some(pack.as_str());
+            let current = row.and_then(|t| t.get(LICENCE_KEY)).and_then(|v| v.as_str())
+                == Some(licence.as_str())
+                && row.and_then(|t| t.get(LICENCE_SHIP_KEY)).and_then(|v| v.as_bool())
+                    == Some(ship);
+            if !(exact && same_pack && !current) {
+                continue;
+            }
+        }
         let mut t = side.import.take().unwrap_or_default();
         t.insert(LICENCE_KEY.into(), licence.clone().into());
         t.insert(LICENCE_SHIP_KEY.into(), ship.into());

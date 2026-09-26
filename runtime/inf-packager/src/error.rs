@@ -115,6 +115,22 @@ pub enum CookError {
     /// A WASM mod cook step failed (transpile, crate generation, or wasm build).
     #[error("mod: {0}")]
     Mod(String),
+
+    /// **The licence wall** (wave VEH3f.2b): the closure reaches assets whose
+    /// sidecar licence row says `licence_may_ship = false` -- content a pack's
+    /// licence keeps LOCAL (reference-only packs, a tier nobody has confirmed).
+    /// The cook refuses to write a shipped pack with them in it; a developer's
+    /// local cook passes `CookOptions::local_reference` and gets a pack that
+    /// reports itself as blocking.
+    #[error(
+        "{count} asset(s) in this cook may not ship -- their licence row says licence_may_ship = false ({listing}). Cook with --local-reference for a pack that is never shipped, or remove them from the closure"
+    )]
+    Licence {
+        /// How many closure assets refuse.
+        count: usize,
+        /// `pack: name (guid)` for the first few, for the human reading it.
+        listing: String,
+    },
 }
 
 /// Convenience alias.

@@ -98,6 +98,14 @@ pub struct CookOptions {
     pub fracture: FractureCookOptions,
     /// Per-block compression of the streaming containers (IASSET1).
     pub compression: BlockCompressionOptions,
+    /// **Pack content whose licence may not ship** (wave VEH3f.2b). `false` --
+    /// the default, and what every shipped build is cooked with -- makes the
+    /// cook REFUSE a closure that reaches an asset whose sidecar says
+    /// `licence_may_ship = false` ([`CookError::Licence`]). `true` is a
+    /// developer's LOCAL cook of a project holding reference content: the pack
+    /// is written, and the cook reports it as blocking, so it can never be
+    /// mistaken for one that may ship.
+    pub local_reference: bool,
 }
 
 /// **The cook's compile step for the streaming containers** (IASSET1).
@@ -182,6 +190,26 @@ impl Default for VgeomCookOptions {
             min_triangles: 2048,
         }
     }
+}
+
+/// **Every closure asset whose licence row says it may not ship** (wave
+/// VEH3f.2b), `(id, name, pack)` in closure order -- the cook's one reader of
+/// `inf_asset::licence::may_ship`. An asset with no row (this repository's own
+/// content) is never refused for want of one.
+pub fn unshippable_licences(db: &AssetDb, closure: &[AssetId]) -> Vec<(AssetId, String, String)> {
+    closure
+        .iter()
+        .filter_map(|id| {
+            let e = db.get(*id)?;
+            (inf_asset::licence::may_ship(&e.sidecar) == Some(false)).then(|| {
+                (
+                    *id,
+                    e.name.clone(),
+                    inf_asset::licence::pack_of(&e.sidecar).unwrap_or_else(|| "?".into()),
+                )
+            })
+        })
+        .collect()
 }
 
 /// Derive the deterministic `.inf_vmesh` asset id for a given mesh id.
@@ -1370,6 +1398,32 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
     let mut blocking: Vec<String> = Vec::new();
     let (closure, unreadable) = dependency_closure(&db, &roots);
     blocking.extend(unreadable);
+    // ── THE LICENCE WALL (wave VEH3f.2b) ─────────────────────────────────────
+    //
+    // Before a byte is read: a closure asset whose licence row says it may not
+    // ship refuses the cook, or -- a developer's local cook -- is packed and the
+    // pack reports itself blocking. Everything derived from it (its meshlet
+    // DAG, its fracture, its sections' materials) is keyed off a closure asset,
+    // so refusing the source refuses all of it.
+    let refused = unshippable_licences(&db, &closure);
+    if !refused.is_empty() {
+        let listing = refused
+            .iter()
+            .take(6)
+            .map(|(id, name, pack)| format!("{pack}: {name} ({id})"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        if !opts.local_reference {
+            return Err(CookError::Licence {
+                count: refused.len(),
+                listing,
+            });
+        }
+        blocking.push(format!(
+            "LOCAL REFERENCE ONLY -- {} packed asset(s) may not ship ({listing}); this pack must never ship",
+            refused.len()
+        ));
+    }
     // **WHAT THIS COOK WILL ACTUALLY PACK** (audit ROAD1b) — the set the derived
     // ids below are guarded against.
     //
