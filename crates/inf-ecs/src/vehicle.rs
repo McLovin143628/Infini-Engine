@@ -5844,6 +5844,16 @@ pub trait Vehicle: Send + Sync + 'static {
     /// is the class's business.
     fn control(&mut self, controls: VehicleControls);
 
+    /// **Whether anybody commanded this vehicle for the step about to be
+    /// solved** -- [`VehicleControls::occupied`] of the controls in force
+    /// (the VEH3h audit). The parking hold beyond the collider band reads it:
+    /// a vehicle nobody speaks to is parked; a driver stopped at a light is
+    /// not. A class that does not say is treated as commanded, so the hold
+    /// never freezes a machine it cannot read.
+    fn commanded(&self) -> bool {
+        true
+    }
+
     /// The tunables, by name — the live-tuning door's target.
     fn tune(&mut self, name: &str, value: f64) -> bool;
 
@@ -8782,6 +8792,10 @@ impl Vehicle for RaycastVehicle {
         self.controls = controls;
     }
 
+    fn commanded(&self) -> bool {
+        self.controls.occupied
+    }
+
     fn tune(&mut self, name: &str, value: f64) -> bool {
         self.tuning.set(name, value)
     }
@@ -10295,6 +10309,10 @@ impl Vehicle for HullVehicle {
         self.controls = controls;
     }
 
+    fn commanded(&self) -> bool {
+        self.controls.occupied
+    }
+
     fn tune(&mut self, name: &str, value: f64) -> bool {
         self.tuning.set(name, value)
     }
@@ -10919,6 +10937,10 @@ impl Vehicle for RotorVehicle {
 
     fn control(&mut self, controls: VehicleControls) {
         self.controls = controls;
+    }
+
+    fn commanded(&self) -> bool {
+        self.controls.occupied
     }
 
     fn tune(&mut self, name: &str, value: f64) -> bool {

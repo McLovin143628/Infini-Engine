@@ -510,6 +510,11 @@ pub struct PhysicsBridge3D {
     /// only on the way in, so a shorter level cannot read a longer one's tail.
     live_scratch: Vec<usize>,
     seen_scratch: Vec<Uuid>,
+    /// **The parked vehicles held BEYOND the collider band** (the VEH3h
+    /// audit) -- chassis whose rapier body `d3::vehicle`'s parking hold has
+    /// made kinematic because the ground they were parked on is not resident.
+    /// See [`parked_beyond_band`](Self::parked_beyond_band).
+    pub(crate) parked_beyond_band: BTreeSet<Uuid>,
 }
 
 impl PhysicsBridge3D {
@@ -552,7 +557,20 @@ impl PhysicsBridge3D {
             snaps_scratch: Vec::new(),
             live_scratch: Vec::new(),
             seen_scratch: Vec::new(),
+            parked_beyond_band: BTreeSet::new(),
         }
+    }
+
+    /// **Every parked vehicle held still beyond the collider band** (the
+    /// VEH3h audit), ascending. A chassis is in it while nobody commands it,
+    /// nobody sits at its wheel, it is not hitched, it was at rest, and the
+    /// band says the fine colliders under it are not resident -- the step
+    /// makes it kinematic where it stands rather than let it fall onto the
+    /// bare terrain under its pad and roll away (the CI island's camp
+    /// appliance ran 36.63 m down the grade in fifteen seconds). It leaves the
+    /// set, dynamic again and at rest, the step its ground is back.
+    pub fn parked_beyond_band(&self) -> &BTreeSet<Uuid> {
+        &self.parked_beyond_band
     }
 
     /// **The one door every collider attach goes through** (C4-30).

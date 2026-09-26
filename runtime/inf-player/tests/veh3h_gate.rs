@@ -330,11 +330,11 @@ fn circuits(design: &inf_island::IslandDesign) -> (DVec2, Vec<Vec<DVec2>>) {
 /// streamers, the cells that carry the town's authored vehicles), then every
 /// resident rig is taken out of the world -- the crowd's and the traffic's
 /// reason: a scripted driver has no eyes. (The CI island parks a camp car on
-/// the town's centre street and a fire appliance on its pad; the appliance is
-/// ALSO the cert's finding that a parked vehicle beyond the 64 m collider band
-/// rolls off its pad -- 36 m in 15 s with the hero 120 m away, see
-/// `driving-parity.md`, routed to PERF1's sim LOD.) Answers the largest
-/// circuit and how many vehicles were set aside.
+/// the town's centre street and a fire appliance on its lane; the appliance
+/// was the cert's finding that a parked vehicle beyond the 64 m collider band
+/// rolled off -- 36 m in 15 s with the hero 120 m away -- closed by the VEH3h
+/// audit's parking hold, see `a_parked_vehicle_beyond_the_collider_band_holds_its_pad`.)
+/// Answers the largest circuit and how many vehicles were set aside.
 fn clear_circuit(sim: &mut RuntimeSim, design: &inf_island::IslandDesign) -> (Vec<DVec2>, usize) {
     let (centre, loops) = circuits(design);
     let y0 = sim.terrain_height_at(centre.x, centre.y);
@@ -1311,8 +1311,10 @@ fn three_classes_against_their_forza_inspirations() {
 }
 
 /// Where the CI island's camp fire appliance is after `seconds` with the hero
-/// standing at `hero` (x, z): `(start, end)` of its rapier body.
-fn appliance_after(hero: (f64, f64), seconds: usize) -> (DVec3, DVec3) {
+/// standing at `hero` (x, z): `(start, end)` of its rapier body, and whether
+/// the parking hold held it beyond the band at the end
+/// (`PhysicsBridge3D::parked_beyond_band`).
+fn appliance_after(hero: (f64, f64), seconds: usize) -> (DVec3, DVec3, bool) {
     let tmp = tempfile::tempdir().expect("tmp");
     let proj = build_project(tmp.path());
     let pack = cook(&proj, &tmp.path().join("out"));
@@ -1348,33 +1350,51 @@ fn appliance_after(hero: (f64, f64), seconds: usize) -> (DVec3, DVec3) {
         }
     }
     let (g, p0) = start.expect("the camp appliance streamed in");
-    (p0, pos(&sim, g))
+    let held = sim.bridge3d().parked_beyond_band().contains(&g);
+    (p0, pos(&sim, g), held)
 }
 
-/// **A PARKED VEHICLE BEYOND THE COLLIDER BAND ROLLS OFF ITS PAD** -- the
-/// cert's own finding, asserted AS A DEFECT (P22's precedent: the day it is
-/// fixed this arm reds and the memo row is rewritten).
+/// **A PARKED VEHICLE BEYOND THE COLLIDER BAND HOLDS ITS PAD** (the VEH3h
+/// audit; the cert shipped this arm asserting the DEFECT -- the appliance
+/// rolled **36.63 m** in fifteen seconds with the hero 120 m away -- and routed
+/// it to PERF1. It is a parking-hold defect, and it is closed here.)
 ///
 /// READS the CI island's camp fire appliance's rapier body over fifteen
 /// seconds, the crowd and traffic set aside, with the hero standing 120 m
-/// away (outside `DEFAULT_COLLIDER_NEAR_M`, 64 m -- the fine colliders the
-/// appliance's pad is made of are banded out, the vehicle is not) and, as the
-/// CONTROL, 20 m away. Measured: it rolls tens of metres down the grade with
-/// the hero far, and holds with the hero near. Routed to PERF1's sim LOD (a
-/// parked rig outside the band frozen, not simulated on the bare ground). A
-/// tree with no VEH3 arc shows the same (the band predates the arc) -- this
-/// arm is a finding, not a closure.
+/// away (outside `DEFAULT_COLLIDER_NEAR_M`, 64 m -- the fine colliders under
+/// the appliance are banded out, the vehicle is not) and, as the CONTROL,
+/// 20 m away; and `PhysicsBridge3D::parked_beyond_band` (the hold's
+/// engagement: the appliance is in it at the end of the far run and not of
+/// the near one). ASSERTS: beyond the band it moves **0.00 m** and falls
+/// 0.00 m, held; inside it, simulated, under 3 m. THE CONTROL IS ITSELF A
+/// FINDING, printed and carried: inside the band the appliance creeps
+/// **1.51 m** in fifteen seconds at ~0.11 m/s -- the island generator parks
+/// it 6 m off the lane's centreline on a 7.8 deg grade between two
+/// buildings, it rolls 18.6 deg within two seconds with one wheel hanging, and
+/// its chassis slides on what it leans on (`driving-parity.md` §13). A tree
+/// with no VEH3 arc rolls tens of metres beyond the band. Mutation: the hold
+/// disabled (`hold_beyond_band` answering `false`) -> RED, the appliance
+/// rolls off again.
 #[test]
-fn a_parked_vehicle_beyond_the_collider_band_rolls_off_its_pad() {
-    let (f0, f1) = appliance_after((430.0, -376.0), 15);
-    let (n0, n1) = appliance_after((392.0, -280.0), 15);
+fn a_parked_vehicle_beyond_the_collider_band_holds_its_pad() {
+    let (f0, f1, far_held) = appliance_after((430.0, -376.0), 15);
+    let (n0, n1, near_held) = appliance_after((392.0, -280.0), 15);
     let far = DVec3::new(f1.x - f0.x, 0.0, f1.z - f0.z).length();
     let near = DVec3::new(n1.x - n0.x, 0.0, n1.z - n0.z).length();
     println!(
-        "PARKED APPLIANCE: {far:.2} m in 15 s with the hero 120 m away ({:.2} m of fall), {near:.2} m with the hero 20 m away",
+        "PARKED APPLIANCE: {far:.2} m in 15 s with the hero 120 m away ({:.2} m of fall, held {far_held}), {near:.2} m with the hero 20 m away (held {near_held})",
         f0.y - f1.y
     );
-    assert!(far > 10.0, "the appliance held beyond the band ({far:.2} m) -- the defect is fixed; rewrite the memo row");
+    assert!(
+        far < 0.01 && (f0.y - f1.y).abs() < 0.01,
+        "the parked appliance moved {far:.3} m ({:.3} m of fall) beyond the collider band",
+        f0.y - f1.y
+    );
+    assert!(
+        far_held,
+        "the appliance held still beyond the band without the hold -- the arm measured nothing"
+    );
+    assert!(!near_held, "the hold froze a vehicle INSIDE the band");
     assert!(
         near < 3.0,
         "the control moved {near:.2} m with the hero beside it"

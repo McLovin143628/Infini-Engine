@@ -145,7 +145,24 @@ pub fn step_vehicles(
     // whole, so a car that was despawned leaves nothing behind.
     let mut drivetrains: Vec<(Uuid, inf_ecs::vehicle::DrivetrainState, f64)> =
         Vec::with_capacity(guids.len());
+    // **THE PARKING HOLD BEYOND THE COLLIDER BAND** (the VEH3h audit): the
+    // band and the seated drivers, once a step for every vehicle.
+    let band = bridge.sim_band(world);
+    let driven = super::carjack::occupied_chassis(world);
+    bridge
+        .parked_beyond_band
+        .retain(|g| guids.binary_search(g).is_ok());
     for chassis in guids {
+        if hold_beyond_band(world, bridge, chassis, &band, &driven) {
+            // Held: nothing to solve, and the drivetrain it had is the one it
+            // has (the trace carries it unchanged rather than losing the car).
+            if let Some(v) = bridge.vehicle_of(chassis) {
+                if let Some(state) = v.drivetrain() {
+                    drivetrains.push((chassis, state, v.idle_rpm()));
+                }
+            }
+            continue;
+        }
         if let Some(o) = step_one(
             world,
             bridge,
@@ -170,6 +187,67 @@ pub fn step_vehicles(
     // this rides the `vehicle_step` fence both hosts already carry.
     super::bodywork::step_bodywork(world, bridge, dt);
     out
+}
+
+/// **Hold a parked vehicle still where its ground is not resident** (the
+/// VEH3h audit) -- `true` while held, and then the step does not solve it.
+///
+/// The collider band (`inf_ecs::band`, 64 m) drops the fine static colliders
+/// beyond it -- a pad, a kerb, a forecourt -- and keeps the vehicles, so a
+/// car parked on a levelled pad beyond the band stood on nothing and fell to
+/// the terrain under it and rolled: the CI island's camp fire appliance ran
+/// **36.63 m** down the grade in fifteen seconds with the hero 120 m away
+/// (`veh3h_gate::a_parked_vehicle_beyond_the_collider_band_holds_its_pad`).
+/// A parked car must not move whether or not its ground is resident, so a
+/// vehicle that nobody commands (`Vehicle::commanded`), nobody sits at the
+/// wheel of, is not hitched and is at rest (below `PARK_HOLD_MPS`) is made
+/// KINEMATIC where it stands the step its chassis leaves the band's near
+/// tier, before the solver can drop it, and dynamic again -- at rest, on its
+/// ground -- the step it comes back. A car with a driver (a responder stopped
+/// at a light) is never held, and one set rolling by a collision is not at
+/// rest. Both hosts run this door, so PIE and shipping hold the same cars.
+fn hold_beyond_band(
+    world: &EcsWorld,
+    bridge: &mut PhysicsBridge3D,
+    chassis: Uuid,
+    band: &inf_ecs::SimBand,
+    driven: &BTreeSet<Uuid>,
+) -> bool {
+    let Some(body) = bridge.body_of(chassis) else {
+        return false;
+    };
+    let Some(position) = bridge.world().body_translation(body) else {
+        return false;
+    };
+    let held = bridge.parked_beyond_band.contains(&chassis);
+    let at_rest = held
+        || bridge
+            .world()
+            .body_linvel(body)
+            .is_some_and(|v| v.length() < inf_ecs::vehicle::PARK_HOLD_MPS);
+    let commanded = bridge.vehicle_of(chassis).is_none_or(|v| v.commanded());
+    let hitched = world
+        .entity_of(chassis)
+        .and_then(|e| world.world().get::<inf_ecs::components::Joint3D>(e))
+        .is_some();
+    let beyond = !band
+        .tier(position, DVec3::ZERO, glam::DQuat::IDENTITY)
+        .is_near();
+    let hold = beyond && at_rest && !commanded && !hitched && !driven.contains(&chassis);
+    if hold && !held {
+        let w = bridge.world_mut();
+        w.set_body_linvel(body, DVec3::ZERO);
+        w.set_body_angvel(body, DVec3::ZERO);
+        w.set_body_kind(body, super::world::BodyKind3D::Kinematic);
+        bridge.parked_beyond_band.insert(chassis);
+    } else if !hold && held {
+        let w = bridge.world_mut();
+        w.set_body_kind(body, super::world::BodyKind3D::Dynamic);
+        w.set_body_linvel(body, DVec3::ZERO);
+        w.set_body_angvel(body, DVec3::ZERO);
+        bridge.parked_beyond_band.remove(&chassis);
+    }
+    hold
 }
 
 /// How many rays one tyre's footprint is sampled with (wave VEH3a).
