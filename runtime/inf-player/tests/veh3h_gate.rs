@@ -1542,3 +1542,301 @@ fn the_imported_row_drives_the_same_lap_on_both_hosts() {
         "the imported lap's state digests diverge"
     );
 }
+
+// ── the step beside a car (the VEH3h audit) ─────────────────────────────────
+
+/// One row per body kind the island can carry: every committed SHELL, two
+/// IMPORTED rows (art-referencing; the CI island draws their fallback) and one
+/// PRIMITIVE row.
+const BESIDE_ROWS: [(&str, &str); 8] = [
+    ("shell_coupe", "bravado_gauntlet_hellfire"),
+    ("shell_sedan", "albany_washington"),
+    ("shell_suv", "benefactor_xls"),
+    ("shell_pickup", "bravado_duneloader"),
+    ("shell_cruiser", "bravado_buffalo_cruiser"),
+    ("imported dd_suv", "obey_rocoto"),
+    ("imported dd_sedan", "karin_asterope_gz"),
+    ("primitive", "vulcar_ingot"),
+];
+
+/// The guid the beside-a-car arm spawns its car under.
+const BESIDE_CAR: Uuid = Uuid::from_u128(0x5645_4833_4253_4400_0000_0000_0000_0001);
+
+/// The whole fixed step (ms) and the scene queries it asked, min of five rounds
+/// of twenty steps with the hero held at `at`, after twenty to settle.
+fn step_with_hero_at(sim: &mut RuntimeSim, at: DVec3) -> (f64, f64) {
+    sim.set_step_profiling(true);
+    for _ in 0..20 {
+        put_hero(sim, at);
+        sim.step_once(RuntimeInput::default());
+    }
+    let mut best = f64::INFINITY;
+    let mut asked = f64::INFINITY;
+    for _ in 0..5 {
+        let mut ms = 0.0;
+        let q0 = sim.bridge3d().world().queries();
+        for _ in 0..20 {
+            put_hero(sim, at);
+            sim.step_once(RuntimeInput::default());
+            ms += sim.step_profile().total_ms();
+        }
+        best = best.min(ms / 20.0);
+        asked = asked.min((sim.bridge3d().world().queries() - q0) as f64 / 20.0);
+    }
+    (best, asked)
+}
+
+/// **A FIXED STEP BESIDE A CAR IS A FIXED STEP** (the VEH3h audit) -- the arm
+/// the "Harbour City cruiser stall" asked for, on every body kind.
+///
+/// The cert's hands-on read `character move` at 356-372 ms with the hero 2.5 m
+/// off the Harbour City cruiser and carried it undiagnosed, with the obvious
+/// suspect the shell's 7 000 triangles. The audit's profile refuted the car
+/// (`shell_body` carries no collider; the chassis collider is a box) and named
+/// the cause -- a crowd PILE in a building 37 m away
+/// (`character_move_cost::a_pile_of_characters_is_set_aside_and_one_in_the_way_still_blocks`
+/// is its arm). This one closes the suspicion the cert wrote down: the car
+/// itself costs the step nothing.
+///
+/// READS the CI island's SHIPPED host (the pack), the crowd and traffic set
+/// aside and every level rig cleared (the lap's instrument): each
+/// `BESIDE_ROWS` car spawned beside the circuit's start through the one rig
+/// door, the whole fixed step and `PhysicsWorld3D::queries` per step with
+/// the hero in open ground 20 m off it (the CONTROL: the car's own wheel rays
+/// are paid wherever the hero stands) and stood 2.5 m off its centre on each
+/// of its four sides, and `pawns_set_aside` over all of it. ASSERTS the
+/// counted half everywhere: the queries a step beside every car are at most
+/// twice the control's, and nothing is set aside (there is no pile beside a
+/// car). The clock half -- every step beside every car at most twice the
+/// control's, min of five -- in release off CI (the house conditioning).
+/// A tree with no VEH3 arc has no shells or imported rows and fails at the
+/// roster. VACUOUS BY MUTATION, said: this arm certifies an ABSENCE (no
+/// body kind stalls the step beside it) and no production mutation reaches
+/// it -- the stall was never the car. `stacked_pawns` answering nothing
+/// leaves it green (there is no pile here) and reds the pile arm, which is
+/// why the two are named together.
+#[test]
+fn a_fixed_step_beside_every_body_kind_is_a_fixed_step() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let proj = build_project(tmp.path());
+    let pack = cook(&proj, &tmp.path().join("out"));
+    let recipe = inf_island::IslandRecipe::load(&fixture_recipe()).expect("recipe");
+    let design = inf_island::read_design(&recipe).expect("design");
+    let mut sim = pack_sim(&pack);
+    sim.set_crowd_population(Default::default());
+    sim.set_traffic_population(Default::default());
+    let (pts, _) = clear_circuit(&mut sim, &design);
+    let p = pts[0];
+    let ground = sim.terrain_height_at(p.x, p.y);
+    let spot = DVec3::new(p.x, ground + 1.0, p.y);
+    // Five more seconds at the spot: the first seconds after a clear are the
+    // streamers finishing (measured: 2.3 ms falling to 0.3), and a control
+    // taken while the world settles would flatter every row after it.
+    for _ in 0..300 {
+        put_hero(&mut sim, spot);
+        sim.step_once(RuntimeInput::default());
+    }
+    let set_aside0 = sim.bridge3d().world().pawns_set_aside();
+    let (bare_ms, bare_q) = step_with_hero_at(&mut sim, spot);
+    println!("BESIDE: open ground, no car {bare_ms:.3} ms a step, {bare_q:.1} queries a step");
+    let release = !cfg!(debug_assertions) && std::env::var_os("CI").is_none();
+    let mut worst: (f64, String) = (0.0, String::new());
+    for (kind, row) in BESIDE_ROWS {
+        let def: VehicleDef = *inf_ecs::roster::roster()
+            .get(row)
+            .unwrap_or_else(|| panic!("the roster has no `{row}`"));
+        let centre = DVec3::new(
+            p.x + 6.0,
+            inf_ecs::vehicle::resting_origin_y(&def, ground),
+            p.y,
+        );
+        inf_ecs::vehicle::spawn_rig_at(
+            sim.world_mut(),
+            BESIDE_CAR,
+            &def,
+            &inf_ecs::vehicle::RigSpawn {
+                name: "Beside Car".into(),
+                at: centre,
+                yaw_deg: 0.0,
+                paint: inf_ecs::math::Color::new(0.2, 0.2, 0.6, 1.0),
+                clip: None,
+                engine_voice: false,
+                livery: None,
+            },
+            true,
+        );
+        sim.world_mut().propagate();
+        sim.world_mut().mark_dirty();
+        // The CONTROL is the same world with the same car in it, the hero
+        // twenty metres off: the car's own wheel rays are a vehicle-phase
+        // cost the step pays wherever the hero stands.
+        let (open_ms, open_q) = step_with_hero_at(
+            &mut sim,
+            DVec3::new(centre.x - 20.0, ground + 1.0, centre.z),
+        );
+        println!("BESIDE: {kind:<18} {row:<26} 20 m  {open_ms:.3} ms, {open_q:.1} queries a step (the control)");
+        for (side, off) in [
+            ("front", DVec3::new(0.0, 0.0, 2.5)),
+            ("back", DVec3::new(0.0, 0.0, -2.5)),
+            ("left", DVec3::new(2.5, 0.0, 0.0)),
+            ("right", DVec3::new(-2.5, 0.0, 0.0)),
+        ] {
+            let at = DVec3::new(centre.x + off.x, ground + 1.0, centre.z + off.z);
+            let (ms, q) = step_with_hero_at(&mut sim, at);
+            println!(
+                "BESIDE: {kind:<18} {row:<26} {side:<5} {ms:.3} ms ({:.2}x), {q:.1} queries a step",
+                ms / open_ms
+            );
+            if ms / open_ms > worst.0 {
+                worst = (ms / open_ms, format!("{row} {side}"));
+            }
+            assert!(
+                q <= 2.0 * open_q.max(1.0),
+                "beside {row} ({kind}, {side}) the step asked {q:.1} queries against {open_q:.1} in open ground"
+            );
+            if release {
+                assert!(
+                    ms <= 2.0 * open_ms,
+                    "beside {row} ({kind}, {side}) the fixed step is {ms:.3} ms against {open_ms:.3} in open ground"
+                );
+            }
+        }
+        let rigs: Vec<Uuid> = {
+            let w = sim.world();
+            w.world()
+                .iter_entities()
+                .filter_map(|e| e.get::<inf_ecs::Guid>().map(|g| g.0))
+                .filter(|g| inf_ecs::vehicle::rig_of(w, *g).is_some())
+                .collect()
+        };
+        assert!(!rigs.is_empty(), "the {row} rig never spawned");
+        for g in &rigs {
+            if let Some(e) = sim.world().entity_of(*g) {
+                sim.world_mut().despawn(e);
+            }
+        }
+        sim.world_mut().mark_dirty();
+    }
+    println!(
+        "BESIDE: the dearest spot {:.2}x open ground ({})",
+        worst.0, worst.1
+    );
+    assert_eq!(
+        sim.bridge3d().world().pawns_set_aside(),
+        set_aside0,
+        "a body was set aside beside a car -- there is no pile here"
+    );
+}
+
+/// Whole-step p50 over the last thirty of `steps` steps with the hero held at
+/// `at` (a DWELL: the Harbour City pile took ~1.5 s after it materialized to
+/// reach its full price), and the steered characters at the end.
+fn dwell_step_p50(sim: &mut RuntimeSim, at: DVec3, steps: usize) -> (f64, usize) {
+    sim.set_step_profiling(true);
+    let mut totals = Vec::new();
+    for k in 0..steps {
+        put_hero(sim, at);
+        sim.step_once(RuntimeInput::default());
+        if k + 30 >= steps {
+            totals.push(sim.step_profile().total_ms());
+        }
+    }
+    totals.sort_by(f64::total_cmp);
+    let n = sim
+        .world()
+        .world()
+        .iter_entities()
+        .filter(|e| e.get::<CharacterMovement>().is_some())
+        .count();
+    (totals[totals.len() / 2], n)
+}
+
+/// **THE HARBOUR CITY "CRUISER STALL", ON THE REAL ISLAND** (the VEH3h audit).
+///
+/// `#[ignore]`d because it needs the user's cooked island (`INF_ISLAND_PACK`,
+/// e.g. `cook-h/art`) -- the fixture island has no Harbour City pile. Run:
+///
+/// ```text
+/// INF_ISLAND_PACK=<cook> cargo test --release -p inf-player --test veh3h_gate
+///     -- --ignored the_harbour_city_pile --nocapture
+/// ```
+///
+/// READS the shipped host off the pack with its own crowd and traffic, the
+/// hero held at the Harbour City cruiser's spawn for ten seconds, then at the
+/// four spots 2.5 m off the first cruiser's centre and one 20 m off its side,
+/// 160 steps each: the whole fixed step's p50 over each dwell's last thirty,
+/// the steered characters, and `pawns_set_aside`. ASSERTS: the pile is
+/// reached (more than 150 steered characters at one spot -- 229 measured)
+/// and set aside (the count moves), and no spot's step is more than twice the
+/// 20 m spot's. Measured by the audit: before the fix the dwell beside the
+/// cruiser read **266.0 ms** a step (`character move` 232.8; an earlier dwell
+/// 358.7) against **34.6** at 20 m; after it **51.0** against 34.8 (1.47x).
+#[test]
+#[ignore = "needs the user's cooked island (INF_ISLAND_PACK)"]
+fn the_harbour_city_pile_is_set_aside_on_the_real_island() {
+    let Some(pack) = std::env::var_os("INF_ISLAND_PACK").map(PathBuf::from) else {
+        println!("SKIP the_harbour_city_pile: INF_ISLAND_PACK names no pack");
+        return;
+    };
+    let mut sim = pack_sim(&pack);
+    let spawn = DVec3::new(-1620.9, 0.0, 2178.0);
+    let y = sim.terrain_height_at(spawn.x, spawn.z);
+    for _ in 0..600 {
+        put_hero(&mut sim, DVec3::new(spawn.x, y + 1.0, spawn.z));
+        sim.step_once(RuntimeInput::default());
+    }
+    let cruiser = {
+        let w = sim.world();
+        let mut found: Vec<(f64, DVec3, f64)> = w
+            .world()
+            .iter_entities()
+            .filter(|e| w.name_of(e.id()) == Some("Harbour City cruiser"))
+            .filter_map(|e| {
+                e.get::<Transform>()
+                    .map(|t| (t.translation.to_dvec3(), t.rotation.y))
+            })
+            .map(|(p, yaw)| ((p - spawn).length(), p, yaw))
+            .collect();
+        found.sort_by(|a, b| a.0.total_cmp(&b.0));
+        found
+            .first()
+            .map(|f| (f.1, f.2))
+            .expect("the Harbour City cruiser is resident")
+    };
+    let (p, yaw) = (cruiser.0, cruiser.1.to_radians());
+    let fwd = DVec3::new(yaw.sin(), 0.0, yaw.cos());
+    let side = DVec3::new(yaw.cos(), 0.0, -yaw.sin());
+    let at = |sim: &mut RuntimeSim, q: DVec3| {
+        let g = sim.terrain_height_at(q.x, q.z).max(p.y - 0.3);
+        DVec3::new(q.x, g + 1.0, q.z)
+    };
+    let set0 = sim.bridge3d().world().pawns_set_aside();
+    let ctl = at(&mut sim, p + side * 20.0);
+    let (open, _) = dwell_step_p50(&mut sim, ctl, 160);
+    let mut most = 0usize;
+    for (label, q) in [
+        ("long +2.5", p + fwd * 2.5),
+        ("long -2.5", p - fwd * 2.5),
+        ("side +2.5", p + side * 2.5),
+        ("side -2.5", p - side * 2.5),
+    ] {
+        let spot = at(&mut sim, q);
+        let (ms, n) = dwell_step_p50(&mut sim, spot, 160);
+        most = most.max(n);
+        println!(
+            "HARBOUR CITY: {label}: {ms:.3} ms a step ({:.2}x the 20 m spot's {open:.3}), {n} characters",
+            ms / open
+        );
+        assert!(
+            ms <= 2.0 * open,
+            "{label}: the step beside the cruiser is {ms:.3} ms against {open:.3} at 20 m"
+        );
+    }
+    let set = sim.bridge3d().world().pawns_set_aside() - set0;
+    println!("HARBOUR CITY: at most {most} characters; {set} set aside");
+    assert!(
+        most > 150,
+        "the pile was never reached ({most} characters) -- the arm measured nothing"
+    );
+    assert!(set > 0, "the pile was reached and nothing was set aside");
+}

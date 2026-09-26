@@ -252,6 +252,12 @@ pub fn step_character_movement(
     // id assigned by first-seen order is only safe if "first seen" is itself
     // deterministic, and here it is.
     let overlays = model::overlay_registry(world, &targets);
+    // Where every character's body stood when the step began, for
+    // `stacked_pawns` (the VEH3h audit). Once per step, not once per
+    // character: a pile is a fact about where bodies were PLACED, and a
+    // position a few centimetres stale after an earlier character's move is
+    // the same answer to "is somebody standing inside me".
+    let pawns = pawn_centres(world, bridge, &targets);
     let mut out = Vec::with_capacity(targets.len());
     for guid in &targets {
         // **THE WEAPON'S FEEL, ONE STEP** (wave WPN2b) — both recoil springs,
@@ -283,7 +289,7 @@ pub fn step_character_movement(
         // made the falling catch (tried on *every* airborne step with input)
         // O(characters) per character per step. One walk, one sort, one
         // allocation, whoever reads it.
-        if let Some(o) = step_one(world, bridge, *guid, dt, &targets, &overlays) {
+        if let Some(o) = step_one(world, bridge, *guid, dt, &targets, &pawns, &overlays) {
             out.push(o);
         }
     }
@@ -300,6 +306,67 @@ pub fn step_character_movement(
     // the mirror instead of avoiding it: the two call sites are fenced
     // (`MIRROR-BEGIN vehicle_step`) and pinned character-for-character by
     // `inf-editor-core`'s `fixed_step_mirror`.
+    out
+}
+
+/// Every character's collider and body centre as the step begins -- the input
+/// to [`stacked_pawns`] (the VEH3h audit). A character with no collider has
+/// nothing a mover could be stacked on and is left out.
+fn pawn_centres(
+    world: &EcsWorld,
+    bridge: &PhysicsBridge3D,
+    characters: &[uuid::Uuid],
+) -> Vec<(ColliderId3D, DVec3)> {
+    let mut out = Vec::with_capacity(characters.len());
+    for g in characters {
+        let Some(c) = bridge.collider_of(*g) else {
+            continue;
+        };
+        let Some(t) = world
+            .entity_of(*g)
+            .and_then(|e| world.world().get::<Transform>(e))
+        else {
+            continue;
+        };
+        out.push((c, t.translation.to_dvec3()));
+    }
+    out
+}
+
+/// **The characters this mover starts the step STACKED ON** (the VEH3h
+/// audit) -- the ones the sweep sets aside.
+///
+/// A body is stacked on the mover when its centre is within the mover's own
+/// RADIUS in plan and within its standing height in `y`. That is a placement
+/// and never a contact: two capsules the mover has pushed against stand
+/// `r1 + r2` (less the skin) apart, about 0.58 m for two 0.30 m bodies, so
+/// no walking, crowding or blocking reaches it -- only bodies PUT on one
+/// point do: a society that sends eighty residents to one desk, a spawn, a
+/// teleport. rapier's controller cannot separate them (it does not
+/// depenetrate), so without this each one fights the whole pile on every
+/// cast of every step: the Harbour City pile read 358.7 ms of `character
+/// move` for 225 characters, 344.9 ms of it inside the controller. Set
+/// aside, the pile walks apart along its own legs and every body OUTSIDE a
+/// radius -- the ones that are actually in the way -- still blocks.
+///
+/// In `characters` order (Guid order), so the set is a function of the world.
+fn stacked_pawns(
+    pawns: &[(ColliderId3D, DVec3)],
+    own: Option<ColliderId3D>,
+    position: DVec3,
+    radius: f64,
+    half_height: f64,
+) -> Vec<ColliderId3D> {
+    let mut out = Vec::new();
+    for (c, p) in pawns {
+        if Some(*c) == own {
+            continue;
+        }
+        let plan = glam::DVec2::new(p.x - position.x, p.z - position.z).length();
+        if plan < radius && (p.y - position.y).abs() < half_height + radius {
+            out.push(*c);
+        }
+    }
     out
 }
 
@@ -717,12 +784,14 @@ fn slope_deg(normal: DVec3) -> f64 {
 }
 
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 fn step_one(
     world: &mut EcsWorld,
     bridge: &mut PhysicsBridge3D,
     guid: uuid::Uuid,
     dt: f64,
     characters: &[uuid::Uuid],
+    pawns: &[(ColliderId3D, DVec3)],
     overlays: &model::OverlayRegistry,
 ) -> Option<MoveOutcome> {
     let entity = world.entity_of(guid)?;
@@ -1801,10 +1870,11 @@ fn step_one(
     // the step it is decided rather than on the next bridge sync.
     let mover = mover_for_with_capsule(world, guid, is_capsule.then_some((half_height, radius)));
     let was_grounded = cm.runtime.grounded;
-    let result =
-        bridge
-            .world_mut()
-            .move_character(&mover, position, motion, exclude.iter().next().copied());
+    let own = exclude.iter().next().copied();
+    let stacked = stacked_pawns(pawns, own, position, radius, half_height);
+    let result = bridge
+        .world_mut()
+        .move_character_setting_aside(&mover, position, motion, own, &stacked);
     position += result.translation;
     probe.centre = position;
     cm.runtime.grounded = result.grounded;

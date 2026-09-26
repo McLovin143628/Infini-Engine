@@ -1556,3 +1556,185 @@ fn the_movers_cost_is_flat_in_a_crowds_size_and_not_in_its_density() {
         spread.ms
     );
 }
+
+// ── the pile (the VEH3h audit) ──────────────────────────────────────────────
+
+/// Sixty-four steered crowd capsules on one flat tile, either all inside one
+/// quarter metre
+/// (a pile -- what the island's society made of a desk eighty residents shared)
+/// or on an 8 x 8 lattice at a 2 m pitch; plus, when `blocker` is set, one
+/// standing capsule 1.0 m in front of the first mover, which walks into it.
+fn pile_fixture(stacked: bool, blocker: bool) -> (EcsWorld, PhysicsBridge3D, Vec<Uuid>) {
+    let mut world = EcsWorld::new();
+    let mut data = TerrainData::new(TILE_RES, MPS);
+    data.author_tile((0, 0), |_, _| GROUND_Y);
+    let e = world.spawn_with_guid(Uuid::from_u128(0x7e44_0002), "Terrain", None);
+    world.world_mut().entity_mut(e).insert(Terrain {
+        meters_per_sample: MPS,
+        tile_resolution: TILE_RES,
+        data,
+        ..Terrain::default()
+    });
+    let stand = GROUND_Y + AGENT_HALF_HEIGHT + AGENT_RADIUS + 0.02;
+    let movers = if blocker { 1 } else { 64 };
+    let mut out = Vec::new();
+    for i in 0..movers {
+        let guid = character_guid(i);
+        let e = world.spawn_with_guid(guid, "Crowd NPC", None);
+        let at = if stacked {
+            // Within a quarter metre, as the island's piles were (the
+            // society's desk plus each agent's arrival scatter): not one
+            // exact point, whose degenerate contact normal would end the
+            // controller's loop on its first cast and hide the cost.
+            DVec3::new(
+                64.0 + 0.025 * (i % 8) as f64,
+                stand,
+                64.0 + 0.025 * (i / 8) as f64,
+            )
+        } else {
+            DVec3::new(
+                50.0 + 2.0 * (i % 8) as f64,
+                stand,
+                50.0 + 2.0 * (i / 8) as f64,
+            )
+        };
+        let mut t = Transform::IDENTITY;
+        t.translation = Vec3d::from_dvec3(at);
+        world.world_mut().entity_mut(e).insert((
+            kinematic(),
+            capsule(),
+            CharacterController3D::default(),
+            crowd_movement(),
+            t,
+        ));
+        out.push(guid);
+    }
+    if blocker {
+        // A second CHARACTER, standing, 1.0 m ahead of the first on +z: in the
+        // way, not stacked -- the mover must stop against it.
+        let guid = bystander_guid(0);
+        let e = world.spawn_with_guid(guid, "Crowd NPC", None);
+        let mut t = Transform::IDENTITY;
+        t.translation = Vec3d::from_dvec3(DVec3::new(50.0, stand, 51.0));
+        world.world_mut().entity_mut(e).insert((
+            kinematic(),
+            capsule(),
+            CharacterController3D::default(),
+            crowd_movement(),
+            t,
+        ));
+    }
+    world.mark_dirty();
+    world.propagate();
+    let mut bridge = PhysicsBridge3D::new(DVec3::new(0.0, -9.81, 0.0));
+    bridge.sync_from_world(&world);
+    (world, bridge, out)
+}
+
+/// MIN of five rounds of thirty idle steps after ten of warm-up, ms a step,
+/// and the set-aside count per step over the rounds.
+fn pile_step_ms(stacked: bool) -> (f64, f64) {
+    let (mut world, mut bridge, _) = pile_fixture(stacked, false);
+    for _ in 0..10 {
+        step_character_movement(&mut world, &mut bridge, DT);
+    }
+    let before = bridge.world().pawns_set_aside();
+    let mut best = f64::INFINITY;
+    for _ in 0..5 {
+        let t = Instant::now();
+        for _ in 0..30 {
+            step_character_movement(&mut world, &mut bridge, DT);
+        }
+        best = best.min(t.elapsed().as_secs_f64() * 1000.0 / 30.0);
+    }
+    let per_step = (bridge.world().pawns_set_aside() - before) as f64 / 150.0;
+    (best, per_step)
+}
+
+/// **A PILE OF CHARACTERS IS SET ASIDE, NOT FOUGHT** (the VEH3h audit) -- the
+/// Harbour City "cruiser stall".
+///
+/// The cert's hands-on could not board the Harbour City cruiser: the player's
+/// frames ran at 2.5 s beside it and a headless probe read `character move` at
+/// 356-372 ms. The audit's per-sub-pass profile put **344.9 of 358.7 ms inside
+/// `PhysicsWorld3D::move_character`, over 225 calls**, and the cause was not
+/// the car: 204 steered crowd agents stood on FOUR points of one building ~37 m
+/// away (80 on one quarter metre -- the society sends every resident to the
+/// NEAREST desk), and rapier's controller, which does not depenetrate, made
+/// each of them fight its whole pile on every cast. The mover now sets aside
+/// the bodies it starts the step stacked on (`d3::movement`'s `stacked_pawns`:
+/// centre within the mover's own radius in plan -- a placement, never a
+/// contact).
+///
+/// READS the world: 64 steered capsules piled on one point against the same 64
+/// on a 2 m lattice, idle on flat ground, and `pawns_set_aside` (the door's
+/// engagement count). ASSERTS the count: every mover sets aside the other 63
+/// every step in the pile (**4 032 a step**) and nobody sets aside anybody on
+/// the lattice (0). And the other half of the ruling: a character that is IN
+/// THE WAY and not stacked still blocks -- a mover walking at a standing body
+/// 1.0 m ahead stops against it (its centre never comes within 0.5 m) and
+/// sets nothing aside. The clock (pile against lattice, per step) is printed
+/// everywhere and asserted only in release off CI, at 4x (the house
+/// conditioning: min of five). Mutations: `stacked_pawns` answering nothing
+/// (the pile is fought again: count 0, and the release clock reads the pile
+/// at **135.99 ms against 1.79 -- 76x** the lattice, where the fixed tree reads
+/// 2.95 against 1.80, 1.64x); its bound widened past `r1 + r2` (the blocker is
+/// set aside and walked through).
+#[test]
+fn a_pile_of_characters_is_set_aside_and_one_in_the_way_still_blocks() {
+    let (pile_ms, pile_set) = pile_step_ms(true);
+    let (grid_ms, grid_set) = pile_step_ms(false);
+    println!(
+        "VEH3h PILE: 64 capsules inside a quarter metre {pile_ms:.3} ms a step ({pile_set:.0} set aside a step), \
+         on a 2 m lattice {grid_ms:.3} ms ({grid_set:.0}) -- {:.2}x",
+        pile_ms / grid_ms.max(1.0e-9)
+    );
+    assert_eq!(
+        pile_set,
+        64.0 * 63.0,
+        "every mover in the pile sets aside the other 63, every step"
+    );
+    assert_eq!(
+        grid_set, 0.0,
+        "nobody on a 2 m lattice is stacked on anybody"
+    );
+
+    // The other half: a body in the way still blocks.
+    let (mut world, mut bridge, movers) = pile_fixture(false, true);
+    let mover = movers[0];
+    let before = bridge.world().pawns_set_aside();
+    for _ in 0..120 {
+        if let Some(e) = world.entity_of(mover) {
+            if let Some(mut cm) = world.world_mut().get_mut::<CharacterMovement>(e) {
+                cm.runtime.intent_move = Vec2d::new(0.0, 1.0);
+            }
+        }
+        step_character_movement(&mut world, &mut bridge, DT);
+    }
+    let z = world
+        .entity_of(mover)
+        .and_then(|e| world.world().get::<Transform>(e))
+        .map(|t| t.translation.z)
+        .expect("the mover has a transform");
+    println!("VEH3h PILE: a mover walking two seconds at a body 1.0 m ahead ends at z {z:.3} (the body at 51.0)");
+    assert!(
+        z > 50.1,
+        "the mover never walked ({z:.3}), so the blocking half measured nothing"
+    );
+    assert!(
+        z < 50.5,
+        "the mover ended at z {z:.3}: within 0.5 m of a body standing at 51.0 -- walked into or through it"
+    );
+    assert_eq!(
+        bridge.world().pawns_set_aside(),
+        before,
+        "a body in the way was set aside as if it were stacked"
+    );
+
+    if !cfg!(debug_assertions) && std::env::var_os("CI").is_none() {
+        assert!(
+            pile_ms < 4.0 * grid_ms,
+            "the pile costs {pile_ms:.3} ms a step against {grid_ms:.3} on the lattice -- fought, not set aside"
+        );
+    }
+}

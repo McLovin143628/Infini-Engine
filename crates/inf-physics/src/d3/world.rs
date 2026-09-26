@@ -614,6 +614,9 @@ pub struct PhysicsWorld3D {
     /// **How many scene queries this world has answered** (island wave NPC1e) —
     /// see [`queries`](Self::queries).
     queries: u64,
+    /// **How many stacked characters the mover has set aside** (the VEH3h
+    /// audit) -- see [`pawns_set_aside`](Self::pawns_set_aside).
+    set_aside: u64,
 
     pending_contacts: Vec<ContactEvent3D>,
 }
@@ -639,6 +642,7 @@ impl PhysicsWorld3D {
             query_moved: Vec::new(),
             query_moved_bodies: Vec::new(),
             queries: 0,
+            set_aside: 0,
             pending_contacts: Vec::new(),
         }
     }
@@ -1885,6 +1889,60 @@ impl PhysicsWorld3D {
         }
         let pipe = self.query_pipeline(filter);
         mover.solve(&pipe, dt, position, desired_translation)
+    }
+
+    /// [`move_character`](Self::move_character), with `set_aside` ALSO out of
+    /// the sweep — the door for the characters a mover starts the step
+    /// **stacked on** (the VEH3h audit).
+    ///
+    /// rapier's character controller does not depenetrate: a capsule that
+    /// starts a step inside another one is stopped by it on every cast and
+    /// pays the contact work for it on every iteration. One such overlap is
+    /// nothing. A PILE is the most expensive thing a fixed step can meet: the
+    /// island's Harbour City put 204 steered crowd agents on four points of
+    /// one building (80 on one quarter metre), and the `character move` phase
+    /// read **358.7 ms** a step -- 344.9 ms of it inside this call, 225 calls,
+    /// every one of them a capsule fighting the other 79 in its pile. With the
+    /// pile set aside the same step reads ~16 ms. The caller decides what is
+    /// stacked (`d3::movement`'s `stacked_pawns`, which never sets aside a
+    /// body the mover merely touches); this door only honours it and counts
+    /// it ([`pawns_set_aside`](Self::pawns_set_aside)).
+    ///
+    /// An empty `set_aside` IS `move_character` -- the same filter, the same
+    /// solve -- so every step with no pile is byte-identical to what it was.
+    pub fn move_character_setting_aside(
+        &mut self,
+        mover: &CharacterMover3D,
+        position: DVec3,
+        desired_translation: DVec3,
+        exclude: Option<ColliderId3D>,
+        set_aside: &[ColliderId3D],
+    ) -> CharacterMove3D {
+        if set_aside.is_empty() {
+            return self.move_character(mover, position, desired_translation, exclude);
+        }
+        self.set_aside = self.set_aside.saturating_add(set_aside.len() as u64);
+        self.ensure_query_pipeline();
+        let dt = self.integration_parameters.dt;
+        let predicate = |h: ColliderHandle, _c: &rapier3d_f64::geometry::Collider| {
+            !set_aside.contains(&ColliderId3D(h))
+        };
+        let mut filter = QueryFilter::default().predicate(&predicate);
+        if let Some(c) = exclude {
+            filter = filter.exclude_collider(c.0);
+        }
+        let pipe = self.query_pipeline(filter);
+        mover.solve(&pipe, dt, position, desired_translation)
+    }
+
+    /// **How many stacked characters the mover has set aside** (the VEH3h
+    /// audit) -- a monotone count over this world's life, one per character
+    /// per step, bumped only by
+    /// [`move_character_setting_aside`](Self::move_character_setting_aside).
+    /// The engagement count of that door: a gate that says "the pile was set
+    /// aside" reads this, not a clock. Saturating.
+    pub fn pawns_set_aside(&self) -> u64 {
+        self.set_aside
     }
 
     // ── internal ──────────────────────────────────────────────────────────────
