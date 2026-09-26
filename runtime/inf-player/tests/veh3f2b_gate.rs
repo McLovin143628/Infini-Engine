@@ -1095,7 +1095,7 @@ fn put_subject(sim: &mut inf_player::runtime_sim::RuntimeSim, at: DVec3) {
     }
 }
 
-/// **THE ISLAND'S TWO ARTICULATED RIGS, MEASURED -- CARRIED** (LOCAL: the
+/// **THE ISLAND'S TWO ARTICULATED RIGS, ON THEIR WHEELS** (LOCAL: the
 /// committed level over this machine's island project; skips without it).
 /// READS each rig in the WORLD after ten settled seconds: each trailer wheel's
 /// ray contact, the trailer's pitch against the ground's own slope under its
@@ -1103,19 +1103,19 @@ fn put_subject(sim: &mut inf_player::runtime_sim::RuntimeSim, at: DVec3) {
 /// JOINT's own `local_anchor` / `other_anchor`, and the rows' `kingpin_local`
 /// / `coupling_local`) and the joint's impulse.
 ///
-/// **What it found, and why it asserts nothing.** The VEH3f audit carried the
-/// Harbour City box trailer "on 0 of 4 wheels, pitched 4.7 deg, placed over
-/// lower ground". Measured on this tree: the ground under both rigs is level
-/// (slope 0.01-0.06 deg), the box trailer now stands on 4 of 4 wheels, and
-/// BOTH rigs are unstable on the level-loaded host -- the hitch joint's
-/// impulse is ~1e7 N.s every step and the kingpin stands 0.44-1.21 m off the
-/// fifth wheel, the box trailer lurching seven metres at ~8 s; with the
-/// parking hold off the box trailer hangs on 0 of 4 wheels at -10.8 deg. The
-/// same pair on the flat fixture slab holds (`veh3f_gate`'s slalom arm, gap
-/// < 0.1 m). So the carried item is not the ground under the axles: it is the
-/// hitch on the island host -- unisolated, CARRIED (priced in the report). The
-/// arm prints both rigs so the audit reads the same numbers; it is a
-/// measurement, not a claim.
+/// **The cause, named by the audit** (`audit(VEH3f.2b)`, priority e'). The
+/// wave measured both rigs unstable on the island -- the hitch's impulse ~1e7
+/// N.s a step, the kingpin 0.44-1.21 m off the fifth wheel -- and clean on a
+/// flat slab, and carried it "unisolated". The audit walked the trailer
+/// chassis's ACTIVE contact pairs (the narrow phase's own graph): 20-odd
+/// cuboids 0.2 m thick and 2-3 m tall, fixed and kinematic -- the WALLS and
+/// DOORS of a building, each pushing 1e6-1e7 N.s. The roster lot walk had
+/// parked both rigs through a settlement block the PCG builds on; the ground
+/// and the joint were innocent. The lot walk now keeps a rig's whole length
+/// off every block (`island.rs`, CI arm
+/// `every_roster_rig_stands_off_every_settlement_block`), and on the refreshed
+/// island both rigs stand on 4 of 4 wheels, the kingpin 0.000 m off the fifth
+/// wheel, the hitch's impulse ~6e2 N.s.
 #[test]
 fn the_islands_articulated_rigs_measured() {
     let Some(content) = island_project() else {
@@ -1262,7 +1262,17 @@ fn measure_island_rig(content: &std::path::Path, row: &str) {
         "ISLAND RIG {row}: {grounded} of {n} wheels on the ground; pitch {pitch:.2} deg on ground sloping {slope:.2} deg; kingpin gap {:.3} m; grounds under the wheels {grounds:?}",
         gap
     );
-    let _ = (grounded, n, pitch, slope, gap);
+    let imp = jid
+        .and_then(|j| sim.bridge3d().world().joint_impulse(j))
+        .map(|i| i.linear.length())
+        .unwrap_or(f64::MAX);
+    assert_eq!(grounded, n, "{row}: {grounded} of {n} trailer wheels on the ground");
+    assert!(gap < 0.05, "{row}: the kingpin stands {gap:.3} m off the fifth wheel");
+    assert!(
+        imp < 1.0e4,
+        "{row}: the hitch carries {imp:.0} N.s a step -- something is fighting it"
+    );
+    let _ = (pitch, slope);
 }
 
 // ── the crumple: a hull's dent, in its mesh ─────────────────────────────────

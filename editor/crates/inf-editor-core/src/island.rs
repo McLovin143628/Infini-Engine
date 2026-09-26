@@ -1485,9 +1485,35 @@ pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
                     inf_ecs::vehicle::resting_origin_y(&def, v.y) + CAR_LIFT_M,
                     v.z + apron.y,
                 );
-                if authored_spots
-                    .iter()
-                    .all(|(p, r)| (*p - at).length() >= r + half + ROSTER_LOT_GAP_M)
+                // **Off every settlement block** (`audit(VEH3f.2b)`, priority
+                // e'): the rig's whole length, tractor nose to trailer tail, a
+                // half-width plus a gap either side, clear of every block the
+                // PCG will build on. The route a lot walks crosses the city's
+                // grid on a diagonal, and the Harbour City box trailer was
+                // parked THROUGH a building: its chassis in active contact with
+                // 20-odd wall and door cuboids (fixed and kinematic, 1e6-1e7 N.s
+                // a step), which is the ~1e7 N.s the hitch read and the 0.44-1.21
+                // m gap -- not the ground, and not the joint. Blocks are
+                // committed design (`settlements`), so no elevation is read.
+                let reach = def
+                    .half_extents
+                    .x
+                    .max(trailer.map(|t| t.half_extents.x).unwrap_or(0.0))
+                    + ROSTER_LOT_GAP_M;
+                let nose = glam::DVec2::new(at.x, at.z) + dir * def.half_extents.z;
+                let length = 2.0 * half;
+                let samples = (length.ceil() as usize).max(1);
+                let on_a_block = (0..=samples).any(|i| {
+                    let p = nose - dir * (length * i as f64 / samples as f64);
+                    plans.iter().flat_map(|pl| pl.blocks.iter()).any(|b| {
+                        (p.x - b.centre.x).abs() < b.half.x + reach
+                            && (p.y - b.centre.y).abs() < b.half.y + reach
+                    })
+                });
+                if !on_a_block
+                    && authored_spots
+                        .iter()
+                        .all(|(p, r)| (*p - at).length() >= r + half + ROSTER_LOT_GAP_M)
                 {
                     placed = Some((at, dir, d));
                     break;
@@ -3292,6 +3318,74 @@ mod tests {
                 "{recipe}: the pad stands {proud:.3} m proud of the apron"
             );
         }
+    }
+
+    /// **EVERY ROSTER RIG STANDS OFF EVERY SETTLEMENT BLOCK** (`audit(VEH3f.2b)`,
+    /// priority e'). READS the committed recipe's own `island_scene`: each
+    /// `ROSTER_LOTS` chassis (tractor and trailer alike) as its placed
+    /// Transform and its `Collider3D` box, sampled on a 0.5 m grid across its
+    /// yawed footprint, against every block rectangle the PCG builds on. The
+    /// Harbour City box trailer was parked THROUGH a building before the lot
+    /// walk learned the blocks: 20-odd wall and door cuboids in active contact
+    /// with its chassis, the hitch reading ~1e7 N.s. Mutation -> red: the lot
+    /// walk's `on_a_block` test off.
+    #[test]
+    fn every_roster_rig_stands_off_every_settlement_block() {
+        let mut rigs = 0usize;
+        for recipe in ISLAND_RECIPES {
+            let Some(d) = design(recipe) else {
+                println!("SKIP: no {recipe} in this tree");
+                continue;
+            };
+            let doc = island_scene(&d);
+            let name = d.recipe.name.as_str();
+            let plans = crate::settlement::settlements(&d);
+            for (site, lot) in ROSTER_LOTS {
+                for (k, row) in lot.iter().enumerate() {
+                    let ids: Vec<&str> = row.split('+').collect();
+                    for id in &ids {
+                        let guid = derived(name, &format!("island.roster.{site}.{k}.{id}"));
+                        let Some(e) = doc.world().entity_of(guid) else {
+                            continue;
+                        };
+                        let w = doc.world().world();
+                        let (Some(t), Some(c)) = (
+                            w.get::<inf_ecs::components::Transform>(e),
+                            w.get::<inf_ecs::components::Collider3D>(e),
+                        ) else {
+                            continue;
+                        };
+                        rigs += 1;
+                        let q = t.quat();
+                        let h = c.half_extents;
+                        let (nx, nz) = ((h.x / 0.5).ceil() as i32, (h.z / 0.5).ceil() as i32);
+                        let mut inside = None;
+                        for i in -nx..=nx {
+                            for j in -nz..=nz {
+                                let local = glam::DVec3::new(
+                                    h.x * i as f64 / nx.max(1) as f64,
+                                    0.0,
+                                    h.z * j as f64 / nz.max(1) as f64,
+                                );
+                                let p = t.translation.to_dvec3() + q * local;
+                                if let Some(b) = plans.iter().flat_map(|pl| pl.blocks.iter()).find(|b| {
+                                    (p.x - b.centre.x).abs() < b.half.x
+                                        && (p.z - b.centre.y).abs() < b.half.y
+                                }) {
+                                    inside = Some((p, b.centre));
+                                }
+                            }
+                        }
+                        assert!(
+                            inside.is_none(),
+                            "{recipe}: the roster's `{id}` at {site} stands on a settlement block: {inside:?}"
+                        );
+                    }
+                }
+            }
+        }
+        println!("{rigs} roster chassis checked against every block");
+        assert!(rigs >= 10, "only {rigs} roster chassis found -- the arm read nothing");
     }
 
     /// How far a car shell's part may stand proud of its box collider,
