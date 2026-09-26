@@ -41447,3 +41447,116 @@ boarding of the art car (no arm); the Play player holds the by-path
 textures in RAM (921 MB; the cooked player maps them); the weapon art
 reads light and flat in PIE's third-person frames (materials not
 inspected); every carried item of the wave's own list not named above.
+
+
+## WAVE VEH3f.2b — DCC CAR SHELLS + THE CARRIED VEHICLE CLOSURES (2026-09-25)
+
+Range `a56684a1..` (implementer; nothing pushed). Report:
+`campaign-briefs/veh3f2b-implementer-report.md`. Scene v28, payload 14,
+`EXPECTED_LEVELS` 24 -- no schema move; `Cargo.lock` unchanged; no new
+dependency. Goldens 66 -> **71**, five ADDs (`shell_sedan`, `shell_coupe`,
+`shell_suv`, `shell_pickup`, `shell_cruiser`: each shell whole at its island
+row's size through the vgeom path), none re-blessed. The island `.inf_lvl`
+moved twice, each with its cause: the five hero rows wear the shells
+(307 746 -> 338 178 B), then the third town of each three parks the pickup
+(-> 334 936 B, 1 265 entities); the fixture moved once (the shells). NOTHING
+from Unreal/Fab is in the tree: the shells are built in this engine's own
+P23 DCC kernel (`inf-dcc` `AddVertex`/`AddFace`/`SetEdgeSharp` ops, lofted
+from authored profile curves, no reference mesh), committed under
+`samples/vehicle-shells/` (238 files, 3.7 MB).
+
+### what landed
+
+* **Five car shells** (`inf_editor_core::vehicle_shells`): sedan, coupe,
+  SUV, pickup, and the cruiser (the sedan with a light bar and push bar).
+  One closed body per car, lofted from 34-slot rings; the wheel arches CUT
+  (fitted to the envelope of the settled tyres of every row wearing the
+  shell); a glasshouse with pillars whose window openings are the pane
+  parts; bonnet and boot shut lines as recesses; mirrors, lamps, grille. The
+  doors, bonnet, boot, bumpers and every pane are separate closed meshes at
+  the VEH3c part names, so VEH3c hinges, sheds and shatters exactly the skin
+  that was in the hole; a steering wheel on the hub turns with the rack; a
+  dash and seats. Bodies 286-307 KB; a whole car 567-727 KB. Paint is the
+  row's livery; the lamps, trim and rims their own surfaces. The rows name
+  them the way imported art is named (`art = "shell_sedan"`, the same
+  `vehicle_art.toml` shape, `shell = true`), so an imported body swaps in
+  with no code. 54 roster rows wear a shell (sedan 11, coupe 19, SUV 15,
+  pickup 8, cruiser 1) and the island's five hero rows.
+* **The crumple** (the mesh-space dent carried since VEH3c): a car's HULL
+  (`shell_body` / `art_body`) takes the whole blow as dent along the blow's
+  own direction (`PartState::dent_dir`, folded); `dent_mesh_positions`
+  pushes the struck 0.55 m of the mesh back by the dent with a smoothstep and
+  a portable buckle, bounded by `MAX_DENT_M` and four fifths of each vertex's
+  depth; the player's projector draws a crumpled DAG
+  (`VmeshRegistry::dented`: one vertex buffer displaced -- every LOD level
+  shares it -- spheres grown, cones retired, cached per 5 mm). Imported art
+  crumples through the same door (the calibration sedan, LOCAL: 6 206 of
+  56 932 vertices at 60 km/h).
+* **The cab step**: a front-door sill over 0.60 m is climbed in two beats --
+  onto a step at half the rise, then the seat warp from it; the feet on the
+  step through the door phase (knee pole toward the cab). Bus 0.388 m, 6x6
+  0.348, semi 0.737; the saloon none.
+* **The inner latch** waits for the reach and the hold (0.317 s at 66 deg,
+  every row) and the hand rides the pull to the shut; **the seat rides its
+  drawn cushion** (`floor_lift_m` moves seat, floor, pedals and hub together
+  -- 0 on every current body: 136 of 136 cushions are at the rule).
+* **The licence is a wall**: derived `.inf_vmesh.toml` sidecars follow their
+  source (`sync_derived_licences`, on import and on every cache hit; 703
+  derived sidecars on the island project, 0 disagreeing); `inf cook` refuses
+  content whose licence may not ship (`CookError::Licence`, the Package
+  dialog names it) unless `--local-reference`, which marks the pack
+  LOCAL REFERENCE ONLY.
+* **Traffic reads footprints**: `gap_ahead` sweeps the whole car against
+  every obstacle's oriented footprint and measures bumper to body; a car at
+  rest that nobody speaks to holds its parking brake (a hitched trailer and
+  an aircraft excepted); spawns keep off other records' homes. The ten
+  island minutes: **0 moving contacts** (VEH3f audit: 3).
+* **The tandem brakes by axle load** (a one-axle group keeps `brake_share`
+  byte for byte); the hauler stops at 0.697 g, no rear axle locking first.
+* **The gallery camera**: a `hero:<Set>` gallery entry frames the car
+  three-quarter front at 1.25 car lengths (`Gallery::framing`).
+* **The pickup on an island car**: Cedar Cove and Alder Bay park it.
+
+### judged
+
+* **The shed shell bumper was a kerb.** A shell's bumper part boxes its
+  whole wrap; shed, it stood 186.7 mm proud and the saloon stopped against
+  it. Its collider is now a 3 cm sheet laid on its face: 58.5 mm proud, run
+  over with 2.2 mm of lift.
+* **A 6.9 cm door passed through a lamp post.** Part bodies now sweep (CCD):
+  the hinge peak 124 -> 1 085 N.s and the door tears; the open-air control 9.
+* **The parking hold slid the Dodo.** Locking a light aircraft's mains moved
+  it 0.8 m sideways out of the hero's reach; aircraft are exempt.
+* **The plain side outline misses the brief's 25 %**: 13.5-27.6 % against
+  the box family (the shells share the box's length and height; the car is
+  in the flank). The FLANK outline (the first-seen surface within a quarter
+  of the half-width) is 39.5-46.0 %, and it is what the gate asserts
+  (>= 25 %), with the side outline held at >= 12 %.
+
+### the census (10 island minutes, dev build)
+
+600 traffic samples on the CI island: sedan 60 shell + 60 imported, SUV 60
+shell + 120 imported, truck 60 shell, van 240 imported; **0 primitive**;
+3 194 solid contact events, **0 moving vehicle contact pairs**.
+
+### the cost
+
+64 shell saloons through the player projector: release 0.485 ms (boxes
+0.214, the art fallback 0.230), 2 048 instances, 17 876 LOD-0 triangles a
+car; the engine's 1080p GPU frame over the lot 2.274 ms (boxes 1.615, art
+2.097). `SHIPPING_FRAME_CEILING_MS` (38) re-measured on the composed city,
+release: p95 **12.212 ms** at 1080p, 12.955 at 1440p (the lit stack 22.784)
+-- it holds, and the shells do not draw in that world.
+
+### carried, by name
+
+The art-machine cab doors (excavator, dump truck: ~1 day a machine) and a
+hero boarding through them; the Harbour City box trailer on 4 of 4 wheels
+(measured on the real island: the kingpin joint's impulse ~1e7 N.s and a
+0.44-1.21 m gap in BOTH rigs, a flat slab clean -- unisolated, ~1 day); the
+island hero rows' wheel drop sits ~0.2 of the half-height below the roster
+rows', so the island saloon shows ~20 cm of arch gap (re-seat the rows,
+~0.5 day); the shell's crumple in the EDITOR's Simulate viewport (the
+player draws it; ~0.5 day); `traffic_3d`'s hand-off arm re-aimed at a
+mid-leg car (the arrival snap of 4.47 m, pre-existing); the plain side
+outline under 25 %.
