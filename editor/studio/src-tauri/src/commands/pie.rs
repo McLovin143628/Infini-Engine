@@ -656,8 +656,11 @@ mod tests {
         let guard = src
             .find("StartGuard(&pie.inner)")
             .expect("the claim is no longer released by a guard");
+        // The v14 door (the VEH3f.2a audit): Play resolves texture PATHS, so the
+        // call is `build_scene_payload_with_texture_paths` -- the first
+        // occurrence in the file is the call itself, above this test.
         let builds = src
-            .find("build_scene_payload(")
+            .find("build_scene_payload_with_texture_paths(")
             .expect("`pie_start` no longer builds a payload");
         let installs = src
             .find("inner.install_monitor(")
