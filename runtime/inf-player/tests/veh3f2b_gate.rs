@@ -440,6 +440,62 @@ fn after_an_import_every_sidecar_of_a_pack_reads_its_manifest_row_derived_ones_t
         );
     }
     assert_eq!(derived_after, derived_before, "a derived sidecar lost its row");
+    drop(project);
+
+    // **THE DERIVED DOOR ALONE.** The importer's own sweep re-stamps every
+    // sidecar in the pack's folder, derived ones included, so the halves above
+    // cannot see the derived door by itself. Here the SOURCE sidecars are
+    // relabelled by hand on disk -- no importer runs -- and the project is
+    // re-opened and swept as the editor opens one: a derived `.inf_vmesh` is a
+    // cache hit and is re-stamped from its source or not at all.
+    let mut hand = 0usize;
+    let mut stack = vec![content.clone()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            if p.extension().is_none_or(|x| x != "toml")
+                || p.to_string_lossy().ends_with(".inf_vmesh.toml")
+            {
+                continue;
+            }
+            let payload = p.with_extension("");
+            let Ok(mut side) = inf_asset::AssetSidecar::load(&payload) else {
+                continue;
+            };
+            let Some(t) = side.import.as_mut() else {
+                continue;
+            };
+            if !t.contains_key(inf_asset::licence::LICENCE_PACK_KEY) {
+                continue;
+            }
+            t.insert(
+                inf_asset::licence::LICENCE_KEY.into(),
+                "relabelled by hand".into(),
+            );
+            t.insert(inf_asset::licence::LICENCE_SHIP_KEY.into(), false.into());
+            side.save(&payload).unwrap();
+            hand += 1;
+        }
+    }
+    let mut project = AssetProject::open(&content).expect("it re-opens again");
+    let _ = inf_editor_core::assets::vmesh::sweep(&mut project);
+    let resynced = inf_editor_core::assets::vmesh::sync_derived_licences(&mut project);
+    let last = licence_rows(&content);
+    println!(
+        "LICENCE, the derived door alone: {hand} source sidecar(s) relabelled by hand; after a re-open {resynced} more re-stamped by the batch; rows {last:?}"
+    );
+    assert!(hand >= 2, "no source sidecar was relabelled");
+    for (file, licence, ship) in &last {
+        assert_eq!(
+            (licence.as_str(), *ship),
+            ("relabelled by hand", Some(false)),
+            "{file} did not follow its source's hand-relabelled row"
+        );
+    }
 }
 
 /// A cookable project whose content is one mesh per `(name, licence row)`.
