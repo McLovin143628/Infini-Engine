@@ -223,9 +223,9 @@ pub const ISLAND_VEHICLES_TOML: &str = "\
 label = \"Saloon\"
 
 [sedan.vehicle]
-# **The hero body** (wave VEH3f): this row wears DCC-built panels, one
-# committed `.inf_mesh` per panel under `samples/vehicle-bodies/`.
-body_mesh = \"56454833-4845-524f-8000-000000000001\"
+# **The shell** (wave VEH3f.2b): this row wears a DCC car shell -- one closed
+# body and the parts cut from it, under `samples/vehicle-shells/`.
+art = \"shell_sedan\"
 body = \"sedan\"
 half_width_m = 0.92
 half_height_m = 0.62
@@ -268,9 +268,9 @@ stability_control = 0.4
 label = \"Pickup\"
 
 [truck.vehicle]
-# **The hero body** (wave VEH3f): this row wears DCC-built panels, one
-# committed `.inf_mesh` per panel under `samples/vehicle-bodies/`.
-body_mesh = \"56454833-4845-524f-8000-000000000004\"
+# **The shell** (wave VEH3f.2b): this row wears a DCC car shell -- one closed
+# body and the parts cut from it, under `samples/vehicle-shells/`.
+art = \"shell_pickup\"
 body = \"truck\"
 half_width_m = 1.02
 half_height_m = 0.82
@@ -332,9 +332,9 @@ stability_control = 0.6
 label = \"Coupe\"
 
 [sports.vehicle]
-# **The hero body** (wave VEH3f): this row wears DCC-built panels, one
-# committed `.inf_mesh` per panel under `samples/vehicle-bodies/`.
-body_mesh = \"56454833-4845-524f-8000-000000000002\"
+# **The shell** (wave VEH3f.2b): this row wears a DCC car shell -- one closed
+# body and the parts cut from it, under `samples/vehicle-shells/`.
+art = \"shell_coupe\"
 body = \"sports\"
 drivetrain = \"rwd\"
 half_width_m = 0.94
@@ -426,9 +426,9 @@ stability_control = 0.25
 label = \"Wagon\"
 
 [suv.vehicle]
-# **The hero body** (wave VEH3f): this row wears DCC-built panels, one
-# committed `.inf_mesh` per panel under `samples/vehicle-bodies/`.
-body_mesh = \"56454833-4845-524f-8000-000000000003\"
+# **The shell** (wave VEH3f.2b): this row wears a DCC car shell -- one closed
+# body and the parts cut from it, under `samples/vehicle-shells/`.
+art = \"shell_suv\"
 body = \"suv\"
 drivetrain = \"awd\"
 half_width_m = 1.02
@@ -576,9 +576,9 @@ stability_control = 0.7
 label = \"Patrol Cruiser\"
 
 [cruiser.vehicle]
-# **The hero body** (wave VEH3f): this row wears DCC-built panels, one
-# committed `.inf_mesh` per panel under `samples/vehicle-bodies/`.
-body_mesh = \"56454833-4845-524f-8000-000000000005\"
+# **The shell** (wave VEH3f.2b): this row wears a DCC car shell -- one closed
+# body and the parts cut from it, under `samples/vehicle-shells/`.
+art = \"shell_cruiser\"
 body = \"sedan\"
 drivetrain = \"rwd\"
 # A saloon with the police package: wider track, bigger brakes, stiffer springs
@@ -986,13 +986,21 @@ pub const AIR_POLICE_LIVERY: Livery = Livery {
 pub const CRUISER_LIVERY: Livery = Livery {
     name: "cruiser",
     parts: &[
-        // The lower body is the navy; everything above the waistline is white.
-        // That is the split the phrase "white over blue" names, and it falls out
-        // of the saloon's own four parts with nothing added.
-        ("lower", PartPaint::flat(POLICE_BLUE)),
-        ("cabin", PartPaint::flat(SERVICE_WHITE)),
+        // **On the shell** (wave VEH3f.2b): the body is the navy and the four
+        // doors, the bonnet and the boot lid are white -- the patrol car's
+        // "black and white", painted on the parts VEH3c hinges, so a door torn
+        // off in a crash takes its white with it. The shell's body is a
+        // livery-paintable part by its own name (`SHELL_BODY_PART`).
+        (inf_ecs::vehicle::SHELL_BODY_PART, PartPaint::flat(POLICE_BLUE)),
+        ("door_fl", PartPaint::flat(SERVICE_WHITE)),
+        ("door_fr", PartPaint::flat(SERVICE_WHITE)),
+        ("door_rl", PartPaint::flat(SERVICE_WHITE)),
+        ("door_rr", PartPaint::flat(SERVICE_WHITE)),
         ("bonnet", PartPaint::flat(SERVICE_WHITE)),
         ("boot", PartPaint::flat(SERVICE_WHITE)),
+        ("bumper_front", PartPaint::flat(POLICE_BLUE)),
+        ("bumper_rear", PartPaint::flat(POLICE_BLUE)),
+        ("mirror", PartPaint::flat(POLICE_BLUE)),
     ],
     extra: &[(SEDAN_BAR, BEACON_BLUE)],
     service: Some(inf_ecs::dispatch::UnitKind::Police),
@@ -1108,7 +1116,15 @@ mod tests {
                 let def = defs.get(id).unwrap_or_else(|| panic!("no `{id}` row"));
                 let livery =
                     island_vehicle_livery(id).unwrap_or_else(|| panic!("`{id}` has no livery"));
-                let have: Vec<&str> = def.body.parts().iter().map(|p| p.name).collect();
+                // An art row draws ITS parts (and a shell its body by name,
+                // wave VEH3f.2b), never its family's.
+                let mut have: Vec<&str> = match def.art {
+                    Some(k) if !k.parts().is_empty() => k.parts().iter().map(|p| p.name).collect(),
+                    _ => def.body.parts().iter().map(|p| p.name).collect(),
+                };
+                if def.art.is_some_and(|k| k.shell()) {
+                    have.push(inf_ecs::vehicle::SHELL_BODY_PART);
+                }
                 for (name, _) in livery.parts {
                     assert!(
                         have.contains(name),

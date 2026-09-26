@@ -3380,6 +3380,69 @@ pub const GLASS_COLOR: crate::math::Color = crate::math::Color::new(0.07, 0.09, 
 /// naming rule (`BodyPartKind::of`), so the bodywork treats it as the body.
 pub const ART_BODY_PART: &str = "art_body";
 
+/// **The part a DCC shell's body hangs on** (wave VEH3f.2b) -- the
+/// [`ART_BODY_PART`] of a body that is OURS: a panel by the naming rule, drawn
+/// at the chassis half-extents' scale (a shell is hull fractions), and the name
+/// `inf_ecs::roster::body_kind` reads a "shell" off.
+pub const SHELL_BODY_PART: &str = "shell_body";
+
+/// **The part name a shell's rim mesh is keyed by** (wave VEH3f.2b):
+/// `art_part_guid(key, "rim")`, drawn on every wheel beside its tyre.
+pub const SHELL_RIM_PART: &str = "rim";
+
+/// **What a rim is finished in** (wave VEH3f.2b) -- bright alloy.
+pub const RIM_COLOR: crate::math::Color = crate::math::Color::new(0.62, 0.63, 0.65, 1.0);
+
+/// **What a headlamp reads as** (wave VEH3f.2b) -- a clear lens over a
+/// reflector: pale, glossy and faintly lit.
+pub const LAMP_FRONT_COLOR: crate::math::Color = crate::math::Color::new(0.86, 0.87, 0.84, 1.0);
+
+/// **A tail lamp's lens** (wave VEH3f.2b) -- red.
+pub const LAMP_REAR_COLOR: crate::math::Color = crate::math::Color::new(0.55, 0.03, 0.03, 1.0);
+
+/// **Black trim** (wave VEH3f.2b) -- a grille, a push bar: textured plastic
+/// and powder coat, never the body's paint.
+pub const TRIM_COLOR: crate::math::Color = crate::math::Color::new(0.035, 0.036, 0.04, 1.0);
+
+/// **The material a drawn part of this NAME wears when it is not paint**
+/// (wave VEH3f.2b) -- a lamp, a grille, a push bar; `None` for every name
+/// whose kind decides (glass, a seat, a hub) and for paint.
+///
+/// By name, for [`BodyPartKind::of`]'s reason: the name is the one channel a
+/// cooked level carries. Every name a part of the box families or the imported
+/// art carries answers `None`, so nothing that predates the shells moves.
+pub fn trim_material(name: &str) -> Option<crate::components::Material> {
+    use crate::components::Material;
+    if name.starts_with("lamp_front") {
+        Some(Material {
+            base_color: LAMP_FRONT_COLOR,
+            metallic: 0.2,
+            roughness: 0.08,
+            emissive: crate::math::Color::new(0.9, 0.88, 0.8, 1.0),
+            emissive_intensity: 0.25,
+            ..Default::default()
+        })
+    } else if name.starts_with("lamp_rear") {
+        Some(Material {
+            base_color: LAMP_REAR_COLOR,
+            metallic: 0.1,
+            roughness: 0.12,
+            emissive: crate::math::Color::new(0.8, 0.02, 0.02, 1.0),
+            emissive_intensity: 0.2,
+            ..Default::default()
+        })
+    } else if name.starts_with("grille") || name.starts_with("bumper_push") {
+        Some(Material {
+            base_color: TRIM_COLOR,
+            metallic: 0.05,
+            roughness: 0.62,
+            ..Default::default()
+        })
+    } else {
+        None
+    }
+}
+
 /// **What a seat cushion is covered in** (wave VEH3f) -- charcoal cloth.
 pub const SEAT_COLOR: crate::math::Color = crate::math::Color::new(0.09, 0.09, 0.1, 1.0);
 
@@ -3717,6 +3780,11 @@ pub fn rig_nodes_at(
                 ..Default::default()
             }
         };
+        // **A lamp, a grille, a push bar** (wave VEH3f.2b) wear their own
+        // finish; no part a box family or an import names answers here.
+        if let Some(m) = trim_material(part.name) {
+            material = m;
+        }
         if let Some(p) = paint {
             material.base_color = p.base_color;
             material.emissive = p.emissive;
@@ -3782,14 +3850,34 @@ pub fn rig_nodes_at(
     }
 
     if let Some(key) = def.art {
+        // **A shell is hull fractions** (wave VEH3f.2b): its body hangs at the
+        // chassis half-extents' scale, exactly as a family part's unit box
+        // does, under its own name -- and a livery can paint it.
+        let shell = key.shell();
+        let name = if shell { SHELL_BODY_PART } else { ART_BODY_PART };
+        let body_paint = spawn
+            .livery
+            .filter(|_| shell)
+            .and_then(|l| l.part(SHELL_BODY_PART))
+            .map(|p| p.base_color)
+            .unwrap_or(spawn.paint);
         out.push(RigNode {
-            guid: part_guid(ART_BODY_PART),
-            name: ART_BODY_PART.to_string(),
+            guid: part_guid(name),
+            name: name.to_string(),
             parent: Some(chassis),
-            // The mesh is in METRES and centred on the chassis collider, which
-            // is what the importer (and the committed fallback) write -- so the
-            // part is the identity.
-            transform: Transform::IDENTITY,
+            // An import's mesh is in METRES and centred on the chassis
+            // collider, which is what the importer (and the committed
+            // fallback) write -- so the part is the identity. A shell's is the
+            // unit box of the hull.
+            transform: if shell {
+                Transform {
+                    translation: Vec3d::ZERO,
+                    rotation: Vec3d::ZERO,
+                    scale: Vec3d::new(2.0 * h.x, 2.0 * h.y, 2.0 * h.z),
+                }
+            } else {
+                Transform::IDENTITY
+            },
             body: None,
             collider: None,
             mesh: Some(MeshRef {
@@ -3797,7 +3885,7 @@ pub fn rig_nodes_at(
                 asset: Some(crate::roster::art_body_guid(key)),
             }),
             material: Some(Material {
-                base_color: spawn.paint,
+                base_color: body_paint,
                 metallic: 0.35,
                 roughness: 0.42,
                 ..Default::default()
@@ -3912,19 +4000,49 @@ pub fn rig_nodes_at(
         // **An imported machine's wheel is its own mesh** (wave VEH3f), already
         // hub-centred with its axle on `X` in the chassis frame -- so its tyre
         // is the identity and the wheel's spin and steer turn it as they are.
-        let art_wheel = def.art.map(|k| crate::roster::art_wheel_guid(k, i));
+        // **A shell's tyre is the primitive's frame** (wave VEH3f.2b): one
+        // tyre mesh (wheel 0's) laid down and scaled to the row's radius as the
+        // cylinder always was, with its rim beside it.
+        let shell = def.art.is_some_and(|k| k.shell());
+        let art_wheel = def
+            .art
+            .map(|k| crate::roster::art_wheel_guid(k, if shell { 0 } else { i }));
+        let tyre_frame = Transform {
+            translation: Vec3d::ZERO,
+            rotation: Vec3d::new(0.0, 0.0, TYRE_ROLL_DEG),
+            scale: Vec3d::new(2.0 * r, 2.0 * r * TYRE_WIDTH_FRAC, 2.0 * r),
+        };
+        if let Some(k) = def.art.filter(|_| shell) {
+            out.push(RigNode {
+                guid: part_guid(&format!("rim{i}")),
+                name: "Rim".to_string(),
+                parent: Some(wheel),
+                transform: tyre_frame,
+                body: None,
+                collider: None,
+                mesh: Some(MeshRef {
+                    primitive: Primitive::Cylinder,
+                    asset: Some(crate::roster::art_part_guid(k, SHELL_RIM_PART)),
+                }),
+                material: Some(Material {
+                    base_color: RIM_COLOR,
+                    metallic: 0.85,
+                    roughness: 0.28,
+                    ..Default::default()
+                }),
+                class: None,
+                audio: None,
+                buoyancy: None,
+            });
+        }
         out.push(RigNode {
             guid: part_guid(&format!("tyre{i}")),
             name: "Tyre".to_string(),
             parent: Some(wheel),
-            transform: if art_wheel.is_some() {
+            transform: if art_wheel.is_some() && !shell {
                 Transform::IDENTITY
             } else {
-                Transform {
-                    translation: Vec3d::ZERO,
-                    rotation: Vec3d::new(0.0, 0.0, TYRE_ROLL_DEG),
-                    scale: Vec3d::new(2.0 * r, 2.0 * r * TYRE_WIDTH_FRAC, 2.0 * r),
-                }
+                tyre_frame
             },
             body: None,
             collider: None,

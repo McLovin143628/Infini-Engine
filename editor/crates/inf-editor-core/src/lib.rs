@@ -110,6 +110,9 @@ pub mod vehicle;
 /// drawn body and the class it is tuned with, from one `VehicleDef`.
 // VEH3f: the hero bodies -- DCC-built per-panel meshes, committed samples.
 pub mod vehicle_bodies;
+// VEH3f.2b: the car shells -- five closed DCC bodies and the parts cut from
+// them, committed under `samples/vehicle-shells/` as art-table rows of ours.
+pub mod vehicle_shells;
 // VEH3e: the generated vehicle sound library, committed under
 // `samples/vehicle-audio/` and bound by both island recipes.
 pub mod vehicle_audio;

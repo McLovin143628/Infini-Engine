@@ -433,7 +433,12 @@ pub fn art_fallback_meshes() -> Vec<HeroMesh> {
     };
     let (unit, _) = to_mesh_asset(&inf_dcc::cube(1.0), &opts);
     let mut out = Vec::new();
-    for key in inf_ecs::roster::ArtKey::all() {
+    // A SHELL (wave VEH3f.2b) is not an import and has no fallback: its
+    // committed meshes ARE the art (`crate::vehicle_shells`).
+    for key in inf_ecs::roster::ArtKey::all()
+        .into_iter()
+        .filter(|k| !k.shell())
+    {
         let Some((_, def)) = inf_ecs::roster::roster()
             .0
             .iter()

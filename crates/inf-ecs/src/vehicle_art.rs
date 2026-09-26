@@ -89,6 +89,12 @@ pub struct ArtBody {
     /// How many LOD rungs the pack ships for this body (the engine draws a
     /// meshlet DAG, so these are recorded, not stored).
     pub pack_lods: u32,
+    /// **A DCC SHELL of our own** (wave VEH3f.2b) rather than an import: its
+    /// body and parts are hull FRACTIONS (every `BodyPart`'s convention), so
+    /// the rig hangs the body at the chassis half-extents' scale and any row of
+    /// its family fits it -- no `half_extents_m`, and nothing to import: the
+    /// committed meshes under `samples/vehicle-shells/` ARE the art.
+    pub shell: bool,
 }
 
 fn leak(s: &str) -> &'static str {
@@ -147,7 +153,13 @@ pub fn parse_art_table(text: &str) -> Result<Vec<ArtBody>, String> {
                 kind: BodyPartKind::of(name, centre, half),
             });
         }
-        if !parts.is_empty() && half_extents.is_none() {
+        let shell = row.get("shell").and_then(|v| v.as_bool()).unwrap_or(false);
+        if shell && half_extents.is_some() {
+            return Err(format!(
+                "art `{key}` is a shell -- hull fractions -- and names `half_extents_m`"
+            ));
+        }
+        if !parts.is_empty() && half_extents.is_none() && !shell {
             return Err(format!(
                 "art `{key}` has parts but no `half_extents_m` -- its fractions mean nothing"
             ));
@@ -176,6 +188,7 @@ pub fn parse_art_table(text: &str) -> Result<Vec<ArtBody>, String> {
                 .and_then(|v| v.as_integer())
                 .unwrap_or(1)
                 .max(1) as u32,
+            shell,
         });
     }
     if out.len() > u16::MAX as usize {
@@ -247,6 +260,12 @@ impl ArtKey {
     /// The art-derived parts, or empty for a body that keeps its family's seats.
     pub fn parts(self) -> &'static [BodyPart] {
         self.body().parts
+    }
+
+    /// **Whether this body is one of our DCC shells** (wave VEH3f.2b) -- hull
+    /// fractions, hung at the chassis half-extents' scale.
+    pub fn shell(self) -> bool {
+        self.body().shell
     }
 }
 

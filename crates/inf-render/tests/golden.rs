@@ -12363,3 +12363,307 @@ fn golden_hero_pickup() {
         "the pickup's blue panels covered only {lit} px"
     );
 }
+
+// ── the car shells (wave VEH3f.2b) ──────────────────────────────────────────
+//
+// One golden per shell: the committed body, every part the art table lists
+// for it, its tyre and rim on four wheels, at the island row's own size --
+// the parts at their table boxes exactly as `inf_ecs::vehicle::rig_nodes`
+// hangs them. This suite names no `inf-ecs` (the renderer's Ring-0 discipline
+// and an unchanged lockfile), so the table is read from its committed TEXT and
+// the rows' numbers are written here (the island catalogue's own).
+
+/// One island row: `(art key, half-extents, wheel radius, half-track,
+/// half-wheelbase, settled wheel centre y)`, metres.
+type ShellRow = (&'static str, [f64; 3], f64, f64, f64, f64);
+
+const SHELL_ROWS: [ShellRow; 5] = [
+    ("shell_sedan", [0.92, 0.62, 2.2], 0.34, 0.84, 1.42, -0.5083),
+    ("shell_coupe", [0.94, 0.58, 2.25], 0.33, 0.82, 1.35, -0.4483),
+    ("shell_suv", [1.02, 0.86, 2.45], 0.40, 0.90, 1.48, -0.5945),
+    ("shell_pickup", [1.02, 0.82, 2.65], 0.42, 0.92, 1.70, -0.6674),
+    ("shell_cruiser", [0.95, 0.66, 2.32], 0.36, 0.86, 1.50, -0.5276),
+];
+
+/// A shell's parts from the committed art table's TEXT: `(name, centre,
+/// half)`, hull fractions.
+fn shell_table_parts(key: &str) -> Vec<(String, [f64; 3], [f64; 3])> {
+    let text = include_str!("../../inf-ecs/src/vehicle_art.toml");
+    let vec3 = |s: &str| -> [f64; 3] {
+        let inner = s.trim().trim_start_matches('[').trim_end_matches(']');
+        let v: Vec<f64> = inner
+            .split(',')
+            .map(|x| x.trim().parse().unwrap())
+            .collect();
+        [v[0], v[1], v[2]]
+    };
+    let (mut cur, mut out) = (String::new(), Vec::new());
+    let mut part: Option<(String, [f64; 3], [f64; 3])> = None;
+    for line in text.lines() {
+        let l = line.trim();
+        if l == "[[art]]" || l == "[[art.parts]]" {
+            if let Some(p) = part.take() {
+                if cur == key {
+                    out.push(p);
+                }
+            }
+            if l == "[[art.parts]]" {
+                part = Some((String::new(), [0.0; 3], [0.0; 3]));
+            }
+            continue;
+        }
+        if let Some(v) = l.strip_prefix("key = ") {
+            cur = v.trim_matches('"').to_string();
+        } else if let (Some(p), Some(v)) = (part.as_mut(), l.strip_prefix("name = ")) {
+            p.0 = v.trim_matches('"').to_string();
+        } else if let (Some(p), Some(v)) = (part.as_mut(), l.strip_prefix("centre = ")) {
+            p.1 = vec3(v);
+        } else if let (Some(p), Some(v)) = (part.as_mut(), l.strip_prefix("half = ")) {
+            p.2 = vec3(v);
+        }
+    }
+    if let Some(p) = part.take() {
+        if cur == key {
+            out.push(p);
+        }
+    }
+    out
+}
+
+/// One shell mesh as a vgeom asset + a lit instance.
+#[allow(clippy::too_many_arguments)]
+fn shell_add(
+    scene: &mut RenderScene,
+    file: &std::path::Path,
+    at: DVec3,
+    rot: Quat,
+    scale: Vec3,
+    color: [f32; 4],
+    metallic: f32,
+    roughness: f32,
+) {
+    let bytes = std::fs::read(file).unwrap_or_else(|e| panic!("{}: {e}", file.display()));
+    let (p, n, idx) = hero_mesh(&bytes);
+    let mesh = inf_vgeom::build::build_vgeom(&p, &n, &[], &[], &idx, Default::default());
+    let k = scene.vgeom_instances.len() as u128 + 1;
+    let id = 0x5645_4833_4632_4200_0000_0000_0000_0000u128 + k;
+    scene
+        .vgeom_assets
+        .push(VgeomAsset::from_mesh(id, &mesh).expect("index the vmesh"));
+    let mut inst = VgeomInstance::lit(id, at, rot, scale, color, k as u32);
+    inst.metallic = metallic;
+    inst.roughness = roughness;
+    scene.vgeom_instances.push(inst);
+}
+
+/// The whole shell car as vgeom assets + instances, resting with its wheels on
+/// `y = 0`.
+fn shell_scene(row: &ShellRow, paint: [f32; 4]) -> RenderScene {
+    let (key, h, r, track, wb, wy) = *row;
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../samples/vehicle-shells");
+    let lift = r - wy;
+    let mut scene = RenderScene {
+        grid_enabled: true,
+        ..Default::default()
+    };
+    let paint_m = (0.35, 0.42);
+    shell_add(
+        &mut scene,
+        &dir.join(format!("{key}_body.inf_mesh")),
+        DVec3::new(0.0, lift, 0.0),
+        Quat::IDENTITY,
+        Vec3::new(2.0 * h[0] as f32, 2.0 * h[1] as f32, 2.0 * h[2] as f32),
+        paint,
+        paint_m.0,
+        paint_m.1,
+    );
+    for (name, c, half) in shell_table_parts(key) {
+        let (color, m, ro) = if name.starts_with("glass") {
+            ([0.07, 0.09, 0.12, 1.0], 0.1, 0.08)
+        } else if name.starts_with("seat") || name.starts_with("hub") || name == "dash" {
+            ([0.09, 0.09, 0.1, 1.0], 0.0, 0.85)
+        } else if name.starts_with("lamp_front") {
+            ([0.86, 0.87, 0.84, 1.0], 0.2, 0.08)
+        } else if name.starts_with("lamp_rear") {
+            ([0.55, 0.03, 0.03, 1.0], 0.1, 0.12)
+        } else if name.starts_with("grille") || name.starts_with("bumper_push") {
+            ([0.035, 0.036, 0.04, 1.0], 0.05, 0.62)
+        } else {
+            (paint, paint_m.0, paint_m.1)
+        };
+        let rot = if name.starts_with("hub") {
+            Quat::from_euler(
+                glam::EulerRot::YXZ,
+                180f32.to_radians(),
+                22f32.to_radians(),
+                0.0,
+            )
+        } else {
+            Quat::IDENTITY
+        };
+        shell_add(
+            &mut scene,
+            &dir.join(format!("{key}_{name}.inf_mesh")),
+            DVec3::new(c[0] * h[0], c[1] * h[1] + lift, c[2] * h[2]),
+            rot,
+            Vec3::new(
+                (2.0 * half[0] * h[0]) as f32,
+                (2.0 * half[1] * h[1]) as f32,
+                (2.0 * half[2] * h[2]) as f32,
+            ),
+            color,
+            m,
+            ro,
+        );
+    }
+    if key == "shell_cruiser" {
+        // The livery's light bar (`SEDAN_BAR`: centre (0, 1.06, -0.06), half
+        // (0.6, 0.06, 0.18)), wearing this shell's mesh and the beacon blue.
+        shell_add(
+            &mut scene,
+            &dir.join(format!("{key}_light_bar.inf_mesh")),
+            DVec3::new(0.0, 1.06 * h[1] + lift, -0.06 * h[2]),
+            Quat::IDENTITY,
+            Vec3::new(
+                (1.2 * h[0]) as f32,
+                (0.12 * h[1]) as f32,
+                (0.36 * h[2]) as f32,
+            ),
+            [0.1, 0.25, 1.0, 1.0],
+            0.1,
+            0.2,
+        );
+    }
+    let tyre = Quat::from_rotation_z(90f32.to_radians());
+    for (x, z) in [(-track, wb), (track, wb), (-track, -wb), (track, -wb)] {
+        let at = DVec3::new(x, wy + lift, z);
+        let s = Vec3::new(2.0 * r as f32, (2.0 * r * 0.62) as f32, 2.0 * r as f32);
+        shell_add(
+            &mut scene,
+            &dir.join(format!("{key}_wheel0.inf_mesh")),
+            at,
+            tyre,
+            s,
+            [0.07, 0.07, 0.08, 1.0],
+            0.0,
+            0.9,
+        );
+        shell_add(
+            &mut scene,
+            &dir.join(format!("{key}_rim.inf_mesh")),
+            at,
+            tyre,
+            s,
+            [0.62, 0.63, 0.65, 1.0],
+            0.85,
+            0.28,
+        );
+    }
+    scene.lights.push(RenderLight {
+        kind: LightKind::Directional,
+        color: [1.0, 0.97, 0.9],
+        intensity: 3.0,
+        direction: Vec3::new(0.45, 0.8, 0.35).normalize(),
+        position: DVec3::ZERO,
+        range: 0.0,
+        ..RenderLight::default()
+    });
+    scene.mark_dirty();
+    scene
+}
+
+/// **Each shell golden** (wave VEH3f.2b, ADD): the car three-quarter front at
+/// its island row's size -- the frame that shows a closed body with its
+/// wheels in cut arches, a glasshouse with pillars and panes, lids, bumpers,
+/// lamps and a grille, where the VEH3f panels showed slabs on boxes. The
+/// structural gate: the paint covers a real car's share of the frame.
+fn shell_golden(name: &str, row: &ShellRow, paint: [f32; 4]) {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let scene = shell_scene(row, paint);
+    let h = row.1;
+    let view = look_view(
+        DVec3::new(h[0] * 3.6, h[1] * 2.6 + 0.9, h[2] * 1.75),
+        DVec3::new(0.0, h[1] * 0.9, 0.0),
+    );
+    let img = check_golden_with(&gpu, name, &scene, &view, vgeom_settings());
+    let red = paint[0] > paint[2];
+    let lit = img
+        .chunks(4)
+        .filter(|p| {
+            let (r, b) = (p[0] as i32, p[2] as i32);
+            if red {
+                r - b > 30
+            } else {
+                b - r > 30
+            }
+        })
+        .count();
+    assert!(
+        lit > 2_500,
+        "{name}: the painted body covered only {lit} px"
+    );
+}
+
+#[test]
+fn golden_shell_sedan() {
+    shell_golden("shell_sedan", &SHELL_ROWS[0], [0.62, 0.08, 0.07, 1.0]);
+}
+
+#[test]
+fn golden_shell_coupe() {
+    shell_golden("shell_coupe", &SHELL_ROWS[1], [0.70, 0.30, 0.04, 1.0]);
+}
+
+#[test]
+fn golden_shell_suv() {
+    shell_golden("shell_suv", &SHELL_ROWS[2], [0.08, 0.20, 0.55, 1.0]);
+}
+
+#[test]
+fn golden_shell_pickup() {
+    shell_golden("shell_pickup", &SHELL_ROWS[3], [0.10, 0.22, 0.52, 1.0]);
+}
+
+#[test]
+fn golden_shell_cruiser() {
+    shell_golden("shell_cruiser", &SHELL_ROWS[4], [0.05, 0.10, 0.35, 1.0]);
+}
+
+/// **The shells from four sides, at 1280x720** -- NOT a golden: an author's
+/// view (`INF_SHELL_VIEWS=<dir> cargo test -p inf-render --test golden
+/// shell_views -- --ignored`).
+#[test]
+#[ignore]
+fn shell_views() {
+    let Some(out) = std::env::var_os("INF_SHELL_VIEWS") else {
+        return;
+    };
+    let Some(gpu) = gpu_or_skip() else { return };
+    let (w, hgt) = (1280u32, 720u32);
+    for row in SHELL_ROWS.iter() {
+        let scene = shell_scene(row, [0.62, 0.08, 0.07, 1.0]);
+        let h = row.1;
+        let t = DVec3::new(0.0, h[1] * 0.9, 0.0);
+        for (tag, eye) in [
+            ("front34", DVec3::new(h[0] * 3.4, h[1] * 2.2 + 0.7, h[2] * 1.6)),
+            ("side", DVec3::new(h[2] * 2.6, h[1] + 0.2, 0.0)),
+            ("rear34", DVec3::new(-h[0] * 3.4, h[1] * 2.6 + 0.9, -h[2] * 1.6)),
+            ("top", DVec3::new(0.3, h[2] * 3.2, 0.01)),
+        ] {
+            let mut view = look_view(eye, t);
+            view.width = w;
+            view.height = hgt;
+            let target = HeadlessTarget::new(&gpu, w, hgt);
+            let mut renderer = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+            renderer.set_settings(vgeom_settings());
+            renderer.render(&gpu, &scene, &view, &target.view, (w, hgt));
+            let rgba = target.read_rgba(&gpu).expect("readback");
+            let path = PathBuf::from(&out).join(format!("{}-{tag}.png", row.0));
+            let file = std::fs::File::create(&path).unwrap();
+            let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w, hgt);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Eight);
+            enc.write_header().unwrap().write_image_data(&rgba).unwrap();
+        }
+    }
+}

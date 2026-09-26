@@ -11631,6 +11631,12 @@ mod tests {
                 &crate::vehicle_bodies::vehicle_art_dir(),
             )
             .expect("regenerate the vehicle art fallback");
+            // …and the car shells (wave VEH3f.2b): the island's five hero rows
+            // and every roster row of their families name these GUIDs.
+            crate::vehicle_shells::write_vehicle_shells(
+                &crate::vehicle_shells::vehicle_shells_dir(),
+            )
+            .expect("regenerate the car shells");
             // …and the Modern Weapons bodies' committed FALLBACK (wave
             // VEH3f.2a): boxes of their measured bounds at the identities the
             // class table names.
@@ -12603,6 +12609,38 @@ mod tests {
             eprintln!("SKIP: the hero bodies have not been blessed yet");
         }
 
+        // **The car shells (wave VEH3f.2b)**, on the hero bodies' terms.
+        let sdir = crate::vehicle_shells::vehicle_shells_dir();
+        if sdir.join("shell_sedan_body.inf_mesh").exists() {
+            let mut have: Vec<String> = std::fs::read_dir(&sdir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            have.sort();
+            assert_eq!(
+                have,
+                crate::vehicle_shells::shell_files(),
+                "the committed shells are not the file SET the generator writes"
+            );
+            for m in crate::vehicle_shells::shell_meshes() {
+                let p = sdir.join(&m.file);
+                let want = inf_asset::encode(&m.asset).expect("the mesh encodes");
+                assert_eq!(
+                    std::fs::read(&p).unwrap(),
+                    want,
+                    "committed {} drifted from the generator",
+                    p.display()
+                );
+                let side = inf_asset::AssetSidecar::load(&p)
+                    .unwrap_or_else(|e| panic!("{} has no sidecar: {e}", p.display()));
+                assert_eq!(side.guid.0, m.guid, "{}'s committed GUID", m.file);
+            }
+        } else {
+            eprintln!("SKIP: the car shells have not been blessed yet");
+        }
+
         // **The art fallback (wave VEH3f)**, on the hero bodies' terms.
         let adir = crate::vehicle_bodies::vehicle_art_dir();
         if adir.join("excavator_body.inf_mesh").exists() {
@@ -12973,6 +13011,34 @@ mod tests {
             assert_eq!(
                 named, on_disk,
                 "{recipe}'s `[content]` list is not the vehicle sound library"
+            );
+        }
+    }
+
+    /// **Both island recipes name every shell file** (wave VEH3f.2b) -- the
+    /// generator's own file SET, so a part the generator adds is copied into
+    /// the island project, and a shell mesh not copied is a car that draws
+    /// nothing where its door should be.
+    #[test]
+    fn both_island_recipes_name_every_shell() {
+        let want = crate::vehicle_shells::shell_files();
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../samples");
+        for recipe in ["island/island.toml", "island-fixture/island.toml"] {
+            let path = root.join(recipe);
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("no {}: {e}", path.display()));
+            let mut named: Vec<String> = text
+                .lines()
+                .filter_map(|l| {
+                    let l = l.trim().trim_start_matches('"').trim_end_matches(',');
+                    let l = l.trim_end_matches('"');
+                    l.strip_prefix("../vehicle-shells/").map(str::to_string)
+                })
+                .collect();
+            named.sort();
+            assert_eq!(
+                named, want,
+                "{recipe}'s `[content]` list is not the shell library"
             );
         }
     }

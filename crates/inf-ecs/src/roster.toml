@@ -12,6 +12,7 @@ label = "Vapid Dominator GT"
 
 [vapid_dominator_gt.vehicle]
 class = "coupe"
+art = "shell_coupe"
 half_width_m = 0.96
 half_height_m = 0.59
 half_length_m = 2.4
@@ -43,6 +44,7 @@ label = "Bravado Gauntlet Hellfire"
 
 [bravado_gauntlet_hellfire.vehicle]
 class = "coupe"
+art = "shell_coupe"
 differential = "locked"
 half_width_m = 0.96
 half_height_m = 0.625
@@ -76,6 +78,7 @@ label = "Declasse Vigero ZX"
 
 [declasse_vigero_zx.vehicle]
 class = "coupe"
+art = "shell_coupe"
 half_width_m = 0.95
 half_height_m = 0.575
 half_length_m = 2.39
@@ -142,6 +145,7 @@ label = "Ubermacht Sentinel Classic"
 
 [ubermacht_sentinel_classic.vehicle]
 class = "coupe"
+art = "shell_coupe"
 half_width_m = 0.89
 half_height_m = 0.585
 half_length_m = 2.245
@@ -173,6 +177,7 @@ label = "Obey 9F Cabrio"
 
 [obey_9f_cabrio.vehicle]
 class = "coupe"
+art = "shell_coupe"
 drivetrain = "awd"
 half_width_m = 0.97
 half_height_m = 0.52
@@ -206,6 +211,7 @@ label = "Annis Elegy RH8"
 
 [annis_elegy_rh8.vehicle]
 class = "coupe"
+art = "shell_coupe"
 drivetrain = "awd"
 half_width_m = 0.95
 half_height_m = 0.585
@@ -239,6 +245,7 @@ label = "Dinka Jester RR"
 
 [dinka_jester_rr.vehicle]
 class = "coupe"
+art = "shell_coupe"
 half_width_m = 0.925
 half_height_m = 0.545
 half_length_m = 2.19
@@ -271,6 +278,7 @@ label = "Karin Futo GTX"
 
 [karin_futo_gtx.vehicle]
 class = "coupe"
+art = "shell_coupe"
 differential = "open"
 half_width_m = 0.815
 half_height_m = 0.57
@@ -305,6 +313,7 @@ label = "Maibatsu Penumbra FF"
 
 [maibatsu_penumbra_ff.vehicle]
 class = "coupe"
+art = "shell_coupe"
 drivetrain = "awd"
 half_width_m = 0.87
 half_height_m = 0.55
@@ -338,6 +347,7 @@ label = "Lampadati Felon GT"
 
 [lampadati_felon_gt.vehicle]
 class = "coupe"
+art = "shell_coupe"
 half_width_m = 0.96
 half_height_m = 0.575
 half_length_m = 2.455
@@ -370,6 +380,7 @@ label = "Dewbauchee Massacro"
 
 [dewbauchee_massacro.vehicle]
 class = "coupe"
+art = "shell_coupe"
 half_width_m = 0.97
 half_height_m = 0.535
 half_length_m = 2.235
@@ -402,6 +413,7 @@ label = "Grotti Bestia GTS"
 
 [grotti_bestia_gts.vehicle]
 class = "coupe"
+art = "shell_coupe"
 drivetrain = "awd"
 half_width_m = 0.99
 half_height_m = 0.59
@@ -434,6 +446,7 @@ label = "Pegassi Zentorno"
 
 [pegassi_zentorno.vehicle]
 class = "coupe"
+art = "shell_coupe"
 drivetrain = "awd"
 half_width_m = 1.05
 half_height_m = 0.47
@@ -468,6 +481,7 @@ label = "Overflod Entity MT"
 
 [overflod_entity_mt.vehicle]
 class = "coupe"
+art = "shell_coupe"
 half_width_m = 1.015
 half_height_m = 0.505
 half_length_m = 2.305
@@ -502,6 +516,7 @@ label = "Progen T20"
 
 [progen_t20.vehicle]
 class = "coupe"
+art = "shell_coupe"
 half_width_m = 0.975
 half_height_m = 0.495
 half_length_m = 2.295
@@ -536,6 +551,7 @@ label = "Truffade Thrax"
 
 [truffade_thrax.vehicle]
 class = "coupe"
+art = "shell_coupe"
 drivetrain = "awd"
 half_width_m = 1.01
 half_height_m = 0.505
@@ -570,6 +586,7 @@ label = "Emperor Vectre"
 
 [emperor_vectre.vehicle]
 class = "coupe"
+art = "shell_coupe"
 half_width_m = 0.925
 half_height_m = 0.595
 half_length_m = 2.355
@@ -601,6 +618,7 @@ label = "Enus Windsor Drop"
 
 [enus_windsor_drop.vehicle]
 class = "coupe"
+art = "shell_coupe"
 half_width_m = 0.975
 half_height_m = 0.655
 half_length_m = 2.645
@@ -633,6 +651,7 @@ label = "Albany Alpha"
 
 [albany_alpha.vehicle]
 class = "coupe"
+art = "shell_coupe"
 half_width_m = 0.92
 half_height_m = 0.59
 half_length_m = 2.33
@@ -665,6 +684,7 @@ label = "Albany Washington"
 
 [albany_washington.vehicle]
 class = "sedan"
+art = "shell_sedan"
 drivetrain = "rwd"
 half_width_m = 0.995
 half_height_m = 0.645
@@ -697,6 +717,7 @@ label = "Declasse Premier"
 
 [declasse_premier.vehicle]
 class = "sedan"
+art = "shell_sedan"
 half_width_m = 0.925
 half_height_m = 0.65
 half_length_m = 2.555
@@ -728,6 +749,7 @@ label = "Vapid Stanier"
 
 [vapid_stanier.vehicle]
 class = "sedan"
+art = "shell_sedan"
 drivetrain = "rwd"
 half_width_m = 0.995
 half_height_m = 0.635
@@ -829,6 +851,7 @@ label = "Ubermacht Oracle XS"
 
 [ubermacht_oracle_xs.vehicle]
 class = "sedan"
+art = "shell_sedan"
 drivetrain = "rwd"
 half_width_m = 0.95
 half_height_m = 0.645
@@ -896,6 +919,7 @@ label = "Benefactor Schafter V12"
 
 [benefactor_schafter_v12.vehicle]
 class = "sedan"
+art = "shell_sedan"
 drivetrain = "rwd"
 half_width_m = 0.95
 half_height_m = 0.65
@@ -929,6 +953,7 @@ label = "Enus Cognoscenti"
 
 [enus_cognoscenti.vehicle]
 class = "sedan"
+art = "shell_sedan"
 drivetrain = "rwd"
 half_width_m = 0.99
 half_height_m = 0.685
@@ -962,6 +987,7 @@ label = "Lampadati Cinquemila"
 
 [lampadati_cinquemila.vehicle]
 class = "sedan"
+art = "shell_sedan"
 drivetrain = "rwd"
 half_width_m = 0.975
 half_height_m = 0.64
@@ -996,6 +1022,7 @@ label = "Annis Intruder"
 
 [annis_intruder.vehicle]
 class = "sedan"
+art = "shell_sedan"
 drivetrain = "rwd"
 half_width_m = 0.91
 half_height_m = 0.62
@@ -1131,6 +1158,7 @@ label = "Bravado Buffalo STX"
 
 [bravado_buffalo_stx.vehicle]
 class = "sedan"
+art = "shell_sedan"
 drivetrain = "rwd"
 differential = "lsd"
 half_width_m = 1.02
@@ -1231,6 +1259,7 @@ label = "Willard Faction"
 
 [willard_faction.vehicle]
 class = "sedan"
+art = "shell_sedan"
 drivetrain = "rwd"
 half_width_m = 0.91
 half_height_m = 0.585
@@ -1298,6 +1327,7 @@ label = "Coil Raiden"
 
 [coil_raiden.vehicle]
 class = "sedan"
+art = "shell_sedan"
 drivetrain = "awd"
 half_width_m = 0.98
 half_height_m = 0.62
@@ -1340,6 +1370,7 @@ label = "Gallivanter Baller ST-D"
 
 [gallivanter_baller_st_d.vehicle]
 class = "suv"
+art = "shell_suv"
 half_width_m = 0.99
 half_height_m = 0.78
 half_length_m = 2.44
@@ -1372,6 +1403,7 @@ label = "Benefactor XLS"
 
 [benefactor_xls.vehicle]
 class = "suv"
+art = "shell_suv"
 half_width_m = 1.015
 half_height_m = 0.79
 half_length_m = 2.605
@@ -1404,6 +1436,7 @@ label = "Ubermacht Rebla GTS"
 
 [ubermacht_rebla_gts.vehicle]
 class = "suv"
+art = "shell_suv"
 half_width_m = 1.01
 half_height_m = 0.75
 half_length_m = 2.47
@@ -1470,6 +1503,7 @@ label = "Pegassi Toros"
 
 [pegassi_toros.vehicle]
 class = "suv"
+art = "shell_suv"
 half_width_m = 1.01
 half_height_m = 0.7
 half_length_m = 2.555
@@ -1503,6 +1537,7 @@ label = "Albany Cavalcade XL"
 
 [albany_cavalcade_xl.vehicle]
 class = "suv"
+art = "shell_suv"
 half_width_m = 1.03
 half_height_m = 0.85
 half_length_m = 2.885
@@ -1534,6 +1569,7 @@ label = "Declasse Granger 3600LX"
 
 [declasse_granger_3600lx.vehicle]
 class = "suv"
+art = "shell_suv"
 drivetrain = "rwd"
 half_width_m = 1.03
 half_height_m = 0.84
@@ -1566,6 +1602,7 @@ label = "Vapid Aleutian"
 
 [vapid_aleutian.vehicle]
 class = "suv"
+art = "shell_suv"
 half_width_m = 1.015
 half_height_m = 0.855
 half_length_m = 2.815
@@ -1664,6 +1701,7 @@ label = "Karin BeeJay 150"
 
 [karin_beejay_150.vehicle]
 class = "suv"
+art = "shell_suv"
 differential = "locked"
 half_width_m = 0.945
 half_height_m = 0.805
@@ -1698,6 +1736,7 @@ label = "Dundreary Landstalker XL"
 
 [dundreary_landstalker_xl.vehicle]
 class = "suv"
+art = "shell_suv"
 half_width_m = 1.03
 half_height_m = 0.85
 half_length_m = 2.815
@@ -1730,6 +1769,7 @@ label = "Enus Jubilee"
 
 [enus_jubilee.vehicle]
 class = "suv"
+art = "shell_suv"
 half_width_m = 1.0
 half_height_m = 0.8
 half_length_m = 2.67
@@ -1762,6 +1802,7 @@ label = "Grotti Itali SUV"
 
 [grotti_itali_suv.vehicle]
 class = "suv"
+art = "shell_suv"
 half_width_m = 1.015
 half_height_m = 0.675
 half_length_m = 2.485
@@ -1793,6 +1834,7 @@ label = "Coil Astrond"
 
 [coil_astrond.vehicle]
 class = "suv"
+art = "shell_suv"
 half_width_m = 1.04
 half_height_m = 0.865
 half_length_m = 2.55
@@ -1834,6 +1876,7 @@ label = "Fathom FQ 2"
 
 [fathom_fq_2.vehicle]
 class = "suv"
+art = "shell_suv"
 half_width_m = 0.965
 half_height_m = 0.705
 half_length_m = 2.43
@@ -1865,6 +1908,7 @@ label = "Canis Castigator"
 
 [canis_castigator.vehicle]
 class = "suv"
+art = "shell_suv"
 differential = "lsd"
 half_width_m = 0.97
 half_height_m = 0.75
@@ -1967,6 +2011,7 @@ label = "Lampadati Novak"
 
 [lampadati_novak.vehicle]
 class = "suv"
+art = "shell_suv"
 half_width_m = 0.985
 half_height_m = 0.72
 half_length_m = 2.5
@@ -2139,6 +2184,7 @@ label = "Bravado Duneloader"
 
 [bravado_duneloader.vehicle]
 class = "truck"
+art = "shell_pickup"
 drivetrain = "awd"
 differential = "locked"
 half_width_m = 1.0
@@ -2172,6 +2218,7 @@ label = "Declasse Walton L35"
 
 [declasse_walton_l35.vehicle]
 class = "truck"
+art = "shell_pickup"
 half_width_m = 1.0
 half_height_m = 0.78
 half_length_m = 2.65
@@ -2237,6 +2284,7 @@ label = "Vapid Slamvan"
 
 [vapid_slamvan.vehicle]
 class = "truck"
+art = "shell_pickup"
 half_width_m = 0.975
 half_height_m = 0.655
 half_length_m = 2.45
@@ -2376,6 +2424,7 @@ label = "Coil Brawler"
 
 [coil_brawler.vehicle]
 class = "truck"
+art = "shell_pickup"
 drivetrain = "rwd"
 half_width_m = 1.1
 half_height_m = 0.71
@@ -2409,6 +2458,7 @@ label = "Vapid Bobcat XL"
 
 [vapid_bobcat_xl.vehicle]
 class = "truck"
+art = "shell_pickup"
 half_width_m = 0.975
 half_height_m = 0.76
 half_length_m = 2.65
@@ -2440,6 +2490,7 @@ label = "Declasse Drift Yosemite"
 
 [declasse_drift_yosemite.vehicle]
 class = "truck"
+art = "shell_pickup"
 half_width_m = 0.975
 half_height_m = 0.63
 half_length_m = 2.45
@@ -2513,6 +2564,7 @@ label = "Karin Technical"
 
 [karin_technical.vehicle]
 class = "truck"
+art = "shell_pickup"
 drivetrain = "awd"
 differential = "locked"
 half_width_m = 0.935
@@ -2613,6 +2665,7 @@ label = "Cheval Picador"
 
 [cheval_picador.vehicle]
 class = "truck"
+art = "shell_pickup"
 half_width_m = 0.95
 half_height_m = 0.585
 half_length_m = 2.675
@@ -3054,6 +3107,7 @@ label = "Bravado Buffalo Cruiser"
 
 [bravado_buffalo_cruiser.vehicle]
 class = "emergency"
+art = "shell_cruiser"
 body = "sedan"
 drivetrain = "rwd"
 half_width_m = 0.95

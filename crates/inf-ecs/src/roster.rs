@@ -462,7 +462,14 @@ pub fn engine_spawned_art_meshes() -> Vec<uuid::Uuid> {
     let mut out = Vec::new();
     for k in keys {
         out.push(art_body_guid(k));
-        out.extend((0..4).map(|i| art_wheel_guid(k, i)));
+        if k.shell() {
+            // A shell (wave VEH3f.2b) draws wheel 0's tyre on every wheel,
+            // with its rim beside it.
+            out.push(art_wheel_guid(k, 0));
+            out.push(art_part_guid(k, crate::vehicle::SHELL_RIM_PART));
+        } else {
+            out.extend((0..4).map(|i| art_wheel_guid(k, i)));
+        }
         out.extend(k.parts().iter().map(|p| art_part_guid(k, p.name)));
     }
     out.sort();
@@ -546,6 +553,9 @@ pub fn body_kind(world: &crate::world::EcsWorld, chassis: uuid::Uuid) -> &'stati
         }
         if world.name_of(child) == Some(crate::vehicle::ART_BODY_PART) {
             return "imported";
+        }
+        if world.name_of(child) == Some(crate::vehicle::SHELL_BODY_PART) {
+            return "shell";
         }
         if world.name_of(child) != Some("Tyre") {
             kind = "dcc";
