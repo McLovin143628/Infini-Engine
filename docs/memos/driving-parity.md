@@ -284,7 +284,7 @@ re-derives each line and compares it to the digit):
 | `karin_asterope_gz` (imported) | 2023 Toyota Camry TRD | **6.40 s** | 5.615 s | **13.42 s** | 13.916 s | WITHIN (+14 %) |
 | `pegassi_zentorno` (shell) | 2011 Lamborghini Sesto Elemento | **2.35 s** | 2.500 s | **4.57 s** | 5.200 s | WITHIN (−6 %) |
 
-FEEL-VS-FORZA bravado_gauntlet_hellfire: 0-60 mph 3.72 s -- OUTSIDE the band (the Demon's FH5 launch is a drag-radial launch at ~1.19 g mean; a road-tyre row on a mu 0.9 slab cannot make it, and the row authors 652.5 N.m against the car's 1 044).
+FEEL-VS-FORZA bravado_gauntlet_hellfire: 0-60 mph 2.48 s -- WITHIN the band (retuned by the VEH3h audit: the Demon's own 1 044 N.m and a drag-radial launch, longitudinal_grip 2.0; it was 3.72 s OUTSIDE at 652.5 N.m on road tyres).
 FEEL-VS-FORZA karin_asterope_gz: 0-60 mph 6.40 s -- WITHIN the band.
 FEEL-VS-FORZA pegassi_zentorno: 0-60 mph 2.35 s -- WITHIN the band.
 
@@ -379,7 +379,7 @@ VEH3d's pipeline (one interact press); a three-second burnout at the line with t
 aid off; one lap on the engine's own lane driver (`traffic::drive_intent`, 22 m/s on the
 straights, its bend rule in the corners); a five-second cool-down straight.
 
-LAP-FACTS: 3161 rows at 60 Hz; the burnout took the rear tyres +6.35 C; the cool-down straight cooled them 2.99 C; boost 0.965 peak, 0.000 half a second after the lift; the front axle 48.4 % standing and 70.3 % braking; peak braking 1.37 g; the lap 44.68 s.
+LAP-FACTS: 1958 rows at 60 Hz; the burnout took the rear tyres +4.11 C; the cool-down straight cooled them 1.37 C; boost 0.971 peak, 0.000 half a second after the lift; the front axle 49.6 % standing and 73.6 % braking; peak braking 1.69 g; the lap 24.63 s.
 
 The columns (the CSV's SHAPE is the arm's): `t, phase, x, z, s_m, speed_mps, long_g, lat_g,
 throttle, brake, rpm, gear, boost, slip_fl..rr, slip_lat_fl..rr, load_fl..rr, temp_fl..rr,

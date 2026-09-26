@@ -961,7 +961,7 @@ fn the_lap_logs_at_sixty_hertz_and_pie_equals_shipping() {
         f.boost_peak, f.boost_after_lift
     );
     println!(
-        "LAP LOAD: the front axle carries {:.1} % standing and {:.1} % braking (peak braking {:.2} g; peak one-step deceleration {:.2} g, an impact, not a brake)",
+        "LAP LOAD: the front axle carries {:.1} % standing and {:.1} % braking (peak braking {:.2} g; peak one-step deceleration {:.2} g)",
         f.static_front * 100.0,
         f.braking_front * 100.0,
         f.peak_brake_g,
@@ -985,6 +985,15 @@ fn the_lap_logs_at_sixty_hertz_and_pie_equals_shipping() {
     assert!(
         f.braking_front > f.static_front + 0.05,
         "braking moved no load forward: {f:?}"
+    );
+    // **NO IMPACT ON THE LINE** (the VEH3h audit): the cert's circuit struck a
+    // terrace bank at -36.75 g for one step. The steepest one-step
+    // deceleration of the lap is its braking, not a wall.
+    assert!(
+        f.peak_impact_g < f.peak_brake_g + 0.5,
+        "the lap met something: a one-step deceleration of {:.2} g against {:.2} g of braking",
+        f.peak_impact_g,
+        f.peak_brake_g
     );
     // THE MEMO QUOTES THIS LAP: its `LAP-FACTS` line carries the numbers this
     // arm just measured, digit for digit, or the memo is red.
@@ -1181,7 +1190,9 @@ const FEEL_CAR: Uuid = Uuid::from_u128(0x5645_4833_4645_4500_0000_0000_0000_0001
 /// **The three rows re-measured against Forza**, with the real-world car each
 /// is inspired by and that car's STOCK figures in Forza Horizon 5 (the game's
 /// own acceleration test, 0-60 mph and 0-100 mph, as published by the
-/// `forza.labsgg.com` FH5 car sheets, read 2026-09-26): `(row, body kind,
+/// `forza.labsgg.com` FH5 car sheets' "simulation results", RE-READ by the
+/// VEH3h audit on 2026-09-26 -- the cert's figures (2.293 / 5.615 / 2.500 s)
+/// were each 1-2.5 % off what the sheets print): `(row, body kind,
 /// inspiration, FH5 0-60 mph s, FH5 0-100 mph s)`. One SHELL row, one IMPORTED
 /// row (its art is local-only; the physics is the committed row either way),
 /// and one hypercar shell row at the other end of the class.
@@ -1190,22 +1201,22 @@ const FORZA_ROWS: [(&str, &str, &str, f64, f64); 3] = [
         "bravado_gauntlet_hellfire",
         "shell",
         "2018 Dodge Challenger SRT Demon",
-        2.293,
-        5.980,
+        2.259,
+        5.847,
     ),
     (
         "karin_asterope_gz",
         "imported",
         "2023 Toyota Camry TRD",
-        5.615,
-        13.916,
+        5.555,
+        13.785,
     ),
     (
         "pegassi_zentorno",
         "shell",
         "2011 Lamborghini Sesto Elemento",
-        2.500,
-        5.200,
+        2.442,
+        5.088,
     ),
 ];
 

@@ -39,6 +39,9 @@ cylinders = 8.0
 
 # Bravado Gauntlet Hellfire -- inspired by the Dodge Challenger SRT Demon -- high-horsepower drag strip coupe.
 # 1950 kg on 0.17 m of travel: 38 % static by construction (k = m g / 4 / (travel x 0.38)).
+# The Demon's own 1 044 N.m and a DRAG-RADIAL launch (longitudinal_grip 2.0 against the
+# road tyre's 1.2) -- the VEH3h audit: at 652.5 N.m on road tyres the row ran 0-60 mph
+# in 3.72 s against FH5's 2.259 (+65 %); retuned it runs 2.48 s (+10 %).
 [bravado_gauntlet_hellfire]
 label = "Bravado Gauntlet Hellfire"
 
@@ -58,7 +61,7 @@ wheel_drop_m = -0.485
 cog_height_m = -0.375
 stiffness_n_per_m = 74030.0
 damping_ns_per_m = 6010.0
-peak_torque_nm = 652.5
+peak_torque_nm = 1044.0
 peak_torque_rpm = 4200.0
 redline_rpm = 6500.0
 shift_up_rpm = 6110.0
@@ -70,6 +73,7 @@ brake_force_n = 22000.0
 handbrake_force_n = 9900.0
 cylinders = 8.0
 turbo_boost_max = 0.6
+longitudinal_grip = 2.0
 
 # Declasse Vigero ZX -- inspired by the Chevrolet Camaro ZL1 -- track-focused modern pony car.
 # 1760 kg on 0.17 m of travel: 38 % static by construction (k = m g / 4 / (travel x 0.38)).
