@@ -990,7 +990,7 @@ impl Builder {
         let bump = 0.004 * dz.signum();
         let p0 = self.vert(pole(&rings[0], -bump));
         let p1 = self.vert(pole(&rings[rings.len() - 1], bump));
-        let mut quad = |b: &mut Builder, a: [VertId; 4]| {
+        let quad = |b: &mut Builder, a: [VertId; 4]| {
             if flip {
                 b.face(&[a[3], a[2], a[1], a[0]]);
             } else {

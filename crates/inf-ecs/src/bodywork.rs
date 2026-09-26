@@ -956,7 +956,8 @@ pub const CRUMPLE_BAND_M: f64 = 0.55;
 /// **How much a crumple buckles across the car**, as a fraction of its depth.
 /// A real nose does not flatten like a press: it folds, and the fold's ridges
 /// run across it. A portable sine over the lateral coordinate
-/// ([`inf_math::psin64`]) with this amplitude is the fold.
+/// ([`inf_math::psin64`]) takes up to this fraction of the depth away in the
+/// troughs -- never adds it, so the dent stays the bound.
 pub const CRUMPLE_BUCKLE_FRAC: f64 = 0.18;
 
 /// The buckle's wavelength across the car, metres.
@@ -1046,7 +1047,9 @@ pub fn dent_mesh_positions(
         let t = t.min(1.0);
         let w = t * t * (3.0 - 2.0 * t);
         let lat = m[0] * side[0] + m[2] * side[2];
-        let buckle = 1.0 + CRUMPLE_BUCKLE_FRAC * inf_math::psin64(k * lat);
+        // Between `1 - CRUMPLE_BUCKLE_FRAC` and `1`: a buckle only ever takes
+        // depth away, so the crumple's deepest vertex is the dent itself.
+        let buckle = 1.0 - CRUMPLE_BUCKLE_FRAC * 0.5 * (1.0 + inf_math::psin64(k * lat));
         let push = (depth * w * buckle).min(0.8 * (f - f_min)).max(0.0);
         if push <= 0.0 {
             continue;

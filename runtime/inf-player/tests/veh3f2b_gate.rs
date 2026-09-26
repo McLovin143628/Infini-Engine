@@ -846,7 +846,6 @@ fn hard_stop(def: &VehicleDef, from_mps: f64) -> (f64, Vec<(f64, f64, f64, f64)>
     let key = |z: f64| (z * 100.0).round() as i64;
     let mut axles: std::collections::BTreeMap<i64, (f64, f64, f64, f64, usize)> =
         std::collections::BTreeMap::new();
-    let mut t = 0.0f64;
     for _ in 0..2_400 {
         command(
             &mut sim,
@@ -855,7 +854,6 @@ fn hard_stop(def: &VehicleDef, from_mps: f64) -> (f64, Vec<(f64, f64, f64, f64)>
                 ..Default::default()
             },
         );
-        t += 1.0 / 60.0;
         let v = rig_speed(&sim);
         if let Some(rig) = sim.bridge3d().vehicle_of(RIG) {
             let wheels = rig.wheels();
@@ -1173,4 +1171,400 @@ fn measure_island_rig(content: &std::path::Path, row: &str) {
         gap
     );
     let _ = (grounded, n, pitch, slope, gap);
+}
+
+// ── the crumple: a hull's dent, in its mesh ─────────────────────────────────
+
+const WALL: Uuid = Uuid::from_u128(0x5E3F_2B30);
+const CRASH_CAR: Uuid = Uuid::from_u128(0x5E3F_2B31);
+
+/// A shipped host holding one row at rest on the fixture's slab, nose `+Z`,
+/// with (or without) a concrete wall six metres ahead of its nose, and the
+/// car handed `kmh` of speed before its first step.
+fn wall_sim(def: &VehicleDef, kmh: f64, wall: bool) -> inf_player::runtime_sim::RuntimeSim {
+    let mut world = EcsWorld::new();
+    ground(&mut world);
+    let y = inf_ecs::vehicle::resting_origin_y(def, 0.0);
+    car(&mut world, CRASH_CAR, DVec3::new(0.0, y, -20.0), 0.0, def);
+    let nose = {
+        let e = world.entity_of(CRASH_CAR).expect("the car");
+        let c = *world.world().get::<Collider3D>(e).expect("a chassis collider");
+        let h = inf_ecs::vehicle::chassis_half_extents(&c);
+        -20.0 + c.offset.z + h.z
+    };
+    if wall {
+        let e = world.spawn_with_guid(WALL, "Wall", None);
+        world.world_mut().entity_mut(e).insert((
+            Transform {
+                translation: Vec3d::new(0.0, 1.5, nose + 6.0 + 0.5),
+                ..Default::default()
+            },
+            Visibility::default(),
+            RigidBody3D {
+                kind: BodyKind3D::Static,
+                ..Default::default()
+            },
+            Collider3D {
+                shape_kind: ColliderShape3DKind::Box,
+                half_extents: Vec3d::new(6.0, 1.5, 0.5),
+                friction: 0.8,
+                ..Default::default()
+            },
+        ));
+    }
+    world.propagate();
+    let mut sim = inf_player::runtime_sim::RuntimeSim::new(
+        world,
+        Vec::new(),
+        glam::DVec2::new(0.0, -9.81),
+        60.0,
+    );
+    let body = sim.bridge3d().body_of(CRASH_CAR).expect("a chassis body");
+    sim.bridge3d_mut()
+        .world_mut()
+        .set_body_linvel(body, DVec3::new(0.0, 0.0, kmh / 3.6));
+    sim
+}
+
+/// The car's HULL part: its guid, its state, its mesh and its drawn scale.
+fn hull_of(
+    sim: &inf_player::runtime_sim::RuntimeSim,
+    chassis: Uuid,
+) -> Option<(Uuid, inf_ecs::bodywork::PartState, Option<Uuid>, [f64; 3])> {
+    let w = sim.world();
+    let row = inf_ecs::bodywork::damage_of(w)?.rows.get(&chassis)?;
+    let (g, p) = row.parts.iter().find(|(_, p)| p.hull)?;
+    let e = w.entity_of(*g)?;
+    let mesh = w
+        .world()
+        .get::<inf_ecs::components::MeshRef>(e)
+        .and_then(|m| m.asset);
+    let s = w.world().get::<Transform>(e).map(|t| t.scale)?;
+    Some((*g, *p, mesh, [s.x, s.y, s.z]))
+}
+
+/// The committed shell mesh at `guid` (its sidecar's), decoded.
+fn committed_shell_mesh(guid: Uuid) -> inf_mesh::MeshAsset {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/vehicle-shells");
+    for e in std::fs::read_dir(&dir).expect("the shells are committed") {
+        let p = e.unwrap().path();
+        if p.extension().is_some_and(|x| x == "inf_mesh") {
+            let side = inf_asset::AssetSidecar::load(&p).expect("a sidecar");
+            if side.guid.0 == guid {
+                return inf_asset::decode(&std::fs::read(&p).unwrap()).expect("it decodes");
+            }
+        }
+    }
+    panic!("no committed shell mesh at {guid}");
+}
+
+fn positions_of(mesh: &inf_mesh::MeshAsset) -> Vec<[f32; 3]> {
+    mesh.submeshes
+        .iter()
+        .flat_map(|s| s.vertices.iter().map(|v| v.position))
+        .collect()
+}
+
+/// Run one wall crash (or its control) to rest: two and a half seconds.
+fn crash_run(def: &VehicleDef, kmh: f64, wall: bool) -> inf_player::runtime_sim::RuntimeSim {
+    let mut sim = wall_sim(def, kmh, wall);
+    for _ in 0..150 {
+        sim.step_once(Default::default());
+    }
+    sim
+}
+
+/// **A SHELL CRUMPLES BY THE CRASH TABLE** -- 15, 30, 60 and 90 km/h into a
+/// wall, on the SHIPPED host, with a control that hits nothing.
+///
+/// READS: the hull part's `PartState` out of the world's damage resource (the
+/// dent's depth and direction the crash wrote), and the COMMITTED shell body's
+/// vertices crumpled by `dent_mesh_positions` at that state -- the displaced
+/// vertex count and the deepest push, against the undamaged control's.
+/// The claims: the control moves no vertex; the dent grows with speed (15 <
+/// 30 < 60 <= 90) and never passes `MAX_DENT_M`; at 60 the crumple moves
+/// vertices by at least 12 cm and it is the NOSE (the dent's direction is the
+/// car's `+Z`).
+///
+/// VEH3f's panels-on-boxes FAIL it: their body was a box family with no hull
+/// part, and a hull at the chassis centre faced no direction and took nothing
+/// -- measured before this wave, 0 vertices at every speed.
+#[test]
+fn a_shell_crumples_its_mesh_by_the_crash_table() {
+    let def = catalogue_def("sedan");
+    assert!(def.art.is_some_and(|a| a.shell()), "the island saloon wears a shell");
+    let control = crash_run(&def, 60.0, false);
+    let (_, calm, mesh, scale) = hull_of(&control, CRASH_CAR).expect("the shell has a hull");
+    let mesh = committed_shell_mesh(mesh.expect("the hull draws a committed mesh"));
+    let base = positions_of(&mesh);
+    let mut p = base.clone();
+    let none = inf_ecs::bodywork::dent_mesh_positions(&mut p, scale, calm.dent_dir, calm.dent_m);
+    println!(
+        "CONTROL (60 km/h, nothing ahead): dent {:.4} m, {} of {} vertices moved",
+        calm.dent_m, none.moved, none.total
+    );
+    assert_eq!(calm.dent_m, 0.0, "a car that hit nothing dented");
+    assert_eq!(none.moved, 0);
+    assert_eq!(p, base);
+
+    let mut table = Vec::new();
+    for kmh in [15.0, 30.0, 60.0, 90.0] {
+        let sim = crash_run(&def, kmh, true);
+        let (_, st, _, sc) = hull_of(&sim, CRASH_CAR).expect("the hull");
+        let mut p = base.clone();
+        let d = inf_ecs::bodywork::dent_mesh_positions(&mut p, sc, st.dent_dir, st.dent_m);
+        println!(
+            "CRASH {kmh:>4.0} km/h: hull dent {:.4} m along ({:+.3}, {:+.3}, {:+.3}); {} of {} vertices moved, deepest {:.4} m",
+            st.dent_m, st.dent_dir.x, st.dent_dir.y, st.dent_dir.z, d.moved, d.total, d.max_m
+        );
+        table.push((kmh, st, d));
+    }
+    for w in table.windows(2) {
+        let (a, b) = (&w[0], &w[1]);
+        assert!(
+            b.1.dent_m >= a.1.dent_m,
+            "{} km/h dented {:.4} and {} km/h {:.4}",
+            a.0,
+            a.1.dent_m,
+            b.0,
+            b.1.dent_m
+        );
+    }
+    assert!(table[0].1.dent_m > 0.0, "15 km/h did not dent");
+    assert!(table[0].1.dent_m < table[1].1.dent_m && table[1].1.dent_m < table[2].1.dent_m);
+    for (kmh, st, d) in &table {
+        assert!(st.dent_m <= inf_ecs::bodywork::MAX_DENT_M + 1e-12, "{kmh}: past the cap");
+        assert!(d.max_m <= inf_ecs::bodywork::MAX_DENT_M + 1e-9, "{kmh}: a vertex past the cap");
+        assert!(d.moved > 0, "{kmh}: no vertex moved");
+    }
+    let sixty = &table[2];
+    assert!(sixty.2.max_m >= 0.12, "60 km/h crumpled {:.4} m", sixty.2.max_m);
+    assert!(sixty.1.dent_dir.z > 0.9, "the 60 km/h crumple is not the nose");
+}
+
+/// **THE SHIPPED PROJECTOR DRAWS THE CRUMPLE** -- the render half, on the
+/// player's own `project_scene` over DAGs built from the committed shells.
+///
+/// READS: `VmeshRegistry::dent_builds` (the engagement count), the id the
+/// hull's instance is drawn under, and the crumpled DAG's own census. The
+/// claims: a whole car builds nothing and draws its body's own DAG; the same
+/// car after a 60 km/h wall draws ONE crumpled DAG under an id that is not the
+/// body's, whose census moved vertices; a second projection builds nothing
+/// more (the cache).
+///
+/// VEH3f FAILS it: its projector had no dented door at all -- a dented car
+/// drew its pristine mesh.
+#[test]
+fn the_shipped_projector_draws_the_crumple() {
+    let def = catalogue_def("sedan");
+    let project = |sim: &inf_player::runtime_sim::RuntimeSim| {
+        let mut reg = inf_player::vmesh::VmeshRegistry::new();
+        let w = sim.world();
+        let ce = w.entity_of(CRASH_CAR).unwrap();
+        let mut stack = vec![ce];
+        while let Some(e) = stack.pop() {
+            for c in w.children_of(e) {
+                stack.push(c);
+                if let Some(g) = w
+                    .world()
+                    .get::<inf_ecs::components::MeshRef>(c)
+                    .and_then(|m| m.asset)
+                {
+                    let mesh = committed_shell_mesh(g);
+                    let (p, n, u, t, i) = mesh.vgeom_streams();
+                    let dag = inf_vgeom::build_vgeom(&p, &n, &u, &t, &i, inf_vgeom::BuildParams::default());
+                    reg.insert_mesh(inf_player::vmesh::derived_vmesh_id(g), &dag)
+                        .unwrap();
+                }
+            }
+        }
+        let mut scene = inf_render::RenderScene::default();
+        inf_player::render::project_scene(&mut scene, sim, 1.0, &reg);
+        let first = reg.dent_builds();
+        inf_player::render::project_scene(&mut scene, sim, 1.0, &reg);
+        (scene, reg, first)
+    };
+    let whole = crash_run(&def, 60.0, false);
+    let (_, _, body_mesh, _) = hull_of(&whole, CRASH_CAR).unwrap();
+    let body_id = inf_player::vmesh::derived_vmesh_id(body_mesh.unwrap()).as_u128();
+    let (scene, reg, first) = project(&whole);
+    let drew_body = scene.vgeom_instances.iter().any(|i| i.asset == body_id);
+    println!(
+        "WHOLE: {} vgeom instances, the body's own DAG drawn: {drew_body}, crumples built {first}",
+        scene.vgeom_instances.len()
+    );
+    assert_eq!(first, 0);
+    assert!(drew_body, "a whole car did not draw its body");
+
+    let hit = crash_run(&def, 60.0, true);
+    let (scene, reg2, first) = project(&hit);
+    let _ = reg;
+    let drew_body = scene.vgeom_instances.iter().any(|i| i.asset == body_id);
+    let census = reg2.dent_census();
+    println!(
+        "AFTER 60 km/h: {} vgeom instances, the body's own DAG drawn: {drew_body}, crumples built {first} (then {}), census {census:?}",
+        scene.vgeom_instances.len(),
+        reg2.dent_builds()
+    );
+    assert_eq!(first, 1, "the dented hull built {first} crumpled DAGs");
+    assert_eq!(reg2.dent_builds(), 1, "the second projection rebuilt the crumple");
+    assert!(!drew_body, "the dented car still drew its pristine body");
+    assert!(
+        scene.vgeom_instances.iter().any(|i| i.asset == census[0].0),
+        "the crumpled DAG is not what was drawn"
+    );
+    assert!(census[0].1.moved > 0 && census[0].1.max_m > 0.1);
+}
+
+/// **PIE == SHIPPING ON A SHELL CRASH** -- the island saloon dropped from 16 m
+/// onto the slab in the editor's Simulate and in the shipped player.
+///
+/// READS: `damage_state_bytes` every step on both hosts -- which now folds the
+/// hull's dent and its DIRECTION -- and the hull's `PartState` at the end.
+/// The claims: the section is empty before the car lands and not after; the
+/// hull dented (so the fold carries the crumple and is not a recording of
+/// nothing); the two hosts' sections are byte-identical at every step.
+///
+/// VEH3f FAILS its non-vacuity half: its hull never dented.
+#[test]
+fn pie_equals_shipping_on_a_shell_crash() {
+    use inf_editor_core::scene::SceneDoc;
+    use inf_editor_core::simulate::{SimInput, SimSession};
+    use inf_player::runtime_sim::{RuntimeInput, RuntimeSim};
+    const STEPS: u32 = 150;
+    let def = catalogue_def("sedan");
+    let at = DVec3::new(0.0, 16.0, 0.0);
+    let shipped: (Vec<Vec<u8>>, Option<inf_ecs::bodywork::PartState>) = {
+        let mut world = EcsWorld::new();
+        ground(&mut world);
+        car(&mut world, CRASH_CAR, at, 0.0, &def);
+        world.propagate();
+        let mut sim = RuntimeSim::new(world, Vec::new(), glam::DVec2::new(0.0, -9.81), 60.0);
+        let t = (0..STEPS)
+            .map(|_| {
+                sim.step_once(RuntimeInput::default());
+                inf_ecs::bodywork::damage_state_bytes(sim.world())
+            })
+            .collect();
+        (t, hull_of(&sim, CRASH_CAR).map(|h| h.1))
+    };
+    let preview: Vec<Vec<u8>> = {
+        use inf_editor_core::ipc::SpawnKind;
+        let mut doc = SceneDoc::new();
+        let g = doc.create_with_guid(GROUND, SpawnKind::Empty, "Ground", None);
+        {
+            let mut w = EcsWorld::new();
+            ground(&mut w);
+            let e = w.entity_of(GROUND).unwrap();
+            let t = *w.world().get::<Transform>(e).unwrap();
+            let rb = *w.world().get::<RigidBody3D>(e).unwrap();
+            let c = *w.world().get::<Collider3D>(e).unwrap();
+            doc.world_mut()
+                .world_mut()
+                .entity_mut(g)
+                .insert((t, Visibility::default(), rb, c));
+        }
+        inf_editor_core::vehicle::spawn_vehicle(
+            &mut doc,
+            CRASH_CAR,
+            &def,
+            inf_editor_core::vehicle::VehicleSpawn {
+                name: "Car",
+                at,
+                yaw_deg: 0.0,
+                paint: inf_ecs::math::Color::new(0.2, 0.2, 0.6, 1.0),
+                clip: None,
+                engine_voice: false,
+                livery: None,
+            },
+        );
+        doc.world_mut().propagate();
+        let mut session = SimSession::enter(&mut doc, Vec::new(), glam::DVec2::new(0.0, -9.81), 60.0);
+        let out = (0..STEPS)
+            .map(|_| {
+                session.step_once(&mut doc, SimInput::default());
+                inf_ecs::bodywork::damage_state_bytes(doc.world())
+            })
+            .collect();
+        session.exit(&mut doc);
+        out
+    };
+    let hull = shipped.1.expect("the shell has a hull part");
+    let first_loud = shipped.0.iter().position(|b| !b.is_empty());
+    println!(
+        "SHELL DROP: section empty for the first {first_loud:?} steps, {} bytes at the end; hull dent {:.4} m along ({:+.3}, {:+.3}, {:+.3})",
+        shipped.0.last().map(|b| b.len()).unwrap_or(0),
+        hull.dent_m,
+        hull.dent_dir.x,
+        hull.dent_dir.y,
+        hull.dent_dir.z
+    );
+    assert!(shipped.0[0].is_empty());
+    assert!(first_loud.is_some(), "the drop did nothing");
+    assert!(hull.dent_m > 0.0, "the hull did not crumple -- the fold carries nothing of it");
+    assert_eq!(
+        shipped.0, preview,
+        "the shipped player and the editor's Simulate crumpled the same shell differently"
+    );
+}
+
+/// **IMPORTED ART CRUMPLES THROUGH THE SAME DOOR** -- the calibration sedan
+/// (`karin_asterope_gz`, art `dd_sedan`) into the wall at 60 km/h.
+///
+/// READS: its `art_body` part's `PartState` (hull, dent, direction) -- which
+/// is the state the projector crumples by -- on every machine; and, where
+/// this machine has the imported art (LOCAL), the art body's own vertices
+/// crumpled at that state. CI proves the state half; the art half is printed
+/// and asserted only where the art is.
+#[test]
+fn the_calibration_sedans_art_crumples_through_the_same_door() {
+    let def = *inf_ecs::roster::roster()
+        .get("karin_asterope_gz")
+        .expect("the calibration row");
+    let sim = crash_run(&def, 60.0, true);
+    let (_, st, mesh, scale) = hull_of(&sim, CRASH_CAR).expect("the art body is a hull");
+    println!(
+        "CALIBRATION SEDAN at 60 km/h: art_body dent {:.4} m along ({:+.3}, {:+.3}, {:+.3}), drawn scale {scale:?}",
+        st.dent_m, st.dent_dir.x, st.dent_dir.y, st.dent_dir.z
+    );
+    assert!(st.hull && st.dent_m > 0.1 && st.dent_dir.z > 0.9);
+    let local = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../island-build/project/Content/UE/Vehicles");
+    let Some(g) = mesh else {
+        return;
+    };
+    let mut found = None;
+    if let Ok(rd) = std::fs::read_dir(&local) {
+        let mut stack: Vec<std::path::PathBuf> = rd.flatten().map(|e| e.path()).collect();
+        while let Some(p) = stack.pop() {
+            if p.is_dir() {
+                if let Ok(rd) = std::fs::read_dir(&p) {
+                    stack.extend(rd.flatten().map(|e| e.path()));
+                }
+            } else if p.extension().is_some_and(|x| x == "inf_mesh") {
+                if let Ok(side) = inf_asset::AssetSidecar::load(&p) {
+                    if side.guid.0 == g {
+                        found = Some(p);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    let Some(path) = found else {
+        println!("LOCAL: no imported art on this machine -- the state half stands alone");
+        return;
+    };
+    let mesh: inf_mesh::MeshAsset =
+        inf_asset::decode(&std::fs::read(&path).unwrap()).expect("the art decodes");
+    let mut p = positions_of(&mesh);
+    let d = inf_ecs::bodywork::dent_mesh_positions(&mut p, scale, st.dent_dir, st.dent_m);
+    println!(
+        "LOCAL: the imported body ({}) crumples {} of {} vertices, deepest {:.4} m",
+        path.display(),
+        d.moved,
+        d.total,
+        d.max_m
+    );
+    assert!(d.moved > 0 && d.max_m > 0.1);
 }
