@@ -234,7 +234,12 @@ density_kg_m3 = 118.0
 wheel_radius_m = 0.34
 half_track_m = 0.84
 half_wheelbase_m = 1.42
-wheel_drop_m = -0.62
+# **SEATED 8 cm DEEPER IN ITS ARCHES** (`audit(VEH3f.2b)`): the shell's arch
+# is fitted to every row that wears it, and this row's tyre sat lowest -- a
+# 0.197 m daylight over it on the showcase car. Raising the wheel 0.08 m takes
+# the ground clearance 0.228 -> 0.148 m (a saloon's) and the daylight to
+# 0.117 m; the arch itself does not move (a roster row's tyre sets it).
+wheel_drop_m = -0.54
 max_speed_mps = 34.0
 max_engine_force_n = 9000.0
 brake_force_n = 13000.0
@@ -590,7 +595,12 @@ density_kg_m3 = 126.0
 wheel_radius_m = 0.36
 half_track_m = 0.86
 half_wheelbase_m = 1.5
-wheel_drop_m = -0.64
+# **SEATED 8 cm DEEPER IN ITS ARCHES** (`audit(VEH3f.2b)`): the shell's arch
+# is fitted to every row that wears it, and this row's tyre sat lowest -- a
+# 0.198 m daylight over it on the showcase car. Raising the wheel 0.08 m takes
+# the ground clearance 0.228 -> 0.148 m (a saloon's) and the daylight to
+# 0.118 m; the arch itself does not move (a roster row's tyre sets it).
+wheel_drop_m = -0.56
 peak_torque_nm = 330.0
 peak_torque_rpm = 4200.0
 redline_rpm = 6600.0

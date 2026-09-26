@@ -1999,12 +1999,74 @@ fn shell_library() -> std::collections::BTreeMap<Uuid, (std::path::PathBuf, u64)
 /// top and flank outlines of the committed car against the box family's; the
 /// meshlet DAG's level count built from the committed body. The claims: 0 open
 /// edges anywhere; 0 body triangles over any wheel (the box family covers
-/// them); side outline >= 12 % and flank >= 25 % off the box car (the brief's
-/// 25 % on the plain side outline is NOT met -- 13.5-27.6 % -- see the
-/// report); at least three LOD levels in each body's DAG.
+/// them); flank >= 25 % off the box car; at least three LOD levels in each
+/// body's DAG.
+///
+/// **THE PLAIN SIDE OUTLINE IS NOT AT THE BRIEF'S 25 %, AND THIS ARM SAYS SO**
+/// (`audit(VEH3f.2b)`). The wave re-aimed this bar to "side >= 12 %" -- a bar
+/// moved to fit the number. The audit tried the reshape the ruling asked for
+/// (raked screens to 29 deg, a fastback, a lowered deck and roof, overhangs
+/// raised ~10 cm) and moved the side delta only 16.2 -> 19.6 % (saloon),
+/// 13.5 -> 15.5 (coupe), 16.8 -> 19.2 (SUV); and it measured the imported
+/// Fab cars against their own rows' box families: 28.2-35.5 %, almost all of
+/// it their GLASSLESS window holes and missing doors -- the glazed silhouette
+/// of a real car sits close to the box family, which was drawn car-shaped.
+/// So the arm asserts each shell's HONEST measured side delta as a floor (a
+/// regression pin, [`SIDE_OUTLINE_PINNED`]) and prints which shells meet the
+/// brief's 25 % (the pickup alone); it claims nothing it does not measure.
 ///
 /// VEH3f's panels-on-boxes FAIL the arches (their lower slab spans every
 /// wheel -- the control below) and the outline (2.4-8.7 %).
+/// **The most daylight the showcase saloon and the cruiser may show over a
+/// settled tyre**, metres (`audit(VEH3f.2b)`): measured 0.197 / 0.198 before
+/// their rows sat 0.08 m deeper; the other three island shells are CARRIED
+/// with their measured gaps (printed) -- a lower ride would put them under a
+/// saloon's ground clearance.
+const ARCH_DAYLIGHT_MAX_M: f64 = 0.125;
+
+/// Moller-Trumbore's distance: where the ray `o + t d` crosses `tri`, if it does.
+fn ray_t(o: [f64; 3], d: [f64; 3], tri: &[[f64; 3]; 3]) -> Option<f64> {
+    let sub = |a: [f64; 3], b: [f64; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    let cross = |a: [f64; 3], b: [f64; 3]| {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    };
+    let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let (e1, e2) = (sub(tri[1], tri[0]), sub(tri[2], tri[0]));
+    let pv = cross(d, e2);
+    let det = dot(e1, pv);
+    if det.abs() < 1e-14 {
+        return None;
+    }
+    let tv = sub(o, tri[0]);
+    let u = dot(tv, pv) / det;
+    if !(0.0..=1.0).contains(&u) {
+        return None;
+    }
+    let qv = cross(tv, e1);
+    let v = dot(d, qv) / det;
+    if v < 0.0 || u + v > 1.0 {
+        return None;
+    }
+    let t = dot(e2, qv) / det;
+    (t > 1e-9).then_some(t)
+}
+
+/// **Each shell's plain side-outline delta, as MEASURED** off the committed
+/// bytes at wave VEH3f.2b's close (less 0.5 % of raster slack): a floor that
+/// catches a shell sliding back toward the box, NOT the brief's 25 % -- which
+/// only the pickup meets (see the arm below).
+const SIDE_OUTLINE_PINNED: [(&str, f64); 5] = [
+    ("sedan", 0.157),
+    ("sports", 0.130),
+    ("suv", 0.163),
+    ("truck", 0.271),
+    ("cruiser", 0.163),
+];
+
 #[test]
 fn the_committed_shells_are_closed_cut_and_not_the_box_family() {
     use inf_editor_core::vehicle_shells::measure;
@@ -2105,11 +2167,51 @@ fn the_committed_shells_are_closed_cut_and_not_the_box_family() {
                 covered += 1;
             }
         }
+        // **The arch's daylight** (`audit(VEH3f.2b)`, priority c'): from each
+        // settled wheel centre straight UP to the first body triangle, less
+        // the tyre's radius -- the gap a viewer sees over the tyre. The island
+        // saloon showed ~0.20 m; its row now sits 0.08 m deeper in its arch.
+        let daylight = wheels
+            .iter()
+            .filter_map(|c| {
+                body.iter()
+                    .filter_map(|t| ray_t([c.x, c.y, c.z], [0.0, 1.0, 0.0], t))
+                    .reduce(f64::min)
+            })
+            .map(|t| t - def.wheel_radius_m)
+            .reduce(f64::max)
+            .unwrap_or(f64::MAX);
+        println!(
+            "ARCH DAYLIGHT {} ({row}): {daylight:.3} m over the settled tyre",
+            k.name()
+        );
+        if matches!(row, "sedan" | "cruiser") && daylight > ARCH_DAYLIGHT_MAX_M {
+            bad.push(format!(
+                "{}: {daylight:.3} m of daylight over the tyre (at most {ARCH_DAYLIGHT_MAX_M})",
+                k.name()
+            ));
+        }
         let (side, top) = measure::outline_delta(&car, &boxes, h);
         let flank = measure::flank_delta(&car, &boxes, h);
-        if side < 0.12 {
-            bad.push(format!("{}: side outline {:.1} %", k.name(), side * 100.0));
+        let pinned = SIDE_OUTLINE_PINNED
+            .iter()
+            .find(|(r, _)| *r == row)
+            .map(|(_, v)| *v)
+            .expect("every shell row has its pinned side delta");
+        if side < pinned {
+            bad.push(format!(
+                "{}: side outline {:.1} % -- below its measured {:.1} %",
+                k.name(),
+                side * 100.0,
+                pinned * 100.0
+            ));
         }
+        println!(
+            "SIDE OUTLINE {}: {:.1} % -- the brief's 25 % bar {}",
+            k.name(),
+            side * 100.0,
+            if side >= 0.25 { "MET" } else { "NOT MET" }
+        );
         if flank < 0.25 {
             bad.push(format!(
                 "{}: flank outline {:.1} %",
