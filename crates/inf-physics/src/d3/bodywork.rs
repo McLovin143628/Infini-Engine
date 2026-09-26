@@ -36,7 +36,7 @@ use uuid::Uuid;
 
 use inf_ecs::bodywork::{
     damage_mut, damage_of, part_pose, DamageLimits, Debris, PartLatch, PartState, VehicleDamage,
-    GLASS_SHARDS, GLASS_SHARD_LIFETIME_S, LATCH_POP_FRAC, MAX_DENT_M, MAX_GLASS_SHARDS,
+    GLASS_SHARDS, GLASS_SHARD_LIFETIME_S, LATCH_POP_FRAC, MAX_GLASS_SHARDS,
     MAX_SHED_PARTS, PART_DEBRIS_LIFETIME_S,
 };
 use inf_ecs::components::{Collider3D, GlobalTransform, MeshRef, Sprite, Transform, Visibility};
@@ -53,6 +53,12 @@ use super::PhysicsBridge3D;
 /// exactly where "the driver did something" stops and "the car hit something"
 /// begins, and a car being driven hard sheds nothing.
 pub const CRASH_MIN_NS: f64 = 300.0;
+
+/// **The share of a crash's blow a car's HULL takes as crumple** (wave
+/// VEH3f.2b) -- the whole of it, as a bumper takes: the body is the load path
+/// every other part hangs on. At [`inf_ecs::bodywork::DENT_M_PER_KNS`] that is
+/// about 4 cm at 15 km/h, 9 at 30, 19 at 60 and the 22 cm cap at 90.
+pub const HULL_DENT_SHARE: f64 = 1.0;
 
 /// **The thinnest half-extent a shed bumper's collider keeps**, metres (wave
 /// VEH3f.2b) -- a cover in the road is a sheet, whatever box its wrap drew.
@@ -158,6 +164,8 @@ struct PartFacts {
     /// re-spawned latched by a tier change wins over whatever this module last
     /// believed about it.
     child: bool,
+    /// Whether it is the car's whole body (`PartState::hull`).
+    hull: bool,
 }
 
 /// One car, as the world and the solver describe it.
@@ -272,9 +280,10 @@ pub fn step_bodywork(
                 // and dented again — a 39.6 mm dent closed a 186 mm panel to
                 // **0.1 mm** in under two seconds, and it took the part's own
                 // FACING axis with it.
-                row.parts
-                    .entry(p.guid)
-                    .or_insert_with(|| PartState::authored(p.kind, p.centre_frac, p.half_frac));
+                row.parts.entry(p.guid).or_insert_with(|| PartState {
+                    hull: p.hull,
+                    ..PartState::authored(p.kind, p.centre_frac, p.half_frac)
+                });
                 let _ = p.child;
             }
         }
@@ -383,14 +392,26 @@ pub fn step_bodywork(
                 continue;
             }
             let kind = kind_of_state(p);
+            // **THE HULL CRUMPLES** (wave VEH3f.2b). A car's whole body sits
+            // at the chassis centre, so it faces no direction and a panel's
+            // share is nothing -- which drew a car that hit a wall at 60 with
+            // a pristine nose and a bumper lying in the road. The body takes
+            // the blow whole ([`HULL_DENT_SHARE`]) along the direction it came
+            // from, and its mesh crumples by it (`dent_mesh_positions`).
+            if p.hull {
+                p.take_dent(
+                    j * HULL_DENT_SHARE * 1e-3 * inf_ecs::bodywork::DENT_M_PER_KNS,
+                    dir,
+                );
+                continue;
+            }
             let face = BodyPartKind::face(p.centre_frac, dir);
             if face <= 0.0 {
                 continue;
             }
             let share = j * face * kind.impact_share();
             if kind.dents() {
-                p.dent_m =
-                    (p.dent_m + share * 1e-3 * inf_ecs::bodywork::DENT_M_PER_KNS).min(MAX_DENT_M);
+                p.take_dent(share * 1e-3 * inf_ecs::bodywork::DENT_M_PER_KNS, dir);
             }
             if kind == BodyPartKind::Glass {
                 p.damage_j += energy * face * GLASS_CRASH_FRAC;
@@ -775,6 +796,8 @@ fn car_facts(
                 centre_frac,
                 half_frac,
                 child: true,
+                hull: name == inf_ecs::vehicle::SHELL_BODY_PART
+                    || name == inf_ecs::vehicle::ART_BODY_PART,
             });
         }
     }

@@ -693,9 +693,17 @@ fn step_one(
         .entity_of(chassis)
         .and_then(|e| world.world().get::<inf_ecs::components::Joint3D>(e))
         .is_some();
+    //    An AIRCRAFT is exempt too: its "rear axle" is its main gear, and a
+    //    light aircraft parked on the island's apron with its mains locked
+    //    slid SIDEWAYS 0.8 m in nine seconds -- out of the hero's reach
+    //    (`veh3g_gate::the_islands_dodo_boards_where_the_flight_leg_puts_it`).
+    //    A parked aircraft keeps the rolling it always had (CARRIED: chocks).
     if let Some(v) = bridge.vehicle_mut(chassis) {
+        let hold = !hitched
+            && v.flight().is_none()
+            && forward_mps.abs() < inf_ecs::vehicle::PARK_HOLD_MPS;
         v.control(inf_ecs::vehicle::VehicleControls {
-            handbrake: !hitched && forward_mps.abs() < inf_ecs::vehicle::PARK_HOLD_MPS,
+            handbrake: hold,
             ..inf_ecs::vehicle::VehicleControls::default()
         });
     }

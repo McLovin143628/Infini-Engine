@@ -1117,19 +1117,28 @@ fn committed_guids(folder: &str) -> BTreeMap<Uuid, PathBuf> {
 /// removed -> red on the body GUID.
 #[test]
 fn every_art_row_draws_committed_geometry_without_the_art() {
-    let committed = committed_guids("vehicle-art");
+    let mut committed = committed_guids("vehicle-art");
+    // A DCC car SHELL (wave VEH3f.2b) is committed geometry of our own too --
+    // it IS the drawing, with no art behind it -- under `samples/vehicle-shells`,
+    // and it hangs its body as `shell_body`.
+    committed.extend(committed_guids("vehicle-shells"));
     let mut rows = 0usize;
     let mut meshes = 0usize;
     for (id, def) in inf_ecs::roster::roster().0.iter() {
         let Some(art) = def.art else {
             continue;
         };
+        let body_part = if art.shell() {
+            inf_ecs::vehicle::SHELL_BODY_PART
+        } else {
+            inf_ecs::vehicle::ART_BODY_PART
+        };
         let mut world = EcsWorld::new();
         car(&mut world, CHASSIS, DVec3::ZERO, 0.0, def);
         let drawn = bevy_free::drawn(&world, CHASSIS);
         let body = drawn
             .iter()
-            .find(|(n, _)| n == inf_ecs::vehicle::ART_BODY_PART)
+            .find(|(n, _)| n == body_part)
             .and_then(|(_, m)| m.asset);
         assert_eq!(body, Some(inf_ecs::roster::art_body_guid(art)), "{id}");
         for (name, m) in &drawn {

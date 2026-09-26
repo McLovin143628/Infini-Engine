@@ -859,6 +859,21 @@ pub fn project_scene_full(
     // MIRROR: both are `inf_viewport::host::rebuild_scene`'s locals of the same
     // names and the same purpose.
     let mut vgeom_seen: std::collections::HashSet<u128> = std::collections::HashSet::new();
+    // **THE CRUMPLED HULLS** (wave VEH3f.2b): every car body whose mesh has a
+    // dent, by the body part's guid -- `(direction, depth)`. Empty on every
+    // level where nobody hit anything, so the walk below pays one empty-map
+    // probe per vgeom entity.
+    let hull_dents: std::collections::HashMap<Uuid, (inf_ecs::math::Vec3d, f64)> =
+        inf_ecs::bodywork::damage_of(sim.world())
+            .map(|res| {
+                res.rows
+                    .values()
+                    .flat_map(|row| row.parts.iter())
+                    .filter(|(_, p)| p.hull && p.dent_m > 0.0 && p.latch.attached())
+                    .map(|(g, p)| (*g, (p.dent_dir, p.dent_m)))
+                    .collect()
+            })
+            .unwrap_or_default();
     let mut skinned_slots: std::collections::HashMap<(Uuid, Uuid), usize> =
         std::collections::HashMap::new();
     // **ONE PALETTE PER WEARER** (wave OUTFIT1). A wearable resolves the
@@ -1554,6 +1569,18 @@ pub fn project_scene_full(
             if fractured {
                 // Its chunks are already in the scene; nothing else to push.
             } else if let Some((asset_id, source)) = vgeom {
+                // A dented hull draws its crumpled DAG (`VmeshRegistry::dented`),
+                // section by section alike; an undented one, or a DAG whose
+                // payload will not read, draws as it always did.
+                let dent = hull_dents.get(&guid).copied();
+                let crumple = |id: u128, src: Arc<inf_vgeom::VgeomSource>| match dent {
+                    Some((dir, depth)) => vmeshes
+                        .dented(id, &src, [scale.x, scale.y, scale.z], dir, depth)
+                        .map(|d| (d.id, d.source))
+                        .unwrap_or((id, src)),
+                    None => (id, src),
+                };
+                let (asset_id, source) = crumple(asset_id, source);
                 // **A SECTIONED mesh draws one instance per section** (wave
                 // VEH3f.2a) -- each with its slot's own surface and virtual
                 // textures (`inf_mesh::section_material_id`), and a section with
@@ -1566,6 +1593,7 @@ pub fn project_scene_full(
                     .unwrap_or_default();
                 if let (false, Some(mesh_id)) = (sections.is_empty(), mesh_ref.asset) {
                     for (slot, sid, src) in sections {
+                        let (sid, src) = crumple(sid, src);
                         if vgeom_seen.insert(sid) {
                             scene.vgeom_assets.push(VgeomAsset::new(sid, src));
                         }

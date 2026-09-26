@@ -312,6 +312,18 @@ pub struct PartState {
     /// The part's AUTHORED half-extents, same units. Not folded, for the same
     /// reason.
     pub half_frac: Vec3d,
+    /// **Which way the blows that dented it travelled**, a unit vector in the
+    /// chassis frame (wave VEH3f.2b) -- the dent-weighted mean of every crash
+    /// direction that reached it, `ZERO` until one did. Folded: it is what the
+    /// drawn crumple is pushed along, so two hosts that disagree about it draw
+    /// two different cars.
+    pub dent_dir: Vec3d,
+    /// **The part is the car's whole BODY** -- a DCC shell's `shell_body` or
+    /// an imported body's `art_body` (wave VEH3f.2b). A hull is drawn by its
+    /// own MESH, so its dent is a crumple of the mesh's vertices
+    /// ([`dent_mesh_positions`]) and never a shrink of its box. Authored (it
+    /// comes from the part's name), so not folded.
+    pub hull: bool,
 }
 
 impl Default for PartState {
@@ -327,6 +339,8 @@ impl Default for PartState {
             shed_step: 0,
             centre_frac: Vec3d::ZERO,
             half_frac: Vec3d::ZERO,
+            dent_dir: Vec3d::ZERO,
+            hull: false,
         }
     }
 }
@@ -348,6 +362,34 @@ impl PartState {
             half_frac,
             ..Default::default()
         }
+    }
+
+    /// **Take a crash's dent** (wave VEH3f.2b): `inc_m` more of it, from a
+    /// blow travelling along `dir` (chassis frame). The depth is capped at
+    /// [`MAX_DENT_M`]; the direction is the dent-weighted mean of every blow,
+    /// so a car hit in the nose and then clipped on a corner crumples mostly
+    /// in the nose.
+    pub fn take_dent(&mut self, inc_m: f64, dir: Vec3d) {
+        if !(inc_m > 0.0) {
+            return;
+        }
+        let was = self.dent_m;
+        let now = (was + inc_m).min(MAX_DENT_M);
+        let took = now - was;
+        if took <= 0.0 {
+            return;
+        }
+        let d = self.dent_dir;
+        let sum = Vec3d::new(
+            d.x * was + dir.x * took,
+            d.y * was + dir.y * took,
+            d.z * was + dir.z * took,
+        );
+        let l = (sum.x * sum.x + sum.y * sum.y + sum.z * sum.z).sqrt();
+        if l > 1e-12 {
+            self.dent_dir = Vec3d::new(sum.x / l, sum.y / l, sum.z / l);
+        }
+        self.dent_m = now;
     }
 
     /// **Which way this part faces**, as an axis index and a sign — the axis of
@@ -382,6 +424,7 @@ impl PartState {
             && self.damage_j == 0.0
             && self.dent_m == 0.0
             && self.shed_step == 0
+            && self.dent_dir == Vec3d::ZERO
     }
 }
 
@@ -788,7 +831,9 @@ pub fn part_pose(
     // which is what a dent IS. Bounded by `MAX_DENT_M` at the source and by
     // four fifths of the panel's own thickness here, so a panel can never be
     // pushed through the far side of its own car.
-    if part.dent_m > 0.0 {
+    // A HULL's dent is its mesh's (`dent_mesh_positions`): its box keeps its
+    // authored size, or the whole car would shrink in the direction it was hit.
+    if part.dent_m > 0.0 && !part.hull {
         let (axis, sign) = part.facing();
         let base = [scale.x, scale.y, scale.z][axis];
         let d = part.dent_m.min(MAX_DENT_M).min(0.8 * base);
@@ -846,9 +891,9 @@ pub fn part_pose(
 
 // ── the trace (the 18th section) ────────────────────────────────────────────
 
-/// How many bytes one PART folds: 16 of guid, a kind, a latch, five `f64` and
-/// the step it was shed.
-pub const PART_TRACE_BYTES: usize = 16 + 1 + 1 + 5 * 8 + 8;
+/// How many bytes one PART folds: 16 of guid, a kind, a latch, five `f64`, the
+/// step it was shed and the dent's direction (three `f64`, wave VEH3f.2b).
+pub const PART_TRACE_BYTES: usize = 16 + 1 + 1 + 5 * 8 + 8 + 3 * 8;
 
 /// How many bytes one CAR folds before its parts: 16 of guid, two `f64`, the
 /// flats byte, the fire step and a part count.
@@ -892,7 +937,130 @@ pub fn damage_state_bytes(world: &EcsWorld) -> Vec<u8> {
                 out.extend_from_slice(&v.to_bits().to_le_bytes());
             }
             out.extend_from_slice(&p.shed_step.to_le_bytes());
+            for v in [p.dent_dir.x, p.dent_dir.y, p.dent_dir.z] {
+                out.extend_from_slice(&v.to_bits().to_le_bytes());
+            }
         }
+    }
+    out
+}
+
+// ── the crumple: a hull's dent, drawn in its mesh ───────────────────────────
+
+/// **How deep behind the struck face a hull's crumple reaches**, metres (wave
+/// VEH3f.2b). A crumple zone is the front (or back) half-metre of a car: the
+/// vertices at the struck face take the whole dent, the ones this far behind it
+/// take none, and a smoothstep joins them so the bend has no crease.
+pub const CRUMPLE_BAND_M: f64 = 0.55;
+
+/// **How much a crumple buckles across the car**, as a fraction of its depth.
+/// A real nose does not flatten like a press: it folds, and the fold's ridges
+/// run across it. A portable sine over the lateral coordinate
+/// ([`inf_math::psin64`]) with this amplitude is the fold.
+pub const CRUMPLE_BUCKLE_FRAC: f64 = 0.18;
+
+/// The buckle's wavelength across the car, metres.
+pub const CRUMPLE_BUCKLE_M: f64 = 0.42;
+
+/// **What a crumple did to a mesh** -- the vertex census an arm reads.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MeshDent {
+    /// Vertices moved by more than a tenth of a millimetre.
+    pub moved: usize,
+    /// The vertices in the mesh.
+    pub total: usize,
+    /// The deepest any vertex went, metres.
+    pub max_m: f64,
+}
+
+/// **Crumple a hull's mesh by its dent** (wave VEH3f.2b) -- in place, in the
+/// mesh's own space, which is the chassis frame scaled by `scale` (a DCC
+/// shell's unit hull draws at twice the half-extents; an imported body at 1).
+///
+/// Every vertex is measured along the blow's direction `dir` (the direction the
+/// car was travelling into what it hit, chassis frame): `f = p . dir` in
+/// metres, `f_max` the mesh's own struck face. A vertex within
+/// [`CRUMPLE_BAND_M`] of that face is pushed back against `dir` by
+/// `depth_m * smoothstep(t)`, buckled by [`CRUMPLE_BUCKLE_FRAC`] across the
+/// car, and never past four fifths of its own distance to the far face -- the
+/// bound a proxy dent had, drawn on the real surface. `depth_m` is clamped to
+/// [`MAX_DENT_M`].
+///
+/// Pure: the same mesh, direction and depth give the same bytes on every
+/// machine (the sine is [`inf_math::psin64`]; there is no other
+/// transcendental).
+pub fn dent_mesh_positions(
+    positions: &mut [[f32; 3]],
+    scale: [f64; 3],
+    dir: Vec3d,
+    depth_m: f64,
+) -> MeshDent {
+    let mut out = MeshDent {
+        total: positions.len(),
+        ..Default::default()
+    };
+    let l = (dir.x * dir.x + dir.y * dir.y + dir.z * dir.z).sqrt();
+    let depth = depth_m.min(MAX_DENT_M);
+    if positions.is_empty() || l <= 1e-12 || !(depth > 0.0) {
+        return out;
+    }
+    let d = [dir.x / l, dir.y / l, dir.z / l];
+    let sc = [
+        scale[0].abs().max(1e-9),
+        scale[1].abs().max(1e-9),
+        scale[2].abs().max(1e-9),
+    ];
+    let metres = |p: &[f32; 3]| {
+        [
+            p[0] as f64 * sc[0],
+            p[1] as f64 * sc[1],
+            p[2] as f64 * sc[2],
+        ]
+    };
+    let along = |m: &[f64; 3]| m[0] * d[0] + m[1] * d[1] + m[2] * d[2];
+    let (mut f_min, mut f_max) = (f64::INFINITY, f64::NEG_INFINITY);
+    for p in positions.iter() {
+        let f = along(&metres(p));
+        f_min = f_min.min(f);
+        f_max = f_max.max(f);
+    }
+    // The buckle runs across the car: the horizontal axis perpendicular to the
+    // blow (for a blow straight down, across X).
+    let side = {
+        let s = [-d[2], 0.0, d[0]];
+        let n = (s[0] * s[0] + s[2] * s[2]).sqrt();
+        if n > 1e-9 {
+            [s[0] / n, 0.0, s[2] / n]
+        } else {
+            [1.0, 0.0, 0.0]
+        }
+    };
+    let k = std::f64::consts::TAU / CRUMPLE_BUCKLE_M;
+    for p in positions.iter_mut() {
+        let m = metres(p);
+        let f = along(&m);
+        let t = (f - (f_max - CRUMPLE_BAND_M)) / CRUMPLE_BAND_M;
+        if t <= 0.0 {
+            continue;
+        }
+        let t = t.min(1.0);
+        let w = t * t * (3.0 - 2.0 * t);
+        let lat = m[0] * side[0] + m[2] * side[2];
+        let buckle = 1.0 + CRUMPLE_BUCKLE_FRAC * inf_math::psin64(k * lat);
+        let push = (depth * w * buckle).min(0.8 * (f - f_min)).max(0.0);
+        if push <= 0.0 {
+            continue;
+        }
+        let moved = [m[0] - d[0] * push, m[1] - d[1] * push, m[2] - d[2] * push];
+        *p = [
+            (moved[0] / sc[0]) as f32,
+            (moved[1] / sc[1]) as f32,
+            (moved[2] / sc[2]) as f32,
+        ];
+        if push > 1e-4 {
+            out.moved += 1;
+        }
+        out.max_m = out.max_m.max(push);
     }
     out
 }

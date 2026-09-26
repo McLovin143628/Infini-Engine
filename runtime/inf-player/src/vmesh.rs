@@ -80,10 +80,41 @@ pub struct VmeshRegistry {
     /// and remembered: `(slot, vmesh id)` in slot order, empty for a mesh drawn
     /// whole -- which is every mesh an importer did not section.
     sections: Mutex<SectionCache>,
+    /// **The crumpled DAGs** (wave VEH3f.2b) -- one per `(DAG, quantized dent)`
+    /// a car's hull has been drawn with, built on first sight by
+    /// [`dented`](Self::dented) and kept while it is still drawn.
+    dents: Mutex<DentCache>,
 }
 
 /// `(slot, vmesh id)` per mesh, slot order -- see `VmeshRegistry::sections`.
 type SectionCache = HashMap<Uuid, Arc<[(u32, Uuid)]>>;
+
+/// One crumpled variant: its drawn id, its DAG and what the crumple did.
+#[derive(Clone)]
+pub struct DentedDag {
+    /// The id the renderer streams it under -- never a real asset's.
+    pub id: u128,
+    /// The crumpled DAG.
+    pub source: Arc<VgeomSource>,
+    /// The vertex census of the crumple (`inf_ecs::bodywork::MeshDent`).
+    pub census: inf_ecs::bodywork::MeshDent,
+}
+
+/// `(DAG id, dent key)` -> the variant, and how many were ever built.
+#[derive(Default)]
+struct DentCache {
+    map: HashMap<(u128, [i32; 7]), DentedDag>,
+    builds: u64,
+}
+
+/// **How finely a drawn dent is quantized** -- a new crumpled DAG is built when
+/// the dent moves by more than this, metres. Half a centimetre: finer than the
+/// eye reads on a car at street distance, coarse enough that a car being
+/// shunted along a kerb builds a handful of variants and not one a step.
+pub const DENT_DRAW_QUANTUM_M: f64 = 0.005;
+
+/// How many crumpled DAGs the registry keeps before it forgets the oldest.
+pub const MAX_DENTED_DAGS: usize = 48;
 
 /// One drawn section of a sectioned mesh: its slot, and its DAG.
 pub type VmeshSection = (u32, u128, Arc<VgeomSource>);
@@ -99,6 +130,108 @@ impl VmeshRegistry {
 
     pub fn is_empty(&self) -> bool {
         self.meshes.is_empty()
+    }
+
+    /// **The crumpled form of a hull's DAG** (wave VEH3f.2b) -- `source`
+    /// (drawn under `id`) with every vertex pushed by
+    /// [`inf_ecs::bodywork::dent_mesh_positions`] for a dent of `depth_m`
+    /// along `dir` (chassis frame) at the instance's `scale`.
+    ///
+    /// Every LOD level of the DAG shares its vertex buffer, and a meshlet
+    /// simplifier keeps the vertices it keeps where they were, so displacing
+    /// the one buffer crumples every level alike -- nothing is rebuilt but the
+    /// image. Each meshlet's bounding sphere grows by the deepest push (the
+    /// cull must not lose a vertex that moved out of its sphere) and its
+    /// normal cone is retired (a crumple turns faces).
+    ///
+    /// The dent is quantized to [`DENT_DRAW_QUANTUM_M`] and the direction to
+    /// 1/256, so a variant is built once per visible change and then reused.
+    /// `None` when the payload cannot be read, and then the car draws its
+    /// undented body -- which is what it did before this wave.
+    pub fn dented(
+        &self,
+        id: u128,
+        source: &Arc<VgeomSource>,
+        scale: [f64; 3],
+        dir: inf_ecs::math::Vec3d,
+        depth_m: f64,
+    ) -> Option<DentedDag> {
+        let q = |v: f64, step: f64| (v / step).round() as i32;
+        let key = [
+            q(depth_m, DENT_DRAW_QUANTUM_M),
+            q(dir.x, 1.0 / 256.0),
+            q(dir.y, 1.0 / 256.0),
+            q(dir.z, 1.0 / 256.0),
+            q(scale[0], 1e-3),
+            q(scale[1], 1e-3),
+            q(scale[2], 1e-3),
+        ];
+        if key[0] <= 0 {
+            return None;
+        }
+        if let Some(d) = self.dents.lock().ok()?.map.get(&(id, key)) {
+            return Some(d.clone());
+        }
+        let depth = key[0] as f64 * DENT_DRAW_QUANTUM_M;
+        let dir = inf_ecs::math::Vec3d::new(
+            key[1] as f64 / 256.0,
+            key[2] as f64 / 256.0,
+            key[3] as f64 / 256.0,
+        );
+        let payload = source.payload()?;
+        let reader = inf_vgeom::VgeomAssetReader::new(payload.as_ref()).ok()?;
+        let mut mesh = reader.to_mesh().ok()?;
+        drop(payload);
+        let mut pos: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.position).collect();
+        let census = inf_ecs::bodywork::dent_mesh_positions(&mut pos, scale, dir, depth);
+        for (v, p) in mesh.vertices.iter_mut().zip(&pos) {
+            v.position = *p;
+        }
+        let min_scale = scale
+            .iter()
+            .fold(f64::INFINITY, |m, s| m.min(s.abs()))
+            .max(1e-9);
+        let grow = (census.max_m / min_scale) as f32;
+        for m in mesh.meshlets.iter_mut() {
+            m.radius += grow;
+            m.cone_cutoff = 1.0;
+        }
+        mesh.radius += grow;
+        let built = Arc::new(VgeomSource::from_mesh(&mesh).ok()?);
+        // A drawn id no real asset has: the DAG's own id, mixed with the key.
+        let mut h: u128 = id ^ 0x5645_4833_4632_4244_454e_5400_0000_0000;
+        for k in key {
+            h = h.rotate_left(29) ^ (k as u32 as u128).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        }
+        let out = DentedDag {
+            id: h,
+            source: built,
+            census,
+        };
+        let mut c = self.dents.lock().ok()?;
+        if c.map.len() >= MAX_DENTED_DAGS {
+            c.map.clear();
+        }
+        c.builds += 1;
+        c.map.insert((id, key), out.clone());
+        Some(out)
+    }
+
+    /// How many crumpled DAGs have ever been built -- the engagement count a
+    /// gate reads to know the crumple path ran at all.
+    pub fn dent_builds(&self) -> u64 {
+        self.dents.lock().map(|c| c.builds).unwrap_or(0)
+    }
+
+    /// The crumpled DAGs held right now, `(drawn id, census)`, id order.
+    pub fn dent_census(&self) -> Vec<(u128, inf_ecs::bodywork::MeshDent)> {
+        let mut out: Vec<(u128, inf_ecs::bodywork::MeshDent)> = self
+            .dents
+            .lock()
+            .map(|c| c.map.values().map(|d| (d.id, d.census)).collect())
+            .unwrap_or_default();
+        out.sort_by_key(|(id, _)| *id);
+        out
     }
 
     /// Whether the vmesh with this asset GUID is indexed.

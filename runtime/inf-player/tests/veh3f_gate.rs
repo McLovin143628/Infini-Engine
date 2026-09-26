@@ -1074,7 +1074,16 @@ fn the_tracked_rig_turns_by_skid() {
 /// recipe for each of the five hero rows names a mesh on each panel its set
 /// covers, the committed file is at that GUID, and it is a real mesh.
 ///
-/// **Mutation → red**: a row's `body_mesh` removed; `hero_parts` emptied.
+/// **Re-ruled at VEH3f.2b, with cause**: the five island rows now wear the
+/// DCC car SHELLS (`art = "shell_*"`, `veh3f2b_gate`), so none of them names
+/// a hero set any more. The hero-set MECHANISM is still the level's v28
+/// `body_mesh` field and its five committed sets still ship in the island
+/// recipe, so this arm now hangs each set on its row with the row's shell
+/// taken off -- the same recipe a level that names a set gets -- and asserts
+/// the row itself wears its shell.
+///
+/// **Mutation → red**: a set's base GUID changed; `hero_parts` emptied; a
+/// row's shell removed.
 #[test]
 fn the_hero_bodies_hang_on_their_rows_and_are_committed() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/vehicle-bodies");
@@ -1094,9 +1103,22 @@ fn the_hero_bodies_hang_on_their_rows_and_are_committed() {
     }
     let defs = inf_editor_core::vehicle::island_vehicles();
     let (mut hung, mut bytes) = (0usize, 0u64);
-    for id in ["sedan", "sports", "suv", "truck", "cruiser"] {
-        let def = defs.get(id).expect("the row");
-        assert!(def.body_mesh.is_some(), "`{id}` names no hero set");
+    for (id, set) in [
+        ("sedan", 1u128),
+        ("sports", 2),
+        ("suv", 3),
+        ("truck", 4),
+        ("cruiser", 5),
+    ] {
+        let row = defs.get(id).expect("the row");
+        assert!(
+            row.art.is_some_and(|a| a.shell()),
+            "`{id}` does not wear a shell"
+        );
+        let mut def = *row;
+        def.art = None;
+        def.body_mesh = Some(Uuid::from_u128(0x5645_4833_4845_524f_8000_0000_0000_0000 | set));
+        let def = &def;
         let nodes = inf_ecs::vehicle::rig_nodes(
             Uuid::from_u128(9),
             def,
@@ -2448,6 +2470,9 @@ fn the_drawn_seat_is_the_seat_the_body_sits_on() {
         }
         let mut world = EcsWorld::new();
         let at = DVec3::new(0.0, inf_ecs::vehicle::resting_origin_y(def, 0.0), 0.0);
+        // The FRONT row's cushions are the sockets' (wave VEH3f.2b): a car
+        // shell draws a rear bench too, and a rear cushion is not the seat the
+        // driver or the front passenger sits on.
         spawn(&mut world, CAR, def, at, 0.0);
         world.propagate();
         let mut sim = RuntimeSim::new(world, Vec::new(), glam::DVec2::new(0.0, -9.81), HZ);
@@ -2461,9 +2486,14 @@ fn the_drawn_seat_is_the_seat_the_body_sits_on() {
         let parts = inf_ecs::boarding::part_geoms(w, CAR);
         let s = inf_ecs::boarding::sockets_of(half, c.offset, &parts);
         let mut drew = 0usize;
-        for p in parts
+        let front = parts
             .iter()
             .filter(|p| p.kind == inf_ecs::vehicle::KIND_SEAT)
+            .map(|p| p.centre_frac.z)
+            .fold(f64::NEG_INFINITY, f64::max);
+        for p in parts
+            .iter()
+            .filter(|p| p.kind == inf_ecs::vehicle::KIND_SEAT && p.centre_frac.z > front - 0.05)
         {
             let top = DVec3::new(
                 c.offset.x + p.centre_frac.x * half.x,
