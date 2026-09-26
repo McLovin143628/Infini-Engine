@@ -928,6 +928,23 @@ fn the_lap_logs_at_sixty_hertz_and_pie_equals_shipping() {
     );
     // The header is the plot's contract.
     assert_eq!(LAP_COLUMNS.len(), shipped.rows[0].csv().split(',').count());
+    assert!(
+        f.burnout_rear_rise_c > 3.0,
+        "the burnout heated nothing: {f:?}"
+    );
+    assert!(
+        f.straight_rear_fall_c > 0.3,
+        "nothing cooled on the straight: {f:?}"
+    );
+    assert!(f.boost_peak > 0.5, "the compressor never spooled: {f:?}");
+    assert!(
+        f.boost_after_lift < 0.5 * f.boost_peak,
+        "no blow-off on the lift: {f:?}"
+    );
+    assert!(
+        f.braking_front > f.static_front + 0.05,
+        "braking moved no load forward: {f:?}"
+    );
     // THE MEMO QUOTES THIS LAP: its `LAP-FACTS` line carries the numbers this
     // arm just measured, digit for digit, or the memo is red.
     let memo = memo_text();
@@ -947,23 +964,6 @@ fn the_lap_logs_at_sixty_hertz_and_pie_equals_shipping() {
             "the memo's LAP-FACTS line does not say {want:?}: {line}"
         );
     }
-    assert!(
-        f.burnout_rear_rise_c > 3.0,
-        "the burnout heated nothing: {f:?}"
-    );
-    assert!(
-        f.straight_rear_fall_c > 0.3,
-        "nothing cooled on the straight: {f:?}"
-    );
-    assert!(f.boost_peak > 0.5, "the compressor never spooled: {f:?}");
-    assert!(
-        f.boost_after_lift < 0.5 * f.boost_peak,
-        "no blow-off on the lift: {f:?}"
-    );
-    assert!(
-        f.braking_front > f.static_front + 0.05,
-        "braking moved no load forward: {f:?}"
-    );
     // PIE == SHIPPING, the whole lap.
     assert_eq!(
         shipped.rows.len(),
