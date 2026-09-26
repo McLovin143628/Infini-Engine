@@ -534,7 +534,8 @@ pub fn row_of(world: &crate::world::EcsWorld, chassis: uuid::Uuid) -> Option<&'s
         .map(String::as_str)
 }
 
-/// **What a chassis is drawn with** (wave VEH3f): `"imported"` when it hangs a
+/// **What a chassis is drawn with** (wave VEH3f): `"shell"` when it hangs a DCC
+/// car shell's body (`shell_body`, wave VEH3f.2b), `"imported"` when it hangs a
 /// machine's art body (`art_body` -- the pack's art where this project has it,
 /// the committed fallback where not), `"dcc"` when any of its panels hangs a
 /// DCC hero mesh, `"primitive"` otherwise. Read off the chassis's own children,
