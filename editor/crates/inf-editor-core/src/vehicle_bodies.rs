@@ -902,8 +902,10 @@ mod tests {
         );
     }
 
-    /// The guids are the Ring-0 rule's, distinct, and the rows that name the
-    /// sets name them.
+    /// The guids are the Ring-0 rule's and distinct -- and since wave VEH3f.2b
+    /// no island row names a set any more: the five rows wear the car SHELLS
+    /// (`crate::vehicle_shells`), and these panels stay committed for the two
+    /// goldens that draw them (`hero_sedan`, `hero_pickup`).
     #[test]
     fn every_hero_mesh_has_the_guid_the_rig_asks_for() {
         let meshes = hero_meshes();
@@ -914,10 +916,10 @@ mod tests {
         let defs = crate::vehicle::island_vehicles();
         for set in HeroSet::ALL {
             let def = defs.get(set.row()).expect("the row");
-            assert_eq!(
-                def.body_mesh,
-                Some(set.base()),
-                "{} names its set",
+            assert_eq!(def.body_mesh, None, "{} wears a shell now", set.row());
+            assert!(
+                def.art.is_some_and(|k| k.shell()),
+                "{} wears a shell",
                 set.row()
             );
             assert_eq!(def.body, set.family());

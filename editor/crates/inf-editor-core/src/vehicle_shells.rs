@@ -2267,6 +2267,39 @@ mod tests {
         print!("{}", shell_art_toml());
     }
 
+    /// MEASURE FIRST (brief item 3): every row that draws a seat -- the drawn
+    /// driver cushion's top face vs the fraction rule's height, metres.
+    #[test]
+    #[ignore]
+    fn probe_the_drawn_cushions() {
+        let mut rows: Vec<(String, VehicleDef)> = inf_ecs::roster::roster()
+            .0
+            .iter()
+            .map(|(k, d)| (k.clone(), *d))
+            .collect();
+        rows.extend(crate::vehicle::island_vehicles().0);
+        for (id, def) in rows {
+            let parts: &[inf_ecs::vehicle::BodyPart] = match def.art {
+                Some(k) if !k.parts().is_empty() => k.parts(),
+                _ => def.body.parts(),
+            };
+            let driver = parts
+                .iter()
+                .filter(|p| p.kind == inf_ecs::vehicle::BodyPartKind::Seat)
+                .filter(|p| p.centre.x >= -1e-9)
+                .max_by(|a, b| a.centre.x.total_cmp(&b.centre.x));
+            let Some(d) = driver else { continue };
+            let hy = def.half_extents.y;
+            let top = (d.centre.y + d.half.y) * hy;
+            let rule = inf_ecs::boarding::SEAT_CUSHION_FRAC_Y * hy;
+            println!(
+                "CUSHION {id:30} {:?} top {top:+.3} rule {rule:+.3} delta {:+.3} m",
+                def.body,
+                top - rule
+            );
+        }
+    }
+
     #[test]
     #[ignore]
     fn probe_the_shells() {

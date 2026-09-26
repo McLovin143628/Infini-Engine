@@ -2523,9 +2523,10 @@ impl Lineup {
 ///
 /// * an entry is a roster row id (spawned through `roster::spawn_defined`,
 ///   the `vehicle.spawn` door) or `hero:<Set>` (`Sedan`, `Coupe`, `Suv`,
-///   `Pickup`, `Cruiser`): the level's own authored car that wears that DCC
-///   hero set, MOVED there through [`RuntimeSim::place_vehicle`] (the island
-///   row's own proportions -- nothing is re-derived for the frame);
+///   `Pickup`, `Cruiser`): the level's own authored car that wears that
+///   set's car SHELL (wave VEH3f.2b; `hero:shell_<key>` names one directly),
+///   MOVED there through [`RuntimeSim::place_vehicle`] (the island row's own
+///   proportions -- nothing is re-derived for the frame);
 /// * with no list: the shortest row of each of the eighteen classes, then the
 ///   five hero sets.
 ///
@@ -2545,6 +2546,9 @@ pub struct Gallery {
     next: usize,
     /// The roster car on show, to take away before the next one.
     shown: Option<(uuid::Uuid, inf_ecs::vehicle::VehicleDef)>,
+    /// **The car the gallery camera frames** (wave VEH3f.2b): the one on
+    /// show, whichever door put it there.
+    focus: Option<uuid::Uuid>,
     armed: bool,
 }
 
@@ -2622,8 +2626,36 @@ impl Gallery {
             entries,
             next: 0,
             shown: None,
+            focus: None,
             armed: true,
         }
+    }
+
+    /// **The gallery camera** (wave VEH3f.2b, the VEH3f audit's carried
+    /// "frames far, inside a scaffold"): while a car is on show, an eye at its
+    /// three-quarter FRONT -- ahead of the nose and out to the right flank,
+    /// a car-length and a quarter off, a little above the roof -- and the
+    /// point it looks at, the car's middle. Read off the car's live transform
+    /// and collider every frame, so it frames what the world holds.
+    /// `None` when nothing is on show.
+    pub fn framing(&self, sim: &RuntimeSim) -> Option<(glam::DVec3, glam::DVec3)> {
+        let car = self.focus?;
+        let w = sim.world();
+        let e = w.entity_of(car)?;
+        let t = w.world().get::<inf_ecs::components::GlobalTransform>(e)?;
+        let half = w
+            .world()
+            .get::<inf_ecs::components::Collider3D>(e)
+            .map(|c| c.half_extents.to_dvec3())
+            .unwrap_or(glam::DVec3::new(1.0, 0.7, 2.3));
+        let at = t.translation();
+        // The affine's linear part carries no scale on a chassis.
+        let fwd = t.0.transform_vector3(glam::DVec3::Z).normalize_or(glam::DVec3::Z);
+        let right = t.0.transform_vector3(glam::DVec3::X).normalize_or(glam::DVec3::X);
+        let d = (2.0 * half.z).max(4.0) * 1.25;
+        let eye = at + (fwd * 0.74 + right * 0.67).normalize() * d
+            + glam::DVec3::Y * (half.y * 1.6 + 0.5);
+        Some((eye, at + glam::DVec3::Y * (0.15 * half.y)))
     }
 
     /// Show the next vehicle once its time has come. Answers a log line when
@@ -2665,21 +2697,26 @@ impl Gallery {
         let entry = self.entries[i].clone();
         let n = self.entries.len();
         if let Some(set) = entry.strip_prefix("hero:") {
-            let base = inf_ecs::vehicle::HERO_SETS
-                .iter()
-                .find(|(name, _)| name.eq_ignore_ascii_case(set))
-                .map(|(_, b)| uuid::Uuid::from_u128(*b));
-            let Some(base) = base else {
+            // **The island's hero rows wear the car SHELLS** (wave VEH3f.2b):
+            // `hero:Sedan` finds the level's car whose shell body is
+            // `shell_sedan`'s (the five sets' names map one to one), and a
+            // `shell:<key>` entry names a shell directly.
+            let key = if set.starts_with("shell_") {
+                set.to_string()
+            } else {
+                format!("shell_{}", set.to_ascii_lowercase())
+            };
+            let Some(art) = inf_ecs::roster::ArtKey::from_name(&key).filter(|k| k.shell()) else {
                 return Some(format!(
-                    "{GALLERY_ENV} {}/{n} hero={set} UNKNOWN SET",
+                    "{GALLERY_ENV} {}/{n} hero={set} UNKNOWN SHELL",
                     i + 1
                 ));
             };
-            let lower = inf_ecs::vehicle::hero_part_mesh_guid(base, "lower");
+            let body = inf_ecs::roster::art_body_guid(art);
             let w = sim.world();
             let car = w.world().iter_entities().find_map(|e| {
                 let m = e.get::<inf_ecs::components::MeshRef>()?;
-                if m.asset != Some(lower) {
+                if m.asset != Some(body) {
                     return None;
                 }
                 let parent = w.parent_of(e.id())?;
@@ -2703,8 +2740,9 @@ impl Gallery {
                 .to_string();
             p.y = ground + half.y + 0.45;
             let placed = sim.place_vehicle(car, p, glam::DQuat::from_rotation_y(yaw.to_radians()));
+            self.focus = Some(car);
             return Some(format!(
-                "{GALLERY_ENV} {}/{n} class=hero row={set} label={name} body=dcc-hero-panels half={:.2},{:.2},{:.2} at {:.1},{:.1},{:.1} {}",
+                "{GALLERY_ENV} {}/{n} class=hero row={set} label={name} body=shell:{key} half={:.2},{:.2},{:.2} at {:.1},{:.1},{:.1} {}",
                 i + 1,
                 half.x,
                 half.y,
@@ -2725,7 +2763,10 @@ impl Gallery {
         let guid = roster::spawn_defined(sim.world_mut(), &entry, p, yaw)?;
         sim.world_mut().propagate();
         self.shown = Some((guid, def));
-        let body = if def.art.is_some() {
+        self.focus = Some(guid);
+        let body = if let Some(k) = def.art.filter(|k| k.shell()) {
+            format!("shell:{}", k.name())
+        } else if def.art.is_some() {
             "art".to_string()
         } else if def.body_mesh.is_some() {
             "dcc-hero-panels".to_string()

@@ -307,7 +307,7 @@ pub fn seat_local_with(c: &Collider3D, seats: &[crate::boarding::PartGeom]) -> V
     let s = crate::boarding::sockets_of(half, c.offset, seats);
     s.seat_floor(
         crate::boarding::SeatIndex::Driver,
-        c.offset.y + crate::boarding::SEAT_FLOOR_FRAC_Y * half.y,
+        c.offset.y + crate::boarding::SEAT_FLOOR_FRAC_Y * half.y + s.floor_lift_m,
     )
 }
 

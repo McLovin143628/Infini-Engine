@@ -402,6 +402,14 @@ pub struct VehicleSockets {
     /// rim that is drawn. An offset rather than the rake itself so a
     /// `Default` socket set keeps the constant.
     pub wheel_rake_offset_deg: f64,
+    /// **How far the drawn driver cushion lifts the seat off the fraction
+    /// rule**, metres (wave VEH3f.2b): `0` for a body that draws no seat or
+    /// draws its cushion at [`SEAT_CUSHION_FRAC_Y`] (every body at the wave's
+    /// start -- measured, 136 of 136), and otherwise the drawn top face less the
+    /// rule. The seat, the foot-well floor, the pedals and the hub all move by
+    /// it TOGETHER -- the arithmetic that put VEH3f's crew-cab driver 0.21 m
+    /// under a cushion moved the cushion alone.
+    pub floor_lift_m: f64,
 }
 
 impl VehicleSockets {
@@ -610,6 +618,23 @@ pub fn sockets_of(half: Vec3d, offset: Vec3d, parts: &[PartGeom]) -> VehicleSock
         }
     }
     let (mut seat_r, mut seat_l) = (seat_r, seat_l);
+    // ── THE SEAT'S HEIGHT, off the drawn cushion too (wave VEH3f.2b) ─────────
+    //
+    // The driver sits on the TOP FACE of the cushion that is drawn, and the
+    // foot-well floor, the pedals and the hub move with him by the same lift
+    // (`floor_lift_m`), so the one arithmetic of the hull's height is kept --
+    // the VEH3f revert moved the cushion alone and measured a crew-cab driver
+    // 0.21 m under it. A body that draws its cushion at the rule lifts by zero.
+    let lift_m = driver
+        .map(|dp| (dp.centre_frac.y + dp.half_frac.y.abs() - cushion) * hy)
+        .filter(|l| l.is_finite())
+        .unwrap_or(0.0);
+    if lift_m != 0.0 {
+        seat_r.y += lift_m;
+        pedal_throttle.y += lift_m;
+        pedal_brake.y += lift_m;
+        wheel_hub.y += lift_m;
+    }
     if let Some(dp) = driver {
         let x = offset.x + dp.centre_frac.x * hx;
         let z = offset.z + dp.centre_frac.z * hz;
@@ -632,9 +657,10 @@ pub fn sockets_of(half: Vec3d, offset: Vec3d, parts: &[PartGeom]) -> VehicleSock
         );
     }
     if let Some(pp) = passenger {
+        let top = (pp.centre_frac.y + pp.half_frac.y.abs() - cushion) * hy;
         seat_l = Vec3d::new(
             offset.x + pp.centre_frac.x * hx,
-            seat_l.y,
+            seat_l.y + if top.is_finite() { top } else { 0.0 },
             offset.z + pp.centre_frac.z * hz,
         );
     }
@@ -686,6 +712,7 @@ pub fn sockets_of(half: Vec3d, offset: Vec3d, parts: &[PartGeom]) -> VehicleSock
         wheel_hub,
         wheel_rim_m,
         wheel_rake_offset_deg,
+        floor_lift_m: lift_m,
     };
     // ── the handles, from the DOORS (VEH3c's own derivation) ────────────────
     //

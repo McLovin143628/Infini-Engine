@@ -3691,20 +3691,34 @@ fn step_driving(
         if cm.runtime.seat.time_s >= enter_time_s {
             cm.runtime.seat.entering = false;
             if b.phase == BoardPhase::EnteringIK {
-                // In: pull the door shut on the inner handle.
+                // In. The door is pulled shut on the inner handle -- once the
+                // hand is ON it (`Seated` below), not here (wave VEH3f.2b).
                 b.enter(BoardPhase::Seated, 0.0);
-                if !b.door.is_nil() {
-                    super::bodywork::set_part_open(world, bridge, vehicle, b.door, false);
-                }
             }
         }
     } else {
         match b.phase {
             BoardPhase::Seated => {
                 b.time_s += dt;
+                // **The inner latch waits for the hand** (wave VEH3f.2b, the
+                // VEH3f audit's carried "the inner handle latches on the motor
+                // before the reach ramps in"): the motor is told to shut the
+                // door once the reach has finished and the hand has HELD the
+                // pull -- `HAND_REACH_S + HANDLE_HOLD_S`, the outer latch's own
+                // rule -- and the hand rides the handle until the door is shut.
+                let pull_at = board::HAND_REACH_S + board::HANDLE_HOLD_S;
+                if b.mark_s < 0.0 && b.time_s >= pull_at {
+                    b.mark_s = b.time_s;
+                    if !b.door.is_nil() {
+                        super::bodywork::set_part_open(world, bridge, vehicle, b.door, false);
+                    }
+                }
                 b.door_deg = super::boarding::door_angle_deg(world, bridge, vehicle, b.door);
                 let shut = b.door.is_nil() || b.door_deg <= board::DOOR_SHUT_DEG;
-                if (shut && b.time_s >= board::SEATED_MIN_S) || b.time_s >= board::SEATED_MAX_S {
+                let pulled = b.mark_s >= 0.0 || b.door.is_nil();
+                if (pulled && shut && b.time_s >= board::SEATED_MIN_S)
+                    || b.time_s >= board::SEATED_MAX_S
+                {
                     b.enter(BoardPhase::Driving, 0.0);
                 }
             }

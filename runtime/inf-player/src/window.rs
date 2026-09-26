@@ -552,6 +552,25 @@ impl PlayerApp {
                     ortho: None,
                 });
             }
+            // The GALLERY camera (wave VEH3f.2b): while a car is on show, its
+            // three-quarter front, close -- the follow camera sits behind the
+            // hero and framed every gallery car small and far.
+            if let Some((eye, at)) = self.gallery.framing(&self.sim).filter(|_| self.pie.is_some())
+            {
+                let look = (at - eye).normalize_or(forward).as_vec3();
+                let side = look.cross(Vec3::Y).normalize_or(Vec3::X);
+                return Some(RenderView {
+                    origin: live.host.origin(),
+                    eye_world: eye,
+                    forward: look,
+                    up: side.cross(look).normalize_or(Vec3::Y),
+                    fov_y: 50f32.to_radians(),
+                    near: 0.05,
+                    width: w,
+                    height: h,
+                    ortho: None,
+                });
+            }
             return Some(RenderView {
                 origin: live.host.origin(),
                 eye_world: pose.position.to_dvec3(),

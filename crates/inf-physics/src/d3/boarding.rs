@@ -112,9 +112,10 @@ impl CarFrame {
         model::planar_yaw_deg(Vec2d::new(f.x, f.z))
     }
 
-    /// The foot-well floor under a seat, chassis frame `y`.
+    /// The foot-well floor under a seat, chassis frame `y` -- lifted with a
+    /// drawn cushion (`VehicleSockets::floor_lift_m`, wave VEH3f.2b).
     pub fn floor_y(&self) -> f64 {
-        self.offset.y + board::SEAT_FLOOR_FRAC_Y * self.half.y.abs()
+        self.offset.y + board::SEAT_FLOOR_FRAC_Y * self.half.y.abs() + self.sockets.floor_lift_m
     }
 }
 
