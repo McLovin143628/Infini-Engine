@@ -685,9 +685,17 @@ fn step_one(
     //    into a traffic car stopped beside it -- the one moving contact left
     //    once the following rule read footprints. A car in motion keeps coasting
     //    exactly as it did (a bailed-out car still rolls on).
+    //    A HITCHED trailer is exempt: it carries the joint, its tractor holds
+    //    the rig, and a trailer whose own wheels were locked fought its
+    //    kingpin (measured on the island's box trailer: the joint's impulse in
+    //    the tens of millions of N.s and the rig lurching seven metres).
+    let hitched = world
+        .entity_of(chassis)
+        .and_then(|e| world.world().get::<inf_ecs::components::Joint3D>(e))
+        .is_some();
     if let Some(v) = bridge.vehicle_mut(chassis) {
         v.control(inf_ecs::vehicle::VehicleControls {
-            handbrake: forward_mps.abs() < inf_ecs::vehicle::PARK_HOLD_MPS,
+            handbrake: !hitched && forward_mps.abs() < inf_ecs::vehicle::PARK_HOLD_MPS,
             ..inf_ecs::vehicle::VehicleControls::default()
         });
     }

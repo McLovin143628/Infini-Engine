@@ -697,43 +697,6 @@ fn the_island_traffic_makes_no_moving_contact_and_its_hero_classes_draw_shells()
                 }
             }
         }
-        if std::env::var_os("INF_VEH3F2B_TRACE").is_some() && (900..1080).contains(&s) && s % 6 == 0 {
-            if let Some(pop) = inf_ecs::traffic::traffic_of(sim.world()) {
-                let keys: Vec<Uuid> = pop.records.keys().copied().collect();
-                for g in keys {
-                    if inf_ecs::traffic::catalogue_row_id(g) != Some("bravado_gresley") {
-                        continue;
-                    }
-                    let i = inf_physics::d3::traffic::probe_intent(sim.world(), sim.bridge3d(), g, 1.0 / 60.0);
-                    if let Some(i) = i {
-                        eprintln!(
-                            "  INTENT t {:.2} gresley target {:.2} move {:?} handbrake {} lateral {:.2}",
-                            s as f64 / 60.0,
-                            i.target_mps,
-                            i.move_input,
-                            i.handbrake,
-                            i.lateral_m
-                        );
-                    }
-                }
-            }
-        }
-        if std::env::var_os("INF_VEH3F2B_TRACE").is_some() && s % 30 == 0 {
-            for e in sim.world().world().iter_entities() {
-                if e.get::<inf_ecs::components::VehicleClass>().is_none() {
-                    continue;
-                }
-                let Some(g) = e.get::<inf_ecs::components::Guid>() else {
-                    continue;
-                };
-                if let Some((p, yaw)) = pose(g.0, &sim) {
-                    if (p.x + 417.0).abs() < 12.0 && (p.z - 380.0).abs() < 14.0 {
-                        let name = sim.world().name_of(e.id()).unwrap_or("?");
-                        eprintln!("  TRACE t {:.1} {name} ({:.2}, {:.2}, {:.2}) yaw {yaw:.1}", s as f64 / 60.0, p.x, p.y, p.z);
-                    }
-                }
-            }
-        }
         if s % 600 != 599 {
             continue;
         }
@@ -982,4 +945,232 @@ fn the_tandem_brakes_by_axle_load_and_no_rear_axle_locks_first() {
         }
     }
     assert!(bad.is_empty(), "{}", bad.join("\n"));
+}
+
+// ── the island's articulated rig ────────────────────────────────────────────
+
+/// The LOCAL island project's content, when this machine has one.
+fn island_project() -> Option<std::path::PathBuf> {
+    let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../island-build/project/Content");
+    (p.join("VancouverIsland.inf_lvl").is_file()).then(|| p.canonicalize().unwrap_or(p))
+}
+
+/// The committed island level booted as the editor's Play boots it, over the
+/// local project's streamed content (`veh3d_gate`'s harness).
+fn real_island_sim(content: &std::path::Path) -> inf_player::runtime_sim::RuntimeSim {
+    let source = inf_player::level::DevDirLevelSource::new(content.join("VancouverIsland.inf_lvl"));
+    let terrains = inf_player::level::terrain_paths_by_guid_from_dir(content);
+    let pcg_terrains = terrains.clone();
+    let (skeletons, clips, machines) = inf_player::level::load_anim_assets_from_dir(content);
+    let builder = inf_player::level::InfSceneWorldBuilder::with_defaults(
+        inf_player::level::load_actor_classes_from_dir(content),
+    )
+    .with_pcgs(inf_player::level::load_pcg_payloads_by_guid_from_dir(
+        content,
+    ))
+    .with_biome_sets(inf_player::level::load_biome_sets_by_guid_from_dir(content))
+    .with_anim_assets(skeletons, clips, machines)
+    .with_audio(inf_player::level::load_audio_assets_from_dir(content))
+    .with_terrain_resolver(std::sync::Arc::new(move |g| {
+        inf_player::level::terrain_source_from_file(pcg_terrains.get(&g)?).ok()
+    }));
+    let mut built = inf_player::level::load(&source, &builder).expect("the island builds");
+    let partition = built.take_partition();
+    let pcg = built.pcg_context();
+    let mut sim = inf_player::sim_from_built(built);
+    inf_player::attach_cell_streaming(&mut sim, &partition, pcg);
+    inf_player::attach_terrain_streaming(&mut sim, &inf_player::TerrainContent::Dir(terrains));
+    sim
+}
+
+/// The level's entity named `name`, and its guid.
+fn named(sim: &inf_player::runtime_sim::RuntimeSim, name: &str) -> Option<Uuid> {
+    let w = sim.world();
+    w.world().iter_entities().find_map(|e| {
+        (w.name_of(e.id()) == Some(name))
+            .then(|| e.get::<inf_ecs::components::Guid>().map(|g| g.0))
+            .flatten()
+    })
+}
+
+/// Move the camera subject (capsule centre): the transform and the body.
+fn put_subject(sim: &mut inf_player::runtime_sim::RuntimeSim, at: DVec3) {
+    let Some(hero) = inf_ecs::movement::camera_subject(sim.world()) else {
+        return;
+    };
+    if let Some(e) = sim.world().entity_of(hero) {
+        if let Some(mut t) = sim.world_mut().world_mut().get_mut::<Transform>(e) {
+            t.translation = Vec3d::from_dvec3(at);
+        }
+    }
+    if let Some(b) = sim.bridge3d().body_of(hero) {
+        sim.bridge3d_mut().world_mut().set_body_translation(b, at);
+    }
+}
+
+/// **THE ISLAND'S TWO ARTICULATED RIGS, MEASURED -- CARRIED** (LOCAL: the
+/// committed level over this machine's island project; skips without it).
+/// READS each rig in the WORLD after ten settled seconds: each trailer wheel's
+/// ray contact, the trailer's pitch against the ground's own slope under its
+/// wheels (`terrain_height_at`), the hitch's two anchors in the world (the
+/// JOINT's own `local_anchor` / `other_anchor`, and the rows' `kingpin_local`
+/// / `coupling_local`) and the joint's impulse.
+///
+/// **What it found, and why it asserts nothing.** The VEH3f audit carried the
+/// Harbour City box trailer "on 0 of 4 wheels, pitched 4.7 deg, placed over
+/// lower ground". Measured on this tree: the ground under both rigs is level
+/// (slope 0.01-0.06 deg), the box trailer now stands on 4 of 4 wheels, and
+/// BOTH rigs are unstable on the level-loaded host -- the hitch joint's
+/// impulse is ~1e7 N.s every step and the kingpin stands 0.44-1.21 m off the
+/// fifth wheel, the box trailer lurching seven metres at ~8 s; with the
+/// parking hold off the box trailer hangs on 0 of 4 wheels at -10.8 deg. The
+/// same pair on the flat fixture slab holds (`veh3f_gate`'s slalom arm, gap
+/// < 0.1 m). So the carried item is not the ground under the axles: it is the
+/// hitch on the island host -- unisolated, CARRIED (priced in the report). The
+/// arm prints both rigs so the audit reads the same numbers; it is a
+/// measurement, not a claim.
+#[test]
+fn the_islands_articulated_rigs_measured() {
+    let Some(content) = island_project() else {
+        println!("SKIP: no local island project");
+        return;
+    };
+    for row in ["jobuilt_box_trailer", "mtl_tanker_trailer"] {
+        measure_island_rig(&content, row);
+    }
+}
+
+fn measure_island_rig(content: &std::path::Path, row: &str) {
+    let mut sim = real_island_sim(content);
+    let label = inf_ecs::roster::roster_label(row).expect("the row");
+    let tractor_label = inf_ecs::roster::roster_label("mtl_packer").expect("the row");
+    let trailer = named(&sim, label).unwrap_or_else(|| panic!("the island names no `{label}`"));
+    // The tractor is the one its hitch names (a lot can hold two of a row).
+    let tractor = {
+        let w = sim.world();
+        w.entity_of(trailer)
+            .and_then(|e| w.world().get::<inf_ecs::components::Joint3D>(e))
+            .and_then(|j| j.other.get())
+            .unwrap_or_else(|| panic!("`{label}` is hitched to nothing"))
+    };
+    let _ = tractor_label;
+    let at = |sim: &inf_player::runtime_sim::RuntimeSim, g: Uuid| {
+        let w = sim.world();
+        w.entity_of(g)
+            .and_then(|e| w.world().get::<Transform>(e))
+            .map(|t| t.translation.to_dvec3())
+    };
+    let p0 = at(&sim, trailer).expect("the trailer");
+    put_subject(&mut sim, p0 + DVec3::new(12.0, 3.0, 0.0));
+    sim.step_once(Default::default());
+    {
+        let w = sim.world();
+        for e in w.world().iter_entities() {
+            if e.get::<inf_ecs::components::VehicleClass>().is_none() {
+                continue;
+            }
+            let Some(tr) = e.get::<Transform>() else { continue };
+            let d = tr.translation.to_dvec3() - p0;
+            if d.length() < 30.0 {
+                println!(
+                    "  NEAR {} at {:?} yaw {:.1} half {:?}",
+                    w.name_of(e.id()).unwrap_or("?"),
+                    tr.translation,
+                    tr.rotation.y,
+                    e.get::<Collider3D>().map(|c| c.half_extents)
+                );
+            }
+        }
+    }
+    for i in 0..600 {
+        sim.step_once(Default::default());
+        if i % 60 == 0 {
+            let jid = sim.bridge3d().joint_of(trailer);
+            println!(
+                "  step {i}: trailer at {:?} body {} joint {:?}",
+                at(&sim, trailer),
+                sim.bridge3d().body_of(trailer).is_some(),
+                jid
+            );
+        }
+    }
+    let w = sim.world();
+    let e = w.entity_of(trailer).expect("the trailer is resident");
+    let t = *w.world().get::<Transform>(e).expect("a transform");
+    let q = t.quat();
+    let fwd = q * DVec3::Z;
+    let pitch = inf_math::patan2_64(fwd.y, (fwd.x * fwd.x + fwd.z * fwd.z).sqrt()).to_degrees();
+    let v = sim.bridge3d().vehicle_of(trailer).expect("the trailer is a rig");
+    let mounts: Vec<DVec3> = v
+        .rig()
+        .wheels
+        .iter()
+        .map(|m| t.translation.to_dvec3() + q * m.mount_local.to_dvec3())
+        .collect();
+    let grounded = v.wheels().iter().filter(|w| w.contact.is_some()).count();
+    let n = v.wheels().len();
+    let rt = w
+        .entity_of(tractor)
+        .and_then(|e| w.world().get::<Transform>(e))
+        .copied()
+        .expect("the tractor");
+    let grounds: Vec<f64> = mounts
+        .iter()
+        .map(|m| sim.terrain_height_at(m.x, m.z))
+        .collect();
+    let slope = if mounts.len() >= 2 {
+        let (a, b) = (mounts[0], mounts[mounts.len() - 1]);
+        let run = DVec3::new(b.x - a.x, 0.0, b.z - a.z).length().max(1e-6);
+        inf_math::patan2_64(grounds[0] - grounds[grounds.len() - 1], run).to_degrees()
+    } else {
+        0.0
+    };
+    let tdef = catalogue_def(row);
+    let rdef = catalogue_def(
+        if row == "jobuilt_box_trailer" {
+            "mtl_packer"
+        } else {
+            "jobuilt_hauler"
+        },
+    );
+    let pin = inf_ecs::vehicle::kingpin_local(&tdef).to_dvec3();
+    // The hitch's own anchor on the tractor: the fifth wheel's plan position
+    // at the pair's coupling height (`coupling_local`, what `hitch_joint`
+    // anchors the joint at).
+    let fifth = inf_ecs::vehicle::coupling_local(&rdef, &tdef)
+        .map(|f| f.to_dvec3())
+        .unwrap_or(DVec3::ZERO);
+    let gap = ((t.translation.to_dvec3() + q * pin) - (rt.translation.to_dvec3() + rt.quat() * fifth))
+        .length();
+    // …and the hitch AS THE LEVEL HOLDS IT: the joint's own two anchors.
+    let joint = sim
+        .world()
+        .entity_of(trailer)
+        .and_then(|e| sim.world().world().get::<inf_ecs::components::Joint3D>(e))
+        .copied()
+        .expect("the hitch");
+    let joint_gap = ((t.translation.to_dvec3() + q * joint.local_anchor.to_dvec3())
+        - (rt.translation.to_dvec3() + rt.quat() * joint.other_anchor.to_dvec3()))
+    .length();
+    println!(
+        "ISLAND HITCH: joint anchors {:?} / {:?} (the rows now say {pin:?} / {fifth:?}); the joint's own gap {joint_gap:.3} m; tractor body {:?} at {:?}, trailer body {:?} at {:?}; authored trailer at {p0:?}",
+        joint.local_anchor,
+        joint.other_anchor,
+        sim.bridge3d().body_of(tractor).is_some(),
+        rt.translation,
+        sim.bridge3d().body_of(trailer).is_some(),
+        t.translation
+    );
+    let jid = sim.bridge3d().joint_of(trailer);
+    println!(
+        "ISLAND JOINT: bridge joint {:?}; impulse {:?}",
+        jid,
+        jid.and_then(|j| sim.bridge3d().world().joint_impulse(j))
+    );
+    println!(
+        "ISLAND RIG {row}: {grounded} of {n} wheels on the ground; pitch {pitch:.2} deg on ground sloping {slope:.2} deg; kingpin gap {:.3} m; grounds under the wheels {grounds:?}",
+        gap
+    );
+    let _ = (grounded, n, pitch, slope, gap);
 }
