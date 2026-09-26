@@ -54,6 +54,10 @@ use super::PhysicsBridge3D;
 /// begins, and a car being driven hard sheds nothing.
 pub const CRASH_MIN_NS: f64 = 300.0;
 
+/// **The thinnest half-extent a shed bumper's collider keeps**, metres (wave
+/// VEH3f.2b) -- a cover in the road is a sheet, whatever box its wrap drew.
+pub const SHED_BUMPER_HALF_M: f64 = 0.03;
+
 /// **How fast a car has to have been going for a blow to be a crash**, m/s.
 ///
 /// Two metres a second, which is walking pace. Under it a car is parking, being
@@ -882,11 +886,36 @@ fn part_to_body(
             scale: Vec3d::ONE,
         }
         .quat();
-    let half = DVec3::new(
+    let mut half = DVec3::new(
         (scale.x * 0.5).abs().max(0.01),
         (scale.y * 0.5).abs().max(0.01),
         (scale.z * 0.5).abs().max(0.01),
     );
+    // **A shed bumper lies FLAT** (wave VEH3f.2b): it is a plastic cover over
+    // a beam, and in the road it is a sheet a wheel rides over. A box
+    // family's bumper box is already a sheet (6.6 cm); a car SHELL's bumper
+    // part boxes its whole wrap -- 27 cm tall and 34 cm deep on the island
+    // saloon -- which as a collider was a kerb the saloon stopped against.
+    // So its thinnest half-extent is capped at `SHED_BUMPER_HALF_M`, and the
+    // part is laid down on that face: a shell's bumper is an UPRIGHT sheet
+    // (thin in z) and shed upright it stood 18.7 cm proud of the road, so the
+    // frame (drawn and solved alike) turns a quarter about the thin axis's
+    // neighbour until the thin axis is vertical. The quarter turn is built
+    // from its exact half-angle components, not from trig.
+    let mut rot = rot;
+    if shed && kind == BodyPartKind::Bumper {
+        let cap = SHED_BUMPER_HALF_M;
+        let h = std::f64::consts::FRAC_1_SQRT_2;
+        if half.x <= half.y && half.x <= half.z {
+            half.x = half.x.min(cap);
+            rot *= glam::DQuat::from_xyzw(0.0, 0.0, h, h);
+        } else if half.y <= half.z {
+            half.y = half.y.min(cap);
+        } else {
+            half.z = half.z.min(cap);
+            rot *= glam::DQuat::from_xyzw(h, 0.0, 0.0, h);
+        }
+    }
     let mut local_out = local_t;
     if shed {
         let (axis, sign) = state.facing();

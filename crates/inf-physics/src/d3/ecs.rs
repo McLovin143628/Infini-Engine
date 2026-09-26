@@ -793,6 +793,13 @@ impl PhysicsBridge3D {
                 .density((desc.mass_kg.max(0.1) / volume).clamp(1.0, 100_000.0))
                 .friction(0.7),
         );
+        // **A panel is a SHEET, so it sweeps** (wave VEH3f.2b): a car shell's
+        // door is 6.9 cm thick, and an open one meeting a 24 cm lamp post at
+        // 19 m/s (32 cm a step) passed through it between two steps -- the
+        // hinge read 124 N.s where the box family's thicker door read 2 060.
+        // Rapier's CCD only engages a body moving more than its own thickness
+        // in a step, so a parked car's shut door costs nothing.
+        self.world.set_body_ccd(body, true);
         let joint = desc.hinge.and_then(|h| {
             let d = Self::part_joint_desc(h.axis, h.pivot, h.pivot - desc.local, h.open_rad, 0.0);
             self.world.add_joint(chassis, body, d)

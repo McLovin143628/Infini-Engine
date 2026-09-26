@@ -491,7 +491,11 @@ fn every_authored_family_is_a_car_with_doors() {
             parts.len()
         );
         assert!(doors >= 2, "{id} has {doors} doors");
-        assert_eq!(bumpers, 2, "{id} has {bumpers} bumpers");
+        // Two -- and the cruiser's SHELL a third, its push bar, which is a
+        // bumper by kind: the impact structure a crash reaches first and sheds
+        // (wave VEH3f.2b).
+        let want_bumpers = if id == "cruiser" { 3 } else { 2 };
+        assert_eq!(bumpers, want_bumpers, "{id} has {bumpers} bumpers");
         assert!(glass >= 3, "{id} has {glass} panes");
         assert!(hinged >= 3, "{id} has {hinged} hinged parts");
         total += parts.len();
