@@ -261,6 +261,13 @@ const SEALED_SURFACE_FRICTION: f64 = 0.85;
 /// from the type it is comparing against would agree with anything.
 const DEFAULT_COLLIDER_FRICTION: f64 = 0.5;
 
+/// **The brake an uncommanded, parked aircraft holds on every wheel**
+/// (`audit(VEH3f.2b)`): enough to stop a Dodo on a 3 deg grade (0.040 m in ten
+/// seconds, was 5.402), short of LOCKING the gear -- a locked wheel keeps no
+/// lateral grip, and the fully braked Dodo slid 0.8 m sideways on the island
+/// apron.
+const CHOCK_BRAKE: f64 = 0.25;
+
 fn step_one(
     world: &mut EcsWorld,
     bridge: &mut PhysicsBridge3D,
@@ -699,15 +706,18 @@ fn step_one(
     //    (`veh3g_gate::the_islands_dodo_boards_where_the_flight_leg_puts_it`).
     //    **An aircraft is CHOCKED instead** (`audit(VEH3f.2b)`, priority h'):
     //    the wave left it rolling (a parked Dodo ran 5.40 m down a 3 deg slab
-    //    in ten seconds); it now holds on EVERY wheel's brake, nose gear
-    //    included, and no handbrake -- which is what locked the mains alone
-    //    and let the nose wheel swing it sideways.
+    //    in ten seconds); it now holds on a quarter of EVERY wheel's brake,
+    //    nose gear included, and no handbrake -- [`CHOCK_BRAKE`], measured:
+    //    the full brake LOCKED the gear and the Dodo slid 0.8 m sideways off
+    //    the island apron's cross-fall (the veh3g threshold boarding went
+    //    out of reach, the wave's own finding with the mains locked); 0.1
+    //    held the grade but let the placed Dodo roll 1.4 m on the apron.
     if let Some(v) = bridge.vehicle_mut(chassis) {
         let slow = !hitched && forward_mps.abs() < inf_ecs::vehicle::PARK_HOLD_MPS;
         let aircraft = v.flight().is_some();
         v.control(inf_ecs::vehicle::VehicleControls {
             handbrake: slow && !aircraft,
-            brake: if slow && aircraft { 1.0 } else { 0.0 },
+            brake: if slow && aircraft { CHOCK_BRAKE } else { 0.0 },
             ..inf_ecs::vehicle::VehicleControls::default()
         });
     }
