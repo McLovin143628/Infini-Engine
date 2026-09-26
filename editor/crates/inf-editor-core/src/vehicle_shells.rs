@@ -1897,13 +1897,17 @@ pub fn shell_body_guid(shell: Shell) -> Uuid {
     inf_ecs::roster::art_body_guid(shell.art())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// **What a gate measures a shell by** (wave VEH3f.2b) -- closedness, the
+/// arch rays and the outline against the box family, over TRIANGLES in metres,
+/// so the unit tests below run them on the generator's output and
+/// `veh3f2b_gate` on the committed bytes.
+pub mod measure {
+    /// One triangle, three positions.
+    pub type Tri = [[f64; 3]; 3];
 
     /// Welded-edge closedness of an exported asset: every edge (keyed by its
     /// two positions' bits) on exactly two triangles.
-    fn closed(asset: &inf_mesh::MeshAsset) -> (usize, usize) {
+    pub fn closed(asset: &inf_mesh::MeshAsset) -> (usize, usize) {
         let mut edges: std::collections::BTreeMap<([u32; 3], [u32; 3]), usize> =
             Default::default();
         for sm in &asset.submeshes {
@@ -1919,11 +1923,8 @@ mod tests {
         (edges.len(), bad)
     }
 
-    type Tri = [[f64; 3]; 3];
-
-    /// A mesh's triangles (the exported asset's), each vertex mapped by `f`.
-    fn tris_of(m: &Mesh, f: impl Fn([f64; 3]) -> [f64; 3]) -> Vec<Tri> {
-        let a = export(m);
+    /// An exported asset's triangles, each vertex mapped by `f`.
+    pub fn tris_of_asset(a: &inf_mesh::MeshAsset, f: impl Fn([f64; 3]) -> [f64; 3]) -> Vec<Tri> {
         let mut out = Vec::new();
         for sm in &a.submeshes {
             for t in sm.indices.chunks(3) {
@@ -1938,7 +1939,7 @@ mod tests {
     }
 
     /// Moller-Trumbore: does the ray `o + t d` (`t > 0`) cross `tri`?
-    fn ray_hits(o: [f64; 3], d: [f64; 3], tri: &Tri) -> bool {
+    pub fn ray_hits(o: [f64; 3], d: [f64; 3], tri: &Tri) -> bool {
         let sub = |a: [f64; 3], b: [f64; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
         let cross = |a: [f64; 3], b: [f64; 3]| {
             [
@@ -1965,6 +1966,205 @@ mod tests {
             return false;
         }
         dot(e2, qv) / det > 1e-9
+    }
+
+    /// Rasterise triangles projected on two axes, 1 cm cells, over `lo..lo+n`.
+    fn raster(tris: &[Tri], ax: (usize, usize), lo: [f64; 2], n: [usize; 2]) -> Vec<bool> {
+        let cell = 0.01;
+        let mut g = vec![false; n[0] * n[1]];
+        for t in tris {
+            let p: Vec<[f64; 2]> = t.iter().map(|v| [v[ax.0], v[ax.1]]).collect();
+            let area = (p[1][0] - p[0][0]) * (p[2][1] - p[0][1])
+                - (p[2][0] - p[0][0]) * (p[1][1] - p[0][1]);
+            if area.abs() < 1e-12 {
+                continue;
+            }
+            let (mut a0, mut a1, mut b0, mut b1) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+            for q in &p {
+                a0 = a0.min(q[0]);
+                a1 = a1.max(q[0]);
+                b0 = b0.min(q[1]);
+                b1 = b1.max(q[1]);
+            }
+            let i0 = ((a0 - lo[0]) / cell).floor().max(0.0) as usize;
+            let i1 = (((a1 - lo[0]) / cell).ceil().max(0.0) as usize).min(n[0]);
+            let j0 = ((b0 - lo[1]) / cell).floor().max(0.0) as usize;
+            let j1 = (((b1 - lo[1]) / cell).ceil().max(0.0) as usize).min(n[1]);
+            for i in i0..i1 {
+                for j in j0..j1 {
+                    let (x, y) = (
+                        lo[0] + (i as f64 + 0.5) * cell,
+                        lo[1] + (j as f64 + 0.5) * cell,
+                    );
+                    let e = |a: [f64; 2], b: [f64; 2]| {
+                        (b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0])
+                    };
+                    let (e0, e1, e2) = (e(p[0], p[1]), e(p[1], p[2]), e(p[2], p[0]));
+                    if (e0 >= 0.0 && e1 >= 0.0 && e2 >= 0.0) || (e0 <= 0.0 && e1 <= 0.0 && e2 <= 0.0)
+                    {
+                        g[i * n[1] + j] = true;
+                    }
+                }
+            }
+        }
+        g
+    }
+
+    /// The side view WITH DEPTH: per 1 cm `(z, y)` cell, the largest `x` any
+    /// triangle reaches there (the surface a viewer on the `+X` flank sees
+    /// first), or `None`.
+    fn side_depth(tris: &[Tri], lo: [f64; 2], n: [usize; 2]) -> Vec<Option<f64>> {
+        let cell = 0.01;
+        let mut g: Vec<Option<f64>> = vec![None; n[0] * n[1]];
+        for t in tris {
+            let p: Vec<[f64; 3]> = t.iter().map(|v| [v[2], v[1], v[0]]).collect();
+            let area = (p[1][0] - p[0][0]) * (p[2][1] - p[0][1])
+                - (p[2][0] - p[0][0]) * (p[1][1] - p[0][1]);
+            if area.abs() < 1e-12 {
+                continue;
+            }
+            let (mut a0, mut a1, mut b0, mut b1) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+            for q in &p {
+                a0 = a0.min(q[0]);
+                a1 = a1.max(q[0]);
+                b0 = b0.min(q[1]);
+                b1 = b1.max(q[1]);
+            }
+            let i0 = ((a0 - lo[0]) / cell).floor().max(0.0) as usize;
+            let i1 = (((a1 - lo[0]) / cell).ceil().max(0.0) as usize).min(n[0]);
+            let j0 = ((b0 - lo[1]) / cell).floor().max(0.0) as usize;
+            let j1 = (((b1 - lo[1]) / cell).ceil().max(0.0) as usize).min(n[1]);
+            for i in i0..i1 {
+                for j in j0..j1 {
+                    let (x, y) = (
+                        lo[0] + (i as f64 + 0.5) * cell,
+                        lo[1] + (j as f64 + 0.5) * cell,
+                    );
+                    let w0 = ((p[1][0] - x) * (p[2][1] - y) - (p[2][0] - x) * (p[1][1] - y)) / area;
+                    let w1 = ((p[2][0] - x) * (p[0][1] - y) - (p[0][0] - x) * (p[2][1] - y)) / area;
+                    let w2 = 1.0 - w0 - w1;
+                    if w0 < -1e-9 || w1 < -1e-9 || w2 < -1e-9 {
+                        continue;
+                    }
+                    let d = w0 * p[0][2] + w1 * p[1][2] + w2 * p[2][2];
+                    let c = &mut g[i * n[1] + j];
+                    if c.is_none_or(|e| d > e) {
+                        *c = Some(d);
+                    }
+                }
+            }
+        }
+        g
+    }
+
+    /// **The all-box car**: the family's part boxes (seats aside) at the row's
+    /// half-extents `h`, metres.
+    pub fn box_family(def: &inf_ecs::vehicle::VehicleDef) -> Vec<Tri> {
+        let h = [def.half_extents.x, def.half_extents.y, def.half_extents.z];
+        let cube = inf_dcc::to_mesh_asset(
+            &inf_dcc::cube(1.0),
+            &inf_dcc::ExportOptions {
+                normals: inf_dcc::NormalPolicy::Recompute,
+                optimize: false,
+            },
+        )
+        .0;
+        let mut boxes = Vec::new();
+        for p in def.body.parts() {
+            if p.kind == inf_ecs::vehicle::BodyPartKind::Seat {
+                continue;
+            }
+            let c = [p.centre.x * h[0], p.centre.y * h[1], p.centre.z * h[2]];
+            let hh = [p.half.x * h[0], p.half.y * h[1], p.half.z * h[2]];
+            boxes.extend(tris_of_asset(&cube, |q| {
+                [
+                    c[0] + q[0] * 2.0 * hh[0],
+                    c[1] + q[1] * 2.0 * hh[1],
+                    c[2] + q[2] * 2.0 * hh[2],
+                ]
+            }));
+        }
+        boxes
+    }
+
+    /// **The side and top outlines of `car` against `boxes`**, `(side, top)`
+    /// as symmetric difference over union on a 1 cm raster over the row's
+    /// half-extents `h` -- the measurement VEH3f's panels scored 2.4-8.7 % on.
+    pub fn outline_delta(car: &[Tri], boxes: &[Tri], h: [f64; 3]) -> (f64, f64) {
+        let lo = [-h[0] * 1.3, -h[1] * 1.3, -h[2] * 1.3];
+        let n = [
+            (h[0] * 2.6 / 0.01) as usize,
+            (h[1] * 2.6 / 0.01) as usize,
+            (h[2] * 2.6 / 0.01) as usize,
+        ];
+        let diff = |ax: (usize, usize)| {
+            let (l, nn) = ([lo[ax.0], lo[ax.1]], [n[ax.0], n[ax.1]]);
+            let (a, b) = (raster(boxes, ax, l, nn), raster(car, ax, l, nn));
+            let x = a.iter().zip(&b).filter(|(p, q)| p != q).count() as f64;
+            let u = a.iter().zip(&b).filter(|(p, q)| **p || **q).count() as f64;
+            x / u.max(1.0)
+        };
+        (diff((2, 1)), diff((0, 2)))
+    }
+
+    /// **The FLANK outline** of `car` against `boxes`: the side view's cells
+    /// whose first-seen surface is the flank skin (`x >= 0.75 hw`), symmetric
+    /// difference over union. A cut arch shows here -- the first surface seen
+    /// through it is the wheel well's inner wall -- where the plain side
+    /// outline is filled by that same wall.
+    pub fn flank_delta(car: &[Tri], boxes: &[Tri], h: [f64; 3]) -> f64 {
+        let lo = [-h[2] * 1.3, -h[1] * 1.3];
+        let n = [(h[2] * 2.6 / 0.01) as usize, (h[1] * 2.6 / 0.01) as usize];
+        let skin = 0.75 * h[0];
+        let flank = |t: &[Tri]| -> Vec<bool> {
+            side_depth(t, lo, n)
+                .into_iter()
+                .map(|d| d.is_some_and(|x| x >= skin))
+                .collect()
+        };
+        let (a, b) = (flank(boxes), flank(car));
+        let x = a.iter().zip(&b).filter(|(p, q)| p != q).count() as f64;
+        let u = a.iter().zip(&b).filter(|(p, q)| **p || **q).count() as f64;
+        x / u.max(1.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::measure::*;
+
+    fn tris_of(m: &Mesh, f: impl Fn([f64; 3]) -> [f64; 3]) -> Vec<Tri> {
+        tris_of_asset(&export(m), f)
+    }
+
+    /// The generator's car at the island row's size, metres (the hub aside
+    /// when `hub` is false).
+    fn car_tris(shell: Shell, hub: bool) -> (Vec<Tri>, Vec<Tri>, [f64; 3]) {
+        let def = crate::vehicle::island_vehicles()
+            .get(shell.island_row())
+            .copied()
+            .expect("the row");
+        let h = [def.half_extents.x, def.half_extents.y, def.half_extents.z];
+        let m = |p: [f64; 3]| [p[0] * h[0], p[1] * h[1], p[2] * h[2]];
+        let mut car = tris_of(&body_mesh(shell), m);
+        for sp in shell_parts(shell) {
+            if sp.name == "hub" && !hub {
+                continue;
+            }
+            car.extend(tris_of(&sp.mesh, m));
+        }
+        (car, box_family(&def), h)
+    }
+
+    fn outline_delta_of(shell: Shell) -> (f64, f64) {
+        let (car, boxes, h) = car_tris(shell, false);
+        outline_delta(&car, &boxes, h)
+    }
+
+    fn flank_delta_of(shell: Shell) -> f64 {
+        let (car, boxes, h) = car_tris(shell, true);
+        flank_delta(&car, &boxes, h)
     }
 
     /// **Every shell is closed** -- the body and every part, each welded edge
@@ -2021,192 +2221,6 @@ mod tests {
         assert!(rays >= 200, "only {rays} wheels swept");
     }
 
-    /// Rasterise triangles projected on two axes, 1 cm cells, over `lo..lo+n`.
-    fn raster(tris: &[Tri], ax: (usize, usize), lo: [f64; 2], n: [usize; 2]) -> Vec<bool> {
-        let cell = 0.01;
-        let mut g = vec![false; n[0] * n[1]];
-        for t in tris {
-            let p: Vec<[f64; 2]> = t.iter().map(|v| [v[ax.0], v[ax.1]]).collect();
-            let area = (p[1][0] - p[0][0]) * (p[2][1] - p[0][1])
-                - (p[2][0] - p[0][0]) * (p[1][1] - p[0][1]);
-            if area.abs() < 1e-12 {
-                continue;
-            }
-            let (mut a0, mut a1, mut b0, mut b1) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
-            for q in &p {
-                a0 = a0.min(q[0]);
-                a1 = a1.max(q[0]);
-                b0 = b0.min(q[1]);
-                b1 = b1.max(q[1]);
-            }
-            let i0 = ((a0 - lo[0]) / cell).floor().max(0.0) as usize;
-            let i1 = (((a1 - lo[0]) / cell).ceil().max(0.0) as usize).min(n[0]);
-            let j0 = ((b0 - lo[1]) / cell).floor().max(0.0) as usize;
-            let j1 = (((b1 - lo[1]) / cell).ceil().max(0.0) as usize).min(n[1]);
-            for i in i0..i1 {
-                for j in j0..j1 {
-                    let (x, y) = (
-                        lo[0] + (i as f64 + 0.5) * cell,
-                        lo[1] + (j as f64 + 0.5) * cell,
-                    );
-                    let e = |a: [f64; 2], b: [f64; 2]| {
-                        (b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0])
-                    };
-                    let (e0, e1, e2) = (e(p[0], p[1]), e(p[1], p[2]), e(p[2], p[0]));
-                    if (e0 >= 0.0 && e1 >= 0.0 && e2 >= 0.0) || (e0 <= 0.0 && e1 <= 0.0 && e2 <= 0.0)
-                    {
-                        g[i * n[1] + j] = true;
-                    }
-                }
-            }
-        }
-        g
-    }
-
-    /// **The side outline of the shell car against the all-box car**, `(side,
-    /// top)` as symmetric difference over union on a 1 cm raster, at the
-    /// island row's size -- the measurement VEH3f's panels scored 2.4-8.7 % on.
-    pub(super) fn outline_delta(shell: Shell) -> (f64, f64) {
-        let def = crate::vehicle::island_vehicles()
-            .get(shell.island_row())
-            .copied()
-            .expect("the row");
-        let h = [def.half_extents.x, def.half_extents.y, def.half_extents.z];
-        let m = |p: [f64; 3]| [p[0] * h[0], p[1] * h[1], p[2] * h[2]];
-        let mut car = tris_of(&body_mesh(shell), m);
-        for sp in shell_parts(shell) {
-            if sp.name == "hub" {
-                continue;
-            }
-            car.extend(tris_of(&sp.mesh, m));
-        }
-        let mut boxes = Vec::new();
-        for p in def.body.parts() {
-            if p.kind == inf_ecs::vehicle::BodyPartKind::Seat {
-                continue;
-            }
-            let c = [p.centre.x * h[0], p.centre.y * h[1], p.centre.z * h[2]];
-            let hh = [p.half.x * h[0], p.half.y * h[1], p.half.z * h[2]];
-            let cube = inf_dcc::cube(1.0);
-            boxes.extend(tris_of(&cube, |q| {
-                [
-                    c[0] + q[0] * 2.0 * hh[0],
-                    c[1] + q[1] * 2.0 * hh[1],
-                    c[2] + q[2] * 2.0 * hh[2],
-                ]
-            }));
-        }
-        let lo = [-h[0] * 1.3, -h[1] * 1.3, -h[2] * 1.3];
-        let n = [
-            (h[0] * 2.6 / 0.01) as usize,
-            (h[1] * 2.6 / 0.01) as usize,
-            (h[2] * 2.6 / 0.01) as usize,
-        ];
-        let diff = |ax: (usize, usize)| {
-            let (l, nn) = ([lo[ax.0], lo[ax.1]], [n[ax.0], n[ax.1]]);
-            let (a, b) = (raster(&boxes, ax, l, nn), raster(&car, ax, l, nn));
-            let x = a.iter().zip(&b).filter(|(p, q)| p != q).count() as f64;
-            let u = a.iter().zip(&b).filter(|(p, q)| **p || **q).count() as f64;
-            x / u.max(1.0)
-        };
-        (diff((2, 1)), diff((0, 2)))
-    }
-
-    /// The side view WITH DEPTH: per 1 cm `(z, y)` cell, the largest `x` any
-    /// triangle reaches there (the surface a viewer on the `+X` flank sees
-    /// first), or `None`.
-    fn side_depth(tris: &[Tri], lo: [f64; 2], n: [usize; 2]) -> Vec<Option<f64>> {
-        let cell = 0.01;
-        let mut g: Vec<Option<f64>> = vec![None; n[0] * n[1]];
-        for t in tris {
-            let p: Vec<[f64; 3]> = t.iter().map(|v| [v[2], v[1], v[0]]).collect();
-            let area = (p[1][0] - p[0][0]) * (p[2][1] - p[0][1])
-                - (p[2][0] - p[0][0]) * (p[1][1] - p[0][1]);
-            if area.abs() < 1e-12 {
-                continue;
-            }
-            let (mut a0, mut a1, mut b0, mut b1) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
-            for q in &p {
-                a0 = a0.min(q[0]);
-                a1 = a1.max(q[0]);
-                b0 = b0.min(q[1]);
-                b1 = b1.max(q[1]);
-            }
-            let i0 = ((a0 - lo[0]) / cell).floor().max(0.0) as usize;
-            let i1 = (((a1 - lo[0]) / cell).ceil().max(0.0) as usize).min(n[0]);
-            let j0 = ((b0 - lo[1]) / cell).floor().max(0.0) as usize;
-            let j1 = (((b1 - lo[1]) / cell).ceil().max(0.0) as usize).min(n[1]);
-            for i in i0..i1 {
-                for j in j0..j1 {
-                    let (x, y) = (
-                        lo[0] + (i as f64 + 0.5) * cell,
-                        lo[1] + (j as f64 + 0.5) * cell,
-                    );
-                    let w0 = ((p[1][0] - x) * (p[2][1] - y) - (p[2][0] - x) * (p[1][1] - y)) / area;
-                    let w1 = ((p[2][0] - x) * (p[0][1] - y) - (p[0][0] - x) * (p[2][1] - y)) / area;
-                    let w2 = 1.0 - w0 - w1;
-                    if w0 < -1e-9 || w1 < -1e-9 || w2 < -1e-9 {
-                        continue;
-                    }
-                    let d = w0 * p[0][2] + w1 * p[1][2] + w2 * p[2][2];
-                    let c = &mut g[i * n[1] + j];
-                    if c.is_none_or(|e| d > e) {
-                        *c = Some(d);
-                    }
-                }
-            }
-        }
-        g
-    }
-
-    /// **The FLANK outline** of the shell car against the all-box car: the side
-    /// view's cells whose first-seen surface is the car's own flank skin (within
-    /// a quarter of the half-width of the side, `x >= 0.75 hw`), symmetric
-    /// difference over union. A cut arch shows here -- the first surface seen
-    /// through it is the wheel well's inner wall, a third of the way in -- where
-    /// the plain side outline is filled by that same wall. Returns `(flank,
-    /// arch cells the shell loses)`.
-    pub(super) fn flank_delta(shell: Shell) -> f64 {
-        let def = crate::vehicle::island_vehicles()
-            .get(shell.island_row())
-            .copied()
-            .expect("the row");
-        let h = [def.half_extents.x, def.half_extents.y, def.half_extents.z];
-        let m = |p: [f64; 3]| [p[0] * h[0], p[1] * h[1], p[2] * h[2]];
-        let mut car = tris_of(&body_mesh(shell), m);
-        for sp in shell_parts(shell) {
-            car.extend(tris_of(&sp.mesh, m));
-        }
-        let mut boxes = Vec::new();
-        for p in def.body.parts() {
-            if p.kind == inf_ecs::vehicle::BodyPartKind::Seat {
-                continue;
-            }
-            let c = [p.centre.x * h[0], p.centre.y * h[1], p.centre.z * h[2]];
-            let hh = [p.half.x * h[0], p.half.y * h[1], p.half.z * h[2]];
-            boxes.extend(tris_of(&inf_dcc::cube(1.0), |q| {
-                [
-                    c[0] + q[0] * 2.0 * hh[0],
-                    c[1] + q[1] * 2.0 * hh[1],
-                    c[2] + q[2] * 2.0 * hh[2],
-                ]
-            }));
-        }
-        let lo = [-h[2] * 1.3, -h[1] * 1.3];
-        let n = [(h[2] * 2.6 / 0.01) as usize, (h[1] * 2.6 / 0.01) as usize];
-        let skin = 0.75 * h[0];
-        let flank = |t: &[Tri]| -> Vec<bool> {
-            side_depth(t, lo, n)
-                .into_iter()
-                .map(|d| d.is_some_and(|x| x >= skin))
-                .collect()
-        };
-        let (a, b) = (flank(&boxes), flank(&car));
-        let x = a.iter().zip(&b).filter(|(p, q)| p != q).count() as f64;
-        let u = a.iter().zip(&b).filter(|(p, q)| **p || **q).count() as f64;
-        x / u.max(1.0)
-    }
-
     /// **A shell's side outline is a car's, not the box family's** -- >= 25 %
     /// symmetric difference over union on the side view (the VEH3f panels:
     /// 3.6-8.7 %). Mutation -> red: the body lofted with every feature off
@@ -2214,8 +2228,8 @@ mod tests {
     #[test]
     fn a_shells_side_outline_is_not_the_box_family() {
         for shell in Shell::ALL {
-            let (side, top) = outline_delta(shell);
-            let flank = flank_delta(shell);
+            let (side, top) = outline_delta_of(shell);
+            let flank = flank_delta_of(shell);
             println!(
                 "SHELL {shell:?}: outline vs the box family side {:.1} % top {:.1} %; flank {:.1} %",
                 100.0 * side,

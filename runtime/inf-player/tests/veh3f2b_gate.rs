@@ -1810,3 +1810,597 @@ fn probe_the_seat_heights() {
         );
     }
 }
+
+// ── the committed shells, read as bytes ─────────────────────────────────────
+
+/// The committed shell library: every `.inf_mesh` by its sidecar's guid.
+fn shell_library() -> std::collections::BTreeMap<Uuid, (std::path::PathBuf, u64)> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/vehicle-shells");
+    let mut out = std::collections::BTreeMap::new();
+    for e in std::fs::read_dir(&dir).expect("the shells are committed") {
+        let p = e.unwrap().path();
+        if p.extension().is_some_and(|x| x == "inf_mesh") {
+            let side = inf_asset::AssetSidecar::load(&p).expect("a sidecar");
+            let len = std::fs::metadata(&p).unwrap().len();
+            out.insert(side.guid.0, (p, len));
+        }
+    }
+    out
+}
+
+/// **THE COMMITTED SHELLS ARE CLOSED, CUT AND NOT THE BOX FAMILY** -- the
+/// shell library read as BYTES off `samples/vehicle-shells`, at the GUIDs the
+/// art table names, and each island row that wears one settled on the SHIPPED
+/// host.
+///
+/// READS: every committed file's welded edges (each on exactly two
+/// triangles); the settled `Wheel` nodes' centres out of the world, and a ray
+/// from each outward along its axle against the committed body's triangles at
+/// the row's size (the box family's triangles are the control); the side,
+/// top and flank outlines of the committed car against the box family's; the
+/// meshlet DAG's level count built from the committed body. The claims: 0 open
+/// edges anywhere; 0 body triangles over any wheel (the box family covers
+/// them); side outline >= 12 % and flank >= 25 % off the box car (the brief's
+/// 25 % on the plain side outline is NOT met -- 13.5-27.6 % -- see the
+/// report); at least three LOD levels in each body's DAG.
+///
+/// VEH3f's panels-on-boxes FAIL the arches (their lower slab spans every
+/// wheel -- the control below) and the outline (2.4-8.7 %).
+#[test]
+fn the_committed_shells_are_closed_cut_and_not_the_box_family() {
+    use inf_editor_core::vehicle_shells::measure;
+    let lib = shell_library();
+    let mut bad = Vec::new();
+    let (mut files, mut rays, mut box_hits_total) = (0usize, 0usize, 0usize);
+    println!("| shell (row) | body bytes | files | open edges | wheels clear / box-covered | side / top / flank | DAG levels |");
+    println!("|---|---|---|---|---|---|---|");
+    for row in ["sedan", "sports", "suv", "truck", "cruiser"] {
+        let def = catalogue_def(row);
+        let k = def.art.expect("the row wears art");
+        assert!(k.shell(), "`{row}` wears {} -- not a shell", k.name());
+        let h = [def.half_extents.x, def.half_extents.y, def.half_extents.z];
+        let load = |g: Uuid| -> inf_mesh::MeshAsset {
+            let (p, _) = lib
+                .get(&g)
+                .unwrap_or_else(|| panic!("{}: no committed mesh at {g}", k.name()));
+            inf_asset::decode(&std::fs::read(p).unwrap()).expect("it decodes")
+        };
+        // Every committed file of this shell: closed.
+        let mut guids = vec![
+            inf_ecs::roster::art_body_guid(k),
+            inf_ecs::roster::art_wheel_guid(k, 0),
+            inf_ecs::roster::art_part_guid(k, inf_ecs::vehicle::SHELL_RIM_PART),
+        ];
+        guids.extend(k.parts().iter().map(|p| inf_ecs::roster::art_part_guid(k, p.name)));
+        let mut open = 0usize;
+        for g in &guids {
+            let (_, o) = measure::closed(&load(*g));
+            open += o;
+            files += 1;
+        }
+        if open > 0 {
+            bad.push(format!("{}: {open} open edge(s)", k.name()));
+        }
+        // The body and the parts in METRES, from the committed unit frames.
+        let body_g = inf_ecs::roster::art_body_guid(k);
+        let body_asset = load(body_g);
+        let body = measure::tris_of_asset(&body_asset, |p| {
+            [2.0 * p[0] * h[0], 2.0 * p[1] * h[1], 2.0 * p[2] * h[2]]
+        });
+        let mut car = body.clone();
+        for p in k.parts().iter().filter(|p| p.name != "hub") {
+            let (c, hh) = (p.centre, p.half);
+            car.extend(measure::tris_of_asset(
+                &load(inf_ecs::roster::art_part_guid(k, p.name)),
+                |q| {
+                    [
+                        (c.x + q[0] * 2.0 * hh.x) * h[0],
+                        (c.y + q[1] * 2.0 * hh.y) * h[1],
+                        (c.z + q[2] * 2.0 * hh.z) * h[2],
+                    ]
+                },
+            ));
+        }
+        let boxes = measure::box_family(&def);
+        // The wheels, settled, out of the world.
+        let mut sim = rigged_sim(row, DVec3::new(30.0, 0.0, 0.0));
+        for _ in 0..120 {
+            sim.step_once(Default::default());
+        }
+        let w = sim.world();
+        let ce = w.entity_of(CHASSIS).unwrap();
+        let wheels: Vec<DVec3> = w
+            .children_of(ce)
+            .into_iter()
+            .filter(|c| w.name_of(*c) == Some("Wheel"))
+            .filter_map(|c| w.world().get::<Transform>(c).map(|t| t.translation.to_dvec3()))
+            .collect();
+        let (mut clear, mut covered) = (0usize, 0usize);
+        for c in &wheels {
+            let o = [c.x, c.y, c.z];
+            let d = [c.x.signum(), 0.0, 0.0];
+            let hits = body.iter().filter(|t| measure::ray_hits(o, d, t)).count();
+            let box_hits = boxes.iter().filter(|t| measure::ray_hits(o, d, t)).count();
+            rays += 1;
+            box_hits_total += box_hits;
+            if hits == 0 {
+                clear += 1;
+            } else {
+                bad.push(format!(
+                    "{}: the wheel at ({:.3}, {:.3}, {:.3}) is under {hits} body triangle(s)",
+                    k.name(),
+                    c.x,
+                    c.y,
+                    c.z
+                ));
+            }
+            if box_hits > 0 {
+                covered += 1;
+            }
+        }
+        let (side, top) = measure::outline_delta(&car, &boxes, h);
+        let flank = measure::flank_delta(&car, &boxes, h);
+        if side < 0.12 {
+            bad.push(format!("{}: side outline {:.1} %", k.name(), side * 100.0));
+        }
+        if flank < 0.25 {
+            bad.push(format!("{}: flank outline {:.1} %", k.name(), flank * 100.0));
+        }
+        let (p, n, u, t, i) = body_asset.vgeom_streams();
+        let dag = inf_vgeom::build_vgeom(&p, &n, &u, &t, &i, inf_vgeom::BuildParams::default());
+        let levels = dag.levels.len();
+        if levels < 3 {
+            bad.push(format!("{}: {levels} DAG level(s)", k.name()));
+        }
+        println!(
+            "| {} ({row}) | {} B | {} | {open} | {clear}/{} clear; box family covers {covered} | {:.1} / {:.1} / {:.1} % | {levels} |",
+            k.name(),
+            lib[&body_g].1,
+            guids.len(),
+            wheels.len(),
+            side * 100.0,
+            top * 100.0,
+            flank * 100.0
+        );
+        if wheels.len() < 4 {
+            bad.push(format!("{}: only {} wheels found", k.name(), wheels.len()));
+        }
+    }
+    println!("{files} committed files closed-checked, {rays} wheel rays, the box family's triangles over them: {box_hits_total}");
+    assert!(box_hits_total > 0, "the control covers no wheel -- this arm measured nothing");
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+}
+
+// ── PIE == shipping: the climb, and a traffic minute ────────────────────────
+
+/// **PIE == SHIPPING ON A CAB-STEP CLIMB** -- the semi boarded by a capsule
+/// hero in the editor's Simulate and in the shipped player, the E press
+/// through the INPUT door on both.
+///
+/// READS: `boarding_state_bytes` and the hero's transform bits every step on
+/// both hosts. The claims: the shipped hero CLIMBED (its centre rose by the
+/// step's height before the door phase) and reached the wheel; the two hosts'
+/// rows are identical at every step. VEH3f has no climb: the anti-vacuity
+/// half FAILS it.
+#[test]
+fn pie_equals_shipping_on_a_cab_step_climb() {
+    use inf_editor_core::scene::SceneDoc;
+    use inf_editor_core::simulate::{SimInput, SimSession};
+    use inf_ecs::movement::actions::INTERACT;
+    use inf_player::runtime_sim::{RuntimeInput, RuntimeSim};
+    const STEPS: u32 = 480;
+    let def = catalogue_def("jobuilt_hauler");
+    let at = DVec3::new(0.0, inf_ecs::vehicle::resting_origin_y(&def, 0.0) + 0.15, 0.0);
+    let hero = hero_at(&def);
+    type Row = (Vec<u8>, [u64; 3], u8, f64);
+    let row = |w: &EcsWorld| -> Row {
+        let e = w.entity_of(HERO).expect("the hero");
+        let t = w.world().get::<Transform>(e).expect("placed").translation;
+        let cm = w.world().get::<CharacterMovement>(e).expect("a mover");
+        (
+            inf_ecs::boarding::boarding_state_bytes(w),
+            [t.x.to_bits(), t.y.to_bits(), t.z.to_bits()],
+            cm.runtime.boarding.phase.as_u8(),
+            cm.runtime.boarding.step_m,
+        )
+    };
+    let shipped: Vec<Row> = {
+        let mut world = EcsWorld::new();
+        ground(&mut world);
+        car(&mut world, CHASSIS, at, 0.0, &def);
+        stand(&mut world, HERO, "Hero", hero, 0.0);
+        world.propagate();
+        let mut sim = RuntimeSim::new(world, Vec::new(), glam::DVec2::new(0.0, -9.81), 60.0);
+        (0..STEPS)
+            .map(|i| {
+                let input = if i == 60 {
+                    RuntimeInput::default().press(INTERACT)
+                } else {
+                    RuntimeInput::default()
+                };
+                sim.step_once(input);
+                row(sim.world())
+            })
+            .collect()
+    };
+    let preview: Vec<Row> = {
+        let mut doc = SceneDoc::new();
+        {
+            let w = doc.world_mut();
+            ground(w);
+            stand(w, HERO, "Hero", hero, 0.0);
+        }
+        inf_editor_core::vehicle::spawn_vehicle(
+            &mut doc,
+            CHASSIS,
+            &def,
+            inf_editor_core::vehicle::VehicleSpawn {
+                name: "Car",
+                at,
+                yaw_deg: 0.0,
+                paint: inf_ecs::math::Color::new(0.2, 0.2, 0.6, 1.0),
+                clip: None,
+                engine_voice: false,
+                livery: None,
+            },
+        );
+        doc.world_mut().propagate();
+        let mut session = SimSession::enter(&mut doc, Vec::new(), glam::DVec2::new(0.0, -9.81), 60.0);
+        let out = (0..STEPS)
+            .map(|i| {
+                let down: Vec<&str> = if i == 60 { vec![INTERACT] } else { Vec::new() };
+                session.step_once(&mut doc, SimInput::with_down(down));
+                row(doc.world())
+            })
+            .collect();
+        session.exit(&mut doc);
+        out
+    };
+    let step = shipped.iter().map(|r| r.3).fold(0.0f64, f64::max);
+    let y = |r: &Row| f64::from_bits(r.1[1]);
+    let door = shipped
+        .iter()
+        .find(|r| r.2 == BoardPhase::OpeningDoor.as_u8())
+        .map(y);
+    let drove = shipped.iter().any(|r| r.2 == BoardPhase::Driving.as_u8());
+    println!(
+        "THE SEMI, BOTH HOSTS: step {step:.3} m; the hero at the door phase y {door:?} (stood at {:.3}); reached the wheel: {drove}",
+        y(&shipped[0])
+    );
+    assert!(step > 0.2, "the semi's boarding climbed no step");
+    let rose = door.map(|d| d - y(&shipped[0])).unwrap_or(0.0);
+    assert!((rose - step).abs() < 0.05, "the hero rose {rose:.3} for a {step:.3} m step");
+    assert!(drove, "the hero never reached the semi's wheel");
+    for (i, (a, b)) in shipped.iter().zip(&preview).enumerate() {
+        assert_eq!(a, b, "the two hosts climbed the semi differently at step {i}");
+    }
+}
+
+const TOWN_HERO: Uuid = Uuid::from_u128(0x5E3F_2B40);
+const TOWN_SKY: Uuid = Uuid::from_u128(0x5E3F_2B41);
+
+/// A 3x3 town of home blocks on a 1 km slab at 14:00, the traffic's own hour
+/// (`ems2_dispatch_gate`'s fixture, without the fleet).
+fn traffic_town(world: &mut EcsWorld) {
+    use inf_ecs::components::{PcgVolume, ResidentSlot, SlotRole, StreamingSource, TimeOfDay};
+    const PITCH: f64 = 100.0;
+    const STREET: f64 = 20.0;
+    let half = (PITCH - STREET) * 0.5;
+    for row in 0..3i32 {
+        for col in 0..3i32 {
+            let c = glam::DVec2::new(f64::from(col) * PITCH, f64::from(row) * PITCH);
+            let guid = Uuid::from_u64_pair(0x5E3F_2B50, (row as u64) << 32 | col as u64);
+            let e = world.spawn_with_guid(guid, "block", None);
+            world
+                .world_mut()
+                .entity_mut(e)
+                .insert(Transform::from_translation(DVec3::new(c.x, 0.0, c.y)));
+            let mut v = PcgVolume {
+                extent: inf_ecs::math::Vec2d::new(half, half),
+                ..Default::default()
+            };
+            v.residents = vec![ResidentSlot {
+                role: SlotRole::Home,
+                at: DVec3::new(c.x, 0.0, c.y),
+                room: 0,
+                building: 0,
+                floor: 0,
+                index: 0,
+                node: 0,
+                posture: inf_ecs::components::SlotPosture::Stand,
+                shift: inf_ecs::components::SlotShift::Day,
+                face: DVec3::ZERO,
+            }];
+            world.world_mut().entity_mut(e).insert(v);
+        }
+    }
+    let g = world.spawn_with_guid(GROUND, "Ground", None);
+    world.world_mut().entity_mut(g).insert((
+        Transform::from_translation(DVec3::new(100.0, -0.5, 100.0)),
+        RigidBody3D {
+            kind: BodyKind3D::Static,
+            ..Default::default()
+        },
+        Collider3D {
+            shape_kind: ColliderShape3DKind::Box,
+            half_extents: Vec3d::new(500.0, 0.5, 500.0),
+            ..Default::default()
+        },
+    ));
+    let h = world.spawn_with_guid(TOWN_HERO, "Hero", None);
+    world.world_mut().entity_mut(h).insert((
+        Transform::from_translation(DVec3::new(100.0, 0.0, 100.0)),
+        StreamingSource { radius_m: 1024.0 },
+    ));
+    let s = world.spawn_with_guid(TOWN_SKY, "Sky", None);
+    world.world_mut().entity_mut(s).insert(TimeOfDay {
+        seconds: 14.0 * 3600.0,
+        rate: 0.0,
+        ..Default::default()
+    });
+    world.mark_dirty();
+    world.propagate();
+}
+
+/// **PIE == SHIPPING OVER A TRAFFIC MINUTE** -- a town's traffic on the
+/// footprint-aware following rule, the parking hold and the tandem split, in
+/// the editor's Simulate and in the shipped player, byte for byte.
+///
+/// READS: `traffic_state_bytes` + `damage_state_bytes` every step for an
+/// island minute (3 600 steps after a 240-step warm-up) on both hosts, and
+/// the shipped world's traffic cars' `roster::body_kind`. The claims: the
+/// traffic section is populated and changes; at least one traffic car draws a
+/// SHELL; the two hosts agree at every step. Pre-wave: no shell is ever drawn
+/// -- FAILS the census half.
+#[test]
+fn pie_equals_shipping_over_a_traffic_minute() {
+    use inf_editor_core::scene::SceneDoc;
+    use inf_editor_core::simulate::{SimInput, SimSession};
+    use inf_physics::WorldGravity;
+    use inf_player::runtime_sim::{RuntimeInput, RuntimeSim};
+    const WARMUP: u32 = 240;
+    const RUN: u32 = 3_600;
+    let trace = |w: &EcsWorld| {
+        let mut out = inf_ecs::traffic::traffic_state_bytes(w);
+        out.extend_from_slice(&inf_ecs::bodywork::damage_state_bytes(w));
+        out
+    };
+    let (shipped, kinds) = {
+        let mut world = EcsWorld::new();
+        traffic_town(&mut world);
+        let mut sim = RuntimeSim::with_gravity(world, Vec::new(), WorldGravity::EARTH, 60.0);
+        for _ in 0..WARMUP {
+            sim.step_once(RuntimeInput::default());
+        }
+        let mut t = Vec::with_capacity(RUN as usize);
+        let mut kinds: std::collections::BTreeMap<&'static str, usize> = Default::default();
+        for i in 0..RUN {
+            sim.step_once(RuntimeInput::default());
+            t.push(trace(sim.world()));
+            if i % 600 == 599 {
+                if let Some(pop) = inf_ecs::traffic::traffic_of(sim.world()) {
+                    for g in pop.records.keys() {
+                        if sim.world().entity_of(*g).is_some() {
+                            *kinds.entry(inf_ecs::roster::body_kind(sim.world(), *g)).or_default() += 1;
+                        }
+                    }
+                }
+            }
+        }
+        (t, kinds)
+    };
+    let preview = {
+        let mut doc = SceneDoc::new();
+        traffic_town(doc.world_mut());
+        let mut session =
+            SimSession::enter_with_gravity(&mut doc, Vec::new(), WorldGravity::EARTH, 60.0);
+        for _ in 0..WARMUP {
+            session.step_once(&mut doc, SimInput::default());
+        }
+        let out: Vec<Vec<u8>> = (0..RUN)
+            .map(|_| {
+                session.step_once(&mut doc, SimInput::default());
+                trace(doc.world())
+            })
+            .collect();
+        session.exit(&mut doc);
+        out
+    };
+    let last = shipped.last().map(|b| b.len()).unwrap_or(0);
+    println!(
+        "A TRAFFIC MINUTE: {last} bytes folded at the end; body kinds sampled {kinds:?}"
+    );
+    assert!(last > 64, "the town's traffic never populated");
+    assert!(shipped.windows(2).any(|w| w[0] != w[1]), "the traffic never moved");
+    assert!(kinds.get("shell").copied().unwrap_or(0) > 0, "no traffic car drew a shell");
+    for (i, (a, b)) in shipped.iter().zip(&preview).enumerate() {
+        assert_eq!(a, b, "PIE and shipping diverged at traffic step {i}");
+    }
+}
+
+// ── the cost: 64 cars, shells against boxes against imported art ────────────
+
+/// Whether a wall-clock claim is asserted here: release, off CI (the house
+/// conditioning); printed either way.
+fn clock_is_asserted(what: &str) -> bool {
+    if cfg!(debug_assertions) || std::env::var_os("CI").is_some() {
+        println!("{what}: measured and printed; asserted only in a release build off CI");
+        return false;
+    }
+    true
+}
+
+/// 64 cars of `def` in an 8 x 8 lot, and a registry holding the committed
+/// DAGs of `lib` for every mesh they draw.
+fn lot_of_64(
+    def: &VehicleDef,
+    lib: &std::collections::BTreeMap<Uuid, std::path::PathBuf>,
+) -> (
+    inf_player::runtime_sim::RuntimeSim,
+    inf_player::vmesh::VmeshRegistry,
+    std::collections::BTreeMap<u128, usize>,
+) {
+    let mut world = EcsWorld::new();
+    ground(&mut world);
+    let y = inf_ecs::vehicle::resting_origin_y(def, 0.0);
+    for k in 0..64u128 {
+        let at = DVec3::new((k % 8) as f64 * 6.0 - 21.0, y, (k / 8) as f64 * 8.0 - 28.0);
+        car(&mut world, Uuid::from_u128(0x5E3F_6400 + k), at, 0.0, def);
+    }
+    world.propagate();
+    let mut reg = inf_player::vmesh::VmeshRegistry::new();
+    let mut tris = std::collections::BTreeMap::new();
+    let mut seen = std::collections::BTreeSet::new();
+    let w = &world;
+    for e in w.world().iter_entities() {
+        let Some(g) = e.get::<inf_ecs::components::MeshRef>().and_then(|m| m.asset) else {
+            continue;
+        };
+        if !seen.insert(g) {
+            continue;
+        }
+        let Some(p) = lib.get(&g) else {
+            continue;
+        };
+        let mesh: inf_mesh::MeshAsset = inf_asset::decode(&std::fs::read(p).unwrap()).unwrap();
+        if mesh.triangle_count() == 0 {
+            continue;
+        }
+        let (pp, n, u, t, i) = mesh.vgeom_streams();
+        let dag = inf_vgeom::build_vgeom(&pp, &n, &u, &t, &i, inf_vgeom::BuildParams::default());
+        let id = inf_player::vmesh::derived_vmesh_id(g);
+        reg.insert_mesh(id, &dag).unwrap();
+        tris.insert(id.as_u128(), mesh.triangle_count());
+    }
+    let sim = inf_player::runtime_sim::RuntimeSim::new(
+        world,
+        Vec::new(),
+        glam::DVec2::new(0.0, -9.81),
+        60.0,
+    );
+    (sim, reg, tris)
+}
+
+/// **64 CARS COST WHAT THEY COST** -- the island saloon's SHELL, the same hull
+/// as the BOX family, and the calibration sedan's imported art (its committed
+/// FALLBACK, the geometry CI has), 64 of each in a lot, through the player's
+/// own projector and, where this machine has an adapter, the engine's own
+/// renderer at 1920 x 1080 with GPU timing.
+///
+/// READS: the projector's wall time (min of five), the instances it submits
+/// and their LOD-0 triangle bill; the renderer's GPU frame total (min over 30
+/// frames after 30 discarded). Asserted, release off CI only: the shell lot
+/// projects under `SHELL_PROJECTION_BUDGET_MS`. The frame numbers are the
+/// report's rows (`SHIPPING_FRAME_CEILING_MS` is the composed city's ratchet,
+/// re-measured by `fps_instrument` -- the number is stated there and in the
+/// report).
+#[test]
+fn sixty_four_shell_cars_cost_what_they_cost() {
+    let lib: std::collections::BTreeMap<Uuid, std::path::PathBuf> =
+        shell_library().into_iter().map(|(g, (p, _))| (g, p)).collect();
+    let art_lib: std::collections::BTreeMap<Uuid, std::path::PathBuf> = {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/vehicle-art");
+        let mut out = std::collections::BTreeMap::new();
+        for e in std::fs::read_dir(&dir).expect("the art fallback").flatten() {
+            let p = e.path();
+            if p.extension().is_some_and(|x| x == "inf_mesh") {
+                out.insert(inf_asset::AssetSidecar::load(&p).unwrap().guid.0, p);
+            }
+        }
+        out
+    };
+    let shell = catalogue_def("sedan");
+    let mut boxes = shell;
+    boxes.art = None;
+    let art = *inf_ecs::roster::roster()
+        .get("karin_asterope_gz")
+        .expect("the calibration row");
+    let lots = [
+        ("shells", shell, &lib),
+        ("boxes", boxes, &lib),
+        ("art (fallback)", art, &art_lib),
+    ];
+    let gpu = inf_render::GpuContext::headless().ok();
+    let mut rows = Vec::new();
+    for (name, def, l) in lots {
+        let (sim, reg, tris) = lot_of_64(&def, l);
+        let mut best = f64::MAX;
+        let mut scene = inf_render::RenderScene {
+            grid_enabled: false,
+            ..Default::default()
+        };
+        for _ in 0..5 {
+            let t0 = std::time::Instant::now();
+            inf_player::render::project_scene(&mut scene, &sim, 1.0, &reg);
+            best = best.min(t0.elapsed().as_secs_f64() * 1e3);
+        }
+        let inst = scene.vgeom_instances.len() + scene.instances.len();
+        let bill: usize = scene
+            .vgeom_instances
+            .iter()
+            .filter_map(|i| tris.get(&i.asset))
+            .sum();
+        let frame = gpu.as_ref().map(|gpu| {
+            let (w, h) = (1920u32, 1080u32);
+            let target = inf_render::HeadlessTarget::new(gpu, w, h);
+            let mut renderer = inf_render::EngineRenderer::new(gpu, inf_render::HEADLESS_FORMAT);
+            let timed = renderer.set_gpu_timing(gpu, true);
+            let view = inf_render::RenderView {
+                origin: inf_math::FloatingOrigin::new(DVec3::ZERO),
+                eye_world: DVec3::new(0.0, 9.0, -48.0),
+                forward: glam::Vec3::new(0.0, -0.3, 1.0).normalize(),
+                up: glam::Vec3::Y,
+                fov_y: 60f32.to_radians(),
+                near: 0.05,
+                width: w,
+                height: h,
+                ortho: None,
+            };
+            let (mut gpu_best, mut wall_best) = (f64::MAX, f64::MAX);
+            for f in 0..60 {
+                let t0 = std::time::Instant::now();
+                renderer.render(gpu, &scene, &view, &target.view, (w, h));
+                let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+                let wall = t0.elapsed().as_secs_f64() * 1e3;
+                let g = renderer.gpu_timings(gpu).map(|t| t.total_ms);
+                if f >= 30 {
+                    wall_best = wall_best.min(wall);
+                    if let Some(g) = g {
+                        gpu_best = gpu_best.min(g);
+                    }
+                }
+            }
+            (timed, gpu_best, wall_best)
+        });
+        println!(
+            "64 {name:<15} project {best:.3} ms, {inst} instances, {bill} LOD-0 triangles ({:.0}/car); 1080p frame {}",
+            bill as f64 / 64.0,
+            match frame {
+                Some((true, g, wl)) => format!("GPU {g:.3} ms, wall {wl:.3} ms (min of 30)"),
+                Some((false, _, wl)) => format!("wall {wl:.3} ms (no GPU timestamps on this adapter)"),
+                None => "not measured (no adapter)".into(),
+            }
+        );
+        rows.push((name, best, inst, bill));
+    }
+    assert!(rows[0].3 > rows[1].3, "the shells submitted no more geometry than boxes -- this drew no shell");
+    if clock_is_asserted("64 shell cars") {
+        assert!(
+            rows[0].1 < SHELL_PROJECTION_BUDGET_MS,
+            "64 shell cars project in {:.3} ms",
+            rows[0].1
+        );
+    }
+}
+
+/// The projector's ceiling for 64 shell cars (release, min of five), ms --
+/// VEH3f.2a's `ART_PROJECTION_BUDGET_MS` for 64 imported cars, the same lot.
+const SHELL_PROJECTION_BUDGET_MS: f64 = 2.0;
+
+/// **This wave moved no schema** -- the scene wire stays v28 and the PIE
+/// envelope 14.
+#[test]
+fn this_wave_moved_no_schema() {
+    assert_eq!(inf_scene::SCHEMA_VERSION, 28);
+    assert_eq!(inf_runtime::pie::SCENE_PAYLOAD_VERSION, 14);
+}
