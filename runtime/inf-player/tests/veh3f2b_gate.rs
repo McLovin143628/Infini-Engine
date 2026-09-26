@@ -2857,3 +2857,80 @@ fn frame_the_dented_saloon() {
         );
     }
 }
+
+// ── chocks: a parked aircraft on a grade ─────────────────────────────────────
+
+const GRADE: Uuid = Uuid::from_u128(0x5E3F_2B60);
+const PARKED: Uuid = Uuid::from_u128(0x5E3F_2B61);
+
+/// How far `row` travels in ten seconds parked, nobody aboard, nose DOWN a
+/// `grade_deg` slab, and how far sideways -- `(along, sideways)` metres.
+fn parked_on_a_grade(row: &str, grade_deg: f64) -> (f64, f64) {
+    let def = catalogue_def(row);
+    let mut world = EcsWorld::new();
+    let e = world.spawn_with_guid(GRADE, "Grade", None);
+    world.world_mut().entity_mut(e).insert((
+        Transform {
+            translation: Vec3d::new(0.0, -0.5, 0.0),
+            // Positive X rotation tips +Z down: the nose points downhill.
+            rotation: Vec3d::new(grade_deg, 0.0, 0.0),
+            ..Default::default()
+        },
+        Visibility::default(),
+        RigidBody3D {
+            kind: BodyKind3D::Static,
+            ..Default::default()
+        },
+        Collider3D {
+            shape_kind: ColliderShape3DKind::Box,
+            half_extents: Vec3d::new(200.0, 0.5, 200.0),
+            friction: 0.9,
+            ..Default::default()
+        },
+    ));
+    let y = inf_ecs::vehicle::resting_origin_y(&def, 0.0) + 0.05;
+    car(&mut world, PARKED, DVec3::new(0.0, y, 0.0), 0.0, &def);
+    world.propagate();
+    let mut sim = inf_player::runtime_sim::RuntimeSim::new(
+        world,
+        Vec::new(),
+        glam::DVec2::new(0.0, -9.81),
+        60.0,
+    );
+    let at = |sim: &inf_player::runtime_sim::RuntimeSim| {
+        let w = sim.world();
+        w.entity_of(PARKED)
+            .and_then(|e| w.world().get::<Transform>(e))
+            .map(|t| t.translation.to_dvec3())
+            .expect("the parked craft")
+    };
+    for _ in 0..120 {
+        sim.step_once(Default::default());
+    }
+    let p0 = at(&sim);
+    for _ in 0..600 {
+        sim.step_once(Default::default());
+    }
+    let d = at(&sim) - p0;
+    (DVec3::new(0.0, d.y, d.z).length(), d.x.abs())
+}
+
+/// **A PARKED AIRCRAFT IS CHOCKED** (`audit(VEH3f.2b)`, priority h'). The
+/// wave's parking hold (an uncommanded vehicle below walking pace holds its
+/// handbrake) EXEMPTED aircraft, because a light aircraft whose mains were
+/// locked slid sideways 0.8 m on the island apron -- so a parked plane rolled
+/// as it always had. READS the craft's own transform after two settled seconds
+/// and then ten more, nose down a 3 deg slab, nobody aboard: the Dodo and the
+/// saloon (the control, held by the wave's own rule: 0.150 m of creep).
+/// Before the chocks the Dodo ran 5.402 m.
+#[test]
+fn a_parked_aircraft_is_chocked() {
+    let (dodo, dodo_side) = parked_on_a_grade("mammoth_dodo", 3.0);
+    let (car, car_side) = parked_on_a_grade("sedan", 3.0);
+    println!(
+        "PARKED ON A 3 DEG GRADE, ten seconds: dodo {dodo:.3} m along / {dodo_side:.3} m sideways; saloon {car:.3} / {car_side:.3}"
+    );
+    assert!(car < 0.25, "the control rolled {car:.3} m -- the parking hold is off");
+    assert!(dodo < 0.25, "a parked Dodo rolled {dodo:.3} m down a 3 deg grade");
+    assert!(dodo_side < 0.10, "a parked Dodo slid {dodo_side:.3} m sideways");
+}

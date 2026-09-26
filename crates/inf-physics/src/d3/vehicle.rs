@@ -697,12 +697,17 @@ fn step_one(
     //    light aircraft parked on the island's apron with its mains locked
     //    slid SIDEWAYS 0.8 m in nine seconds -- out of the hero's reach
     //    (`veh3g_gate::the_islands_dodo_boards_where_the_flight_leg_puts_it`).
-    //    A parked aircraft keeps the rolling it always had (CARRIED: chocks).
+    //    **An aircraft is CHOCKED instead** (`audit(VEH3f.2b)`, priority h'):
+    //    the wave left it rolling (a parked Dodo ran 5.40 m down a 3 deg slab
+    //    in ten seconds); it now holds on EVERY wheel's brake, nose gear
+    //    included, and no handbrake -- which is what locked the mains alone
+    //    and let the nose wheel swing it sideways.
     if let Some(v) = bridge.vehicle_mut(chassis) {
-        let hold =
-            !hitched && v.flight().is_none() && forward_mps.abs() < inf_ecs::vehicle::PARK_HOLD_MPS;
+        let slow = !hitched && forward_mps.abs() < inf_ecs::vehicle::PARK_HOLD_MPS;
+        let aircraft = v.flight().is_some();
         v.control(inf_ecs::vehicle::VehicleControls {
-            handbrake: hold,
+            handbrake: slow && !aircraft,
+            brake: if slow && aircraft { 1.0 } else { 0.0 },
             ..inf_ecs::vehicle::VehicleControls::default()
         });
     }
