@@ -1620,10 +1620,33 @@ mod tests {
                 Some(k) if !k.parts().is_empty() => k.parts(),
                 _ => def.body.parts(),
             };
-            // A shell's mirrors and bumper skins stand proud of the box collider
-            // by design (0.186 m, the mirror pair, measured); a UNIT box -- the
-            // defect this door closes -- is refused by the scale check below.
-            let slack = if shell { 0.20 } else { 1e-9 };
+            // **A shell's trim stands proud of the box collider BY PART, and by
+            // AXIS** (wave VEH3h, closing VEH3f.2b's flat 0.20 m): measured on
+            // the five island shells, the mirror pair reaches 0.184-0.186 m past
+            // the half-WIDTH, the cruiser's push bar 0.195 m past the
+            // half-LENGTH, the bumper skins 0.026-0.032 m, the grille and the
+            // headlamps 0.018-0.021 m and the tail lamps 0.035-0.042 m past it.
+            // Each is allowed its own reach on its own axis (rounded up), and
+            // every other part of every row -- a shell's included -- stays
+            // inside its hull to 1e-9; a UNIT box is refused by the scale check.
+            const SHELL_PROUD_M: [(&str, usize, f64); 7] = [
+                ("mirror", 0, 0.19),
+                ("bumper_push", 2, 0.20),
+                ("bumper_front", 2, 0.035),
+                ("bumper_rear", 2, 0.035),
+                ("grille", 2, 0.025),
+                ("lamp_front", 2, 0.025),
+                ("lamp_rear", 2, 0.045),
+            ];
+            let slack_of = |name: &str, axis: usize| -> f64 {
+                if !shell {
+                    return 1e-9;
+                }
+                SHELL_PROUD_M
+                    .iter()
+                    .find(|(n, a, _)| name.starts_with(n) && *a == axis)
+                    .map_or(1e-9, |(_, _, s)| *s)
+            };
             for part in parts {
                 let guid = inf_ecs::vehicle::body_part_guid(chassis, part.name);
                 let e = world
@@ -1638,11 +1661,15 @@ mod tests {
                     "{id}/{}: a part that draws nothing",
                     part.name
                 );
-                for (axis, c, s, hull) in [
+                for (k, (axis, c, s, hull)) in [
                     ("x", t.translation.x, t.scale.x, def.half_extents.x),
                     ("y", t.translation.y, t.scale.y, def.half_extents.y),
                     ("z", t.translation.z, t.scale.z, def.half_extents.z),
-                ] {
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let slack = slack_of(part.name, k);
                     assert!(
                         s > 0.0,
                         "{id}/{}: axis {axis} is drawn at scale {s}",

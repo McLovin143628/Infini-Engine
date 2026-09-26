@@ -221,6 +221,10 @@ struct Fixture {
     scatter_meshes: inf_render::ScatterMeshes,
     record: inf_scene::RenderSettingsRecord,
     materials: std::sync::Arc<inf_player::MaterialContent>,
+    /// **What the frame does to the world before its fixed step** (wave VEH3h):
+    /// the driving frame's 64 cars take their controls here, on every frame the
+    /// harness steps, discarded pass included. `None` everywhere else.
+    before_step: Option<Box<dyn FnMut(&mut RuntimeSim)>>,
 }
 
 fn open(pack: &Path) -> Fixture {
@@ -246,6 +250,7 @@ fn open(pack: &Path) -> Fixture {
         scatter_meshes,
         record,
         materials,
+        before_step: None,
     }
 }
 
@@ -485,6 +490,9 @@ fn measure(
         // processor over.
         let mut cpu = [0.0f64; CPU_STAGES];
         let t = std::time::Instant::now();
+        if let Some(hook) = fx.before_step.as_mut() {
+            hook(&mut fx.sim);
+        }
         fx.sim
             .step_once(inf_player::runtime_sim::RuntimeInput::default());
         cpu[0] = t.elapsed().as_secs_f64() * 1000.0;
@@ -1932,6 +1940,7 @@ fn the_island_at_shipping_resolution() {
             scatter_meshes,
             record,
             materials,
+            before_step: None,
         }
     };
 
@@ -2674,6 +2683,7 @@ fn open_streamed(pack: &Path) -> Fixture {
         scatter_meshes,
         record,
         materials,
+        before_step: None,
     }
 }
 
@@ -2961,5 +2971,272 @@ fn the_island_in_imported_traffic() {
         "the imported art makes the island's SHIPPED frame x{ratio:.3} the fallback's ({:.3} against {:.3} ms), over x{ART_TRAFFIC_FRAME_RATIO}",
         art.0,
         boxes.0
+    );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// THE DRIVING FRAME (wave VEH3h, the cert's fps row)
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Cars the driving frame drives down the composed city's middle street.
+const DRIVING_FRAME_CARS: usize = 64;
+
+/// The chassis guid of driving-frame car `k` (the 65th, `k == 64`, is the
+/// occupied one).
+fn driving_car(k: usize) -> uuid::Uuid {
+    uuid::Uuid::from_u128(0x5645_4833_4650_5300_0000_0000_0000_0000 + k as u128)
+}
+
+/// Every committed shell mesh, `(guid, path)` -- `samples/vehicle-shells/`,
+/// read by its sidecars.
+fn shell_meshes() -> Vec<(uuid::Uuid, PathBuf)> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/vehicle-shells");
+    let mut out = Vec::new();
+    for e in std::fs::read_dir(&dir).expect("the committed shells").flatten() {
+        let p = e.path();
+        if p.extension().is_some_and(|x| x == "inf_mesh") {
+            let g = inf_asset::AssetSidecar::load(&p)
+                .expect("a shell sidecar")
+                .guid
+                .0;
+            out.push((g, p));
+        }
+    }
+    out.sort();
+    out
+}
+
+/// **Put the driving frame's cars into a fixture**: 64 of the island saloon
+/// (its SHELL, parts, four wheels and four tyres -- `spawn_rig`, the rig door
+/// every island car is built through) in two lanes down the composed city's
+/// middle street ahead of the camera, 9 m apart, each a real rig the vehicle
+/// phase steps with the full model (four casts a wheel, `tyre_substeps` N);
+/// and a 65th, OCCUPIED through `RuntimeSim::occupy_nearest_car` (a seated
+/// driver through the traffic's own `occupy` door), so the audio planner voices
+/// its whole stack. The 64 take their pedals from `before_step` every frame --
+/// throttle to hold 6 m/s -- so the rays, the tyres and the drivetrain are
+/// solving a MOVING car. The shell DAGs are built into the fixture's own
+/// meshlet registry, since the composed city's pack carries no car.
+fn drive_the_street(fx: &mut Fixture) -> Option<uuid::Uuid> {
+    let def = *inf_editor_core::vehicle::island_vehicles()
+        .get("sedan")
+        .expect("the island saloon");
+    for (g, p) in shell_meshes() {
+        let mesh: inf_mesh::MeshAsset =
+            inf_asset::decode(&std::fs::read(&p).expect("read a shell")).expect("it decodes");
+        if mesh.triangle_count() == 0 {
+            continue;
+        }
+        let (pp, n, u, t, i) = mesh.vgeom_streams();
+        let dag = inf_vgeom::build_vgeom(&pp, &n, &u, &t, &i, inf_vgeom::BuildParams::default());
+        let _ = fx
+            .vmeshes
+            .insert_mesh(inf_player::vmesh::derived_vmesh_id(g), &dag);
+    }
+    let start = samples::city_drive_point(0);
+    let y = inf_ecs::vehicle::resting_origin_y(&def, 0.0);
+    let spawn = |k: usize, at: DVec3| inf_ecs::vehicle::RigSpawn {
+        name: format!("Frame Car {k}"),
+        at,
+        yaw_deg: 90.0,
+        paint: inf_ecs::math::Color::new(0.2 + 0.01 * k as f32, 0.2, 0.6, 1.0),
+        clip: None,
+        engine_voice: true,
+        livery: None,
+    };
+    for k in 0..DRIVING_FRAME_CARS {
+        let lane = if k % 2 == 0 { -2.6 } else { 2.6 };
+        let at = DVec3::new(start.x + 14.0 + (k / 2) as f64 * 9.0, y, lane);
+        inf_ecs::vehicle::spawn_rig(fx.sim.world_mut(), driving_car(k), &def, &spawn(k, at));
+    }
+    let hero_car = driving_car(DRIVING_FRAME_CARS);
+    let hero_at = DVec3::new(start.x + 4.0, y, 6.5);
+    inf_ecs::vehicle::spawn_rig(fx.sim.world_mut(), hero_car, &def, &spawn(64, hero_at));
+    fx.sim.world_mut().propagate();
+    fx.sim.world_mut().mark_dirty();
+    for _ in 0..30 {
+        fx.sim
+            .step_once(inf_player::runtime_sim::RuntimeInput::default());
+    }
+    let seat = inf_physics::d3::vehicle::seat_pose(fx.sim.bridge3d(), hero_car).map(|s| s.0);
+    let occupied = seat.and_then(|s| fx.sim.occupy_nearest_car(s, 1.0));
+    fx.before_step = Some(Box::new(move |sim: &mut RuntimeSim| {
+        for k in 0..DRIVING_FRAME_CARS {
+            let g = driving_car(k);
+            let v = sim
+                .bridge3d()
+                .body_of(g)
+                .and_then(|b| sim.bridge3d().world().body_linvel(b))
+                .map(|v| v.length())
+                .unwrap_or(0.0);
+            let throttle = ((6.0 - v) / 3.0).clamp(0.0, 1.0);
+            let brake = ((v - 7.0) / 3.0).clamp(0.0, 1.0);
+            if let Some(veh) = sim.bridge3d_mut().vehicle_mut(g) {
+                veh.control(inf_ecs::vehicle::VehicleControls {
+                    throttle,
+                    brake,
+                    ..Default::default()
+                });
+            }
+        }
+    }));
+    occupied
+}
+
+/// One configuration's session numbers: p50, p95, worst, GPU frame, the
+/// in-frame `vehicle` and `audio` phases (ms), audio commands a frame.
+type DrivingRow = (f64, f64, f64, f64, f64, f64, f64);
+
+/// Sessions of the driving frame: FIVE in a release build off CI (the cert's
+/// min-of-five), ONE in a dev build or on a shared runner, where nothing is
+/// asserted; `INF_VEH3H_FPS_SESSIONS` overrides.
+fn driving_sessions() -> usize {
+    if let Some(n) = std::env::var("INF_VEH3H_FPS_SESSIONS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        return n;
+    }
+    if cfg!(debug_assertions) || std::env::var_os("CI").is_some() {
+        1
+    } else {
+        5
+    }
+}
+
+/// **THE DRIVING FRAME** (wave VEH3h, the cert's fps row): 64 island saloons
+/// driving the full model down the composed city's middle street plus one
+/// OCCUPIED saloon singing its whole voice stack, at 1080p, in the SHIPPED
+/// configuration and the LIT one (`SHIPPING_FRAME_CEILING_MS` has been
+/// asserted over the lit frame since CERT1), MIN OF FIVE SESSIONS -- each a
+/// fresh fixture, each `measure`'s own three rounds; the session with the
+/// lowest p50 is the one reported, every session's numbers printed beside it.
+///
+/// READS: the per-frame CPU wall clock (p50 / p95 / worst), the GPU frame off
+/// the query-set clock, the fixed step's own `vehicle` and `audio` phases
+/// inside the frame, the audio commands the step queued, and -- the
+/// anti-vacuity -- the vehicle count the bridge derived and the vgeom instance
+/// count (the shells draw).
+///
+/// ASSERTS, everywhere: 65 vehicles in the bridge, the 65th occupied, the
+/// audio stream moving, the shells drawn. ASSERTS, release on a representative
+/// adapter off CI (the house conditioning): the worst p95 of the two
+/// configurations under `SHIPPING_FRAME_CEILING_MS`. A tree with no VEH3 arc
+/// has no shells to draw and fails the anti-vacuity.
+#[test]
+fn sixty_four_cars_drive_the_composed_city_at_shipping_resolution() {
+    let Ok(gpu) = GpuContext::headless() else {
+        eprintln!("SKIP the driving frame: no GPU adapter");
+        return;
+    };
+    let info = gpu.adapter.get_info();
+    let real = representative(&info);
+    let tmp = tempfile::tempdir().expect("tmp");
+    let pack = cook_instrument(tmp.path());
+    let sessions = driving_sessions();
+    let mut shipped_rows: Vec<DrivingRow> = Vec::new();
+    let mut lit_rows: Vec<DrivingRow> = Vec::new();
+    println!(
+        "\n=== THE DRIVING FRAME === {} ({:?}); {DRIVING_FRAME_CARS} saloons driving + 1 occupied, 1080p, {sessions} session(s) x {ROUNDS} rounds x {FRAMES} frames",
+        info.name, info.device_type
+    );
+    for session in 0..sessions {
+        let mut fx = open(&pack);
+        let occupied = drive_the_street(&mut fx);
+        assert_eq!(
+            fx.sim.bridge3d().vehicle_guids().len(),
+            DRIVING_FRAME_CARS + 1,
+            "the bridge did not derive the frame's 65 cars"
+        );
+        assert!(occupied.is_some(), "nobody sat in the 65th car");
+        let (shipped, _tier) = shipped_settings(&gpu, fx.record);
+        let lit_record = inf_scene::RenderSettingsRecord {
+            bloom_enabled: true,
+            ssao_enabled: true,
+            taa: true,
+            shadows_enabled: true,
+            gi_enabled: true,
+            ..fx.record
+        };
+        let (mut lit, _) = shipped_settings(&gpu, lit_record);
+        lit.vsm.enabled = true;
+        for (label, settings) in [("SHIPPED", shipped), ("LIT", lit)] {
+            let before = fx.sim.audio_commands_queued();
+            let m = measure(&gpu, &mut fx, 1920, 1080, settings, &fly);
+            let frames = (FRAMES * (ROUNDS + 1)) as f64;
+            let cmds = (fx.sim.audio_commands_queued() - before) as f64 / frames;
+            let r = m.round();
+            let phase = |name: &str| {
+                inf_player::step_profile::STEP_PHASE_NAMES
+                    .iter()
+                    .position(|n| *n == name)
+                    .map(|i| m.step_profile.ms[i])
+                    .unwrap_or(0.0)
+            };
+            let row = (
+                r.p50,
+                r.p95,
+                r.worst,
+                m.gpu_frame_ms,
+                phase("vehicle"),
+                phase("audio"),
+                cmds,
+            );
+            println!(
+                "DRIVING session {} {label}: p50 {:.3} p95 {:.3} worst {:.3} ms | GPU {:.3} ms | step: vehicle {:.3} ms ({:.2} us a car), audio {:.3} ms, {:.1} audio commands a frame | {} vgeom instances",
+                session + 1,
+                row.0,
+                row.1,
+                row.2,
+                row.3,
+                row.4,
+                row.4 * 1000.0 / (DRIVING_FRAME_CARS + 1) as f64,
+                row.5,
+                row.6,
+                m.vgeom_instances
+            );
+            assert!(
+                m.vgeom_instances >= DRIVING_FRAME_CARS,
+                "{label}: {} vgeom instances -- the shells did not draw",
+                m.vgeom_instances
+            );
+            assert!(cmds > 0.0, "{label}: the occupied car queued no audio");
+            if label == "SHIPPED" {
+                shipped_rows.push(row);
+            } else {
+                lit_rows.push(row);
+            }
+        }
+    }
+    let best = |rows: &[DrivingRow]| {
+        *rows
+            .iter()
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .expect("a session")
+    };
+    let (s, l) = (best(&shipped_rows), best(&lit_rows));
+    println!(
+        "DRIVING FRAME (min of {sessions} session(s) by p50): SHIPPED p50 {:.3} / p95 {:.3} / worst {:.3} ms, GPU {:.3}; LIT p50 {:.3} / p95 {:.3} / worst {:.3} ms, GPU {:.3}; vehicle phase {:.3} ms ({:.2} us a car); against SHIPPING_FRAME_CEILING_MS {SHIPPING_FRAME_CEILING_MS}",
+        s.0,
+        s.1,
+        s.2,
+        s.3,
+        l.0,
+        l.1,
+        l.2,
+        l.3,
+        s.4,
+        s.4 * 1000.0 / (DRIVING_FRAME_CARS + 1) as f64
+    );
+    if cfg!(debug_assertions) || std::env::var_os("CI").is_some() || !real {
+        println!("reported, not asserted: dev profile, CI or a non-representative adapter");
+        return;
+    }
+    let worst_p95 = s.1.max(l.1);
+    assert!(
+        worst_p95 <= SHIPPING_FRAME_CEILING_MS,
+        "the driving frame's p95 is {worst_p95:.3} ms (shipped {:.3}, lit {:.3}) over the {SHIPPING_FRAME_CEILING_MS} ms ceiling {RATCHET_NOTE}",
+        s.1,
+        l.1
     );
 }
