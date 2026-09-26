@@ -309,9 +309,10 @@ pub fn step_character_movement(
     out
 }
 
-/// Every character's collider and body centre as the step begins -- the input
-/// to [`stacked_pawns`] (the VEH3h audit). A character with no collider has
-/// nothing a mover could be stacked on and is left out.
+/// Every NON-PLAYER character's collider and body centre as the step begins
+/// -- the input to [`stacked_pawns`] (the VEH3h audit). A character with no
+/// collider has nothing a mover could be stacked on and is left out; so is a
+/// player, whose body the pile rule never touches in either direction.
 fn pawn_centres(
     world: &EcsWorld,
     bridge: &PhysicsBridge3D,
@@ -322,10 +323,20 @@ fn pawn_centres(
         let Some(c) = bridge.collider_of(*g) else {
             continue;
         };
-        let Some(t) = world
-            .entity_of(*g)
-            .and_then(|e| world.world().get::<Transform>(e))
-        else {
+        let Some(e) = world.entity_of(*g) else {
+            continue;
+        };
+        // A PLAYER is never set aside: the pile rule is the crowd's, and a
+        // hero stood on an NPC (a gate that walks its streaming source with
+        // the agent, a spawn) keeps blocking it exactly as it always did.
+        if world
+            .world()
+            .get::<CharacterMovement>(e)
+            .is_some_and(|m| m.player_controlled)
+        {
+            continue;
+        }
+        let Some(t) = world.world().get::<Transform>(e) else {
             continue;
         };
         out.push((c, t.translation.to_dvec3()));
@@ -336,18 +347,25 @@ fn pawn_centres(
 /// **The characters this mover starts the step STACKED ON** (the VEH3h
 /// audit) -- the ones the sweep sets aside.
 ///
-/// A body is stacked on the mover when its centre is within the mover's own
-/// RADIUS in plan and within its standing height in `y`. That is a placement
-/// and never a contact: two capsules the mover has pushed against stand
-/// `r1 + r2` (less the skin) apart, about 0.58 m for two 0.30 m bodies, so
-/// no walking, crowding or blocking reaches it -- only bodies PUT on one
-/// point do: a society that sends eighty residents to one desk, a spawn, a
-/// teleport. rapier's controller cannot separate them (it does not
+/// A body is stacked on the mover when its centre is within
+/// [`STACKED_SPAN`] of the mover's own radius in plan (0.60 m for two 0.30 m
+/// bodies) and within its standing height in `y` -- the two capsules
+/// INTERPENETRATE. That is a placement and never a contact: the controller
+/// keeps its skin, so a body the mover has walked into stands `r1 + r2` plus
+/// the skin apart (0.62 m measured), and no walking, crowding or blocking
+/// reaches it -- only bodies PUT on one point do: a society that sends
+/// eighty residents to one desk, a spawn, a teleport. rapier's controller cannot separate them (it does not
 /// depenetrate), so without this each one fights the whole pile on every
 /// cast of every step: the Harbour City pile read 358.7 ms of `character
-/// move` for 225 characters, 344.9 ms of it inside the controller. Set
-/// aside, the pile walks apart along its own legs and every body OUTSIDE a
-/// radius -- the ones that are actually in the way -- still blocks.
+/// move` for 225 characters, 344.9 ms of it inside the controller. Every
+/// body outside the span -- the ones that are actually in the way -- still
+/// blocks.
+///
+/// The pile is set aside, not taken apart: an agent walks out of it along
+/// its own route and stops being set aside the step it is clear. SEPARATING
+/// a pile that stands still (a desk eighty residents share) is the society's
+/// placement to fix, not the mover's -- a push was measured and the pile's
+/// outer ring still met bodies its stale step-start test had not set aside.
 ///
 /// In `characters` order (Guid order), so the set is a function of the world.
 fn stacked_pawns(
@@ -363,12 +381,20 @@ fn stacked_pawns(
             continue;
         }
         let plan = glam::DVec2::new(p.x - position.x, p.z - position.z).length();
-        if plan < radius && (p.y - position.y).abs() < half_height + radius {
+        if plan < STACKED_SPAN * radius && (p.y - position.y).abs() < half_height + radius {
             out.push(*c);
         }
     }
     out
 }
+
+/// The plan distance, in the mover's own radii, inside which another body is
+/// STACKED on it rather than touching it (the VEH3h audit): 2.0, i.e. the
+/// two capsules OVERLAP at all. A contact the controller made keeps its skin
+/// (2 cm), so a body walked into stands 0.62 m off two 0.30 m radii, never
+/// inside 0.60 -- and a partial overlap is set aside with the rest, because a
+/// body left just inside the span still blocks a sweep out of the pile.
+pub const STACKED_SPAN: f64 = 2.0;
 
 /// **One step of a shooter's feel** (wave WPN2b) — the whole of clause 2's aim
 /// layer and clause 4's sway, at the one seam that reaches every look integrator.
@@ -1871,7 +1897,11 @@ fn step_one(
     let mover = mover_for_with_capsule(world, guid, is_capsule.then_some((half_height, radius)));
     let was_grounded = cm.runtime.grounded;
     let own = exclude.iter().next().copied();
-    let stacked = stacked_pawns(pawns, own, position, radius, half_height);
+    let stacked = if cm.player_controlled {
+        Vec::new()
+    } else {
+        stacked_pawns(pawns, own, position, radius, half_height)
+    };
     let result = bridge
         .world_mut()
         .move_character_setting_aside(&mover, position, motion, own, &stacked);

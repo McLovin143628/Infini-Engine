@@ -1631,14 +1631,15 @@ fn pile_fixture(stacked: bool, blocker: bool) -> (EcsWorld, PhysicsBridge3D, Vec
     (world, bridge, out)
 }
 
-/// MIN of five rounds of thirty idle steps after ten of warm-up, ms a step,
-/// and the set-aside count per step over the rounds.
-fn pile_step_ms(stacked: bool) -> (f64, f64) {
-    let (mut world, mut bridge, _) = pile_fixture(stacked, false);
-    for _ in 0..10 {
-        step_character_movement(&mut world, &mut bridge, DT);
-    }
-    let before = bridge.world().pawns_set_aside();
+/// What a pile does over time: the first step's set-aside count, the MIN of
+/// five rounds of thirty idle steps (ms a step, after the first step), the
+/// set-aside count over the last of four and a half seconds, and the closest two bodies
+/// end up in plan, metres.
+fn pile_run(stacked: bool) -> (u64, f64, u64, f64) {
+    let (mut world, mut bridge, movers) = pile_fixture(stacked, false);
+    let s0 = bridge.world().pawns_set_aside();
+    step_character_movement(&mut world, &mut bridge, DT);
+    let first = bridge.world().pawns_set_aside() - s0;
     let mut best = f64::INFINITY;
     for _ in 0..5 {
         let t = Instant::now();
@@ -1647,12 +1648,31 @@ fn pile_step_ms(stacked: bool) -> (f64, f64) {
         }
         best = best.min(t.elapsed().as_secs_f64() * 1000.0 / 30.0);
     }
-    let per_step = (bridge.world().pawns_set_aside() - before) as f64 / 150.0;
-    (best, per_step)
+    for _ in 0..60 {
+        step_character_movement(&mut world, &mut bridge, DT);
+    }
+    let s1 = bridge.world().pawns_set_aside();
+    for _ in 0..60 {
+        step_character_movement(&mut world, &mut bridge, DT);
+    }
+    let late = bridge.world().pawns_set_aside() - s1;
+    let at: Vec<DVec3> = movers
+        .iter()
+        .filter_map(|g| world.entity_of(*g))
+        .filter_map(|e| world.world().get::<Transform>(e))
+        .map(|t| t.translation.to_dvec3())
+        .collect();
+    let mut closest = f64::INFINITY;
+    for (i, a) in at.iter().enumerate() {
+        for b in &at[i + 1..] {
+            closest = closest.min(glam::DVec2::new(a.x - b.x, a.z - b.z).length());
+        }
+    }
+    (first, best, late, closest)
 }
 
-/// **A PILE OF CHARACTERS IS SET ASIDE, NOT FOUGHT** (the VEH3h audit) -- the
-/// Harbour City "cruiser stall".
+/// **A PILE OF CHARACTERS IS SET ASIDE, NOT FOUGHT** (the
+/// VEH3h audit) -- the Harbour City "cruiser stall".
 ///
 /// The cert's hands-on could not board the Harbour City cruiser: the player's
 /// frames ran at 2.5 s beside it and a headless probe read `character move` at
@@ -1661,42 +1681,49 @@ fn pile_step_ms(stacked: bool) -> (f64, f64) {
 /// the car: 204 steered crowd agents stood on FOUR points of one building ~37 m
 /// away (80 on one quarter metre -- the society sends every resident to the
 /// NEAREST desk), and rapier's controller, which does not depenetrate, made
-/// each of them fight its whole pile on every cast. The mover now sets aside
-/// the bodies it starts the step stacked on (`d3::movement`'s `stacked_pawns`:
-/// centre within the mover's own radius in plan -- a placement, never a
-/// contact).
+/// each of them fight its whole pile on every cast of every step. The mover
+/// now sets aside the NPCs it starts the step stacked on
+/// (`d3::movement`'s `stacked_pawns`: the capsules overlap in plan -- a
+/// placement, never a contact, which keeps the controller's skin).
 ///
-/// READS the world: 64 steered capsules piled on one point against the same 64
-/// on a 2 m lattice, idle on flat ground, and `pawns_set_aside` (the door's
-/// engagement count). ASSERTS the count: every mover sets aside the other 63
-/// every step in the pile (**4 032 a step**) and nobody sets aside anybody on
-/// the lattice (0). And the other half of the ruling: a character that is IN
-/// THE WAY and not stacked still blocks -- a mover walking at a standing body
-/// 1.0 m ahead stops against it (its centre never comes within 0.5 m) and
-/// sets nothing aside. The clock (pile against lattice, per step) is printed
-/// everywhere and asserted only in release off CI, at 4x (the house
-/// conditioning: min of five). Mutations: `stacked_pawns` answering nothing
-/// (the pile is fought again: count 0, and the release clock reads the pile
-/// at **135.99 ms against 1.79 -- 76x** the lattice, where the fixed tree reads
-/// 2.95 against 1.80, 1.64x); its bound widened past `r1 + r2` (the blocker is
-/// set aside and walked through).
+/// READS the world: 64 steered capsules inside one quarter metre against the
+/// same 64 on a 2 m lattice, idle on flat ground, `pawns_set_aside` (the
+/// door's engagement count). ASSERTS: the pile's first step sets aside every
+/// other body for every mover (**4 032**), an idle pile goes on being set
+/// aside (it is not separated -- the society's placement is the carried
+/// cause) and the lattice sets aside nothing. And the
+/// other half of the ruling: a character that is IN THE WAY and not stacked
+/// still blocks -- a mover walking at a standing body 1.0 m ahead stops
+/// against it (its centre never comes within 0.5 m) and sets nothing aside.
+/// The clock (pile against lattice, per step) is printed everywhere and
+/// asserted only in release off CI, at 4x (the house conditioning: min of
+/// five). Mutations: `stacked_pawns` answering nothing (the pile is fought:
+/// count 0, and the release clock read **135.99 ms against 1.79 -- 76x**);
+/// its bound widened to 2.5 r (the blocker is walked through).
 #[test]
 fn a_pile_of_characters_is_set_aside_and_one_in_the_way_still_blocks() {
-    let (pile_ms, pile_set) = pile_step_ms(true);
-    let (grid_ms, grid_set) = pile_step_ms(false);
+    let (pile_first, pile_ms, pile_late, pile_closest) = pile_run(true);
+    let (grid_first, grid_ms, grid_late, _) = pile_run(false);
     println!(
-        "VEH3h PILE: 64 capsules inside a quarter metre {pile_ms:.3} ms a step ({pile_set:.0} set aside a step), \
-         on a 2 m lattice {grid_ms:.3} ms ({grid_set:.0}) -- {:.2}x",
+        "VEH3h PILE: 64 capsules inside a quarter metre: {pile_first} set aside on the first step, \
+         {pile_ms:.3} ms a step, {pile_late} set aside in the last second, closest two {pile_closest:.3} m apart; \
+         on a 2 m lattice {grid_first} / {grid_ms:.3} ms / {grid_late} -- {:.2}x",
         pile_ms / grid_ms.max(1.0e-9)
     );
     assert_eq!(
-        pile_set,
-        64.0 * 63.0,
-        "every mover in the pile sets aside the other 63, every step"
+        pile_first,
+        64 * 63,
+        "every mover in the pile sets aside the other 63 on its first step"
     );
     assert_eq!(
-        grid_set, 0.0,
+        grid_first + grid_late,
+        0,
         "nobody on a 2 m lattice is stacked on anybody"
+    );
+    assert_eq!(
+        pile_late,
+        60 * 64 * 63,
+        "an idle pile is set aside every step while it stands (closest two {pile_closest:.3} m)"
     );
 
     // The other half: a body in the way still blocks.

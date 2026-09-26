@@ -356,7 +356,48 @@ fn clear_circuit(sim: &mut RuntimeSim, design: &inf_island::IslandDesign) -> (Ve
         }
     }
     sim.world_mut().mark_dirty();
-    (loops.into_iter().next().expect("a circuit"), rigs.len())
+    // **The first circuit whose line stays on graded ground** (the VEH3h
+    // audit). The cert drove the settlement's largest circuit, and its west
+    // street crosses a TERRACE BANK -- the terrain itself rises 1.5 m at
+    // ~39 deg between z -262 and -264 on x 354, where two levelled block rows
+    // meet -- so the lap car struck an earth face at 13.8 m/s (-36.75 g for
+    // one step, the fronts unloaded). It is neither a kerb nor a collider
+    // seam (the ray under it answers `Terrain` all the way up); it is a line
+    // a road car should not be driven on, so the lap's line moves.
+    let mut chosen = None;
+    for (k, l) in loops.iter().enumerate() {
+        let grade = steepest_grade(sim, l);
+        println!(
+            "LAP CANDIDATE {k}: the steepest 0.5 m of its line climbs {grade:.3} (rise over run)"
+        );
+        if chosen.is_none() && grade <= LAP_MAX_GRADE {
+            chosen = Some(l.clone());
+        }
+    }
+    (chosen.expect("a circuit on graded ground"), rigs.len())
+}
+
+/// The steepest rise over run the lap's line may meet anywhere, sampled
+/// every half metre -- 0.20 (11.3 deg). The island's graded streets read
+/// under it; the terrace bank the cert's lap struck reads 0.8 (39 deg).
+const LAP_MAX_GRADE: f64 = 0.20;
+
+/// The steepest half metre of a closed line's terrain, rise over run.
+fn steepest_grade(sim: &mut RuntimeSim, pts: &[DVec2]) -> f64 {
+    let mut worst = 0.0f64;
+    for w in pts.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let n = ((b - a).length() / 0.5).ceil().max(1.0) as usize;
+        let mut prev = sim.terrain_height_at(a.x, a.y);
+        for i in 1..=n {
+            let p = a + (b - a) * (i as f64 / n as f64);
+            let h = sim.terrain_height_at(p.x, p.y);
+            let run = (b - a).length() / n as f64;
+            worst = worst.max((h - prev).abs() / run.max(1e-9));
+            prev = h;
+        }
+    }
+    worst
 }
 
 /// A step's telemetry off the car the hero is driving -- the bridge's own
@@ -1790,7 +1831,7 @@ fn dwell_step_p50(sim: &mut RuntimeSim, at: DVec3, steps: usize) -> (f64, usize)
 /// and set aside (the count moves), and no spot's step is more than twice the
 /// 20 m spot's. Measured by the audit: before the fix the dwell beside the
 /// cruiser read **266.0 ms** a step (`character move` 232.8; an earlier dwell
-/// 358.7) against **34.6** at 20 m; after it **51.0** against 34.8 (1.47x).
+/// 358.7) against **34.6** at 20 m; after it **50.0** against 34.0 (1.47x).
 #[test]
 #[ignore = "needs the user's cooked island (INF_ISLAND_PACK)"]
 fn the_harbour_city_pile_is_set_aside_on_the_real_island() {

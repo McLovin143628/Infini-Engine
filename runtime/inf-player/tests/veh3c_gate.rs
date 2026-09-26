@@ -1523,27 +1523,37 @@ fn a_thousand_parked_cars_with_parts_cost_what_they_cost_without_them() {
         (world, bridge)
     };
 
-    let measure = |with_parts: bool| -> f64 {
-        let (mut world, mut bridge) = build(with_parts);
-        let mut best = f64::INFINITY;
-        for _ in 0..5 {
-            bridge.sync_from_world(&world);
+    // **THE HOUSE CONDITIONING** (the VEH3h audit): five ROUNDS a side, each
+    // the mean of twenty steps, the two populations INTERLEAVED round by round
+    // so a machine that warms or throttles over the measurement moves both
+    // sides alike, and the min of the five taken per side. It was the min of
+    // five SINGLE steps a side, one side measured after the other, and the
+    // cert read x1.020 / x1.029 / x1.032 / x1.051 over four release runs --
+    // one over the ceiling on one step's noise.
+    let round = |world: &mut EcsWorld, bridge: &mut PhysicsBridge3D| -> f64 {
+        let mut total = 0.0;
+        for _ in 0..20 {
+            bridge.sync_from_world(world);
             let t = Instant::now();
-            inf_physics::d3::step_vehicles(&mut world, &mut bridge, DT);
-            best = best.min(t.elapsed().as_secs_f64() * 1e6);
+            inf_physics::d3::step_vehicles(world, bridge, DT);
+            total += t.elapsed().as_secs_f64() * 1e6;
             bridge.step(DT);
-            bridge.write_back_into(&mut world);
+            bridge.write_back_into(world);
             world.propagate();
         }
-        best / CARS as f64
+        total / 20.0 / CARS as f64
     };
-
-    let control = measure(false);
-    let parts = measure(true);
+    let (mut cw, mut cb) = build(false);
+    let (mut pw, mut pb) = build(true);
+    let (mut control, mut parts) = (f64::INFINITY, f64::INFINITY);
+    for _ in 0..5 {
+        control = control.min(round(&mut cw, &mut cb));
+        parts = parts.min(round(&mut pw, &mut pb));
+    }
     let ratio = parts / control.max(1e-9);
     eprintln!(
         "{CARS} parked cars: {control:.3} µs/car WITHOUT parts, {parts:.3} µs/car WITH them \
-         (x{ratio:.3}), min of five"
+         (x{ratio:.3}), min of five interleaved rounds of twenty steps"
     );
     let (world, _) = build(true);
     let drawn: usize = inf_physics::d3::bodywork::row_count(&world);
