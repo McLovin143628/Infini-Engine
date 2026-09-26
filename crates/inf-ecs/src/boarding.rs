@@ -1379,6 +1379,52 @@ pub fn next_enter_phase(p: BoardPhase) -> Option<BoardPhase> {
     BoardPhase::ENTER_ORDER.get(at + 1).copied()
 }
 
+// ── the cab step (wave VEH3f.2b) ───────────────────────────────────────────
+
+/// **The sill height over which a body climbs a STEP before it reaches for
+/// the door**, metres. Sixty centimetres -- a knee raised to the hip. A
+/// saloon's sill is 0.37 above the road and a pickup's 0.47, and a body steps
+/// over both; a bus's is 0.78, a 6x6's 0.71, a van's 0.85 and a semi's cab
+/// 1.48 (the VEH3f audit measured the semi's outer handle 345 mm beyond a
+/// hand on the ground).
+pub const CAB_STEP_MIN_RISE_M: f64 = 0.60;
+
+/// **How long the climb onto the step takes**, seconds -- the first beat.
+pub const CLIMB_S: f64 = 0.6;
+
+/// How far the step stands out of the flank, metres (its centre).
+pub const STEP_OUT_M: f64 = 0.12;
+
+/// How far out of the flank a body standing ON the step has its centre,
+/// metres -- the hips a little outboard of the feet, leaning back off the
+/// cab as a hand on a door handle does (with the hips straight over the step
+/// the semi's handle swung in under the shoulder and the arm could not fold
+/// far enough: 39 mm at weight 1).
+pub const STEP_STANCE_OUT_M: f64 = 0.30;
+
+/// Half the fore-aft span of the two feet on the step, metres.
+pub const STEP_FOOT_HALF_SPAN_M: f64 = 0.11;
+
+/// **The step for a floor this far above the ground**, metres above it:
+/// half the rise over [`CAB_STEP_MIN_RISE_M`], none under it. One step,
+/// placed at the rise's middle, so neither beat of the climb is more than
+/// half of it -- 0.74 m on the semi's cab, 0.39 on the bus.
+pub fn cab_step_m(rise_m: f64) -> f64 {
+    if rise_m.is_finite() && rise_m > CAB_STEP_MIN_RISE_M {
+        0.5 * rise_m
+    } else {
+        0.0
+    }
+}
+
+/// The step's feet, chassis frame `(x, z)` -- aft and fore of its centre.
+pub fn step_feet_local(step_local: Vec3d) -> [Vec3d; 2] {
+    [
+        Vec3d::new(step_local.x, 0.0, step_local.z - STEP_FOOT_HALF_SPAN_M),
+        Vec3d::new(step_local.x, 0.0, step_local.z + STEP_FOOT_HALF_SPAN_M),
+    ]
+}
+
 /// How long an approach of `len_m` metres takes at [`APPROACH_MPS`], clamped
 /// to `[UNLOCK_MIN_S, UNLOCK_MAX_S]`.
 pub fn approach_s(len_m: f64) -> f64 {
@@ -1528,6 +1574,16 @@ pub struct BoardingState {
     /// NOT folded (it rides an `Idle` phase; what it produces — the modes — is
     /// folded everywhere a mode is, and both hosts derive it identically).
     pub bail: bool,
+    /// **The cab step's height above the ground the body stood on**, metres
+    /// (wave VEH3f.2b) -- `0` for a car whose floor a body steps straight onto,
+    /// and otherwise [`cab_step_m`] of the rise. Decided by `begin` from the
+    /// live floor and the ground under the stance, so both hosts climb the same
+    /// step. NOT folded: what it produces (the body's placement, its feet) is
+    /// folded everywhere a placement is.
+    pub step_m: f64,
+    /// Where that step is, chassis frame: `x` and `z` of its top centre (`y`
+    /// unused -- the height is `ground_y + step_m`).
+    pub step_local: Vec3d,
 }
 
 impl Default for BoardingState {
@@ -1558,6 +1614,8 @@ impl Default for BoardingState {
             throttle_in: 0.0,
             brake_in: 0.0,
             bail: false,
+            step_m: 0.0,
+            step_local: Vec3d::ZERO,
         }
     }
 }

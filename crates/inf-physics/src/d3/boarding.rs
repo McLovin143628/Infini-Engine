@@ -563,9 +563,11 @@ pub fn begin(
     // helicopter's far side over a drop. The body boards from where it stands,
     // which is exactly P29.7's warp: the approach becomes a turn in place and
     // the door phase has nothing to open.
+    let mut grounded = true;
     let (take, back, ground_y) = match ground_under(bridge, take_w, &exclude) {
         Some(g) => (take, back, g),
         None => {
+            grounded = false;
             let here = car.local(position);
             let stay = Vec3d::new(here.x, 0.0, here.z);
             take_w = car.world(stay);
@@ -636,13 +638,44 @@ pub fn begin(
         door_deg: door_angle_deg(world, bridge, chassis, door),
         ..Default::default()
     };
+    // **THE CAB STEP** (wave VEH3f.2b): a floor more than a knee above the
+    // ground the body stands on is climbed in two beats -- onto a step at half
+    // the rise (the end of `Unlocking`), then into the seat from it (the seat
+    // warp). Decided here, from the live floor and the ground under the
+    // stance, so both hosts climb the same step.
+    //
+    // The rise is the front door's SILL -- what a foot has to clear -- and the
+    // rule floor for a car with no door. Measured on the slab (H-point / sill,
+    // metres): saloon 0.57 / 0.37, SUV 0.61 / 0.35, pickup 0.72 / 0.47, van
+    // 0.77 / 0.85, crew cab 0.64 / 0.71, bus 1.00 / 0.78, Caracara 6x6
+    // 0.64 / 0.71, semi 1.21 / 1.48 -- the rule floor put the semi's at 0.58
+    // and the bus's under a knee.
+    if grounded {
+        let seat_l = car.sockets.seat(seat);
+        let rise_to = match door_geom.as_ref() {
+            Some(d) => {
+                let (dc, dh) = board::door_metres(car.half, car.offset, d);
+                car.world(Vec3d::new(dc.x, dc.y - dh.y, dc.z)).y
+            }
+            None => car.world(Vec3d::new(seat_l.x, car.floor_y(), seat_l.z)).y,
+        };
+        b.step_m = board::cab_step_m(rise_to - ground_y);
+        if b.step_m > 0.0 {
+            b.step_local = Vec3d::new(
+                car.offset.x + side * (car.half.x.abs() + board::STEP_OUT_M),
+                0.0,
+                take.z,
+            );
+        }
+    }
     b.enter(BoardPhase::Locked, board::LOCKED_S);
     // The approach length is decided NOW, from the curve as laid — the clock is
     // what makes two hosts agree about when the body arrives.
     b.phase_len_s = board::LOCKED_S;
     b.tangent_end_len = chord;
-    // `mark_s` carries the approach's own length into `Unlocking`.
-    b.mark_s = board::approach_s(len);
+    // `mark_s` carries the approach's own length into `Unlocking` -- and the
+    // climb's, which is the approach's last beat.
+    b.mark_s = board::approach_s(len) + if b.step_m > 0.0 { board::CLIMB_S } else { 0.0 };
     cm.runtime.boarding = b;
     super::vehicle::park_collider(bridge, guid, true);
     if let Some(victim) = occupant {
@@ -910,8 +943,14 @@ pub fn step_ground(
             // Root motion along the Hermite. The END is the take as the car
             // stands NOW, so a car that is nudged (or a victim's car that is
             // still braking) is boarded at its door.
-            let alpha = b.alpha();
-            let p = board::hermite(
+            let climb = if b.step_m > 0.0 { board::CLIMB_S } else { 0.0 };
+            let walk_s = (b.phase_len_s - climb).max(1e-6);
+            let alpha = if b.phase_len_s <= 0.0 {
+                0.0
+            } else {
+                (b.time_s / walk_s).clamp(0.0, 1.0)
+            };
+            let mut p = board::hermite(
                 b.start,
                 b.tangent_start,
                 Vec3d::from_dvec3(take),
@@ -919,6 +958,14 @@ pub fn step_ground(
                 alpha,
             )
             .to_dvec3();
+            // **Beat one: onto the step** (wave VEH3f.2b) -- from the take on
+            // the ground to a stance over the step, raised by its height.
+            if climb > 0.0 && b.time_s > walk_s {
+                let c = ((b.time_s - walk_s) / climb).clamp(0.0, 1.0);
+                let c = c * c * (3.0 - 2.0 * c);
+                let on = at_ground(step_stance(&b, side), b.ground_y + b.step_m);
+                p = take + (on - take) * c;
+            }
             // The facing turns to the flank as the curve arrives, and is LOCKED
             // to it from the end of the approach on.
             let s = alpha * alpha * (3.0 - 2.0 * alpha);
@@ -927,6 +974,13 @@ pub fn step_ground(
             );
             if b.expired() {
                 b.enter(BoardPhase::OpeningDoor, 0.0);
+                // On the step: the door is reached, opened and stepped
+                // through from HERE -- there is no stepping back off a step.
+                if b.step_m > 0.0 {
+                    b.ground_y += b.step_m;
+                    b.take_local = step_stance(&b, side);
+                    b.back_local = b.take_local;
+                }
             }
             GroundStep::Stand {
                 at: p,
@@ -1015,6 +1069,70 @@ pub fn step_ground(
     };
     cm.runtime.boarding = b;
     out
+}
+
+/// **Where a body stands on the cab step**, chassis frame `(x, z)`: over the
+/// step, [`board::STEP_STANCE_OUT_M`] out of the flank on `side`.
+fn step_stance(b: &BoardingState, side: f64) -> Vec3d {
+    let out = board::STEP_STANCE_OUT_M - board::STEP_OUT_M;
+    Vec3d::new(b.step_local.x + side * out, 0.0, b.step_local.z)
+}
+
+/// **The cab step's two foot sockets**, world -- ankle height over the step's
+/// top, `[aft, fore]` -- or `None` when this boarding climbs no step or the
+/// body is not on it (yet). `ground_y` is the ground the body stood on
+/// before the climb.
+pub fn step_feet_world(car: &CarFrame, b: &BoardingState) -> Option<[DVec3; 2]> {
+    if b.step_m <= 0.0 {
+        return None;
+    }
+    let top = match b.phase {
+        // During the climb `ground_y` is still the road's.
+        BoardPhase::Unlocking => b.ground_y + b.step_m,
+        // From `OpeningDoor` on it IS the step's top.
+        BoardPhase::OpeningDoor => b.ground_y,
+        _ => return None,
+    };
+    let f = board::step_feet_local(b.step_local);
+    let at = |l: Vec3d| {
+        let w = car.world(l);
+        DVec3::new(w.x, top + ANKLE_ABOVE_GROUND_M, w.z)
+    };
+    Some([at(f[0]), at(f[1])])
+}
+
+/// **The knees of a body on the step bend toward the cab** -- a pole ahead of
+/// and above each foot, which also solves the leg without the rig's knee
+/// limit (`FootGoal::unlimited`, the VEH3d measurement: the template's knee
+/// hinge permits only hyperextension, and a limited standing goal missed by
+/// 0.29 m on the step).
+fn step_poles(car: &CarFrame, b: &BoardingState, feet: [DVec3; 2]) -> [Option<DVec3>; 2] {
+    let side = VehicleSockets::side_sign(b.seat_index());
+    let inward = car.dir(DVec3::new(-side, 0.0, 0.0));
+    let up = car.dir(DVec3::Y);
+    feet.map(|f| Some(f + up * STEP_KNEE_POLE_UP_M + inward * STEP_KNEE_POLE_IN_M))
+}
+
+/// How far above a foot on the step its knee's pole is, metres.
+pub const STEP_KNEE_POLE_UP_M: f64 = 0.45;
+
+/// How far toward the cab a foot on the step has its knee's pole, metres.
+pub const STEP_KNEE_POLE_IN_M: f64 = 0.35;
+
+/// How far through the climb this body is, `[0, 1]` -- `0` before it and for
+/// a boarding with no step, `1` once on the step.
+pub fn climb_alpha(b: &BoardingState) -> f64 {
+    if b.step_m <= 0.0 {
+        return 0.0;
+    }
+    match b.phase {
+        BoardPhase::Unlocking => {
+            let walk_s = (b.phase_len_s - board::CLIMB_S).max(1e-6);
+            ((b.time_s - walk_s) / board::CLIMB_S).clamp(0.0, 1.0)
+        }
+        BoardPhase::OpeningDoor => 1.0,
+        _ => 0.0,
+    }
 }
 
 /// The boarding phase of a body IN a given car, or `None` when it is not in
@@ -1233,9 +1351,17 @@ pub fn follow_boarding(bridge: &mut PhysicsBridge3D, world: &mut EcsWorld) -> Bo
                         }
                     }
                 }
-                // The dip needs the feet held on the ground, or the whole
-                // leg chain goes down with the pelvis.
-                if cm.runtime.pelvis_offset.y < -1e-4 {
+                // ON THE STEP the feet are the step's, dip or no dip.
+                if let Some(f) = (phase == BoardPhase::OpeningDoor)
+                    .then(|| step_feet_world(&car, &b))
+                    .flatten()
+                {
+                    feet = [Some(f[0]), Some(f[1])];
+                    poles = step_poles(&car, &b, f);
+                    feet_w = 1.0;
+                } else if cm.runtime.pelvis_offset.y < -1e-4 {
+                    // The dip needs the feet held on the ground, or the whole
+                    // leg chain goes down with the pelvis.
                     if let Some(f) = inf_ecs::anim_bridge::feet_of(world, guid) {
                         for (i, s) in f.iter().enumerate() {
                             if let Some(s) = s {
@@ -1248,6 +1374,14 @@ pub fn follow_boarding(bridge: &mut PhysicsBridge3D, world: &mut EcsWorld) -> Bo
                         }
                         feet_w = 1.0;
                     }
+                }
+            }
+            // The climb's feet: onto the step as the body rises (beat one).
+            BoardPhase::Unlocking if climb_alpha(&b) > 0.0 => {
+                if let Some(f) = step_feet_world(&car, &b) {
+                    feet = [Some(f[0]), Some(f[1])];
+                    poles = step_poles(&car, &b, f);
+                    feet_w = climb_alpha(&b);
                 }
             }
             BoardPhase::EnteringIK
@@ -1583,7 +1717,8 @@ pub fn board_sockets(
     let right_is_plus_x = lr_shoulders
         .map(|(l, r)| car.local(r).x - car.local(l).x >= 0.0)
         .unwrap_or(true);
-    let feet = matches!(phase, BoardPhase::Seated | BoardPhase::Driving).then(|| {
+    let step = step_feet_world(&car, &b).filter(|_| phase == BoardPhase::OpeningDoor);
+    let feet = step.or_else(|| matches!(phase, BoardPhase::Seated | BoardPhase::Driving).then(|| {
         if seat.drives() {
             let (throttle, brake) = pedal_inputs(cm);
             let (mut tp, mut bp) = board::pedal_faces(&car.sockets, throttle, brake);
@@ -1597,7 +1732,7 @@ pub fn board_sockets(
             let f = board::floor_feet(&car.sockets, seat, car.floor_y());
             [car.world(f[0]), car.world(f[1])]
         }
-    });
+    }));
     Some(BoardSockets {
         phase,
         hand_weight: b.hand_weight,

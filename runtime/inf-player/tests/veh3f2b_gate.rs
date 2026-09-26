@@ -1568,3 +1568,245 @@ fn the_calibration_sedans_art_crumples_through_the_same_door() {
     );
     assert!(d.moved > 0 && d.max_m > 0.1);
 }
+
+// ── the cab step, and the residuals on the shipped host ─────────────────────
+
+/// One boarding course on the shipped host, measured: the posed joints
+/// against the live sockets per phase, and the climb's trace.
+#[derive(Default, Debug)]
+struct Course {
+    step_m: f64,
+    /// `(t, phase, capsule-centre y above the start, feet-on-step residual)`
+    /// while the machine is on the ground.
+    trace: Vec<(f64, BoardPhase, f64, Option<f64>)>,
+    outer: Vec<f64>,
+    step_feet: Vec<f64>,
+    grips: Vec<f64>,
+    pedals: Vec<f64>,
+    driving_at: Option<f64>,
+}
+
+fn board_course(row: &str) -> Course {
+    use inf_ecs::movement::actions::{INTERACT, MOVE_X, MOVE_Y};
+    use inf_player::runtime_sim::RuntimeInput;
+    let def = catalogue_def(row);
+    let mut sim = rigged_sim(row, hero_at(&def));
+    let y0 = {
+        let e = sim.world().entity_of(HERO).unwrap();
+        sim.world().world().get::<Transform>(e).unwrap().translation.y
+    };
+    let mut c = Course::default();
+    let mut driving_step: Option<u32> = None;
+    for i in 0..1_500u32 {
+        let mut input = RuntimeInput::default();
+        if i == 60 {
+            input = input.press(INTERACT);
+        }
+        if let Some(d) = driving_step {
+            match i - d {
+                30..=120 => input = input.axis_at(MOVE_X, 1.0),
+                121..=210 => input = input.axis_at(MOVE_X, -1.0),
+                240..=300 => input = input.axis_at(MOVE_Y, 1.0),
+                301 => break,
+                _ => {}
+            }
+        }
+        sim.step_once(input);
+        let b = boarding(&sim);
+        let t = i as f64 / 60.0;
+        if b.phase != BoardPhase::Idle && b.step_m > 0.0 {
+            c.step_m = b.step_m;
+        }
+        let r = sim.boarding_residuals(HERO);
+        if matches!(
+            b.phase,
+            BoardPhase::Unlocking | BoardPhase::OpeningDoor | BoardPhase::EnteringIK
+        ) {
+            let e = sim.world().entity_of(HERO).unwrap();
+            let y = sim.world().world().get::<Transform>(e).unwrap().translation.y;
+            let on_step = r
+                .as_ref()
+                .filter(|r| r.sockets.phase == BoardPhase::OpeningDoor)
+                .and_then(|r| r.feet_m);
+            c.trace.push((t, b.phase, y - y0, on_step));
+        }
+        if b.phase == BoardPhase::Driving && driving_step.is_none() {
+            driving_step = Some(i);
+            c.driving_at = Some(t);
+        }
+        let Some(r) = r else {
+            continue;
+        };
+        match r.sockets.phase {
+            BoardPhase::OpeningDoor => {
+                if r.sockets.handle_weight >= 0.999 {
+                    c.outer.extend(r.handle_m);
+                }
+                c.step_feet.extend(r.feet_m);
+            }
+            BoardPhase::Driving => {
+                if r.sockets.hand_weight >= 0.999 {
+                    c.grips.extend(r.grips_m);
+                }
+                c.pedals.extend(r.feet_m);
+            }
+            _ => {}
+        }
+    }
+    c
+}
+
+/// **THE CAB STEP: foot on the step, then the seat -- two beats, traced; and
+/// the posed joints on their sockets** (the VEH3f audit's carried cab step and
+/// the brief's residual table), on the SHIPPED host with the mannequin rig.
+///
+/// READS: the boarding machine's `step_m` (decided by `begin` from the live
+/// floor against the ground under the stance), the capsule centre's height
+/// through the ground phases (the trace), and `RuntimeSim::boarding_residuals`
+/// -- the POSED hand and foot joints against the live sockets: the outer
+/// handle at weight 1, both feet on the step while the door opens, the rim
+/// grips at weight 1 through a full lock each way, the pedals under throttle.
+///
+/// The claims: the shell sedan climbs NO step; the bus, the 6x6 and the semi
+/// each climb one (beat one: the centre rises by the step's height before the
+/// door phase; beat two: the seat warp from the step); on every row the outer
+/// handle, the step feet, the grips and the pedals are each within 2 cm at
+/// weight 1 and each measured (non-empty). Pre-wave: the semi's outer handle
+/// 345 mm off (the VEH3f audit's row) and no step -- FAILS.
+#[test]
+fn the_cab_step_climb_and_the_residuals_on_the_shipped_host() {
+    let mut bad = Vec::new();
+    println!("| row | step | climb (rise before the door) | outer handle | feet on step | rim | pedals | driving at |");
+    println!("|---|---|---|---|---|---|---|---|");
+    for row in ["sedan", "brute_bus", "caracara_6x6", "jobuilt_hauler"] {
+        let c = board_course(row);
+        let worst = |v: &[f64]| v.iter().copied().fold(0.0f64, f64::max) * 1000.0;
+        let cell = |v: &[f64]| {
+            if v.is_empty() {
+                "none".to_string()
+            } else {
+                format!("{:.2} mm ({})", worst(v), v.len())
+            }
+        };
+        let door_at = c
+            .trace
+            .iter()
+            .find(|x| x.1 == BoardPhase::OpeningDoor)
+            .map(|x| x.2);
+        let walk_top = c
+            .trace
+            .iter()
+            .filter(|x| x.1 == BoardPhase::Unlocking)
+            .map(|x| x.2)
+            .fold(f64::NEG_INFINITY, f64::max);
+        println!(
+            "| {row} | {:.3} m | {} | {} | {} | {} | {} | {} |",
+            c.step_m,
+            door_at
+                .map(|d| format!("{d:+.3} m (unlocking peak {walk_top:+.3})"))
+                .unwrap_or_else(|| "never reached the door".into()),
+            cell(&c.outer),
+            cell(&c.step_feet),
+            cell(&c.grips),
+            cell(&c.pedals),
+            c.driving_at
+                .map(|t| format!("{t:.2} s"))
+                .unwrap_or_else(|| "NEVER".into())
+        );
+        if row == "sedan" {
+            if c.step_m != 0.0 {
+                bad.push(format!("the saloon climbed a {:.3} m step", c.step_m));
+            }
+        } else {
+            if c.step_m <= 0.2 {
+                bad.push(format!("{row}: no cab step ({:.3} m)", c.step_m));
+            }
+            match door_at {
+                Some(d) if (d - c.step_m).abs() < 0.05 => {}
+                other => bad.push(format!(
+                    "{row}: the body was not on the step when the door phase began ({other:?} against {:.3})",
+                    c.step_m
+                )),
+            }
+            // The trace: beat one (the rise, inside `Unlocking`), the door
+            // phase ON the step, beat two (the warp leaves FROM the step).
+            let rise0 = c
+                .trace
+                .iter()
+                .find(|x| x.1 == BoardPhase::Unlocking && x.2 > 0.05 + 0.03);
+            let door0 = c.trace.iter().find(|x| x.1 == BoardPhase::OpeningDoor);
+            let warp0 = c.trace.iter().find(|x| x.1 == BoardPhase::EnteringIK);
+            println!(
+                "    {row} trace: beat one starts {:?}; the door phase at {:?}; beat two (the warp) leaves at {:?}",
+                rise0.map(|x| (x.0, x.2)),
+                door0.map(|x| (x.0, x.2)),
+                warp0.map(|x| (x.0, x.2))
+            );
+            match (rise0, door0, warp0) {
+                (Some(r), Some(d), Some(w)) if r.0 < d.0 && d.0 < w.0 => {
+                    if w.2 < c.step_m - 0.05 {
+                        bad.push(format!("{row}: the warp left from {:.3}, below the step", w.2));
+                    }
+                }
+                other => bad.push(format!("{row}: the two beats are out of order: {other:?}")),
+            }
+            if c.step_feet.is_empty() {
+                bad.push(format!("{row}: the feet on the step were never measured"));
+            } else if worst(&c.step_feet) > 20.0 {
+                bad.push(format!("{row}: a foot {:.1} mm off the step", worst(&c.step_feet)));
+            }
+        }
+        if c.driving_at.is_none() {
+            bad.push(format!("{row}: never drove"));
+        }
+        for (what, v) in [("outer handle", &c.outer), ("rim", &c.grips), ("pedals", &c.pedals)] {
+            if v.is_empty() {
+                bad.push(format!("{row}: the {what} was never measured"));
+            } else if worst(v) > 20.0 {
+                bad.push(format!("{row}: the {what} {:.1} mm off", worst(v)));
+            }
+        }
+    }
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+}
+
+/// **PROBE (ignored): how high each row's driver sits** -- the H-point, the
+/// rule floor and the front door's sill above the slab, world metres, after
+/// the car settles. The measurement the cab step's threshold was set from.
+#[test]
+#[ignore]
+fn probe_the_seat_heights() {
+    for row in [
+        "sedan", "sports", "suv", "truck", "cruiser", "van", "ambulance", "vapid_contender",
+        "brute_bus", "caracara_6x6", "benefactor_dubsta_6x6", "jobuilt_hauler", "mtl_packer",
+    ] {
+        let def = catalogue_def(row);
+        let mut sim = rigged_sim(row, hero_at(&def) + DVec3::new(20.0, 0.0, 0.0));
+        for _ in 0..90 {
+            sim.step_once(Default::default());
+        }
+        let w = sim.world();
+        let e = w.entity_of(CHASSIS).unwrap();
+        let c = *w.world().get::<Collider3D>(e).unwrap();
+        let t = *w.world().get::<Transform>(e).unwrap();
+        let half = inf_ecs::vehicle::chassis_half_extents(&c);
+        let parts = inf_ecs::boarding::part_geoms(w, CHASSIS);
+        let s = inf_ecs::boarding::sockets_of(half, c.offset, &parts);
+        let to_w = |l: Vec3d| t.translation.to_dvec3() + t.quat() * l.to_dvec3();
+        let seat = to_w(s.seat_r).y;
+        let floor = to_w(Vec3d::new(
+            s.seat_r.x,
+            c.offset.y + inf_ecs::boarding::SEAT_FLOOR_FRAC_Y * half.y + s.floor_lift_m,
+            s.seat_r.z,
+        ))
+        .y;
+        let sill = inf_ecs::boarding::front_door(&parts, 1.0).map(|d| {
+            let (dc, dh) = inf_ecs::boarding::door_metres(half, c.offset, d);
+            to_w(Vec3d::new(dc.x, dc.y - dh.y, dc.z)).y
+        });
+        println!(
+            "{row:<24} H-point {seat:.3}  rule floor {floor:.3}  door sill {}",
+            sill.map(|v| format!("{v:.3}")).unwrap_or_else(|| "none".into())
+        );
+    }
+}
