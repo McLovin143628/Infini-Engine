@@ -1484,7 +1484,11 @@ fn the_composed_frame_stays_inside_the_frame_budget() {
 /// P20.3 also **re-blessed the three P20.1 water scenes**, deliberately: shoreline
 /// wetness is default-on and all three carry terrain, so their ground at and below
 /// the water level is now darker. Every other image is byte-identical.
-const GOLDENS: [&str; 66] = [
+///
+/// Wave VEH3f.2b ADDED the five `shell_*` frames (66 -> 71, nothing
+/// re-blessed); its killed battery never reached this arm, and
+/// `audit(VEH3f.2b)` listed them.
+const GOLDENS: [&str; 71] = [
     "2d_lit.png",
     "aerial_fog.png",
     "billboards.png",
@@ -1536,6 +1540,11 @@ const GOLDENS: [&str; 66] = [
     "scatter.png",
     "scatter_impostors.png",
     "selection_gizmo.png",
+    "shell_coupe.png",
+    "shell_cruiser.png",
+    "shell_pickup.png",
+    "shell_sedan.png",
+    "shell_suv.png",
     // Wave CHAR1a.2: the masked-skin golden — eight hair cards alternating
     // alpha against a 0.5 cutoff, four discarded, which is the picture that
     // proves `SkinnedInstance::blend` reaches the fragment stage.
@@ -1601,7 +1610,7 @@ const GOLDENS: [&str; 66] = [
     "weather_storm_noon.png",
 ];
 
-/// **GATE (f).** The golden *inventory* is exactly these 60 PNGs.
+/// **GATE (f).** The golden *inventory* is exactly these PNGs (71 at VEH3f.2b).
 ///
 /// Nothing is re-blessed here, and no pixel is compared — that stays in
 /// `inf-render`'s own harness, which is where the renderer and the images live.

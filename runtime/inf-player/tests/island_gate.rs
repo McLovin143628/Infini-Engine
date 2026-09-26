@@ -1494,8 +1494,14 @@ fn both_hosts_resolve_the_same_dag_for_every_mesh_the_island_draws() {
     // authored rows now hang on their panels (`vehicle_bodies::hero_meshes`,
     // the committed set) -- seven of them on this fixture, every one a mesh the
     // two hosts must resolve the same DAG for.
+    //
+    // Wave VEH3f.2b: and the DCC car SHELLS the hero rows now wear
+    // (`vehicle_shells::shell_meshes`) -- 51 more vehicle meshes on this
+    // fixture, none of them a road layer (`audit(VEH3f.2b)`: the wave's
+    // killed battery never reached this arm, which read 55 non-vehicle refs).
     let hero: std::collections::BTreeSet<Uuid> = inf_editor_core::vehicle_bodies::hero_meshes()
         .into_iter()
+        .chain(inf_editor_core::vehicle_shells::shell_meshes())
         .map(|m| m.guid)
         .collect();
     let heroes = refs.iter().filter(|g| hero.contains(g)).count();
@@ -1693,13 +1699,20 @@ fn both_hosts_resolve_the_same_dag_for_every_mesh_the_island_draws() {
             else {
                 continue;
             };
-            if sim.sim.world().entity_of(guid).is_some() && !out.contains(&mesh) {
+            // One instance per resident ENTITY, not per distinct mesh: a
+            // VEH3f.2b shell hangs one tyre and one rim mesh on all four of its
+            // wheels (`audit(VEH3f.2b)`), where every earlier ref was unique.
+            if sim.sim.world().entity_of(guid).is_some() {
                 out.push(mesh);
             }
         }
         out
     };
-    println!("RESIDENT MESH REFS: {} of {}", resident.len(), refs.len());
+    println!(
+        "RESIDENT MESH-REF ENTITIES: {} ({} distinct meshes in the level)",
+        resident.len(),
+        refs.len()
+    );
     assert!(
         resident.len() > 4,
         "no hero panel is resident, so the vehicle half is empty"

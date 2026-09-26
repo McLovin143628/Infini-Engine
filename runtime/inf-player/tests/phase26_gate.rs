@@ -2419,7 +2419,11 @@ fn the_golden_set_is_pinned_and_additive() {
     // Wave VEH3f added `hero_sedan.png` and `hero_pickup.png` -- the committed
     // DCC hero bodies drawn from their own `.inf_mesh` bytes. 64 -> 66; nothing
     // was re-blessed.
-    const GOLDENS: usize = 66;
+    // Wave VEH3f.2b added `shell_sedan`, `shell_coupe`, `shell_suv`,
+    // `shell_pickup` and `shell_cruiser` -- the five DCC car shells drawn whole
+    // at their island rows' sizes. 66 -> 71; nothing was re-blessed (the wave
+    // moved the count without this constant: `audit(VEH3f.2b)`).
+    const GOLDENS: usize = 71;
     /// `xxh3_128` over `"{file_name} {hex}\n"` for every golden, name-sorted —
     /// the CONTENT pin (P26.5 audit). Committed PNGs are `-text` in
     /// `.gitattributes`, so these bytes are the same on every checkout.
@@ -2678,7 +2682,12 @@ fn the_golden_set_is_pinned_and_additive() {
     // existing frame moved -- the two skinned goldens are sha256-identical to
     // `origin/main` and the whole 124-scene suite runs green under
     // `INF_GOLDEN_STRICT=1`, which is what says this digest moved by an ADDITION.
-    const GOLDEN_SET_DIGEST: &str = "03409fcf94ae5d2114fe2300f76e9aad";
+    // Wave VEH3f.2b: the five `shell_*` frames joined (66 -> 71) and no
+    // existing frame moved -- `git diff --name-status a56684a1` over the
+    // goldens lists five `A` and nothing else. The wave moved the set without
+    // moving this pin (its battery never reached this arm); `audit(VEH3f.2b)`
+    // moved it BY THE ADDITION, from `03409fcf94ae5d2114fe2300f76e9aad`.
+    const GOLDEN_SET_DIGEST: &str = "10545eeb8d0c55d7c8459488e81f0bbf";
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
