@@ -1360,10 +1360,16 @@ fn a_flat_tyre_pulls() {
     // then has a whole tyre's lateral authority to steer the car with. Without a
     // ceiling that mutation leaves this arm green — it pulls, just wrongly — and
     // half of what a flat costs would be deletable in silence.
+    //
+    // **Re-aimed from the drift to the YAW, with cause** (`audit(VEH3f.2b)`):
+    // the island saloon now rides 0.08 m deeper in its shell's arches, and on
+    // that ride the model's flat drifts **8.542 m** (1.46 deg) where
+    // `FLAT_MU_FRAC` forced to 1.0 drifts **8.744 m** (1.83 deg) -- the drift
+    // no longer separates the two (0.2 m), the yaw still does (25 %). The
+    // ceiling sits between the two yaws.
     assert!(
-        drift_flat.abs() < 8.5,
-        "a flat drifted {drift_flat:.3} m in four seconds — more than a deflated tyre's own \
-         grip can steer with, so `FLAT_MU_FRAC` is not being applied"
+        yaw_flat < 1.65,
+        "a flat yawed {yaw_flat:.3} deg (drift {drift_flat:.3} m): more than a deflated tyre's own grip steers, so `FLAT_MU_FRAC` is not applied"
     );
     assert!(
         yaw_flat > yaw_ok * 1.5 + 0.2,
