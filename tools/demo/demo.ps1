@@ -133,6 +133,12 @@ param(
     # `-LookAtSettleS` to load. Empty is off.
     [string]$EditorLookAt = "",
     [int]$LookAtSettleS = 25,
+    # **THE EDITOR SELECTS A NODE** (`audit(VEH3f.2b)`), `rig;child`: after
+    # the look-at frame, `select.mjs` selects the child named like `child` of
+    # the first rig named like `rig` (the Outliner's own `scene_select` door),
+    # and `01f-editor-selected.png` is taken with its Details grid showing.
+    # Empty is off.
+    [string]$EditorSelect = "",
     # **WRITE THE SESSION'S AUDIO TO A WAV** (wave VEH3e), `INF_RENDER_AUDIO`:
     # the player's mixer renders to this file (through the same kira mixer the
     # device path uses) instead of to a device. Empty is off.
@@ -683,6 +689,17 @@ if ($EditorLookAt -ne "" -and (Get-Command node -ErrorAction Ignore)) {
     } else {
         Say "  -EditorLookAt '$EditorLookAt' is not 'ex,ey,ez;tx,ty,tz'"
     }
+}
+if ($EditorSelect -ne "" -and (Get-Command node -ErrorAction Ignore)) {
+    $sel = $EditorSelect.Split(";")
+    $child = if ($sel.Count -gt 1) { $sel[1] } else { "shell_body" }
+    Say "editor selection: the '$child' of the rig named like '$($sel[0])'"
+    & node (Join-Path $PSScriptRoot "select.mjs") $Port $sel[0] $child 2>&1 |
+        ForEach-Object { Say "  cdp: $_" }
+    if ($LASTEXITCODE -ne 0) { Say "  select.mjs exit $LASTEXITCODE" }
+    Start-Sleep -Seconds 4
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "01f-editor-selected.png") -WindowTitle "Infini" -Foreground |
+        ForEach-Object { Say $_ }
 }
 
 # ── 3. press Play ────────────────────────────────────────────────────────────
