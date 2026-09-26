@@ -2549,6 +2549,11 @@ pub struct Gallery {
     /// **The car the gallery camera frames** (wave VEH3f.2b): the one on
     /// show, whichever door put it there.
     focus: Option<uuid::Uuid>,
+    /// **The level car the gallery MOVED onto the stand, and where it was**
+    /// (wave VEH3f.2b): put back before the next one is placed. Without it
+    /// every hero car landed on the one spot and the five piled up on each
+    /// other (the first gallery run's frames: a pickup on its roof).
+    moved: Option<(uuid::Uuid, glam::DVec3, glam::DQuat)>,
     armed: bool,
 }
 
@@ -2626,6 +2631,7 @@ impl Gallery {
             entries,
             next: 0,
             shown: None,
+            moved: None,
             focus: None,
             armed: true,
         }
@@ -2678,6 +2684,9 @@ impl Gallery {
         self.next += 1;
         if let Some((g, def)) = self.shown.take() {
             inf_ecs::vehicle::despawn_rig(sim.world_mut(), g, &def);
+        }
+        if let Some((g, at, rot)) = self.moved.take() {
+            sim.place_vehicle(g, at, rot);
         }
         let world = sim.world();
         let hero = inf_ecs::movement::camera_subject(world)?;
@@ -2744,6 +2753,12 @@ impl Gallery {
                 .unwrap_or("?")
                 .to_string();
             p.y = ground + half.y + 0.45;
+            if let Some(t) = w
+                .entity_of(car)
+                .and_then(|e| w.world().get::<inf_ecs::components::Transform>(e))
+            {
+                self.moved = Some((car, t.translation.to_dvec3(), t.quat()));
+            }
             let placed = sim.place_vehicle(car, p, glam::DQuat::from_rotation_y(yaw.to_radians()));
             self.focus = Some(car);
             return Some(format!(
