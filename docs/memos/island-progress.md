@@ -41560,3 +41560,77 @@ rows', so the island saloon shows ~20 cm of arch gap (re-seat the rows,
 player draws it; ~0.5 day); `traffic_3d`'s hand-off arm re-aimed at a
 mid-leg car (the arrival snap of 4.47 m, pre-existing); the plain side
 outline under 25 %.
+
+
+## WAVE VEH3f.2b — THE AUDIT (2026-09-26)
+
+Range `bc4506f8..` over the wave's twenty-two commits; report
+`campaign-briefs/veh3f2b-audit-report.md`; frames and traces
+`AUDIT-VEH3f2b-FINAL/`. Scene schema unmoved (v28, `EXPECTED_LEVELS` 24,
+payload 14); goldens 71 (the wave's five ADDs, none re-blessed; the
+golden-set pins in four gates moved BY THE ADDITION); `Cargo.lock`
+unchanged; no new dependency. The island `.inf_lvl` moved twice with cause
+(the saloon and the cruiser seated 0.08 m deeper; the roster lots off the
+settlement blocks), the fixture once (the saloon).
+
+### audit: the battery the wave never finished
+
+The first FULL run on the wave's own head (`bc4506f8`): 404 binaries, 7 835
+passed, **6 failed**, 29 ignored. None was in the wave's report. Five were
+golden-set pins and an island arm the wave's five new goldens and shell
+meshes moved without moving the pin (phase18, phase26, phase27, phase28,
+island_gate: the fixture's "non-vehicle" refs read 55, and the frame count
+compared instances to distinct meshes where a shell hangs one tyre and one
+rim on four wheels). The sixth was a REGRESSION: `veh2c_harbour_gate`'s
+launch travelled 10.0 m over its 800 beats (49.4 before the wave) --
+bisected to `468f9678`, whose standstill hold is every brake, and a hull's
+brake is its screw ASTERN: a boarding launch was driven backwards. A
+wheel-less craft now keeps the old hold. Clippy `-D warnings` (never run by
+the wave): five findings, all the wave's, fixed. The three "re-ruled" tests
+read: `vehicle_ground`'s control is a re-bless (the world changed: a bare
+step is now the handbrake); the two editor tests are re-blesses, one with a
+0.20 m slack for a shell's mirrors (a loosening with a stated cause).
+
+### audit: the shells, measured
+
+The side-outline bar the wave moved to 12 % is back to the brief's 25 % as
+a PRINTED verdict, and the arm asserts each shell's honest measured delta as
+a floor (saloon 16.2, coupe 13.5, SUV 16.8, pickup 27.6, cruiser 16.8: only
+the pickup meets 25 %). The reshape the ruling asked for was tried (raked
+screens, a fastback, lowered deck and roof, overhangs raised ~10 cm): 16.2 ->
+19.6 % at most; the imported Fab cars against their own rows' box families
+read 28.2-35.5 %, almost all of it their glassless window holes and missing
+doors -- a glazed real car sits close to the box family. The flank outline
+(the arches) holds 39.5-46.0 %. Arch DAYLIGHT is now measured (settled wheel
+centre straight up to the committed body): the saloon 0.196 -> 0.116 m and
+the cruiser 0.197 -> 0.117 m after sitting 0.08 m deeper (ground clearance
+0.228 -> 0.148 m, a saloon's); coupe 0.272, SUV 0.253, pickup 0.361 CARRIED
+(one body serves rows whose tyres sit 13-25 cm apart).
+
+### audit: the closures
+
+* **The box trailer's cause, named**: its chassis was in active contact with
+  20-odd cuboids 0.2 m thick and 2-3 m tall, fixed and kinematic -- the
+  walls and doors of a BUILDING. The roster lot walk had parked both
+  articulated rigs (and the Eastgate cutter) through settlement blocks. The
+  walk keeps a rig's length off every block; both rigs stand on 4 of 4
+  wheels, kingpin 0.000 m, hitch ~6e2 N.s (was ~1e7).
+* **Chocks**: a parked Dodo ran 5.402 m down a 3 deg slab; it now holds a
+  quarter of every wheel's brake (0.040 m) -- the full brake locked the gear
+  and slid it 0.8 m sideways on the apron.
+* The 14 orphaned VVP seat sidecars moved out of the island project: 689
+  derived sidecars, 0 disagree, 0 VVP rows at `may_ship = false`.
+* The editor frame with the shell SELECTED (`demo.ps1 -EditorSelect`):
+  `shell_body` of the Harbour City Car, Details `Mesh Asset shell_sedan_body`.
+
+### carried, by name
+
+The art-machine cab doors (~1 d a machine); the crumple in the editor's
+Simulate viewport (the builder lives in `inf-player::vmesh`, unreachable from
+`inf-viewport`; lift the key/id/displace door into `inf-vgeom` + a viewport
+cache + a cross-host arm, ~0.5 d); the arch daylight of the coupe, SUV and
+pickup (a second body per ride-height cluster, ~0.5 d); the plain side
+outline below 25 % on four shells (a measured ruling, not a price); the
+4.47 m traffic arrival snap (a leg whose window closed has no path to
+rephase onto, ~0.5 d); the cab-step frames show a backlit primitive semi (the
+climb is in `hero.csv`: +0.74 m at the handle and the door beats).
