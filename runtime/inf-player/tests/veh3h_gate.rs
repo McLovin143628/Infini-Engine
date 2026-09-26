@@ -773,6 +773,10 @@ fn the_tier_ladder_prices_a_car_per_rung() {
             "{rung}: the ladder put the cars on {:?}, not all on one rung",
             st.per_tier
         );
+        assert_eq!(
+            st.per_tier[2], 0,
+            "{rung}: a car reached the Far rung, which TRAFFIC_RADII makes unreachable"
+        );
         let rigs = sim.bridge3d().vehicle_guids().len();
         if tier == 0 {
             assert_eq!(rigs, 64, "the Full rung built {rigs} rigs");

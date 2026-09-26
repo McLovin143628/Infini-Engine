@@ -5456,6 +5456,17 @@ pub struct VehicleControls {
 }
 
 impl VehicleControls {
+    /// **Whether these controls COMMAND the vehicle** (the VEH3h audit): a
+    /// hand on it (`occupied`, which every intent-built control carries) or
+    /// any pedal, wheel or collective off neutral. The parking hold's own
+    /// write -- a handbrake, and an aircraft's chock brake -- is neither, so
+    /// a car nobody speaks to reads uncommanded; a harness that presses the
+    /// throttle without spelling `occupied` (the frame instrument's 64 cars)
+    /// reads commanded, which is what it is.
+    pub fn commands(&self) -> bool {
+        self.occupied || self.throttle != 0.0 || self.steer != 0.0 || self.vertical != 0.0
+    }
+
     /// **On a wing, the stick's fore-aft axis is the POWER LEVER and the WHEEL
     /// BRAKES**, whichever way the aeroplane is rolling (VEH3g audit).
     ///
@@ -5845,7 +5856,7 @@ pub trait Vehicle: Send + Sync + 'static {
     fn control(&mut self, controls: VehicleControls);
 
     /// **Whether anybody commanded this vehicle for the step about to be
-    /// solved** -- [`VehicleControls::occupied`] of the controls in force
+    /// solved** -- [`VehicleControls::commands`] of the controls in force
     /// (the VEH3h audit). The parking hold beyond the collider band reads it:
     /// a vehicle nobody speaks to is parked; a driver stopped at a light is
     /// not. A class that does not say is treated as commanded, so the hold
@@ -8793,7 +8804,7 @@ impl Vehicle for RaycastVehicle {
     }
 
     fn commanded(&self) -> bool {
-        self.controls.occupied
+        self.controls.commands()
     }
 
     fn tune(&mut self, name: &str, value: f64) -> bool {
@@ -10310,7 +10321,7 @@ impl Vehicle for HullVehicle {
     }
 
     fn commanded(&self) -> bool {
-        self.controls.occupied
+        self.controls.commands()
     }
 
     fn tune(&mut self, name: &str, value: f64) -> bool {
@@ -10940,7 +10951,7 @@ impl Vehicle for RotorVehicle {
     }
 
     fn commanded(&self) -> bool {
-        self.controls.occupied
+        self.controls.commands()
     }
 
     fn tune(&mut self, name: &str, value: f64) -> bool {
