@@ -224,8 +224,11 @@ struct Fixture {
     /// **What the frame does to the world before its fixed step** (wave VEH3h):
     /// the driving frame's 64 cars take their controls here, on every frame the
     /// harness steps, discarded pass included. `None` everywhere else.
-    before_step: Option<Box<dyn FnMut(&mut RuntimeSim)>>,
+    before_step: Option<BeforeStep>,
 }
+
+/// A frame's pre-step hook (wave VEH3h) -- see `Fixture::before_step`.
+type BeforeStep = Box<dyn FnMut(&mut RuntimeSim)>;
 
 fn open(pack: &Path) -> Fixture {
     let source = PackLevelSource::open(pack).expect("the pack opens");
