@@ -1718,21 +1718,23 @@ pub fn board_sockets(
         .map(|(l, r)| car.local(r).x - car.local(l).x >= 0.0)
         .unwrap_or(true);
     let step = step_feet_world(&car, &b).filter(|_| phase == BoardPhase::OpeningDoor);
-    let feet = step.or_else(|| matches!(phase, BoardPhase::Seated | BoardPhase::Driving).then(|| {
-        if seat.drives() {
-            let (throttle, brake) = pedal_inputs(cm);
-            let (mut tp, mut bp) = board::pedal_faces(&car.sockets, throttle, brake);
-            if !right_is_plus_x {
-                let sx = car.sockets.seat(seat).x;
-                tp = board::mirror_about_seat(tp, sx);
-                bp = board::mirror_about_seat(bp, sx);
+    let feet = step.or_else(|| {
+        matches!(phase, BoardPhase::Seated | BoardPhase::Driving).then(|| {
+            if seat.drives() {
+                let (throttle, brake) = pedal_inputs(cm);
+                let (mut tp, mut bp) = board::pedal_faces(&car.sockets, throttle, brake);
+                if !right_is_plus_x {
+                    let sx = car.sockets.seat(seat).x;
+                    tp = board::mirror_about_seat(tp, sx);
+                    bp = board::mirror_about_seat(bp, sx);
+                }
+                [car.world(bp), car.world(tp)]
+            } else {
+                let f = board::floor_feet(&car.sockets, seat, car.floor_y());
+                [car.world(f[0]), car.world(f[1])]
             }
-            [car.world(bp), car.world(tp)]
-        } else {
-            let f = board::floor_feet(&car.sockets, seat, car.floor_y());
-            [car.world(f[0]), car.world(f[1])]
-        }
-    }));
+        })
+    });
     Some(BoardSockets {
         phase,
         hand_weight: b.hand_weight,

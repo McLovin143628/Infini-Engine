@@ -12381,8 +12381,22 @@ const SHELL_ROWS: [ShellRow; 5] = [
     ("shell_sedan", [0.92, 0.62, 2.2], 0.34, 0.84, 1.42, -0.5083),
     ("shell_coupe", [0.94, 0.58, 2.25], 0.33, 0.82, 1.35, -0.4483),
     ("shell_suv", [1.02, 0.86, 2.45], 0.40, 0.90, 1.48, -0.5945),
-    ("shell_pickup", [1.02, 0.82, 2.65], 0.42, 0.92, 1.70, -0.6674),
-    ("shell_cruiser", [0.95, 0.66, 2.32], 0.36, 0.86, 1.50, -0.5276),
+    (
+        "shell_pickup",
+        [1.02, 0.82, 2.65],
+        0.42,
+        0.92,
+        1.70,
+        -0.6674,
+    ),
+    (
+        "shell_cruiser",
+        [0.95, 0.66, 2.32],
+        0.36,
+        0.86,
+        1.50,
+        -0.5276,
+    ),
 ];
 
 /// A shell's parts from the committed art table's TEXT: `(name, centre,
@@ -12645,9 +12659,15 @@ fn shell_views() {
         let h = row.1;
         let t = DVec3::new(0.0, h[1] * 0.9, 0.0);
         for (tag, eye) in [
-            ("front34", DVec3::new(h[0] * 3.4, h[1] * 2.2 + 0.7, h[2] * 1.6)),
+            (
+                "front34",
+                DVec3::new(h[0] * 3.4, h[1] * 2.2 + 0.7, h[2] * 1.6),
+            ),
             ("side", DVec3::new(h[2] * 2.6, h[1] + 0.2, 0.0)),
-            ("rear34", DVec3::new(-h[0] * 3.4, h[1] * 2.6 + 0.9, -h[2] * 1.6)),
+            (
+                "rear34",
+                DVec3::new(-h[0] * 3.4, h[1] * 2.6 + 0.9, -h[2] * 1.6),
+            ),
             ("top", DVec3::new(0.3, h[2] * 3.2, 0.01)),
         ] {
             let mut view = look_view(eye, t);

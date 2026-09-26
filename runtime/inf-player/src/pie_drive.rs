@@ -2650,10 +2650,15 @@ impl Gallery {
             .unwrap_or(glam::DVec3::new(1.0, 0.7, 2.3));
         let at = t.translation();
         // The affine's linear part carries no scale on a chassis.
-        let fwd = t.0.transform_vector3(glam::DVec3::Z).normalize_or(glam::DVec3::Z);
-        let right = t.0.transform_vector3(glam::DVec3::X).normalize_or(glam::DVec3::X);
+        let fwd =
+            t.0.transform_vector3(glam::DVec3::Z)
+                .normalize_or(glam::DVec3::Z);
+        let right =
+            t.0.transform_vector3(glam::DVec3::X)
+                .normalize_or(glam::DVec3::X);
         let d = (2.0 * half.z).max(4.0) * 1.25;
-        let eye = at + (fwd * 0.74 + right * 0.67).normalize() * d
+        let eye = at
+            + (fwd * 0.74 + right * 0.67).normalize() * d
             + glam::DVec3::Y * (half.y * 1.6 + 0.5);
         Some((eye, at + glam::DVec3::Y * (0.15 * half.y)))
     }

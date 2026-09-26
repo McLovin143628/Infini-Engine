@@ -1117,7 +1117,9 @@ fn the_hero_bodies_hang_on_their_rows_and_are_committed() {
         );
         let mut def = *row;
         def.art = None;
-        def.body_mesh = Some(Uuid::from_u128(0x5645_4833_4845_524f_8000_0000_0000_0000 | set));
+        def.body_mesh = Some(Uuid::from_u128(
+            0x5645_4833_4845_524f_8000_0000_0000_0000 | set,
+        ));
         let def = &def;
         let nodes = inf_ecs::vehicle::rig_nodes(
             Uuid::from_u128(9),

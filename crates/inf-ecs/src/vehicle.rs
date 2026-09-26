@@ -3854,7 +3854,11 @@ pub fn rig_nodes_at(
         // chassis half-extents' scale, exactly as a family part's unit box
         // does, under its own name -- and a livery can paint it.
         let shell = key.shell();
-        let name = if shell { SHELL_BODY_PART } else { ART_BODY_PART };
+        let name = if shell {
+            SHELL_BODY_PART
+        } else {
+            ART_BODY_PART
+        };
         let body_paint = spawn
             .livery
             .filter(|_| shell)

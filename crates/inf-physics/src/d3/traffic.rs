@@ -584,8 +584,7 @@ pub(crate) fn obstacles_of(world: &EcsWorld) -> Vec<Obstacle> {
         let az = t.0.transform_vector3(DVec3::Z).normalize_or(DVec3::Z);
         let (half_x, half_z, radius) = match collider {
             Some(c)
-                if !character
-                    && c.shape_kind == inf_ecs::components::ColliderShape3DKind::Box =>
+                if !character && c.shape_kind == inf_ecs::components::ColliderShape3DKind::Box =>
             {
                 let h = inf_ecs::vehicle::chassis_half_extents(c);
                 (h.x.abs(), h.z.abs(), 0.0)
@@ -664,7 +663,10 @@ pub const NEAR_CLEAR_M: f64 = 0.12;
 /// Do two plan rectangles overlap? Each `(centre, unit x axis, unit z axis,
 /// half x, half z)` on the ground plane -- the separating-axis test over the
 /// four edge normals.
-fn boxes_overlap_xz(a: (DVec3, DVec3, DVec3, f64, f64), b: (DVec3, DVec3, DVec3, f64, f64)) -> bool {
+fn boxes_overlap_xz(
+    a: (DVec3, DVec3, DVec3, f64, f64),
+    b: (DVec3, DVec3, DVec3, f64, f64),
+) -> bool {
     let flat = |v: DVec3| DVec3::new(v.x, 0.0, v.z);
     let d = flat(b.0 - a.0);
     for axis in [flat(a.1), flat(a.2), flat(b.1), flat(b.2)] {

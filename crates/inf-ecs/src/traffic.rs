@@ -2168,11 +2168,7 @@ fn plan_batch(world: &mut EcsWorld) -> usize {
                     let d = *p - *q;
                     (d.x * d.x + d.z * d.z).sqrt() < 0.5
                 };
-                near(&home)
-                    || !pop
-                        .records
-                        .iter()
-                        .any(|(g, r)| *g != guid && near(&r.home))
+                near(&home) || !pop.records.iter().any(|(g, r)| *g != guid && near(&r.home))
             })
             .collect();
         // **Which kind of day**, from the car's own seed and nothing else — so a
@@ -3037,9 +3033,7 @@ mod tests {
         // …and the arithmetic is the stopping distance, not a curve somebody
         // liked: at 25 m of gap the clear road is 25 less the standing gap
         // (23.5 m since the gap became bumper to bumper, wave VEH3f.2b).
-        assert!(
-            (mid - (2.0 * COMFORT_DECEL_MPS2 * (25.0 - STANDING_GAP_M)).sqrt()).abs() < 1e-12
-        );
+        assert!((mid - (2.0 * COMFORT_DECEL_MPS2 * (25.0 - STANDING_GAP_M)).sqrt()).abs() < 1e-12);
     }
 
     /// A car that has run out of lane stops at the end of it rather than

@@ -699,9 +699,8 @@ fn step_one(
     //    (`veh3g_gate::the_islands_dodo_boards_where_the_flight_leg_puts_it`).
     //    A parked aircraft keeps the rolling it always had (CARRIED: chocks).
     if let Some(v) = bridge.vehicle_mut(chassis) {
-        let hold = !hitched
-            && v.flight().is_none()
-            && forward_mps.abs() < inf_ecs::vehicle::PARK_HOLD_MPS;
+        let hold =
+            !hitched && v.flight().is_none() && forward_mps.abs() < inf_ecs::vehicle::PARK_HOLD_MPS;
         v.control(inf_ecs::vehicle::VehicleControls {
             handbrake: hold,
             ..inf_ecs::vehicle::VehicleControls::default()

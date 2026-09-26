@@ -1828,9 +1828,13 @@ fn sweep_licences(
                 .and_then(|t| t.get(LICENCE_PACK_KEY))
                 .and_then(|v| v.as_str())
                 == Some(pack.as_str());
-            let current = row.and_then(|t| t.get(LICENCE_KEY)).and_then(|v| v.as_str())
+            let current = row
+                .and_then(|t| t.get(LICENCE_KEY))
+                .and_then(|v| v.as_str())
                 == Some(licence.as_str())
-                && row.and_then(|t| t.get(LICENCE_SHIP_KEY)).and_then(|v| v.as_bool())
+                && row
+                    .and_then(|t| t.get(LICENCE_SHIP_KEY))
+                    .and_then(|v| v.as_bool())
                     == Some(ship);
             if !(exact && same_pack && !current) {
                 continue;

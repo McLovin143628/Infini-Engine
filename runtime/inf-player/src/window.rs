@@ -555,7 +555,10 @@ impl PlayerApp {
             // The GALLERY camera (wave VEH3f.2b): while a car is on show, its
             // three-quarter front, close -- the follow camera sits behind the
             // hero and framed every gallery car small and far.
-            if let Some((eye, at)) = self.gallery.framing(&self.sim).filter(|_| self.pie.is_some())
+            if let Some((eye, at)) = self
+                .gallery
+                .framing(&self.sim)
+                .filter(|_| self.pie.is_some())
             {
                 let look = (at - eye).normalize_or(forward).as_vec3();
                 let side = look.cross(Vec3::Y).normalize_or(Vec3::X);

@@ -36,8 +36,8 @@ use uuid::Uuid;
 
 use inf_ecs::bodywork::{
     damage_mut, damage_of, part_pose, DamageLimits, Debris, PartLatch, PartState, VehicleDamage,
-    GLASS_SHARDS, GLASS_SHARD_LIFETIME_S, LATCH_POP_FRAC, MAX_GLASS_SHARDS,
-    MAX_SHED_PARTS, PART_DEBRIS_LIFETIME_S,
+    GLASS_SHARDS, GLASS_SHARD_LIFETIME_S, LATCH_POP_FRAC, MAX_GLASS_SHARDS, MAX_SHED_PARTS,
+    PART_DEBRIS_LIFETIME_S,
 };
 use inf_ecs::components::{Collider3D, GlobalTransform, MeshRef, Sprite, Transform, Visibility};
 use inf_ecs::math::Vec3d;

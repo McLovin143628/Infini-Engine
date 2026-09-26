@@ -362,7 +362,11 @@ impl Curve {
         if z >= p[p.len() - 1].0 {
             return p[p.len() - 1].1;
         }
-        let i = p.iter().rposition(|q| q.0 <= z).unwrap_or(0).min(p.len() - 2);
+        let i = p
+            .iter()
+            .rposition(|q| q.0 <= z)
+            .unwrap_or(0)
+            .min(p.len() - 2);
         let get = |k: isize| {
             let k = k.clamp(0, p.len() as isize - 1) as usize;
             p[k]
@@ -1186,7 +1190,11 @@ fn part(name: &str, mesh: Mesh) -> ShellPart {
 /// The body's own stations inside `(a, b)` plus the two ends.
 fn span(p: &Profile, env: &Envelope, a: f64, b: f64) -> Vec<f64> {
     let mut z = vec![a];
-    z.extend(stations(p, env).into_iter().filter(|v| *v > a + EPS && *v < b - EPS));
+    z.extend(
+        stations(p, env)
+            .into_iter()
+            .filter(|v| *v > a + EPS && *v < b - EPS),
+    );
     z.push(b);
     z
 }
@@ -1233,12 +1241,7 @@ fn side_glass(p: &Profile, env: &Envelope, name: &str, side: f64, a: f64, b: f64
             let ys = [l.belt + 0.004, lerp(l.belt, ceiling, 0.5), ceiling];
             let outer: Vec<[f64; 2]> = ys.iter().map(|y| [slope(*y), *y]).collect();
             let mut r: Vec<[f64; 3]> = outer.iter().map(|q| [side * q[0], q[1], z]).collect();
-            r.extend(
-                outer
-                    .iter()
-                    .rev()
-                    .map(|q| [side * (q[0] - 0.025), q[1], z]),
-            );
+            r.extend(outer.iter().rev().map(|q| [side * (q[0] - 0.025), q[1], z]));
             r
         })
         .collect();
@@ -1249,17 +1252,22 @@ fn side_glass(p: &Profile, env: &Envelope, name: &str, side: f64, a: f64, b: f64
 
 /// **A slab in the top recess** over `(a, b)`: a pane (windscreen, backlight)
 /// or a lid (bonnet, boot), its outer face where the skin was.
-fn top_slab(p: &Profile, env: &Envelope, name: &str, a: f64, b: f64, edge: f64, depth: f64) -> ShellPart {
+fn top_slab(
+    p: &Profile,
+    env: &Envelope,
+    name: &str,
+    a: f64,
+    b: f64,
+    edge: f64,
+    depth: f64,
+) -> ShellPart {
     let rings: Vec<Vec<[f64; 3]>> = span(p, env, a, b)
         .into_iter()
         .map(|z| {
             let l = levels(p, z);
             let k = l.x_edge - edge - SHUT_GAP;
             let xs = [k, 0.6 * k, 0.25 * k, 0.0, -0.25 * k, -0.6 * k, -k];
-            let mut r: Vec<[f64; 3]> = xs
-                .iter()
-                .map(|x| [*x, roof_y(&l, *x) - 0.004, z])
-                .collect();
+            let mut r: Vec<[f64; 3]> = xs.iter().map(|x| [*x, roof_y(&l, *x) - 0.004, z]).collect();
             r.extend(
                 xs.iter()
                     .rev()
@@ -1700,7 +1708,10 @@ pub fn shell_parts(shell: Shell) -> Vec<ShellPart> {
     out.push(single(
         "dash",
         &[
-            ([-0.90, -0.16, dz - m(0.16, 2)], [0.90, lm.belt - 0.02, dz + 0.01]),
+            (
+                [-0.90, -0.16, dz - m(0.16, 2)],
+                [0.90, lm.belt - 0.02, dz + 0.01],
+            ),
             (
                 [sx - 0.18, lm.belt - 0.04, dz - m(0.10, 2)],
                 [sx + 0.18, lm.belt + m(0.04, 1), dz],
@@ -1908,8 +1919,7 @@ pub mod measure {
     /// Welded-edge closedness of an exported asset: every edge (keyed by its
     /// two positions' bits) on exactly two triangles.
     pub fn closed(asset: &inf_mesh::MeshAsset) -> (usize, usize) {
-        let mut edges: std::collections::BTreeMap<([u32; 3], [u32; 3]), usize> =
-            Default::default();
+        let mut edges: std::collections::BTreeMap<([u32; 3], [u32; 3]), usize> = Default::default();
         for sm in &asset.submeshes {
             let key = |i: u32| sm.vertices[i as usize].position.map(f32::to_bits);
             for t in sm.indices.chunks(3) {
@@ -2000,7 +2010,8 @@ pub mod measure {
                         (b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0])
                     };
                     let (e0, e1, e2) = (e(p[0], p[1]), e(p[1], p[2]), e(p[2], p[0]));
-                    if (e0 >= 0.0 && e1 >= 0.0 && e2 >= 0.0) || (e0 <= 0.0 && e1 <= 0.0 && e2 <= 0.0)
+                    if (e0 >= 0.0 && e1 >= 0.0 && e2 >= 0.0)
+                        || (e0 <= 0.0 && e1 <= 0.0 && e2 <= 0.0)
                     {
                         g[i * n[1] + j] = true;
                     }
@@ -2131,8 +2142,8 @@ pub mod measure {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::measure::*;
+    use super::*;
 
     fn tris_of(m: &Mesh, f: impl Fn([f64; 3]) -> [f64; 3]) -> Vec<Tri> {
         tris_of_asset(&export(m), f)
@@ -2181,7 +2192,10 @@ mod tests {
                 assert_eq!(bad, 0, "{shell:?} {}: {bad} open edge(s)", sp.name);
                 n += 1;
             }
-            assert!(signed_volume(&body_mesh(shell)) > 0.0, "{shell:?} inside out");
+            assert!(
+                signed_volume(&body_mesh(shell)) > 0.0,
+                "{shell:?} inside out"
+            );
         }
         assert!(n >= 100, "only {n} parts swept");
     }
@@ -2208,7 +2222,8 @@ mod tests {
                             .filter(|t| ray_hits([side * x, y, z], [side, 0.0, 0.0], t))
                             .count();
                         assert_eq!(
-                            hits, 0,
+                            hits,
+                            0,
                             "{shell:?} on `{id}`: the wheel at z {z:.3} x {:.3} is under {hits} \
                              body triangle(s)",
                             side * x

@@ -991,7 +991,10 @@ pub const CRUISER_LIVERY: Livery = Livery {
         // "black and white", painted on the parts VEH3c hinges, so a door torn
         // off in a crash takes its white with it. The shell's body is a
         // livery-paintable part by its own name (`SHELL_BODY_PART`).
-        (inf_ecs::vehicle::SHELL_BODY_PART, PartPaint::flat(POLICE_BLUE)),
+        (
+            inf_ecs::vehicle::SHELL_BODY_PART,
+            PartPaint::flat(POLICE_BLUE),
+        ),
         ("door_fl", PartPaint::flat(SERVICE_WHITE)),
         ("door_fr", PartPaint::flat(SERVICE_WHITE)),
         ("door_rl", PartPaint::flat(SERVICE_WHITE)),
