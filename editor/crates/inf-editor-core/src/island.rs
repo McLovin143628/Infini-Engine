@@ -3368,10 +3368,12 @@ mod tests {
                                     h.z * j as f64 / nz.max(1) as f64,
                                 );
                                 let p = t.translation.to_dvec3() + q * local;
-                                if let Some(b) = plans.iter().flat_map(|pl| pl.blocks.iter()).find(|b| {
-                                    (p.x - b.centre.x).abs() < b.half.x
-                                        && (p.z - b.centre.y).abs() < b.half.y
-                                }) {
+                                if let Some(b) =
+                                    plans.iter().flat_map(|pl| pl.blocks.iter()).find(|b| {
+                                        (p.x - b.centre.x).abs() < b.half.x
+                                            && (p.z - b.centre.y).abs() < b.half.y
+                                    })
+                                {
                                     inside = Some((p, b.centre));
                                 }
                             }
@@ -3385,7 +3387,10 @@ mod tests {
             }
         }
         println!("{rigs} roster chassis checked against every block");
-        assert!(rigs >= 10, "only {rigs} roster chassis found -- the arm read nothing");
+        assert!(
+            rigs >= 10,
+            "only {rigs} roster chassis found -- the arm read nothing"
+        );
     }
 
     /// How far a car shell's part may stand proud of its box collider,

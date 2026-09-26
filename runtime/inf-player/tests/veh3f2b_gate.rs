@@ -1266,8 +1266,14 @@ fn measure_island_rig(content: &std::path::Path, row: &str) {
         .and_then(|j| sim.bridge3d().world().joint_impulse(j))
         .map(|i| i.linear.length())
         .unwrap_or(f64::MAX);
-    assert_eq!(grounded, n, "{row}: {grounded} of {n} trailer wheels on the ground");
-    assert!(gap < 0.05, "{row}: the kingpin stands {gap:.3} m off the fifth wheel");
+    assert_eq!(
+        grounded, n,
+        "{row}: {grounded} of {n} trailer wheels on the ground"
+    );
+    assert!(
+        gap < 0.05,
+        "{row}: the kingpin stands {gap:.3} m off the fifth wheel"
+    );
     assert!(
         imp < 1.0e4,
         "{row}: the hitch carries {imp:.0} N.s a step -- something is fighting it"
@@ -2930,7 +2936,16 @@ fn a_parked_aircraft_is_chocked() {
     println!(
         "PARKED ON A 3 DEG GRADE, ten seconds: dodo {dodo:.3} m along / {dodo_side:.3} m sideways; saloon {car:.3} / {car_side:.3}"
     );
-    assert!(car < 0.25, "the control rolled {car:.3} m -- the parking hold is off");
-    assert!(dodo < 0.25, "a parked Dodo rolled {dodo:.3} m down a 3 deg grade");
-    assert!(dodo_side < 0.10, "a parked Dodo slid {dodo_side:.3} m sideways");
+    assert!(
+        car < 0.25,
+        "the control rolled {car:.3} m -- the parking hold is off"
+    );
+    assert!(
+        dodo < 0.25,
+        "a parked Dodo rolled {dodo:.3} m down a 3 deg grade"
+    );
+    assert!(
+        dodo_side < 0.10,
+        "a parked Dodo slid {dodo_side:.3} m sideways"
+    );
 }
