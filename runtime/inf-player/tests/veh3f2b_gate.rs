@@ -210,7 +210,14 @@ fn the_inner_latch_waits_for_the_reach_and_the_hand_holds_to_the_shut() {
     let mut bad = Vec::new();
     let mut held_rows = 0usize;
     for row in [
-        "sedan", "sports", "suv", "truck", "cruiser", "van", "ambulance", "brute_bus",
+        "sedan",
+        "sports",
+        "suv",
+        "truck",
+        "cruiser",
+        "van",
+        "ambulance",
+        "brute_bus",
         "vapid_contender",
     ] {
         let def = catalogue_def(row);
@@ -257,18 +264,27 @@ fn the_inner_latch_waits_for_the_reach_and_the_hand_holds_to_the_shut() {
         );
         let reach = inf_ecs::boarding::HAND_REACH_S + inf_ecs::boarding::HANDLE_HOLD_S;
         if !(latch_s >= reach - 1e-9) {
-            bad.push(format!("{row}: the door latched at {latch_s:.3} s, before the reach ({reach:.2} s)"));
+            bad.push(format!(
+                "{row}: the door latched at {latch_s:.3} s, before the reach ({reach:.2} s)"
+            ));
         }
         if latch_deg < inf_ecs::boarding::DOOR_BOARD_DEG {
-            bad.push(format!("{row}: the door was already swinging ({latch_deg:.1} deg) at the latch"));
+            bad.push(format!(
+                "{row}: the door was already swinging ({latch_deg:.1} deg) at the latch"
+            ));
         }
         if on > 0 {
             held_rows += 1;
             if worst > 0.02 {
-                bad.push(format!("{row}: the posed hand was {:.1} mm off the pull", worst * 1000.0));
+                bad.push(format!(
+                    "{row}: the posed hand was {:.1} mm off the pull",
+                    worst * 1000.0
+                ));
             }
             if off_early > 0 {
-                bad.push(format!("{row}: the hand let go of the pull {off_early} step(s) before the shut"));
+                bad.push(format!(
+                    "{row}: the hand let go of the pull {off_early} step(s) before the shut"
+                ));
             }
         }
     }
@@ -418,7 +434,11 @@ fn after_an_import_every_sidecar_of_a_pack_reads_its_manifest_row_derived_ones_t
     assert!(before.iter().all(|r| r.2 == Some(false)), "{before:?}");
     drop(project);
 
-    let second = licence_manifest(dir.path(), "Fab Standard (commercial tier), confirmed", true);
+    let second = licence_manifest(
+        dir.path(),
+        "Fab Standard (commercial tier), confirmed",
+        true,
+    );
     let mut project = AssetProject::open(&content).expect("it re-opens");
     let report = import_manifest(&mut project, &second, &UeImportOptions::default())
         .expect("the second import");
@@ -439,7 +459,10 @@ fn after_an_import_every_sidecar_of_a_pack_reads_its_manifest_row_derived_ones_t
             "{file} kept the first import's licence row"
         );
     }
-    assert_eq!(derived_after, derived_before, "a derived sidecar lost its row");
+    assert_eq!(
+        derived_after, derived_before,
+        "a derived sidecar lost its row"
+    );
     drop(project);
 
     // **THE DERIVED DOOR ALONE.** The importer's own sweep re-stamps every
@@ -712,7 +735,10 @@ fn the_island_traffic_makes_no_moving_contact_and_its_hero_classes_draw_shells()
                 if contacts.insert((a, b)) {
                     let say = |g: Uuid| {
                         let (p, yaw) = pose(g, &sim).unwrap_or((DVec3::ZERO, 0.0));
-                        let v = last.get(&g).map(|q| (p - *q).length() * 60.0).unwrap_or(-1.0);
+                        let v = last
+                            .get(&g)
+                            .map(|q| (p - *q).length() * 60.0)
+                            .unwrap_or(-1.0);
                         let (home, tier) = inf_ecs::traffic::traffic_of(sim.world())
                             .and_then(|t| t.records.get(&g))
                             .map(|r| (r.home, format!("{:?}/{:?}", r.tier, r.detail)))
@@ -770,7 +796,11 @@ fn the_island_traffic_makes_no_moving_contact_and_its_hero_classes_draw_shells()
             let Some(def) = inf_ecs::roster::roster().get(id) else {
                 continue;
             };
-            let class = def.roster_class.map(|c| c.name()).unwrap_or("-").to_string();
+            let class = def
+                .roster_class
+                .map(|c| c.name())
+                .unwrap_or("-")
+                .to_string();
             let kind = inf_ecs::roster::body_kind(w, *g);
             *census.entry((class.clone(), kind)).or_default() += 1;
             let want = match def.art {
@@ -839,11 +869,7 @@ fn slab_sim(def: &VehicleDef) -> inf_player::runtime_sim::RuntimeSim {
     car(
         &mut world,
         RIG,
-        DVec3::new(
-            0.0,
-            inf_ecs::vehicle::resting_origin_y(def, 0.0),
-            -2_900.0,
-        ),
+        DVec3::new(0.0, inf_ecs::vehicle::resting_origin_y(def, 0.0), -2_900.0),
         0.0,
         def,
     );
@@ -913,7 +939,11 @@ fn hard_stop(def: &VehicleDef, from_mps: f64) -> (f64, Vec<(f64, f64, f64, f64)>
         let v = rig_speed(&sim);
         if let Some(rig) = sim.bridge3d().vehicle_of(RIG) {
             let wheels = rig.wheels();
-            let total: f64 = wheels.iter().map(|w| w.load_n.max(0.0)).sum::<f64>().max(1.0);
+            let total: f64 = wheels
+                .iter()
+                .map(|w| w.load_n.max(0.0))
+                .sum::<f64>()
+                .max(1.0);
             let radius = def.wheel_radius_m;
             for (w, z) in wheels.iter().zip(&mounts) {
                 let e = axles.entry(key(*z)).or_insert((*z, 0.0, 0.0, f64::NAN, 0));
@@ -995,7 +1025,9 @@ fn the_tandem_brakes_by_axle_load_and_no_rear_axle_locks_first() {
             }
         }
         if id == "jobuilt_hauler" && !(0.60..=0.78).contains(&g) {
-            bad.push(format!("{id}: stopped at {g:.3} g, outside its 0.60-0.78 g band"));
+            bad.push(format!(
+                "{id}: stopped at {g:.3} g, outside its 0.60-0.78 g band"
+            ));
         }
     }
     assert!(bad.is_empty(), "{}", bad.join("\n"));
@@ -1124,7 +1156,9 @@ fn measure_island_rig(content: &std::path::Path, row: &str) {
             if e.get::<inf_ecs::components::VehicleClass>().is_none() {
                 continue;
             }
-            let Some(tr) = e.get::<Transform>() else { continue };
+            let Some(tr) = e.get::<Transform>() else {
+                continue;
+            };
             let d = tr.translation.to_dvec3() - p0;
             if d.length() < 30.0 {
                 println!(
@@ -1155,7 +1189,10 @@ fn measure_island_rig(content: &std::path::Path, row: &str) {
     let q = t.quat();
     let fwd = q * DVec3::Z;
     let pitch = inf_math::patan2_64(fwd.y, (fwd.x * fwd.x + fwd.z * fwd.z).sqrt()).to_degrees();
-    let v = sim.bridge3d().vehicle_of(trailer).expect("the trailer is a rig");
+    let v = sim
+        .bridge3d()
+        .vehicle_of(trailer)
+        .expect("the trailer is a rig");
     let mounts: Vec<DVec3> = v
         .rig()
         .wheels
@@ -1181,13 +1218,11 @@ fn measure_island_rig(content: &std::path::Path, row: &str) {
         0.0
     };
     let tdef = catalogue_def(row);
-    let rdef = catalogue_def(
-        if row == "jobuilt_box_trailer" {
-            "mtl_packer"
-        } else {
-            "jobuilt_hauler"
-        },
-    );
+    let rdef = catalogue_def(if row == "jobuilt_box_trailer" {
+        "mtl_packer"
+    } else {
+        "jobuilt_hauler"
+    });
     let pin = inf_ecs::vehicle::kingpin_local(&tdef).to_dvec3();
     // The hitch's own anchor on the tractor: the fifth wheel's plan position
     // at the pair's coupling height (`coupling_local`, what `hitch_joint`
@@ -1195,7 +1230,8 @@ fn measure_island_rig(content: &std::path::Path, row: &str) {
     let fifth = inf_ecs::vehicle::coupling_local(&rdef, &tdef)
         .map(|f| f.to_dvec3())
         .unwrap_or(DVec3::ZERO);
-    let gap = ((t.translation.to_dvec3() + q * pin) - (rt.translation.to_dvec3() + rt.quat() * fifth))
+    let gap = ((t.translation.to_dvec3() + q * pin)
+        - (rt.translation.to_dvec3() + rt.quat() * fifth))
         .length();
     // …and the hitch AS THE LEVEL HOLDS IT: the joint's own two anchors.
     let joint = sim
@@ -1244,7 +1280,10 @@ fn wall_sim(def: &VehicleDef, kmh: f64, wall: bool) -> inf_player::runtime_sim::
     car(&mut world, CRASH_CAR, DVec3::new(0.0, y, -20.0), 0.0, def);
     let nose = {
         let e = world.entity_of(CRASH_CAR).expect("the car");
-        let c = *world.world().get::<Collider3D>(e).expect("a chassis collider");
+        let c = *world
+            .world()
+            .get::<Collider3D>(e)
+            .expect("a chassis collider");
         let h = inf_ecs::vehicle::chassis_half_extents(&c);
         -20.0 + c.offset.z + h.z
     };
@@ -1348,7 +1387,10 @@ fn crash_run(def: &VehicleDef, kmh: f64, wall: bool) -> inf_player::runtime_sim:
 #[test]
 fn a_shell_crumples_its_mesh_by_the_crash_table() {
     let def = catalogue_def("sedan");
-    assert!(def.art.is_some_and(|a| a.shell()), "the island saloon wears a shell");
+    assert!(
+        def.art.is_some_and(|a| a.shell()),
+        "the island saloon wears a shell"
+    );
     let control = crash_run(&def, 60.0, false);
     let (_, calm, mesh, scale) = hull_of(&control, CRASH_CAR).expect("the shell has a hull");
     let mesh = committed_shell_mesh(mesh.expect("the hull draws a committed mesh"));
@@ -1389,13 +1431,26 @@ fn a_shell_crumples_its_mesh_by_the_crash_table() {
     assert!(table[0].1.dent_m > 0.0, "15 km/h did not dent");
     assert!(table[0].1.dent_m < table[1].1.dent_m && table[1].1.dent_m < table[2].1.dent_m);
     for (kmh, st, d) in &table {
-        assert!(st.dent_m <= inf_ecs::bodywork::MAX_DENT_M + 1e-12, "{kmh}: past the cap");
-        assert!(d.max_m <= inf_ecs::bodywork::MAX_DENT_M + 1e-9, "{kmh}: a vertex past the cap");
+        assert!(
+            st.dent_m <= inf_ecs::bodywork::MAX_DENT_M + 1e-12,
+            "{kmh}: past the cap"
+        );
+        assert!(
+            d.max_m <= inf_ecs::bodywork::MAX_DENT_M + 1e-9,
+            "{kmh}: a vertex past the cap"
+        );
         assert!(d.moved > 0, "{kmh}: no vertex moved");
     }
     let sixty = &table[2];
-    assert!(sixty.2.max_m >= 0.12, "60 km/h crumpled {:.4} m", sixty.2.max_m);
-    assert!(sixty.1.dent_dir.z > 0.9, "the 60 km/h crumple is not the nose");
+    assert!(
+        sixty.2.max_m >= 0.12,
+        "60 km/h crumpled {:.4} m",
+        sixty.2.max_m
+    );
+    assert!(
+        sixty.1.dent_dir.z > 0.9,
+        "the 60 km/h crumple is not the nose"
+    );
 }
 
 /// **THE SHIPPED PROJECTOR DRAWS THE CRUMPLE** -- the render half, on the
@@ -1428,7 +1483,14 @@ fn the_shipped_projector_draws_the_crumple() {
                 {
                     let mesh = committed_shell_mesh(g);
                     let (p, n, u, t, i) = mesh.vgeom_streams();
-                    let dag = inf_vgeom::build_vgeom(&p, &n, &u, &t, &i, inf_vgeom::BuildParams::default());
+                    let dag = inf_vgeom::build_vgeom(
+                        &p,
+                        &n,
+                        &u,
+                        &t,
+                        &i,
+                        inf_vgeom::BuildParams::default(),
+                    );
                     reg.insert_mesh(inf_player::vmesh::derived_vmesh_id(g), &dag)
                         .unwrap();
                 }
@@ -1463,7 +1525,11 @@ fn the_shipped_projector_draws_the_crumple() {
         reg2.dent_builds()
     );
     assert_eq!(first, 1, "the dented hull built {first} crumpled DAGs");
-    assert_eq!(reg2.dent_builds(), 1, "the second projection rebuilt the crumple");
+    assert_eq!(
+        reg2.dent_builds(),
+        1,
+        "the second projection rebuilt the crumple"
+    );
     assert!(!drew_body, "the dented car still drew its pristine body");
     assert!(
         scene.vgeom_instances.iter().any(|i| i.asset == census[0].0),
@@ -1535,7 +1601,8 @@ fn pie_equals_shipping_on_a_shell_crash() {
             },
         );
         doc.world_mut().propagate();
-        let mut session = SimSession::enter(&mut doc, Vec::new(), glam::DVec2::new(0.0, -9.81), 60.0);
+        let mut session =
+            SimSession::enter(&mut doc, Vec::new(), glam::DVec2::new(0.0, -9.81), 60.0);
         let out = (0..STEPS)
             .map(|_| {
                 session.step_once(&mut doc, SimInput::default());
@@ -1557,7 +1624,10 @@ fn pie_equals_shipping_on_a_shell_crash() {
     );
     assert!(shipped.0[0].is_empty());
     assert!(first_loud.is_some(), "the drop did nothing");
-    assert!(hull.dent_m > 0.0, "the hull did not crumple -- the fold carries nothing of it");
+    assert!(
+        hull.dent_m > 0.0,
+        "the hull did not crumple -- the fold carries nothing of it"
+    );
     assert_eq!(
         shipped.0, preview,
         "the shipped player and the editor's Simulate crumpled the same shell differently"
@@ -1649,7 +1719,12 @@ fn board_course(row: &str) -> Course {
     let mut sim = rigged_sim(row, hero_at(&def));
     let y0 = {
         let e = sim.world().entity_of(HERO).unwrap();
-        sim.world().world().get::<Transform>(e).unwrap().translation.y
+        sim.world()
+            .world()
+            .get::<Transform>(e)
+            .unwrap()
+            .translation
+            .y
     };
     let mut c = Course::default();
     let mut driving_step: Option<u32> = None;
@@ -1679,7 +1754,13 @@ fn board_course(row: &str) -> Course {
             BoardPhase::Unlocking | BoardPhase::OpeningDoor | BoardPhase::EnteringIK
         ) {
             let e = sim.world().entity_of(HERO).unwrap();
-            let y = sim.world().world().get::<Transform>(e).unwrap().translation.y;
+            let y = sim
+                .world()
+                .world()
+                .get::<Transform>(e)
+                .unwrap()
+                .translation
+                .y;
             let on_step = r
                 .as_ref()
                 .filter(|r| r.sockets.phase == BoardPhase::OpeningDoor)
@@ -1801,7 +1882,10 @@ fn the_cab_step_climb_and_the_residuals_on_the_shipped_host() {
             match (rise0, door0, warp0) {
                 (Some(r), Some(d), Some(w)) if r.0 < d.0 && d.0 < w.0 => {
                     if w.2 < c.step_m - 0.05 {
-                        bad.push(format!("{row}: the warp left from {:.3}, below the step", w.2));
+                        bad.push(format!(
+                            "{row}: the warp left from {:.3}, below the step",
+                            w.2
+                        ));
                     }
                 }
                 other => bad.push(format!("{row}: the two beats are out of order: {other:?}")),
@@ -1809,13 +1893,20 @@ fn the_cab_step_climb_and_the_residuals_on_the_shipped_host() {
             if c.step_feet.is_empty() {
                 bad.push(format!("{row}: the feet on the step were never measured"));
             } else if worst(&c.step_feet) > 20.0 {
-                bad.push(format!("{row}: a foot {:.1} mm off the step", worst(&c.step_feet)));
+                bad.push(format!(
+                    "{row}: a foot {:.1} mm off the step",
+                    worst(&c.step_feet)
+                ));
             }
         }
         if c.driving_at.is_none() {
             bad.push(format!("{row}: never drove"));
         }
-        for (what, v) in [("outer handle", &c.outer), ("rim", &c.grips), ("pedals", &c.pedals)] {
+        for (what, v) in [
+            ("outer handle", &c.outer),
+            ("rim", &c.grips),
+            ("pedals", &c.pedals),
+        ] {
             if v.is_empty() {
                 bad.push(format!("{row}: the {what} was never measured"));
             } else if worst(v) > 20.0 {
@@ -1833,8 +1924,19 @@ fn the_cab_step_climb_and_the_residuals_on_the_shipped_host() {
 #[ignore]
 fn probe_the_seat_heights() {
     for row in [
-        "sedan", "sports", "suv", "truck", "cruiser", "van", "ambulance", "vapid_contender",
-        "brute_bus", "caracara_6x6", "benefactor_dubsta_6x6", "jobuilt_hauler", "mtl_packer",
+        "sedan",
+        "sports",
+        "suv",
+        "truck",
+        "cruiser",
+        "van",
+        "ambulance",
+        "vapid_contender",
+        "brute_bus",
+        "caracara_6x6",
+        "benefactor_dubsta_6x6",
+        "jobuilt_hauler",
+        "mtl_packer",
     ] {
         let def = catalogue_def(row);
         let mut sim = rigged_sim(row, hero_at(&def) + DVec3::new(20.0, 0.0, 0.0));
@@ -1862,7 +1964,8 @@ fn probe_the_seat_heights() {
         });
         println!(
             "{row:<24} H-point {seat:.3}  rule floor {floor:.3}  door sill {}",
-            sill.map(|v| format!("{v:.3}")).unwrap_or_else(|| "none".into())
+            sill.map(|v| format!("{v:.3}"))
+                .unwrap_or_else(|| "none".into())
         );
     }
 }
@@ -1927,7 +2030,11 @@ fn the_committed_shells_are_closed_cut_and_not_the_box_family() {
             inf_ecs::roster::art_wheel_guid(k, 0),
             inf_ecs::roster::art_part_guid(k, inf_ecs::vehicle::SHELL_RIM_PART),
         ];
-        guids.extend(k.parts().iter().map(|p| inf_ecs::roster::art_part_guid(k, p.name)));
+        guids.extend(
+            k.parts()
+                .iter()
+                .map(|p| inf_ecs::roster::art_part_guid(k, p.name)),
+        );
         let mut open = 0usize;
         for g in &guids {
             let (_, o) = measure::closed(&load(*g));
@@ -1969,7 +2076,11 @@ fn the_committed_shells_are_closed_cut_and_not_the_box_family() {
             .children_of(ce)
             .into_iter()
             .filter(|c| w.name_of(*c) == Some("Wheel"))
-            .filter_map(|c| w.world().get::<Transform>(c).map(|t| t.translation.to_dvec3()))
+            .filter_map(|c| {
+                w.world()
+                    .get::<Transform>(c)
+                    .map(|t| t.translation.to_dvec3())
+            })
             .collect();
         let (mut clear, mut covered) = (0usize, 0usize);
         for c in &wheels {
@@ -2000,7 +2111,11 @@ fn the_committed_shells_are_closed_cut_and_not_the_box_family() {
             bad.push(format!("{}: side outline {:.1} %", k.name(), side * 100.0));
         }
         if flank < 0.25 {
-            bad.push(format!("{}: flank outline {:.1} %", k.name(), flank * 100.0));
+            bad.push(format!(
+                "{}: flank outline {:.1} %",
+                k.name(),
+                flank * 100.0
+            ));
         }
         let (p, n, u, t, i) = body_asset.vgeom_streams();
         let dag = inf_vgeom::build_vgeom(&p, &n, &u, &t, &i, inf_vgeom::BuildParams::default());
@@ -2023,7 +2138,10 @@ fn the_committed_shells_are_closed_cut_and_not_the_box_family() {
         }
     }
     println!("{files} committed files closed-checked, {rays} wheel rays, the box family's triangles over them: {box_hits_total}");
-    assert!(box_hits_total > 0, "the control covers no wheel -- this arm measured nothing");
+    assert!(
+        box_hits_total > 0,
+        "the control covers no wheel -- this arm measured nothing"
+    );
     assert!(bad.is_empty(), "{}", bad.join("\n"));
 }
 
@@ -2040,13 +2158,17 @@ fn the_committed_shells_are_closed_cut_and_not_the_box_family() {
 /// half FAILS it.
 #[test]
 fn pie_equals_shipping_on_a_cab_step_climb() {
+    use inf_ecs::movement::actions::INTERACT;
     use inf_editor_core::scene::SceneDoc;
     use inf_editor_core::simulate::{SimInput, SimSession};
-    use inf_ecs::movement::actions::INTERACT;
     use inf_player::runtime_sim::{RuntimeInput, RuntimeSim};
     const STEPS: u32 = 480;
     let def = catalogue_def("jobuilt_hauler");
-    let at = DVec3::new(0.0, inf_ecs::vehicle::resting_origin_y(&def, 0.0) + 0.15, 0.0);
+    let at = DVec3::new(
+        0.0,
+        inf_ecs::vehicle::resting_origin_y(&def, 0.0) + 0.15,
+        0.0,
+    );
     let hero = hero_at(&def);
     type Row = (Vec<u8>, [u64; 3], u8, f64);
     let row = |w: &EcsWorld| -> Row {
@@ -2101,7 +2223,8 @@ fn pie_equals_shipping_on_a_cab_step_climb() {
             },
         );
         doc.world_mut().propagate();
-        let mut session = SimSession::enter(&mut doc, Vec::new(), glam::DVec2::new(0.0, -9.81), 60.0);
+        let mut session =
+            SimSession::enter(&mut doc, Vec::new(), glam::DVec2::new(0.0, -9.81), 60.0);
         let out = (0..STEPS)
             .map(|i| {
                 let down: Vec<&str> = if i == 60 { vec![INTERACT] } else { Vec::new() };
@@ -2125,10 +2248,16 @@ fn pie_equals_shipping_on_a_cab_step_climb() {
     );
     assert!(step > 0.2, "the semi's boarding climbed no step");
     let rose = door.map(|d| d - y(&shipped[0])).unwrap_or(0.0);
-    assert!((rose - step).abs() < 0.05, "the hero rose {rose:.3} for a {step:.3} m step");
+    assert!(
+        (rose - step).abs() < 0.05,
+        "the hero rose {rose:.3} for a {step:.3} m step"
+    );
     assert!(drove, "the hero never reached the semi's wheel");
     for (i, (a, b)) in shipped.iter().zip(&preview).enumerate() {
-        assert_eq!(a, b, "the two hosts climbed the semi differently at step {i}");
+        assert_eq!(
+            a, b,
+            "the two hosts climbed the semi differently at step {i}"
+        );
     }
 }
 
@@ -2237,7 +2366,9 @@ fn pie_equals_shipping_over_a_traffic_minute() {
                 if let Some(pop) = inf_ecs::traffic::traffic_of(sim.world()) {
                     for g in pop.records.keys() {
                         if sim.world().entity_of(*g).is_some() {
-                            *kinds.entry(inf_ecs::roster::body_kind(sim.world(), *g)).or_default() += 1;
+                            *kinds
+                                .entry(inf_ecs::roster::body_kind(sim.world(), *g))
+                                .or_default() += 1;
                         }
                     }
                 }
@@ -2263,12 +2394,16 @@ fn pie_equals_shipping_over_a_traffic_minute() {
         out
     };
     let last = shipped.last().map(|b| b.len()).unwrap_or(0);
-    println!(
-        "A TRAFFIC MINUTE: {last} bytes folded at the end; body kinds sampled {kinds:?}"
-    );
+    println!("A TRAFFIC MINUTE: {last} bytes folded at the end; body kinds sampled {kinds:?}");
     assert!(last > 64, "the town's traffic never populated");
-    assert!(shipped.windows(2).any(|w| w[0] != w[1]), "the traffic never moved");
-    assert!(kinds.get("shell").copied().unwrap_or(0) > 0, "no traffic car drew a shell");
+    assert!(
+        shipped.windows(2).any(|w| w[0] != w[1]),
+        "the traffic never moved"
+    );
+    assert!(
+        kinds.get("shell").copied().unwrap_or(0) > 0,
+        "no traffic car drew a shell"
+    );
     for (i, (a, b)) in shipped.iter().zip(&preview).enumerate() {
         assert_eq!(a, b, "PIE and shipping diverged at traffic step {i}");
     }
@@ -2309,7 +2444,10 @@ fn lot_of_64(
     let mut seen = std::collections::BTreeSet::new();
     let w = &world;
     for e in w.world().iter_entities() {
-        let Some(g) = e.get::<inf_ecs::components::MeshRef>().and_then(|m| m.asset) else {
+        let Some(g) = e
+            .get::<inf_ecs::components::MeshRef>()
+            .and_then(|m| m.asset)
+        else {
             continue;
         };
         if !seen.insert(g) {
@@ -2352,10 +2490,13 @@ fn lot_of_64(
 /// report).
 #[test]
 fn sixty_four_shell_cars_cost_what_they_cost() {
-    let lib: std::collections::BTreeMap<Uuid, std::path::PathBuf> =
-        shell_library().into_iter().map(|(g, (p, _))| (g, p)).collect();
+    let lib: std::collections::BTreeMap<Uuid, std::path::PathBuf> = shell_library()
+        .into_iter()
+        .map(|(g, (p, _))| (g, p))
+        .collect();
     let art_lib: std::collections::BTreeMap<Uuid, std::path::PathBuf> = {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/vehicle-art");
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/vehicle-art");
         let mut out = std::collections::BTreeMap::new();
         for e in std::fs::read_dir(&dir).expect("the art fallback").flatten() {
             let p = e.path();
@@ -2439,7 +2580,10 @@ fn sixty_four_shell_cars_cost_what_they_cost() {
         );
         rows.push((name, best, inst, bill));
     }
-    assert!(rows[0].3 > rows[1].3, "the shells submitted no more geometry than boxes -- this drew no shell");
+    assert!(
+        rows[0].3 > rows[1].3,
+        "the shells submitted no more geometry than boxes -- this drew no shell"
+    );
     if clock_is_asserted("64 shell cars") {
         assert!(
             rows[0].1 < SHELL_PROJECTION_BUDGET_MS,
@@ -2459,4 +2603,49 @@ const SHELL_PROJECTION_BUDGET_MS: f64 = 2.0;
 fn this_wave_moved_no_schema() {
     assert_eq!(inf_scene::SCHEMA_VERSION, 28);
     assert_eq!(inf_runtime::pie::SCENE_PAYLOAD_VERSION, 14);
+}
+
+/// **EVERY SHELL HANGS ON A CAR IN THE COMMITTED ISLAND** -- the pickup's
+/// included (the VEH3f audit: "the Pickup hero set hangs on no car").
+///
+/// READS: `samples/island/VancouverIsland.inf_lvl`, the document that ships,
+/// every entity whose `MeshRef.asset` is a shell's body GUID, and its parent's
+/// name. The claim: each of the five shells is worn by at least one car.
+#[test]
+fn every_shell_hangs_on_a_car_in_the_committed_island() {
+    let lvl = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../samples/island/VancouverIsland.inf_lvl");
+    let doc = inf_editor_core::scene::serialize::load(&lvl).expect("the island level loads");
+    let w = doc.world();
+    let mut worn: std::collections::BTreeMap<&'static str, Vec<String>> = Default::default();
+    for key in [
+        "shell_sedan",
+        "shell_coupe",
+        "shell_suv",
+        "shell_pickup",
+        "shell_cruiser",
+    ] {
+        let k = inf_ecs::roster::ArtKey::from_name(key).expect("a shell key");
+        let body = inf_ecs::roster::art_body_guid(k);
+        let cars: Vec<String> = w
+            .world()
+            .iter_entities()
+            .filter(|e| {
+                e.get::<inf_ecs::components::MeshRef>()
+                    .is_some_and(|m| m.asset == Some(body))
+            })
+            .filter_map(|e| w.parent_of(e.id()))
+            .filter_map(|p| w.name_of(p).map(str::to_string))
+            .collect();
+        worn.insert(key, cars);
+    }
+    for (k, cars) in &worn {
+        println!("  {k:<14} worn by {} car(s): {cars:?}", cars.len());
+    }
+    let bare: Vec<&&str> = worn
+        .iter()
+        .filter(|(_, c)| c.is_empty())
+        .map(|(k, _)| k)
+        .collect();
+    assert!(bare.is_empty(), "no island car wears {bare:?}");
 }

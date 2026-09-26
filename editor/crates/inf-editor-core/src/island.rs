@@ -2044,7 +2044,7 @@ pub const ISLAND_CLOCK_RATE: f64 = 18.0;
 
 /// **Which catalogue row parks at one settlement** (island wave VEH2a).
 ///
-/// A city takes the two road cars, a town the working vehicles and the wagon,
+/// A city takes the two road cars, a town the van, the SUV and the pickup,
 /// and everything else the pickup — by the site's own kind and its place in the
 /// settlement order, so a recipe that adds a town changes exactly one car.
 ///
@@ -2058,7 +2058,12 @@ pub fn island_vehicle_id(kind: inf_island::SiteKind, index: usize) -> &'static s
         (inf_island::SiteKind::City, _) => "sports",
         (inf_island::SiteKind::Town, 0) => "van",
         (inf_island::SiteKind::Town, 1) => "suv",
-        (inf_island::SiteKind::Town, _) => "sedan",
+        // The third town of each three parks the PICKUP (wave VEH3f.2b): the
+        // VEH3f audit found the pickup set on no island car -- every town
+        // landed on `van`/`suv`/`sedan` and no waypoint parks one -- so
+        // `shell_pickup` was a library nothing drew. The saloon keeps its
+        // city (Harbour City).
+        (inf_island::SiteKind::Town, _) => "truck",
         _ => "truck",
     }
 }
@@ -3289,6 +3294,11 @@ mod tests {
         }
     }
 
+    /// How far a car shell's part may stand proud of its box collider,
+    /// metres: a door mirror's reach -- the pair of mirrors measures 0.186 m
+    /// past the island saloon's 0.92 m half-width, the widest proud part.
+    const SHELL_PROUD_M: f64 = 0.20;
+
     #[test]
     fn every_settlement_parks_a_car_on_the_circuit() {
         for recipe in ISLAND_RECIPES {
@@ -3350,8 +3360,13 @@ mod tests {
 
                 // THE CLAUSE THE COMMITTED CAR COULD NOT MEET: every drawn part
                 // is inside the collider it is drawn on, and none of them is the
-                // unit primitive.
-                for part in def.body.parts() {
+                // unit primitive. The parts the RIG hangs: a row wearing art (a
+                // VEH3f.2b shell) hangs its art's parts, not its family's.
+                let parts: &[inf_ecs::vehicle::BodyPart] = match def.art {
+                    Some(k) if !k.parts().is_empty() => k.parts(),
+                    _ => def.body.parts(),
+                };
+                for part in parts {
                     let pe = doc
                         .entity_of(inf_ecs::vehicle::body_part_guid(guid, part.name))
                         .unwrap_or_else(|| panic!("{recipe}: no `{}` part", part.name));
@@ -3372,7 +3387,22 @@ mod tests {
                         (pt.translation.y, pt.scale.y, def.half_extents.y),
                         (pt.translation.z, pt.scale.z, def.half_extents.z),
                     ] {
-                        assert!(c.abs() + s / 2.0 <= hull + 1e-9);
+                        // A SHELL's mirrors and bumper skins stand proud of the
+                        // box collider by design -- a real car's do -- and the
+                        // I8b defect this clause names is a UNIT box, which the
+                        // scale check above refuses; they are held to a
+                        // mirror's reach (`SHELL_PROUD_M`) instead of zero.
+                        let slack = if def.art.is_some_and(|k| k.shell()) {
+                            SHELL_PROUD_M
+                        } else {
+                            1e-9
+                        };
+                        assert!(
+                            c.abs() + s.abs() / 2.0 <= hull + slack,
+                            "{recipe}: `{}` reaches {:.3} past a {hull:.3} hull",
+                            part.name,
+                            c.abs() + s.abs() / 2.0 - hull
+                        );
                     }
                     drawn_parts += 1;
                 }
