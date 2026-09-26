@@ -4,8 +4,8 @@
 # Fab pack (its `<key>.vehicle.toml`), transcribed. No vertex, texel or texture of
 # any pack is in this repository; the art lives in a LOCAL project at the GUIDs the
 # key derives, and `samples/vehicle-art/` commits our own fallback geometry at the
-# same GUIDs. Licence of every pack below: Fab Standard -- user to confirm tier
-# before ship; local reference until then.
+# same GUIDs. Licence of every pack below: Fab Standard (commercial tier), confirmed
+# by the user 2026-09-25 -- ships in cooked builds; never committed to the public repo.
 #
 # `parts` are in fractions of `half_extents_m` (the art's own collider box); a
 # part's NAME decides its kind by the one naming rule (`door*`, `glass*`, `seat*`,

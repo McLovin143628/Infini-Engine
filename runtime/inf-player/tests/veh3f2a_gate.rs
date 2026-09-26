@@ -324,8 +324,14 @@ fn a_v3_manifest_states_bones_sockets_and_blueprint_defaults() {
                 fab.starts_with("https://www.fab.com/listings/"),
                 "{name}: {fab}"
             );
-            assert_eq!(licence, "Fab Standard -- user to confirm tier before ship");
-            assert!(!ship, "{name} is marked ship");
+            assert_eq!(
+                licence,
+                "Fab Standard (commercial tier), confirmed by the user 2026-09-25 -- ships in cooked builds; never committed to the public repo"
+            );
+            assert!(
+                ship,
+                "{name}: the user confirmed the commercial tier on 2026-09-25"
+            );
         }
         for v in &c.vehicles {
             let file = path

@@ -1893,7 +1893,7 @@ def run_characters():
 # construction pack VEH3f imported faces +Y. The importer turns +X into this
 # engine's forward, so a car is never imported facing sideways by assumption.
 
-LICENCE_FAB = "Fab Standard -- user to confirm tier before ship"
+LICENCE_FAB = "Fab Standard (commercial tier), confirmed by the user 2026-09-25 -- ships in cooked builds; never committed to the public repo"
 
 VEHICLE_PACKS = [
     {
@@ -1901,7 +1901,7 @@ VEHICLE_PACKS = [
         "project": "DrivableCarsBasicVehicleS",
         "fab_url": "https://www.fab.com/listings/990042be-cdea-4411-b052-e994bfded322",
         "license": LICENCE_FAB,
-        "ship": False,
+        "ship": True,
         "forward": "+X",
         "vehicles": [
             {"art": "dd_sedan",
@@ -1920,7 +1920,7 @@ VEHICLE_PACKS = [
         "project": "VehicleVarietyPackVolume2",
         "fab_url": "https://www.fab.com/listings/591e3b3f-9d49-4cd2-8e28-d471c1a10cab",
         "license": LICENCE_FAB,
-        "ship": False,
+        "ship": True,
         "forward": "+X",
         "vehicles": [
             {"art": "vvp2_sedan",
@@ -1944,7 +1944,7 @@ VEHICLE_PACKS = [
         "project": "OpenWorld_Project 5.8",
         "fab_url": "https://www.fab.com/listings/dc1ada50-2523-44b1-b0e2-a72d14076fb4",
         "license": LICENCE_FAB,
-        "ship": False,
+        "ship": True,
         "forward": "+X",
         "vehicles": [
             {"art": "vvp1_hatch",
@@ -1971,7 +1971,7 @@ WEAPON_PACKS = [
         "project": "OpenWorld_Project 5.8",
         "fab_url": "https://www.fab.com/listings/b6e3d970-e841-4bc7-ad23-c4d07126eb1f",
         "license": LICENCE_FAB,
-        "ship": False,
+        "ship": True,
         # The classes WPN2d left drawing primitives (shotgun, launcher) and the
         # pistol it substituted an SMG for, plus the revolvers.
         "weapons": [("Shotguns", "Shotgun", n) for n in ("01", "02", "03", "04")]
