@@ -290,10 +290,10 @@ full-throttle launch, a drive, a right-hand tap into the kerb and the throttle
 held until something is shed. Every frame is triggered on a hero.csv column:
 
 ```
-130-veh3h-boarding.png          `board` opening, `hinge_deg` over 15
+130-veh3h-boarding.png          `board` opening or entering (the door phase)
 131-veh3h-at-the-wheel.png      `board` driving, `grain_pitch` over 0 (the engine)
 132-veh3h-burnout.png           an axle's slip over 1.5 below 5 m/s, its squeal over 0.2
-133-veh3h-drive-hud.png         over 8 m/s in gear 2 or higher (the telemetry HUD)
+133-veh3h-drive-hud.png         driving over 5 m/s (the telemetry HUD)
 134-veh3h-kerb.png              `thumps` over 0 above 3 m/s
 135-veh3h-crash.png             `parts_shed` over 0
 136-veh3h-after-the-crash.png   stopped, after it

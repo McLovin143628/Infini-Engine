@@ -449,7 +449,23 @@ no-car control):
 ## §12 THE REFERENCE FRAMES
 
 The engine's frames are the hands-on's (`VEH3h-FINAL\130..136`), photographed on the
-shipped player inside the real editor's Play in New Window; the reference is
+shipped player inside the real editor's Play in New Window (`demo.ps1 -CertOnly`, every
+frame triggered on a hero.csv column). The car the hero reached at Harbour City was the
+nearest one, a roster `Coil Brawler` wearing `shell_pickup` (the cruiser leg is the
+finding below). Taken: the door phase (38°), at the wheel, the burnout beat (its
+trigger row read squeal ≥ 0.2 at slip > 1.5 and the audio hold froze `burnout` at
+squeal **0.500** at 2.24 m/s — the photograph landed after the hold, and its HUD reads
+idle), the drive with the telemetry HUD (27 km/h, 4 117 rpm), the crash (hull **88 %**,
+**1** part shed, the front tyres **23 °C**) and after it. **Not taken: the kerb** —
+`thumps` stayed 0 over both taps (the VEH3e audit's carried item: the island's kerbs are
+not reachable by a blind tap; the arm is `veh3e_gate::the_kerb_thumps_front_then_rear`).
+Session: 255 car rows, the hottest tyre **24.1 °C** from 20.1, squeal up to 0.50, the audio
+device `Speakers (Steam Streaming Speakers) 48000 Hz` opened. **The cruiser leg could not
+be driven**: with the hero against the Harbour City cruiser the player's frames ran at
+**2.5 s** (`frame_dt` in hero.csv), and a headless probe of the real island puts the fixed
+step's `character move` phase at **356-372 ms** with the hero stood 2.5 m off the
+cruiser's centre on its long axis, against a few ms 2.5 m off its side or beside the
+saloon — undiagnosed, a cert finding (CARRIED below). The reference is
 `docs/reference_videos/frames/driving/0006-0030` and `steal-car/` (never committed). The
 contact sheet is `VEH3h-FINAL\reference-contact-sheet.png`. The honest sentence on each:
 
@@ -500,4 +516,7 @@ contact sheet is `VEH3h-FINAL\reference-contact-sheet.png`. The honest sentence 
 | a surface drag term | rolling resistance is per row | VEH3-carried | ~0.25 d |
 | the template rig's knee / elbow limits | inverted in `template.rs` | VEH3-carried (a rig + clip re-bless) | ~1 d |
 | the parked-car cost ceiling at ×1.05 | the ratio spreads ×1.020-×1.051 run to run on this machine | VEH3-carried (a wider control, or a ceiling with its spread) | ~0.25 d |
+| **the fixed step's `character move` at 356-372 ms with the hero against the Harbour City cruiser** (frames at 2.5 s; the hands-on could not board it) | undiagnosed; not the arrival hold (the probe reads the same on `919fa34a`'s traffic) | VEH3-carried, the audit's first look | ~0.5 d to isolate |
+| the island kerb frame | a blind tap does not reach a kerb on the island's streets | VEH3-carried (VEH3e's placement door) | ~2 h |
+| the fallback-body island frame | not re-measured this wave (the art cook only) | PERF1's baseline row | ~1 h |
 | NPC road-rage barks, a carjack victim who fights | dialogue and melee, not driving | no wave in the mandate names them | — |

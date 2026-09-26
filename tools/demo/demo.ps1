@@ -1556,10 +1556,10 @@ function Invoke-Veh3hLeg {
         Say "VEH3h: NO BOARDING began in thirty taps of E -- none of the cert frames is in this session"
         return
     }
-    Wait-ForHero -Csv $heroCsv -What "the door opening on its hinge (VEH3d's pipeline)" -TimeoutS 6.0 `
-        -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^opening") -and ([double]$c[57] -gt 15.0) } `
+    Wait-ForHero -Csv $heroCsv -What "the door phase (VEH3d's pipeline: opening or entering)" -TimeoutS 8.0 `
+        -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^(opening|entering)") } `
         -Out (Join-Path $OutDir "130-veh3h-boarding.png") | Out-Null
-    $atWheel = @(Wait-ForHero -Csv $heroCsv -What "at the wheel, the engine started" -TimeoutS 10.0 `
+    $atWheel = @(Wait-ForHero -Csv $heroCsv -What "at the wheel, the engine started" -TimeoutS 30.0 `
         -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^driving") -and ([double]$c[66] -gt 0.0) } `
         -Out (Join-Path $OutDir "131-veh3h-at-the-wheel.png"))[-1]
     if (-not $atWheel) {
@@ -1581,14 +1581,20 @@ function Invoke-Veh3hLeg {
     Wait-ForHero -Csv $heroCsv -What "the burnout (slip past the peak, squeal loud, below 5 m/s)" -TimeoutS 4.0 `
         -Predicate { param($c) (& $isRow $c) -and ([math]::Max([double]$c[63], [double]$c[64]) -gt 1.5) -and ([double]$c[6] -lt 5.0) -and ([math]::Max([double]$c[68], [double]$c[69]) -gt 0.2) } `
         -Out (Join-Path $OutDir "132-veh3h-burnout.png") | Out-Null
-    Wait-ForHero -Csv $heroCsv -What "driving with the telemetry HUD (over 8 m/s, a gear up)" -TimeoutS 10.0 `
-        -Predicate { param($c) (& $isRow $c) -and ([double]$c[6] -gt 8.0) -and ([int]$c[61] -ge 2) } `
+    Wait-ForHero -Csv $heroCsv -What "driving with the telemetry HUD (over 5 m/s)" -TimeoutS 10.0 `
+        -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^driving") -and ([double]$c[6] -gt 5.0) } `
         -Out (Join-Path $OutDir "133-veh3h-drive-hud.png") | Out-Null
-    # THE KERB: a short right-hand tap at speed.
-    [InfInput]::Down(0x20); Start-Sleep -Milliseconds 350; [InfInput]::Up(0x20)   # D
-    Wait-ForHero -Csv $heroCsv -What "a kerb (a surface impulse played at speed)" -TimeoutS 6.0 `
-        -Predicate { param($c) (& $isRow $c) -and ([int]$c[71] -gt 0) -and ([double]$c[6] -gt 3.0) } `
-        -Out (Join-Path $OutDir "134-veh3h-kerb.png") | Out-Null
+    # THE KERB: a tap toward the near kerb at speed -- LEFT first (the
+    # Harbour City saloon's street runs with the pavement on its left), then
+    # right if nothing thumped.
+    $kerb = $false
+    foreach ($key in @(0x1E, 0x20)) {   # A, then D
+        [InfInput]::Down($key); Start-Sleep -Milliseconds 450; [InfInput]::Up($key)
+        $kerb = @(Wait-ForHero -Csv $heroCsv -What "a kerb (a surface impulse played at speed)" -TimeoutS 3.0 `
+            -Predicate { param($c) (& $isRow $c) -and ([int]$c[71] -gt 0) -and ([double]$c[6] -gt 3.0) } `
+            -Out (Join-Path $OutDir "134-veh3h-kerb.png"))[-1]
+        if ($kerb) { break }
+    }
     # THE CRASH: the throttle stays down until a part comes off.
     $crash = @(Wait-ForHero -Csv $heroCsv -What "the crash (a part shed)" -TimeoutS 25.0 `
         -Predicate { param($c) (& $isRow $c) -and ([int]$c[53] -gt 0) } `

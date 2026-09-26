@@ -41634,3 +41634,72 @@ outline below 25 % on four shells (a measured ruling, not a price); the
 4.47 m traffic arrival snap (a leg whose window closed has no path to
 rephase onto, ~0.5 d); the cab-step frames show a backlit primitive semi (the
 climb is in `hero.csv`: +0.74 m at the handle and the door beats).
+
+## WAVE VEH3h — THE DRIVING CERT GATE (2026-09-26)
+
+The cert of the VEH3 arc. `docs/memos/driving-parity.md` walks the research doc's
+parity checklist and its body row by row — **99 held, 13 partial, 10 not met** — each row
+an arm (`file::function`), what it reads and the number it prints today, re-run on this
+tree. `veh3h_gate` (7 arms) holds the memo to it: every cited arm exists and is not
+ignored (125 citations), and three of the memo's numbers are re-derived by their arms and
+compared to the digit (the `FEEL-VS-FORZA` lines, the `LAP-FACTS` line).
+
+### the lap
+
+The CI island's circuit (the street centreline round the settlement's 2 x 2 blocks,
+609.6 m, 20 m of climb), cooked twice (byte-identical), driven at 60 Hz on the shipped
+host in `bravado_gauntlet_hellfire` (a shell muscle coupe, turbo, rear drive), boarded
+through VEH3d's pipeline, a burnout with the aid off, one lap on the engine's own lane
+driver (`traffic::drive_intent`), a cool-down straight: 3 161 rows; the rear tyres
++6.35 C in the burnout and 2.99 C cooler after the straight (peak 38.5 C); boost 0.965,
+0.000 half a second after the lift; the front axle 48.4 % standing, 70.3 % braking at
+1.37 g. PIE == shipping over the whole lap: 3 161 rows and 3 394 state digests equal. The
+same lap in the imported `obey_rocoto` (`dd_suv`): 3 598 rows, equal on both hosts. The
+CSVs and plots are in the session scratchpad, never committed.
+
+### the frame
+
+64 island saloons driving the full model + one occupied, the composed city, 1080p
+release, min of five sessions: SHIPPED p50 21.96 / p95 24.67 / worst 25.23 ms (held
+against `SHIPPING_FRAME_CEILING_MS` 38, asserted); LIT p95 39.56 ms (+1.6, printed and
+routed to PERF1, not re-minted). The island at the Harbour City crossroads with the art,
+min of five: SHIPPED p50 68.47 / p95 70.96 ms — PERF1 (crowd skinned 11.1 ms GPU, depth
+prepass 6.9, the fixed step 11.7). The tier ladder per car: Full 14.13 us, Near 3.60,
+Dormant 0.03; Far unreachable for a car.
+
+### the feel against Forza (FH5 stock 0-60 mph, 25 % band)
+
+Demon (shell) 3.72 s against 2.293 — OUTSIDE (drag radials, 652.5 against 1 044 N.m);
+Camry TRD (imported) 6.40 against 5.615 — WITHIN; Sesto Elemento (shell) 2.35 against
+2.500 — WITHIN.
+
+### closed by the cert
+
+* **The arrival hold**: a car whose leg closes short of its slot keeps its rig where it
+  stopped until it is Dormant (`traffic_3d::a_car_whose_leg_closes_short_of_its_slot_is_
+  not_snapped_onto_it`; the snap was the whole shortfall).
+* **The per-part shell slack** in `vehicle::tests`: seven parts, each on its own axis,
+  measured (mirrors 0.186 m, push bar 0.195, bumpers, grille and lamps 0.018-0.042);
+  every other part inside its hull to 1e-9.
+
+### found by the cert
+
+* **A parked vehicle beyond the collider band rolls off its pad**: the CI island's camp
+  fire appliance rolls 36.63 m in 15 s with the hero 120 m away, 1.51 m with the hero
+  20 m away — PERF1's sim LOD (an arm asserts the defect).
+* **No car carries a light**: 59 front lamps across 166 rows, all emissive lenses, 0
+  `Light` components — PAR1 on PAR0 (an arm).
+* **The Harbour City cruiser**: the fixed step's `character move` at 356-372 ms with the
+  hero against it (the player's frames at 2.5 s); undiagnosed, carried.
+* The parked-car cost ceiling (x1.05) read x1.020-x1.051 over four release runs.
+
+### carried, by name
+
+PERF1: the island frame, the lit driving frame, the parked-vehicle sim LOD, the 288 ms
+activation step, vehicle LOD/HLOD, the sub-step rate (N = 1). PAR1/PAR0: headlight cones.
+PAR2: smoke, exhaust, dust. The PAR arc: clearcoat paint. VEH3-carried: the per-sample
+granular synth (~1.5 d), the Linux audio device, the art machines' cab doors (~1 d a
+machine), the Simulate-viewport crumple (~0.5 d), the coupe/SUV/pickup arch daylight
+(~1 d, re-priced), the semi's cab-step handle (15.55 mm), the Demon row, a drawn wheel on
+the shells, a surface drag term, the template knee/elbow limits, the cruiser's character
+move, the island kerb frame, the fallback-island frame.
