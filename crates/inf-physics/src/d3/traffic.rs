@@ -59,6 +59,11 @@ use super::PhysicsBridge3D;
 /// driving past.
 pub const CORRIDOR_HALF_M: f64 = 2.5;
 
+/// **How far short of its slot a parked-out car may be and still be let down
+/// to `Near`**, metres (wave VEH3h, the arrival hold). Past it the car keeps
+/// its rig where it stopped rather than be written onto the slot in view.
+pub const ARRIVAL_HOLD_M: f64 = 0.5;
+
 /// How far ahead the following rule looks, metres.
 ///
 /// Sixty metres is four seconds at a 50 km/h limit and two at a highway's, so a
@@ -233,6 +238,25 @@ pub fn step_traffic(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64)
             CrowdTier::Dormant
         };
         let was = rec.tier;
+        // ── THE ARRIVAL HOLD (wave VEH3h, closing VEH3f.2b's carried "4.47 m
+        //    arrival snap"). A steered car whose leg has CLOSED is handbraked
+        //    where its body got to, and its record places it at its SLOT. The
+        //    hand-off below re-phases only a car still `driving`, so a car
+        //    that stopped short of its slot would be written onto the slot the
+        //    first step the band dropped it to `Near` -- the whole shortfall,
+        //    in plain sight. Such a car KEEPS its rig (it stays `Full`, parked
+        //    on its handbrake where it stopped) for as long as it is within
+        //    sight; it is let go only to `Dormant`, where nothing is drawn.
+        let tier = if was == CrowdTier::Full
+            && tier == CrowdTier::Near
+            && !driving
+            && rec.detail == RigDetail::Full
+            && (DVec3::new(here.x - at.x, 0.0, here.z - at.z)).length() > ARRIVAL_HOLD_M
+        {
+            CrowdTier::Full
+        } else {
+            tier
+        };
         if tier != was {
             stats.retiered += 1;
         }

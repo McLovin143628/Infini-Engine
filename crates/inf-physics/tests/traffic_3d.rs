@@ -1463,3 +1463,105 @@ fn a_stolen_car_answers_the_throttle_on_an_empty_street() {
         "the stolen car covered {went:.1} m in ten seconds"
     );
 }
+
+/// **A CAR WHOSE LEG CLOSES SHORT OF ITS SLOT IS NOT SNAPPED ONTO IT** (wave
+/// VEH3h, closing VEH3f.2b's carried "4.47 m arrival snap").
+///
+/// A commuter's leg is a WINDOW on the level clock. A `Full` car that is still
+/// short of its destination when the window closes is handbraked where its
+/// body got to -- and its record's place is the SLOT. The hand-off down
+/// re-phased only a car that was still `driving`, so the first step the band
+/// dropped it to `Near` wrote the slot onto its transform: a jump of the whole
+/// shortfall, in plain sight.
+///
+/// READS the world: every step, each `Full` commuter's record (`leg_at`,
+/// `is_driving`, `place` at the level's own `CrowdClock`) against its
+/// chassis's `Transform`; the first car found stopped more than a metre short
+/// of where its record would place it is the subject. The hero then stands
+/// 100 m from it (outside `TRAFFIC_FULL_M`, inside `TRAFFIC_NEAR_M`) and the
+/// chassis's per-step XZ displacement is read across the next ninety steps.
+/// ASSERTS: it never moves more than the half-lane-plus-two-steps bound the
+/// driving hand-off is held to (`a_car_leaving_the_steered_tier_lands_...`).
+/// Mutation: the arrival hold deleted -> the car jumps the whole shortfall.
+#[test]
+fn a_car_whose_leg_closes_short_of_its_slot_is_not_snapped_onto_it() {
+    let mut town = Town::new(DVec3::new(50.0, 0.0, 50.0));
+    let mut subject: Option<(Uuid, f64)> = None;
+    // The fixture has no sky step, so the clock is wound by hand: a minute of
+    // level time a second, so the morning's windows open and close in the run.
+    let mut hour = 7.8;
+    for _ in 0..14_400 {
+        hour += DT * 60.0 / 3600.0;
+        town.set_hour(hour);
+        town.step(1);
+        let clock = inf_ecs::crowd::CrowdClock::from_world(
+            &town.world,
+            traffic::steps(&town.world) as f64 * DT,
+        );
+        for (g, r) in inf_physics::d3::traffic::records(&town.world) {
+            if r.tier != inf_ecs::crowd::CrowdTier::Full || !r.commutes() {
+                continue;
+            }
+            let leg = r.leg_at(g, clock);
+            if r.is_driving(clock, leg) {
+                continue;
+            }
+            let (place, _) = r.place(g, clock, leg);
+            let Some(body) = town
+                .world
+                .entity_of(g)
+                .and_then(|e| town.world.world().get::<Transform>(e))
+                .map(|t| t.translation.to_dvec3())
+            else {
+                continue;
+            };
+            let short = ((place.x - body.x).powi(2) + (place.z - body.z).powi(2)).sqrt();
+            if short > 1.0 {
+                subject = Some((g, short));
+                break;
+            }
+        }
+        if subject.is_some() {
+            break;
+        }
+    }
+    let (target, short) = subject.expect("a commuter stopped short of its slot at the end of its leg");
+    let at = |t: &Town| {
+        t.world
+            .entity_of(target)
+            .and_then(|e| t.world.world().get::<Transform>(e))
+            .map(|x| x.translation.to_dvec3())
+            .expect("the chassis")
+    };
+    town.stand(at(&town) + DVec3::new(100.0, 0.0, 0.0));
+    let mut worst = 0.0f64;
+    let mut before = at(&town);
+    let mut tiers = std::collections::BTreeSet::new();
+    for _ in 0..90 {
+        town.step(1);
+        let Some(now) = town
+            .world
+            .entity_of(target)
+            .and_then(|e| town.world.world().get::<Transform>(e))
+            .map(|x| x.translation.to_dvec3())
+        else {
+            tiers.insert("no body".to_string());
+            continue;
+        };
+        worst = worst.max(((now.x - before.x).powi(2) + (now.z - before.z).powi(2)).sqrt());
+        before = now;
+        tiers.insert(format!(
+            "{:?}",
+            inf_physics::d3::traffic::records(&town.world)[&target].tier
+        ));
+    }
+    let bound = inf_ecs::traffic::DEFAULT_LANE_WIDTH_M * 0.5
+        + inf_ecs::traffic::street_speed_mps() * DT * 2.0;
+    println!(
+        "ARRIVAL: a commuter {short:.2} m short of its slot when its leg closed; with the hero 100 m away its worst step is {worst:.3} m (tiers {tiers:?}, bound {bound:.2} m)"
+    );
+    assert!(
+        worst < bound,
+        "a car that stopped {short:.2} m short of its slot jumped {worst:.2} m in one step -- the arrival snap"
+    );
+}
