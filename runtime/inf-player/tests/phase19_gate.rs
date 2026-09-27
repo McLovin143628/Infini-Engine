@@ -892,17 +892,17 @@ fn print_phases(mean: &inf_player::step_profile::StepProfile) {
 /// phase that did not exist when the arm was minted (NPC1a is two waves later)
 /// and that silently took it over. An arm named for colliders whose number is
 /// the character controller is `is_venue`-as-a-proxy in a budget. The collider
-/// claim keeps this arm, with the crowd banded out; the crowd's cost gets
-/// [`a_full_crowd_agent_costs_more_than_the_whole_collider_band`], which
-/// carries the finding as its own assertion.
+/// claim keeps this arm, with the crowd banded out; the crowd's cost got
+/// its own arm -- now [`the_full_crowd_steps_inside_the_frame_budget`], since
+/// the VEH3h audit closed the finding it carried.
 ///
 #[test]
 fn stepping_the_town_stays_cheap_with_its_collider_band() {
     let dir = tempfile::tempdir().unwrap();
     let (colliders, mut sim) = timed_town(dir.path());
     // **THE CROWD IS BANDED OUT, AND THAT IS WHAT MAKES THIS ARM ABOUT
-    // COLLIDERS** (wave EMS1). See `a_full_crowd_agent_costs_more_than_the_whole
-    // _collider_band` below for the measurement that forced the split: the
+    // COLLIDERS** (wave EMS1). See `the_full_crowd_steps_inside_the_frame_budget`
+    // below for the measurement that forced the split (closed since): the
     // arm's name says colliders and its number was 96% the crowd's character
     // controller, which is `is_venue`-as-a-proxy one file over. Zero radii put
     // every agent `Dormant` — no entity, no controller — so what is timed here
@@ -940,14 +940,16 @@ fn stepping_the_town_stays_cheap_with_its_collider_band() {
     );
 }
 
-/// **ONE FULL CROWD AGENT COSTS MORE THAN THE WHOLE COLLIDER BAND** (wave EMS1)
-/// — the measurement the arm above was hiding, as its own claim.
+/// **THE FULL CROWD STEPS INSIDE THE FRAME BUDGET** -- EMS1's finding,
+/// CLOSED by the VEH3h audit, and asserted the way round its own doc asked
+/// for ("the day somebody fixes it, this arm goes red and the ledger gets
+/// rewritten").
 ///
-/// # What was found, and how
+/// # What EMS1 found
 ///
 /// EMS1 stood four institutions in this town. Its step went from a few
-/// milliseconds to **302 ms**, and the obvious reading — "22 853 colliders is
-/// too many" — is wrong. The four-point sweep below is the evidence:
+/// milliseconds to **302 ms**, and the obvious reading -- "22 853 colliders is
+/// too many" -- was wrong. The four-point sweep below was the evidence:
 ///
 /// ```text
 ///   radii (0, 0, 0)        1.24 ms/step   tiers [0, 0, 0, 252]
@@ -957,30 +959,29 @@ fn stepping_the_town_stays_cheap_with_its_collider_band() {
 ///                                         character move 300.21 ms
 /// ```
 ///
-/// **The fourth row is `DEFAULT_CROWD_RADII`, which is the band this arm
-/// actually sweeps** (EMS1 audit — the first write-up of this table quoted a
-/// hand-picked `(40, 80, 160)` from an earlier run, so the doc named a
-/// measurement the code does not make; re-measured at
-/// `(32, 96, 512)`: 256.9 ms/step of which 254.9 is `character move`, 7.9 ms an
-/// agent, on a quieter machine than the run above. The *shape* is what is
-/// asserted below, because the milliseconds are a fact about a laptop.)
+/// Thirty-two `Full` agents were 250-300 ms, essentially all of it
+/// `character move` -- 8-9.3 ms per STANDING agent -- and EMS1 read it as the
+/// controller's cost against a city of colliders.
 ///
-/// The static band is free. Fifty `Near` agents and a hundred and seventy `Far`
-/// ones are free. **Thirty-two `Full` ones are 250–300 ms**, essentially all of
-/// it `character move` — about **8–9.3 ms per standing agent per step**, against
-/// a town whose whole physics sync and solve together are 1.5 ms.
+/// # What it was
 ///
-/// # Why this is asserted the way round it is
+/// The VEH3h audit found the same number beside the Harbour City cruiser
+/// (358.7 ms, 344.9 of it inside rapier's controller, 225 calls) and profiled
+/// it: the agents were STACKED -- a society that sends every resident to the
+/// nearest desk puts dozens on one point -- and rapier's controller, which
+/// does not depenetrate, made each one fight its whole pile on every cast.
+/// `inf_physics::d3::movement`'s `stacked_pawns` now sets aside the NPCs a
+/// mover overlaps. This town's 32 `Full` agents step in ~2.6 ms.
 ///
-/// It is a carried defect and not a budget, so the arm asserts the DIAGNOSIS:
-/// the control is inside the frame budget, the default band is not, and the
-/// difference is `character move`. The day somebody gives the character
-/// controller a broadphase, **this arm goes red** and the ledger gets rewritten
-/// — which is the P22 pattern (assert the outcome, so a fix cannot land
-/// silently) and is the only honest thing to do with a number nobody may raise
-/// a budget to.
+/// READS the same four-point sweep. ASSERTS: the control holds no `Full`
+/// agent and is inside the budget; the default band holds some; the default
+/// band's step is now INSIDE `FRAME_BUDGET_MS`; and the set-aside door was
+/// engaged while it was timed (`PhysicsWorld3D::pawns_set_aside` moved), so
+/// it is the pile rule and not an empty town that made it cheap. Mutation:
+/// `stacked_pawns` answering nothing -> the default band is back over the
+/// budget, RED.
 #[test]
-fn a_full_crowd_agent_costs_more_than_the_whole_collider_band() {
+fn the_full_crowd_steps_inside_the_frame_budget() {
     let dir = tempfile::tempdir().unwrap();
     let (colliders, mut sim) = timed_town(dir.path());
     sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
@@ -989,6 +990,8 @@ fn a_full_crowd_agent_costs_more_than_the_whole_collider_band() {
     /// tier census, and what `character move` cost inside it.
     type SweepRow = ((f64, f64, f64), f64, [usize; 4], f64);
     let mut rows: Vec<SweepRow> = Vec::new();
+    // The set-aside count over the LAST row's timed steps (the default band).
+    let mut set_aside = 0u64;
     for r in [
         (0.0f64, 0.0f64, 0.0f64),
         (8.0, 16.0, 32.0),
@@ -1001,7 +1004,9 @@ fn a_full_crowd_agent_costs_more_than_the_whole_collider_band() {
         for _ in 0..4 {
             sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
         }
+        let aside0 = sim.bridge3d().world().pawns_set_aside();
         let (ms, mean) = time_steps(&mut sim, 20);
+        set_aside = sim.bridge3d().world().pawns_set_aside() - aside0;
         let tiers = sim.crowd_stats().per_tier;
         let idx = inf_player::step_profile::STEP_PHASE_NAMES
             .iter()
@@ -1039,24 +1044,18 @@ fn a_full_crowd_agent_costs_more_than_the_whole_collider_band() {
         "the control costs {control_ms:.3} ms — the collider band itself is over \
          budget, which is a different regression from the one this arm names"
     );
-    // **THE CARRIED DEFECT, ASSERTED SO A FIX CANNOT LAND SILENTLY.** If this
-    // line fails, the character controller got cheaper: delete the arm, restore
-    // the crowd to `stepping_the_town_stays_cheap_with_its_collider_band`, and
-    // rewrite the ledger entry that quotes these numbers.
-    assert!(
-        full_ms > FRAME_BUDGET_MS,
-        "{agents} Full agents now step in {full_ms:.3} ms, inside the \
-         {FRAME_BUDGET_MS} ms frame budget — the character-controller cost this \
-         arm was minted to carry is FIXED. That is good news and it makes this \
-         arm a lie: fold the crowd back into the collider arm and rewrite the \
-         EMS1 ledger."
+    // **THE FINDING, CLOSED** (the VEH3h audit): the default band is inside
+    // the frame budget, and the pile rule was engaged while it was timed.
+    eprintln!(
+        "VEH3h: {agents} Full agents step in {full_ms:.3} ms (character move {full_move:.3} ms); {set_aside} stacked bodies set aside over the timed steps"
     );
     assert!(
-        full_move > 0.8 * (full_ms - control_ms),
-        "`character move` is {full_move:.3} ms of a {:.3} ms difference — the \
-         crowd's cost has moved to another phase and the diagnosis in this \
-         arm's doc is stale",
-        full_ms - control_ms
+        full_ms < FRAME_BUDGET_MS,
+        "{agents} Full agents step in {full_ms:.3} ms -- over the {FRAME_BUDGET_MS} ms frame budget again (character move {full_move:.3} ms): the pile is being fought (see `stacked_pawns`)"
+    );
+    assert!(
+        set_aside > 0,
+        "nothing was set aside while the default band was timed, so this arm no longer measures the pile rule"
     );
 }
 

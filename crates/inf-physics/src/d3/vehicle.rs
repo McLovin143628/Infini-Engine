@@ -153,16 +153,6 @@ pub fn step_vehicles(
         .parked_beyond_band
         .retain(|g| guids.binary_search(g).is_ok());
     for chassis in guids {
-        if hold_beyond_band(world, bridge, chassis, &band, &driven) {
-            // Held: nothing to solve, and the drivetrain it had is the one it
-            // has (the trace carries it unchanged rather than losing the car).
-            if let Some(v) = bridge.vehicle_of(chassis) {
-                if let Some(state) = v.drivetrain() {
-                    drivetrains.push((chassis, state, v.idle_rpm()));
-                }
-            }
-            continue;
-        }
         if let Some(o) = step_one(
             world,
             bridge,
@@ -171,6 +161,9 @@ pub fn step_vehicles(
             (wetness, ambient_c, wind),
             &mut forces,
         ) {
+            // The hold reads THIS step's rays: a parked car whose wheels
+            // found no ground is held before the solver can drop it.
+            hold_beyond_band(world, bridge, chassis, &band, &driven, o.wheels_grounded);
             if let Some(v) = bridge.vehicle_of(chassis) {
                 if let Some(state) = v.drivetrain() {
                     drivetrains.push((chassis, state, v.idle_rpm()));
@@ -190,7 +183,8 @@ pub fn step_vehicles(
 }
 
 /// **Hold a parked vehicle still where its ground is not resident** (the
-/// VEH3h audit) -- `true` while held, and then the step does not solve it.
+/// VEH3h audit) -- `true` while held. Called after the vehicle's own rays
+/// (`wheels_grounded` is this step's), before the solver.
 ///
 /// The collider band (`inf_ecs::band`, 64 m) drops the fine static colliders
 /// beyond it -- a pad, a kerb, a forecourt -- and keeps the vehicles, so a
@@ -200,10 +194,17 @@ pub fn step_vehicles(
 /// (`veh3h_gate::a_parked_vehicle_beyond_the_collider_band_holds_its_pad`).
 /// A parked car must not move whether or not its ground is resident, so a
 /// vehicle that nobody commands (`Vehicle::commanded`), nobody sits at the
-/// wheel of, is not hitched and is at rest (below `PARK_HOLD_MPS`) is made
-/// KINEMATIC where it stands the step its chassis leaves the band's near
-/// tier, before the solver can drop it, and dynamic again -- at rest, on its
-/// ground -- the step it comes back. A car with a driver (a responder stopped
+/// wheel of, is not hitched, is at rest (below `PARK_HOLD_MPS`) and has a
+/// wheel that found NO GROUND this step, with its chassis outside the band's near
+/// tier, is made KINEMATIC where it stands before the solver can drop it, and
+/// dynamic again -- at rest -- the step every wheel finds ground or anybody
+/// commands it (the appliance's pad gone, ONE of its four wheels still met
+/// the bare terrain, and a hold on "no wheel grounded" let it roll). A parked
+/// car that still stands on all its wheels outside the band
+/// (terrain, an unbanded floor) is simulated as before, so a unit driving
+/// past can still shove it: the first cut held every parked car beyond the
+/// band, and `dispatch_3d`'s responding ambulance drove into a held neighbour
+/// as into a wall. A car with a driver (a responder stopped
 /// at a light) is never held, and one set rolling by a collision is not at
 /// rest. Both hosts run this door, so PIE and shipping hold the same cars.
 fn hold_beyond_band(
@@ -212,6 +213,7 @@ fn hold_beyond_band(
     chassis: Uuid,
     band: &inf_ecs::SimBand,
     driven: &BTreeSet<Uuid>,
+    wheels_grounded: usize,
 ) -> bool {
     let Some(body) = bridge.body_of(chassis) else {
         return false;
@@ -233,7 +235,18 @@ fn hold_beyond_band(
     let beyond = !band
         .tier(position, DVec3::ZERO, glam::DQuat::IDENTITY)
         .is_near();
-    let hold = beyond && at_rest && !commanded && !hitched && !driven.contains(&chassis);
+    let wheels = bridge.vehicle_of(chassis).map_or(0, |v| v.wheels().len());
+    let free = commanded || hitched || driven.contains(&chassis);
+    let hold = if held {
+        // Released by a hand on it, by ground under every wheel, or -- once
+        // the band holds it again -- by ground under ANY wheel: a car the
+        // band has come back to is released onto what streamed in under it,
+        // not the step before it arrives (the veh3g Dodo, released a step
+        // early, sank below its own apron).
+        !(free || wheels_grounded == wheels || (!beyond && wheels_grounded > 0))
+    } else {
+        beyond && wheels_grounded < wheels && at_rest && !free
+    };
     if hold && !held {
         let w = bridge.world_mut();
         w.set_body_linvel(body, DVec3::ZERO);
