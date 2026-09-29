@@ -41719,7 +41719,11 @@ CLOSED rather than routed. The Demon row retuned (1 044 N.m, drag-radial
 `longitudinal_grip` 2.0: 2.48 s against FH5's 2.259, WITHIN); the FH5 figures re-read
 (each of the cert's three was 1-2.5 % off the sheet). The lap's -36.75 g spike was a 39 deg
 TERRACE BANK in the terrain, not a pad edge or seam; the lap moved to the first graded
-circuit (1 958 rows, 304.2 m, no one-step deceleration above its braking). The audit's
+circuit (304.2 m, no one-step deceleration above its braking; after the audit's own
+hold and pedal fixes, re-derived at the close: 1 999 rows, lap 25.32 s, cool-down 2.34 C,
+front axle 49.6 -> 75.5 %, peak braking 1.82 g; PIE == shipping on 2 231 step digests).
+The imported lap (`obey_rocoto`, 2 445 rows, 32.75 s) is equal on both hosts but NOT
+clean: one step at 37.82 g ~13 m wide of its second corner -- printed by its arm, carried. The audit's
 own hold froze the frame instrument's harness cars (a throttle with no `occupied`) --
 caught by the re-run, fixed (`VehicleControls::commands`). **Not held, printed, PERF1:**
 the parked-car cost ceiling (median x1.058 conditioned). The checklist now 103 / 12 / 9.
@@ -41730,4 +41734,9 @@ The crowd pile itself (the society's unclaimed nearest-desk assignment, ~0.5 d);
 appliance's in-band creep (1.51 m / 15 s, parked on a 7.8 deg lane, ~0.5 d); the boarded
 fleet car is silent (`engine_voice: false` on the EMS fleet, a level re-bless, ~0.5 d);
 `dinka_sugoi` +28 % against FH5 (a front-drive launch, ~0.5 d); the arch daylight of the
-coupe / SUV / pickup (0.272 / 0.253 / 0.361 m, ~1 d); the island kerb frame (~2 h).
+coupe / SUV / pickup (0.272 / 0.253 / 0.361 m, ~1 d); the island kerb frame (~2 h); the
+imported lap's 37.82 g strike (name the obstacle, then the braking or the line, ~0.5 d).
+
+### the close (2026-09-29)
+
+BATTERY_PENDING

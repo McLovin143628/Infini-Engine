@@ -60,7 +60,7 @@ tables after them are measurements, not rows.
 | **sub-stepping at 300-400 Hz** | `veh3a_gate::the_substep_loop_runs_and_one_is_what_ships` | end positions of two rigs over 600 contact-steps at N = 1 and N = 4, and `SubstepAdvance::Shipped` against `Frozen` | **substep loop present, N = 1 shipped, 300 Hz not reached.** N = 1 and N = 4 end **19.796 m** apart; the between-substep chassis advance is worth **2.825 m**. VEH3a's price for N = 4: the sports row's sprint 3.98 → 6.77 s, i.e. the vehicle phase doubled. The fixed step is 60 Hz; the tyres are solved once in it | **PARTIAL** — N is PERF1's to buy (the frame the island does not yet hold, §11) |
 | the Pacejka **magic formula** on slip ratio κ and slip angle α | `veh3a_gate::the_magic_formula_is_not_the_old_curve` | two pure curve functions over 400 samples (the arm that tells "the table held" from "the model was never wired") | **0.2127** of peak grip apart from the pre-VEH3a curve at 0.34 × peak slip, **0.0** at the peak | ✓ |
 | …and it is the model the cars drive on | `vehicle_grade::every_catalogue_row_sprints_stops_and_tops_out_inside_its_own_spec` | sprint, stop and top speed off the rapier body for every island row, ±5 % bands | sports **3.70 s**, stops **28.8 m**, tops out **60.9 m/s**; sedan **7.53 s / 36.9 m / 33.6 m/s** | ✓ |
-| κ and α **per wheel, every step** | `veh3h_gate::the_lap_logs_at_sixty_hertz_and_pie_equals_shipping` | `WheelState::slip_ratio`/`slip_lat` per corner at 60 Hz on the shipped host | logged in `slip_fl..rr` / `slip_lat_fl..rr` over **1958** rows of the lap (§10) | ✓ |
+| κ and α **per wheel, every step** | `veh3h_gate::the_lap_logs_at_sixty_hertz_and_pie_equals_shipping` | `WheelState::slip_ratio`/`slip_lat` per corner at 60 Hz on the shipped host | logged in `slip_fl..rr` / `slip_lat_fl..rr` over **1999** rows of the lap (§10) | ✓ |
 | **multi-contact sensing**, 4-8 casts a tyre | `veh3a_gate::four_casts_do_not_make_a_kerb_worse` | chassis vertical acceleration off `body_linvel` over a 12 cm kerb at three approach speeds, `Footprint::CENTRE` as the control | four casts a wheel; the four/one ratio spans **1.00×–1.02×** (11.8 / 11.6 m/s² at 14.6 km/h). Four casts, at the 60 Hz step — not 360-400 Hz | **PARTIAL** — the rate is the sub-step row's |
 | the contact normal feeds the tyre | `veh3a_gate::a_garbage_contact_normal_changes_the_trace` | `tyre_force_with` through `TyreContext::camber_at` | level **0 N**, then **−3 028 / 2 463 / −2 463 N** as the plane tilts | ✓ |
 | …and the heightfield's own normal | `vehicle_ground::a_wheel_ray_normal_snaps_at_a_heightfield_cell_diagonal` | a wheel ray across a cell diagonal | a levelled road: worst normal step **0.0643°**; 0.15 m of relief: **15.69°** — which is why the solve reads the cast, not the triangle's normal (VEH1a's disposition) | ✓ |
@@ -78,7 +78,7 @@ tables after them are measurements, not rows.
 | **weight transfer** `F_z = F_static − m·a·h/L` | `veh3b_gate::the_axle_loads_are_the_formulas_on_the_shipped_rows` | `WheelState::load_n` per axle on the SHIPPED springs | sedan braking **7.3 %** from the formula, launching **8.4 %**; truck **2.2 % / 3.0 %**; **0 of 150** braked steps pinned at travel | ✓ |
 | …with a bump stop, not a clamp | `veh3b_gate::the_bump_stop_is_a_rate_that_rises_and_the_rows_are_sprung_for_it` | the strut's force past 85 % of travel; the nine rows' standing fractions | a millimetre at the stop costs **370 N** against **20 N** mid-travel (19×); all nine rows stand on **45 %** of their travel | ✓ |
 | nose-dive and squat | `veh3b_gate::the_nose_dives_and_the_tail_squats` | front and rear compression | fixture **45.6 / 8.9 mm**; the shipped sedan **118.5 / 14.1 mm** | ✓ |
-| the lap's own load transfer | `veh3h_gate::the_lap_logs_at_sixty_hertz_and_pie_equals_shipping` | four `load_n` per step on the shipped host | front axle **49.6 %** standing → **73.6 %** braking (§10) | ✓ |
+| the lap's own load transfer | `veh3h_gate::the_lap_logs_at_sixty_hertz_and_pie_equals_shipping` | four `load_n` per step on the shipped host | front axle **49.6 %** standing → **75.5 %** braking (§10) | ✓ |
 | **turbo boost** | `veh3b_gate::the_boost_spools_and_blows_off` | `DrivetrainState::boost` over 240 steps, instant and N/A controls, the re-armed dead time | peak **0.70**, half after **202** steps, **0.70** dumped in six steps; dead time **9 steps** at 0.15 s, 0 without | ✓ |
 | the tyre model's cost | `veh3a_gate::the_vehicle_phase_costs_what_it_prints` | the vehicle phase alone, 64 cars, min of five, a no-car control | **0.4036 ms** release (**6.31 µs a car**) against 0.5 ms | ✓ |
 | a missed ray is AIR, not asphalt | `veh3b_gate::a_car_with_no_wheel_on_the_ground_says_air` | `surface_census` over `WheelState::contact` | 4 of 4 → asphalt µ 1.000; 0 of 4 → **air** µ 0.000 | ✓ |
@@ -196,8 +196,8 @@ tables after them are measurements, not rows.
 | **the arrival snap** (VEH3f.2b carried, 4.47 m) | `traffic_3d::a_car_whose_leg_closes_short_of_its_slot_is_not_snapped_onto_it` | each Full commuter's record against its chassis; the per-step XZ jump across the hand-off | **CLOSED by this wave** (the arrival hold): the jump was the whole shortfall (**112.54 m** under the arm's accelerated clock); now within the half-lane bound | ✓ |
 | the driving hand-off moves nothing | `traffic_3d::a_car_leaving_the_steered_tier_lands_where_its_body_already_was` | the body across the 64 m boundary | within the half-lane + two steps bound | ✓ |
 | **PIE == shipping on the island** | `island_gate::pie_equals_shipping_on_an_island_drive` | both hosts' `state_bytes` over 900 steps | **900** steps, **900** distinct states of **11 358** bytes, equal; **337** posed characters on both hosts | ✓ |
-| …over the whole lap | `veh3h_gate::the_lap_logs_at_sixty_hertz_and_pie_equals_shipping` | both hosts' 60 Hz rows and every step's state digest | **1 958** rows and **2 189** digests equal | ✓ |
-| …over the whole lap in an imported car | `veh3h_gate::the_imported_row_drives_the_same_lap_on_both_hosts` | the same, `obey_rocoto` (`dd_suv`) | equal (§10) | ✓ |
+| …over the whole lap | `veh3h_gate::the_lap_logs_at_sixty_hertz_and_pie_equals_shipping` | both hosts' 60 Hz rows and every step's state digest | **1 999** rows and **2 231** digests equal | ✓ |
+| …over the whole lap in an imported car | `veh3h_gate::the_imported_row_drives_the_same_lap_on_both_hosts` | the same, `obey_rocoto` (`dd_suv`) | equal (§10) — equal, not clean: one step at **37.82 g** off the line, carried (§13) | ✓ |
 | **two cooks** | `veh3h_gate::the_lap_logs_at_sixty_hertz_and_pie_equals_shipping` | every file of two cooks of the CI island | byte-identical | ✓ |
 | **GPU instancing, mesh LOD** for high-poly vehicles | `veh3f2b_gate::sixty_four_shell_cars_cost_what_they_cost` | the projector's wall time and instance count; the GPU frame | 64 shells: **0.463 ms** projected (the cert: 0.461), **2 048** instances, **17 876** LOD-0 triangles a car, GPU **0.326 ms** (min of 30; the cert quoted 2.721 ms, the VEH3f.2a audit 2.274 — the GPU column does not reproduce across sessions and is printed, never asserted) — the meshlet DAG decides the tiers; there are no pack LODs for a shell and no HLOD | **PARTIAL** — vehicle LOD/HLOD is **PERF1**'s |
 | **the island's frame** at 1080p | the ignored `fps_instrument` island arm (`the_island_in_imported_traffic`, needs a local cook) | 1080p release at the Harbour City crossroads | §11 — SHIPPED p50 **69.2** / p95 **72.2 ms** (the audit's run; the cert's 68.5 / 71.0) against a 38 ms ceiling | **✗** — **PERF1** |
@@ -399,18 +399,19 @@ VEH3d's pipeline (one interact press); a three-second burnout at the line with t
 aid off; one lap on the engine's own lane driver (`traffic::drive_intent`, 22 m/s on the
 straights, its bend rule in the corners); a five-second cool-down straight.
 
-LAP-FACTS: 1958 rows at 60 Hz; the burnout took the rear tyres +4.11 C; the cool-down straight cooled them 1.37 C; boost 0.971 peak, 0.000 half a second after the lift; the front axle 49.6 % standing and 73.6 % braking; peak braking 1.69 g; the lap 24.63 s.
+LAP-FACTS: 1999 rows at 60 Hz; the burnout took the rear tyres +4.11 C; the cool-down straight cooled them 2.34 C; boost 0.971 peak, 0.000 half a second after the lift; the front axle 49.6 % standing and 75.5 % braking; peak braking 1.82 g; the lap 25.32 s.
 
 The columns (the CSV's SHAPE is the arm's): `t, phase, x, z, s_m, speed_mps, long_g, lat_g,
 throttle, brake, rpm, gear, boost, slip_fl..rr, slip_lat_fl..rr, load_fl..rr, temp_fl..rr,
 surface` — 30 columns, corners named off each wheel's own mount. The bytes live in the
 session scratchpad (`AUDIT-VEH3h-FINAL\lap.csv`); the PLOT (`AUDIT-VEH3h-FINAL\lap.png`,
-never committed) shows the rear tyres climbing **20.1 → 24.2 °C** through the burnout's
+never committed) shows the rear tyres climbing **20.2 → 24.3 °C** through the burnout's
 staircase of slip (the fronts flat), both axles heating at every braking zone and cooling on
-every straight (the fronts peak at **33.6 °C** after the third corner), the boost spooling to
-**0.971** in the burnout and to ~0.55-0.59 on every straight, dumping to 0 on every lift, and
-the front axle's share of the wheel loads jumping from ~49 % to **~65-74 %** in each braking
-zone. The steepest one-step deceleration of the lap is its braking (**1.69 g**) — asserted.
+every straight (the hottest tyre peaks at **37.4 °C**), the boost spooling to
+**0.971** off the line (0.965 inside the burnout's three seconds) and to ~0.55-0.70 on every
+straight, dumping to 0 on every lift, and
+the front axle's share of the wheel loads jumping from ~49 % to **~65-76 %** in each braking
+zone. The steepest one-step deceleration of the lap is its braking (**1.82 g**) — asserted.
 
 **The cert's lap struck a terrace bank.** Its circuit (the settlement's largest, 609.6 m)
 read one step at **−36.75 g** on its west street, which the cert called "the fire hall's pad
@@ -424,12 +425,17 @@ new: the cert's lap read 3 161 rows / 44.68 s, +6.35 °C, 2.99 °C, boost 0.965,
 1.37 g.
 
 PIE == shipping over the whole lap: the editor's loose-level host drives the same lap and
-its **1 958** rows and **2 189** step digests of `state_bytes` are equal to the shipped
+its **1 999** rows and **2 231** step digests of `state_bytes` are equal to the shipped
 host's, bit for bit. The same lap in the IMPORTED `obey_rocoto`
 (`veh3h_gate::the_imported_row_drives_the_same_lap_on_both_hosts`) is equal on both hosts
-too: **2 356** rows, the lap **31.27 s**, the burnout **+1.46 °C** (all four tyres share
-an all-wheel-drive launch), boost **0.952**, the front axle **47.9 % → 80.8 %** braking.
-Its CSV and plot are `AUDIT-VEH3h-FINAL\lap-imported.csv` / `.png`.
+too: **2 445** rows, the lap **32.75 s**, the burnout **+1.57 °C** (all four tyres share
+an all-wheel-drive launch), boost **0.953**, the front axle **47.9 % → 81.9 %** braking.
+Its CSV and plot are `AUDIT-VEH3h-FINAL\lap-imported.csv` / `.png`. **It is not a clean
+lap**: the heavier SUV runs ~13 m wide out of the second corner and meets something at
+(421.7, −287.1) — one step at **37.82 g** (`IMPORTED LAP IMPACT`, printed by the arm, NOT
+asserted; the shell lap's no-impact assertion does not cover this row), then ~2 s of
+scrabbling under 3.2 m/s before it drives on. Carried (§13; it leaves the brake at ~9.4 m/s into that corner where the coupe
+reaches ~4.5; what it strikes is not yet named).
 
 ## §11 THE FPS ROW
 
@@ -553,6 +559,7 @@ contact sheet is `VEH3h-FINAL\reference-contact-sheet.png`. The honest sentence 
 | **the crowd pile** the cert found as the "Harbour City cruiser stall" — its COST is closed (`character_move_cost::a_pile_of_characters_is_set_aside_and_one_in_the_way_still_blocks`); the PILE remains: 204 residents on four points of one building, 80 on one quarter metre | `society::plan_day` sends every resident to the NEAREST workplace and its errand, unclaimed (the night shift and the evening are claimed; the day is not) | VEH3-carried to the society's owner (a claimed or capacity-bounded desk, and the NPC1d/VEN1 counts re-blessed) | ~0.5 d |
 | the in-band creep of the CI island's camp appliance (**1.51 m** in 15 s, ~0.11 m/s) | the generator parks it 6 m off its lane's centreline on a 7.8° grade between two buildings; it rolls 18.6° within 2 s with one wheel hanging (`island.rs`'s apron placement reads no ground by law) | VEH3-carried (the apron placement) | ~0.5 d |
 | `dinka_sugoi` (imported, Civic Type R) against FH5 — **+28 %**, OUTSIDE the band (the audit's random row) | a front-drive launch the traction aid holds at ~0.44 g; the car's own 400 N·m reaches only 5.83 s | VEH3-carried (a front-drive launch model) | ~0.5 d |
+| **the imported lap strikes something** (`obey_rocoto`: one step at **37.82 g**, ~13 m wide of the second corner, §10) | measured, not diagnosed: the SUV leaves the brake at ~9.4 m/s into that corner where the coupe's lap reaches ~4.5 (the same bend rule on a heavier car); what it strikes is not yet named; printed by `the_imported_row_drives_the_same_lap_on_both_hosts`, not asserted | VEH3-carried (name the obstacle, then the driver's braking or the arm's line) | ~0.5 d |
 | the island kerb frame | a blind tap does not reach a kerb on the island's streets (the audit's cruiser session: thumps 0 again) | VEH3-carried (VEH3e's placement door) | ~2 h |
 | **the boarded fleet car is silent** (the Harbour City cruiser: squeal 0.00, no grain) | the island's EMS fleet spawns with `engine_voice: false` (EMS1); VEH3e already silences an unoccupied car | VEH3-carried: the fleet spawned with a voice, both committed island levels re-blessed with that cause, the island audio arms re-read | ~0.5 d |
 | the fallback-body island frame | not re-measured this wave (the art cook only) | PERF1's baseline row | ~1 h |

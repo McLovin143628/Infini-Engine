@@ -1604,6 +1604,22 @@ fn the_imported_row_drives_the_same_lap_on_both_hosts() {
         front_share(&r[0]) * 100.0,
         braking * 100.0
     );
+    // PRINTED, NOT ASSERTED (the VEH3h audit's close): the shell lap asserts
+    // no one-step deceleration above its braking; this lap does not, and the
+    // heavier all-wheel-drive SUV runs wide out of a corner and meets
+    // something. The line says where, so the memo's sentence is the arm's.
+    let hit = r
+        .iter()
+        .min_by(|a, b| a.long_g.total_cmp(&b.long_g))
+        .expect("rows");
+    println!(
+        "IMPORTED LAP IMPACT: peak one-step deceleration {:.2} g at t {:.2} s, ({:.1}, {:.1}), s {:.1} m (printed, not asserted)",
+        -hit.long_g,
+        hit.t,
+        hit.x,
+        hit.z,
+        hit.s_m
+    );
     assert!(boost > 0.3, "the imported car's compressor never spooled");
     assert!(
         braking > front_share(&r[0]) + 0.05,
