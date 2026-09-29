@@ -154,7 +154,7 @@ libloading = "0.8"
 # component-model / async / WASI / gc: a mod is a plain core module behind our own
 # i64/f64 host ABI. Only inf-wasm-host names it (three-ring facade discipline); it
 # is NEVER built for wasm32 (the browser player does not load native mods).
-wasmtime = { version = "47", default-features = false, features = [
+wasmtime = { version = "48", default-features = false, features = [
     "cranelift",
     "runtime",
     "std",
