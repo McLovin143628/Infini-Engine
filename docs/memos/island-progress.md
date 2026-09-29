@@ -41739,4 +41739,9 @@ imported lap's 37.82 g strike (name the obstacle, then the braking or the line, 
 
 ### the close (2026-09-29)
 
-BATTERY_PENDING
+The full battery on the close's tree (`757a32a9`, -j 3, `INF_GOLDEN_STRICT=1`):
+`AGGREGATE over 405 binaries: 7854 passed, 0 failed, 30 ignored`. fmt clean over all 49
+packages (per member; `--all` dies with os error 206 here); clippy `--workspace
+--all-targets -D warnings` clean (5 m 29 s); rustdoc 399 warnings, 0 errors (161 s); wasm32
+`cargo check -p inf-player` ok; CRLF 0 over the 18 files since `919fa34a`; goldens 71
+(unchanged); `Cargo.lock` untouched; no frame, CSV, plot or Unreal file committed.
