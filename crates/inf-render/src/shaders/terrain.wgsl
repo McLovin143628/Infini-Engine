@@ -838,7 +838,22 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
         roughness = clamp(wetted.a, 0.04, 1.0);
     }
 
-    let sun = normalize(view.sun_dir.xyz);
+    // **THE MOON LIGHTS THE GROUND** (wave PAR0b, clause 3a). Terrain shades
+    // its key light from `view.sun_dir` at a fixed radiance — so at night, with
+    // the sun under the horizon, the ground took NO direct light at all while
+    // every mesh on it took the moon (the island's 21:00 street read black
+    // under the editor's Play). Once the sun is down, the key is the frame's
+    // first directional record — the moon the sky projects — at its own colour
+    // and intensity, on the terrain's own day calibration (the fixed
+    // `(1.15, 1.10, 1.0)` stands for the default 3.0 sun). By day this branch
+    // is not taken and every terrain golden runs the identical arithmetic.
+    var sun = normalize(view.sun_dir.xyz);
+    var key = vec3<f32>(1.15, 1.10, 1.0);
+    if (sun.y <= 0.0 && light_hdr.counts.y > 0u && light_hdr.counts.z == 0u) {
+        let k = light_at(0u);
+        sun = normalize(k.pos_dir.xyz);
+        key = k.color.rgb * (k.color.a * (1.1 / 3.0));
+    }
     let ndl = max(dot(n, sun), 0.0);
     // Hemispheric ambient (sky above / ground below), or the dynamic-GI probe
     // irradiance when GI is on.
@@ -861,7 +876,7 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
     let spec = pow(max(dot(n, half_v), 0.0), spec_power) * gloss * 0.4;
     // The direct sun (+ its glint) receives the cascaded shadow factor; SSAO
     // modulates only the ambient term.
-    var direct = ndl * vec3<f32>(1.15, 1.10, 1.0);
+    var direct = ndl * key;
     var spec_term = vec3<f32>(spec);
     if (sun_shadowing_enabled()) {
         let sf = shadow_factor(in.world_local, n);
