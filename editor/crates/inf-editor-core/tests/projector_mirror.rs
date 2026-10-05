@@ -1023,8 +1023,12 @@ fn both_projectors_fold_an_instance_into_a_batch_the_same_way() {
             "the hour stops reaching the batch and the city never lights up",
         ),
         (
-            "casts_shadows,",
+            "casts_shadows: casts_shadows &&",
             "the parts stop opting out and the caster pack walks a city again",
+        ),
+        (
+            "transmission: f32::from_bits(surface[6]),",
+            "a window pane stops reaching the glass pass and draws as an opaque leaf again (wave PAR0)",
         ),
     ] {
         let needle: String = field.chars().filter(|c| !c.is_whitespace()).collect();

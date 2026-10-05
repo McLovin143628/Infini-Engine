@@ -1488,7 +1488,9 @@ fn the_composed_frame_stays_inside_the_frame_budget() {
 /// Wave VEH3f.2b ADDED the five `shell_*` frames (66 -> 71, nothing
 /// re-blessed); its killed battery never reached this arm, and
 /// `audit(VEH3f.2b)` listed them.
-const GOLDENS: [&str; 71] = [
+/// Wave PAR0 ADDED `par0_cluster_debug`, `par0_wall_leak` and
+/// `par0_window_night` (71 -> 74, nothing re-blessed).
+const GOLDENS: [&str; 74] = [
     "2d_lit.png",
     "aerial_fog.png",
     "billboards.png",
@@ -1535,6 +1537,11 @@ const GOLDENS: [&str; 71] = [
     // on one high-contrast scene. All three are zero at the default.
     "lens_trio.png",
     "ortho_2d.png",
+    // Wave PAR0: the froxel heat view, the closed room from outside, a lit
+    // room through real glass.
+    "par0_cluster_debug.png",
+    "par0_wall_leak.png",
+    "par0_window_night.png",
     "pbr_materials.png",
     "primitives.png",
     "scatter.png",
