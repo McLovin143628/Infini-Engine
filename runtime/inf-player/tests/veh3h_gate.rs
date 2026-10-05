@@ -1469,7 +1469,10 @@ fn a_parked_vehicle_beyond_the_collider_band_holds_its_pad() {
 /// ASSERTS: lamp parts exist and glow (emissive > 0) and NOT ONE rig entity
 /// carries a `Light` -- there is no cone for a night frame to show, which is
 /// PAR1's (street lighting and vehicle lamps on PAR0's many-lights substrate:
-/// `MAX_LIGHTS` is 16 for the whole frame). The day a car grows a light this
+/// the 16-light frame wall is retired into `inf_render::lights::
+/// LIGHTS_PER_FRAME_CEILING` and froxel lists of `CLUSTER_MAX_LIGHTS`, so the
+/// budget no longer stops a car carrying a light -- only PAR1c has not yet
+/// authored one). The day a car grows a light this
 /// arm reds and the memo row is rewritten. A tree with no VEH3 arc has no lamp
 /// parts and fails the first assertion.
 #[test]
