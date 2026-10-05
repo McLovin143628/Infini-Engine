@@ -127,6 +127,12 @@ fn cs_voxelize(@builtin(global_invocation_id) gid: vec3<u32>) {
         // (a world half-voxel is `0.5 · vsize · |row i|` in instance-local units,
         // the row lengths of the inverse model's 3 x 3 being 1 / scale), so any
         // primitive that touches a voxel's half-width band claims it.
+        //
+        // Measured alternatives: thickening only the axes thinner than a voxel,
+        // TO one voxel, let a diagonal probe ray step over the single layer — the
+        // sealed room's floor read 1.15 (frame p95 13.2) against 0.14 (6.3); the
+        // cost of the full half-voxel is a fatter wall, ~5 % less sky on an open
+        // wall's own face (`golden_gi_terrain`'s floating wall, green 184 -> 175).
         let m = inst.inv_model;
         let rows = vec3<f32>(
             length(vec3<f32>(m[0].x, m[1].x, m[2].x)),
