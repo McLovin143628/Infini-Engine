@@ -41745,3 +41745,107 @@ packages (per member; `--all` dies with os error 206 here); clippy `--workspace
 --all-targets -D warnings` clean (5 m 29 s); rustdoc 399 warnings, 0 errors (161 s); wasm32
 `cargo check -p inf-player` ok; CRLF 0 over the 18 files since `919fa34a`; goldens 71
 (unchanged); `Cargo.lock` untouched; no frame, CSV, plot or Unreal file committed.
+
+## Wave PAR0 — the many-lights substrate (2026-10-05)
+
+Base `e2577bd0`. The first wave of the PAR arc: the frame's lights stop being a
+16-record uniform and become a storage buffer + a GPU froxel grid behind ONE shared
+WGSL library; point/spot lights take virtual-shadow pages under a policy; the
+window pane becomes glass; fixtures keep a night schedule; the content caps that
+pre-deleted 87 of the strip's 99 fixtures are re-minted. Zero scene-schema moves
+(wire v28, PIE payload 14, `EXPECTED_LEVELS` 24), zero new dependencies,
+`Cargo.lock` untouched.
+
+### the mini-scout, ruled with numbers
+
+- **The binding wall the brief did not list.** `Limits::default()` grants eight
+  fragment storage buffers and the visibility resolve already spent all eight (four
+  environment + four meshlet pools); the terrain pipeline sits at 16 of 16 sampled
+  textures and uses all four bind groups. So a texture-based list was shut by
+  terrain, a fifth group was shut by terrain, and a storage list costs the resolve
+  a ninth binding. Ruled: the list rides the **environment group** (bindings 24
+  header uniform + 25 storage words), one door for every env-bound lit pass; the
+  device asks for **nine** storage buffers where the adapter grants them
+  (`inf_render::gpu::engine_limits`, `LIT_FRAGMENT_STORAGE_BUFFERS`); the meshlet
+  tier requires nine (`VGEOM_MIN_STORAGE_BUFFERS_PER_STAGE`). Voxel and water bind
+  the same two buffers as their own group.
+- **Clustered over tiled.** Measured on the gate's 2 000-light floor (the grid
+  read back): the worst froxel walks **234** lights where the worst TILE of a tiled
+  grid (the union of each tile's slices, `LightCensus::tiled_max`) walks **257** —
+  past the 256-entry capacity; total entries 6 766 clustered vs 6 140 tiled (a
+  froxel list repeats a light across slices, a tile list does not). The margin is
+  modest on a flat floor and grows with depth range (a street seen along its
+  length). The first cut built froxel boxes in WORLD space and listed **50 014**
+  entries with 160 froxels overflowing and the last slice listing all 2 000 —
+  rebuilt in VIEW space: **0 overflowed**.
+- **Local shadows: the existing VSM cube/quadtree pages** (P27.4 already shaded
+  through them; `VsmSettings::enabled` was simply never on for a point light). The
+  `params.w` seam is solved by construction: a record's slot is looked up by its
+  SCENE index wherever the cull places it, and the tree list / projection walk /
+  receiver slots all read one `casts` mask. Budget: 64 projections − 8 sun clipmap
+  levels = 56 = nine cubes; `LOCAL_SHADOW_BUDGET` = 8.
+- **Glass: a blended pass after the opaque scatter raster**, in the scatter node's
+  own render pass (premultiplied alpha, depth-tested, no depth write, batches back
+  to front). OIT is NOT built in v1; two panes of one batch overlapping on screen
+  blend in the cull's compaction order.
+
+### the clauses
+
+| # | built | the number |
+|---|---|---|
+| 1 | storage list + GPU froxels + `lights.wgsl` (six private loops and BRDFs deleted; voxel's energy fit moved into `lights_bare.wgsl`) | 2 000 lights → 2 000 distinct in the read-back grid, 21 froxels probed; `MAX_LIGHTS` retired into `LIGHTS_PER_FRAME_CEILING` 8 192 |
+| 2 | `shadow_policy` (8 brightest within 48 m of the 8 m-snapped camera) + `casts` through VSM | closed room: exterior mean **0.0022** step, 10 corner-penumbra px (PCF), one-tap kernel max **0**; control max **152** |
+| 3 | frustum + energy cull, footprint cut past the ceiling, fences `venue_rig_lights` + `fixture_clock` | culled lights move **0** pixels; PIE == shipping light lists **60/60** steps at 21:00 |
+| 4 | glass pass; `GLAZING_GLOW` deleted; panes skip GI staging | window 189.8 vs wall beside it 69.8 vs opaque leaf 82.8; pavement 119.7 vs 102.6; GI rejects the pane (1 vs 0) |
+| 5 | `inf_ecs::sky::fixture_level` (+ occupancy hook) | the fixture venue's rig: **0** lights at 11:00, **6/6** at 21:00, both hosts |
+| 6 | `VOLUME_LIGHT_CAP` 4 → 64, `MAX_RIG_SPOTS` 4 → 12 | Harbour City's strip: **99** derived, **99** listed in the shader (12 before) |
+| 7 | terrain + water read `lights_local` | a lamp over terrain: pool 184.2 → 226.0 (8-bit mean) |
+| 8 | `fps_instrument::the_light_loop_on_the_island_at_nine` | below |
+| 9 | goldens 71 → 74 | `par0_wall_leak`, `par0_window_night`, `par0_cluster_debug`; NONE of the 71 moved |
+
+### the island at 21:00 (RTX 4070 Ti, 1080p LIT, release, MIN of 3 rounds × 120 frames)
+
+The curve, at shadow budget 0 so only the light loop varies (the GPU column; the
+spread between two configurations that list the same two lights is 31.3 vs 35.3 ms):
+
+| local lights in the scene | listed by the grid | GPU ms | light-cluster ms |
+|---|---|---|---|
+| 0 (strip WITHOUT local lights) | 0 | 31.33 | 0.005 |
+| strip 99 | 24 | 34.17 | 0.017 |
+| +16 | 29 | 33.31 | 0.016 |
+| +500 | 178 | 35.92 | 0.066 |
+| +1 670 | 539 | 33.96 | 0.168 |
+| +5 000 | 1 566 | 37.82 | 0.521 |
+
+The LIGHT-LOOP row (1 670 synthetic + the strip's 99, minus the same frame with
+local lights off): run 1 +2.06 ms GPU, run 2 +1.99 ms (shadow budget 8, the
+frustum policy), the budget-0 curve −1.39 ms — the loop is inside the run-to-run
+spread up to 1 566 listed lights; the froxel build is 0.52 ms at 5 000.
+
+The shadow budget, the same 1 670-light frame: N = 0 / 2 / 4 / 8 → GPU **33.4 /
+93.2 / 106.9 / 111.1** ms, vsm segments 4.3 / 65.2 / 78.7 / 82.3 ms, p95 101.6 /
+170.8 / 188.5 / 200.8 ms. The HEADLINE row is N = 8 (shipped policy): p50 193.2,
+p95 200.8, GPU 111.1, 10 shadowed (8 local + 2 directional). Virtual shadows are
+LIT-only — `shipped_settings` keeps VSM off — so the SHIPPED frame pays none of
+it. `SHIPPING_FRAME_CEILING_MS` stays **38**: the island frame is PERF1's, and the
+first shadowed point light's ~30 ms of VSM raster is the top item it inherits.
+The first policy (frustum-filtered) re-chose the set as the camera turned and
+thrashed the page system (N = 2 costing more than N = 8, p95 ~300 ms); the policy
+is now a function of the snapped camera POSITION.
+
+### carried, by name
+
+- **The first shadowed local light costs ~30 ms of VSM raster on the island**
+  (vsm segments 4.3 → 65.2 ms at N = 2); cause not isolated (dynamic casters
+  invalidating pages every frame is the suspect) — PERF1, ~1 d to isolate.
+- **CARRIED 62 (FIX3) is not closed**: a 6 m room's floor reads p50 190 open,
+  glazed AND sealed — no probe inside it, the interior ambient is the sky's. The
+  finer interior cascade / visibility-weighted probe term is a GI wave, ~2–3 d.
+- **`gi.rs` reads no local light**: the probe march injects the sun only; a lamp
+  lights its room directly but not by bounce (~1.5 d with a CPU-picked top-K).
+- **Glass tint is grey** (premultiplied blending has one alpha; dual-source
+  blending is the fix, ~0.5 d); glass is opaque on the CPU-fallback scatter path
+  (tiers below High); water drawn after glass is not occluded by it.
+- **No exterior fixture exists** — porches, street lamps, room fixtures and car
+  headlights are PAR1's, on this door (`RenderLight` cone/range/`cast_shadows` +
+  `fixture_level`'s `Dusk`/`Day`/`Always` + the occupancy argument).
