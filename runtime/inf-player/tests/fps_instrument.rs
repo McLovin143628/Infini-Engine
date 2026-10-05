@@ -3921,7 +3921,12 @@ fn the_shipped_island_by_the_hour() {
         fx.sim
             .step_once(inf_player::runtime_sim::RuntimeInput::default());
     }
-    let (shipped, tier) = shipped_settings(&gpu, fx.record);
+    let (mut shipped, tier) = shipped_settings(&gpu, fx.record);
+    // An A/B door for the GI's probe visibility (PAR0b): `PAR0B_NO_VISIBILITY`
+    // renders the same frames with it off.
+    if std::env::var_os("PAR0B_NO_VISIBILITY").is_some() {
+        shipped.gi.probe_visibility = false;
+    }
     println!(
         "=== THE SHIPPED ISLAND BY THE HOUR on {} (tier {tier:?}): exposure {:?}, vsm {}, gi {} ===",
         gpu.adapter.get_info().name,
