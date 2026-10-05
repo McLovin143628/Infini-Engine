@@ -4085,6 +4085,9 @@ pub struct ScatteredSurface {
     /// Authored linear tint (rgba), or `None` for the placeholder kind-index
     /// palette both projectors have used since P18.5.
     pub tint: Option<[f32; 4]>,
+    /// How much light passes through, `[0, 1]` (wave PAR0) — the twin of
+    /// `inf_pcg::PcgSurface::transmission`; `0.0` is opaque.
+    pub transmission: f32,
 }
 
 impl ScatteredSurface {
@@ -4100,6 +4103,7 @@ impl ScatteredSurface {
         metallic: 0.0,
         roughness: 0.75,
         tint: None,
+        transmission: 0.0,
     };
 
     /// Whether this surface emits anything at all.
@@ -4116,7 +4120,7 @@ impl ScatteredSurface {
     /// `PartialOrd` on `f32` has no total order to build a `BTreeMap` on. The
     /// `tint` is deliberately absent — it rides the instance.
     #[inline]
-    pub fn batch_key(&self) -> [u32; 6] {
+    pub fn batch_key(&self) -> [u32; 7] {
         [
             self.emissive[0].to_bits(),
             self.emissive[1].to_bits(),
@@ -4124,6 +4128,8 @@ impl ScatteredSurface {
             self.pulse_hz.to_bits(),
             self.metallic.to_bits(),
             self.roughness.to_bits(),
+            // Wave PAR0: glass is its own batch — it draws in the glass pass.
+            self.transmission.to_bits(),
         ]
     }
 }
@@ -4229,6 +4235,25 @@ pub struct ScatteredLight {
     pub phase: u32,
     /// How many slots the rig has.
     pub phases: u32,
+    /// When the fixture burns (wave PAR0) — `inf_pcg`'s `FixtureSchedule`,
+    /// mirrored here because the two crates do not depend on each other.
+    /// Resolved to an intensity by [`crate::sky::fixture_level`].
+    pub schedule: LightSchedule,
+}
+
+/// **When a fixture burns** (wave PAR0) — the ECS twin of
+/// `inf_pcg::building::FixtureSchedule`, mapped field-for-field by both hosts'
+/// `population_of`. Derived, never serialized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LightSchedule {
+    /// The evening and the small hours.
+    Night,
+    /// The working day.
+    Day,
+    /// Never off.
+    Always,
+    /// Sunset to sunrise, by the sun.
+    Dusk,
 }
 
 /// **Which run of a volume's derived lists is one building**, and what that

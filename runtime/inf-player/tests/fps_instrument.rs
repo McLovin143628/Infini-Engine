@@ -225,6 +225,10 @@ struct Fixture {
     /// the driving frame's 64 cars take their controls here, on every frame the
     /// harness steps, discarded pass included. `None` everywhere else.
     before_step: Option<BeforeStep>,
+    /// **Local lights appended after every projection** (wave PAR0) — the
+    /// instrument's synthetic population for the light-loop curve. Empty
+    /// everywhere else, so every pre-PAR0 row draws exactly what it drew.
+    extra_lights: Vec<inf_render::RenderLight>,
 }
 
 /// A frame's pre-step hook (wave VEH3h) -- see `Fixture::before_step`.
@@ -254,6 +258,7 @@ fn open(pack: &Path) -> Fixture {
         record,
         materials,
         before_step: None,
+        extra_lights: Vec::new(),
     }
 }
 
@@ -520,6 +525,7 @@ fn measure(
             &fx.scatter_meshes,
             &std::collections::HashMap::new(),
         );
+        scene.lights.extend(fx.extra_lights.iter().copied());
         cpu[2] = t.elapsed().as_secs_f64() * 1000.0;
         let t = std::time::Instant::now();
         renderer.render(gpu, scene, &view, &target.view, (w, h));
@@ -1944,6 +1950,7 @@ fn the_island_at_shipping_resolution() {
             record,
             materials,
             before_step: None,
+            extra_lights: Vec::new(),
         }
     };
 
@@ -2687,6 +2694,7 @@ fn open_streamed(pack: &Path) -> Fixture {
         record,
         materials,
         before_step: None,
+        extra_lights: Vec::new(),
     }
 }
 
@@ -3270,5 +3278,260 @@ fn sixty_four_cars_drive_the_composed_city_at_shipping_resolution() {
         s.1 <= SHIPPING_FRAME_CEILING_MS,
         "the driving frame's SHIPPED p95 is {:.3} ms over the {SHIPPING_FRAME_CEILING_MS} ms ceiling {RATCHET_NOTE}",
         s.1
+    );
+}
+
+// ── wave PAR0: THE LIGHT LOOP ───────────────────────────────────────────────
+
+/// `n` synthetic local lights over a disc of `radius` metres around `centre`,
+/// on a deterministic sunflower lattice (integer-indexed, `psin`/`pcos` — no
+/// std trig in committed test data), 3.2 m over `ground`: point lights of
+/// range 9 m with every eighth a downward spot, each asking for a shadow — the
+/// porch / room / lamp population PAR1 will author, standing in for it.
+fn synthetic_lights(
+    n: usize,
+    centre: DVec3,
+    ground: f64,
+    radius: f64,
+) -> Vec<inf_render::RenderLight> {
+    const GOLDEN: f64 = 2.399_963_229_728_653; // pi * (3 - sqrt 5)
+    (0..n)
+        .map(|k| {
+            let r = radius * ((k as f64 + 0.5) / n as f64).sqrt();
+            let a = k as f64 * GOLDEN;
+            let at = centre
+                + DVec3::new(
+                    r * inf_math::pcos64(a),
+                    ground - centre.y + 3.2,
+                    r * inf_math::psin64(a),
+                );
+            let spot = k % 8 == 0;
+            inf_render::RenderLight {
+                kind: if spot {
+                    inf_render::LightKind::Spot
+                } else {
+                    inf_render::LightKind::Point
+                },
+                color: [1.0, 0.82, 0.6],
+                intensity: 18.0,
+                direction: Vec3::Y,
+                position: at,
+                range: 9.0,
+                inner_cos: 0.82,
+                outer_cos: 0.64,
+                cast_shadows: true,
+            }
+        })
+        .collect()
+}
+
+/// **THE LIGHT-LOOP ROW AND ITS CURVE, ON THE ISLAND AT 21:00** (wave PAR0
+/// clause 8): Harbour City's nightlife strip, frozen at 21:00, at 1080p LIT,
+/// with the island's own fixtures plus a synthetic population of 0 / 16 / 500 /
+/// 1 670 / 5 000 local lights. Each row: p50 / p95 / GPU ms, the froxel build's
+/// own segment, the lights the GPU grid LISTED (read back), and the shadowed
+/// count. The LIGHT-LOOP row is the 1 670-light frame minus the SAME frame with
+/// `LightSettings::local_lights` off (same population, same camera).
+///
+/// **It REPORTS and never asserts** — on the `the_island_at_shipping_resolution`
+/// terms: the island frame is PERF1's (p95 ~71 ms against a 38 ms ceiling), and
+/// a light-loop delta must be read against it, not hidden inside it.
+///
+/// ```text
+/// INF_ISLAND_PACK=<cooked island> cargo test --release -p inf-player \
+///   --test fps_instrument -- --ignored the_light_loop --nocapture
+/// ```
+#[test]
+#[ignore = "needs a cooked island pack (INF_ISLAND_PACK) and a real GPU"]
+fn the_light_loop_on_the_island_at_nine() {
+    let Some(pack) = std::env::var_os("INF_ISLAND_PACK").map(PathBuf::from) else {
+        println!("SKIP the_light_loop_on_the_island_at_nine: INF_ISLAND_PACK names no pack");
+        return;
+    };
+    let Ok(gpu) = GpuContext::headless() else {
+        println!("SKIP the_light_loop_on_the_island_at_nine: no GPU adapter");
+        return;
+    };
+    let info = gpu.adapter.get_info();
+    let recipe = inf_island::IslandRecipe::load(&island_recipe()).expect("the island recipe loads");
+    let design = inf_island::read_design(&recipe).expect("the island design reads");
+    let plans = inf_editor_core::settlement::settlements(&design);
+    let city = plans
+        .iter()
+        .find(|p| p.name == "Harbour City")
+        .expect("the island plans Harbour City");
+    let strip: Vec<DVec3> = city
+        .blocks
+        .iter()
+        .filter(|b| b.archetype.is_venue())
+        .map(|b| DVec3::new(b.centre.x, 0.0, b.centre.y))
+        .collect();
+    let centre = strip.iter().fold(DVec3::ZERO, |a, &b| a + b) / strip.len().max(1) as f64;
+    let mut fx = open_streamed(&pack);
+    let ground = fx.sim.terrain_height_at(centre.x, centre.z);
+    let at = DVec3::new(centre.x, ground, centre.z);
+    set_hero(&mut fx.sim, at + DVec3::new(0.0, 2.0, 0.0));
+    {
+        let w = fx.sim.world_mut().world_mut();
+        let mut q = w.query::<&mut inf_ecs::components::TimeOfDay>();
+        for mut tod in q.iter_mut(w) {
+            tod.seconds = (21.0 * 3600.0 - tod.longitude_deg * 240.0).rem_euclid(86_400.0);
+            tod.rate = 0.0;
+        }
+    }
+    fx.sim.world_mut().mark_dirty();
+    for _ in 0..TRAFFIC_WARMUP_STEPS {
+        fx.sim
+            .step_once(inf_player::runtime_sim::RuntimeInput::default());
+    }
+    let lit_record = inf_scene::RenderSettingsRecord {
+        bloom_enabled: true,
+        ssao_enabled: true,
+        taa: true,
+        shadows_enabled: true,
+        gi_enabled: true,
+        ..fx.record
+    };
+    let (mut lit, tier) = shipped_settings(&gpu, lit_record);
+    lit.vsm.enabled = true;
+    println!(
+        "=== THE LIGHT LOOP on {} ({:?}), tier {tier:?} -- Harbour City strip ({:.0}, {:.1}, {:.0}) at 21:00, 1080p LIT ===",
+        info.name, info.device_type, at.x, at.y, at.z
+    );
+    let path = move |step: u64, w: u32, h: u32| street_orbit(step, w, h, at);
+    let mut rows: Vec<(String, f64, f64, f64, f64, u32, u32, usize)> = Vec::new();
+    let mut run = |fx: &mut Fixture, label: String, extra: usize, local: bool, budget: usize| {
+        fx.extra_lights = synthetic_lights(extra, at, ground, 240.0);
+        let mut settings = lit;
+        settings.lights.local_lights = local;
+        settings.lights.local_shadow_budget = budget;
+        let m = measure(&gpu, fx, 1920, 1080, settings, &path);
+        let r = m.round();
+        let cluster = m
+            .passes
+            .iter()
+            .find(|p| p.0 == "light-cluster")
+            .map_or(f64::NAN, |p| p.1);
+        // One more frame through a fresh renderer for the census: the grid the
+        // GPU built, read back, and the virtual-shadow slots it granted.
+        let target = HeadlessTarget::new(&gpu, 1920, 1080);
+        let mut renderer = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+        renderer.set_settings(settings);
+        let mut scene = RenderScene::default();
+        let voxels = inf_voxel::VoxelVolumes::new();
+        project_scene_full(
+            &mut scene,
+            &fx.sim,
+            1.0,
+            &fx.vmeshes,
+            &fx.skinned,
+            &voxels,
+            &mut inf_render::DebrisCache::default(),
+            None,
+            &fx.scatter_meshes,
+            &std::collections::HashMap::new(),
+        );
+        scene.lights.extend(fx.extra_lights.iter().copied());
+        let view = path(0, 1920, 1080);
+        for _ in 0..4 {
+            renderer.render(&gpu, &scene, &view, &target.view, (1920, 1080));
+            let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        }
+        let census = renderer
+            .light_census(&gpu)
+            .expect("the froxel grid reads back");
+        let mut dear: Vec<(&str, f64)> = m.passes.iter().map(|p| (p.0, p.1)).collect();
+        dear.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let vsm_ms: f64 = m
+            .passes
+            .iter()
+            .filter(|p| p.0.starts_with("vsm"))
+            .map(|p| p.1)
+            .sum();
+        let shadowed = renderer
+            .vsm_light_slots()
+            .iter()
+            .filter(|&&s| s > 0)
+            .count();
+        println!(
+            "LIGHT LOOP 1080p LIT {label}: p50 {:.3} p95 {:.3} ms GPU {:.3} ms; light-cluster {:.3} ms; vsm segments {vsm_ms:.3} ms; dearest {:?}; scene {} lights -> shader lists {} ({} directional + {} local), longest froxel {}, {} overflowed; {} shadowed; rounds {:?}",
+            r.p50,
+            r.p95,
+            m.gpu_frame_ms,
+            cluster,
+            &dear[..dear.len().min(4)],
+            scene.lights.len(),
+            census.lights_in_shader(),
+            census.directional,
+            census.distinct_local,
+            census.max_per_froxel,
+            census.overflowed_froxels,
+            shadowed,
+            m.rounds.iter().map(|x| (x.p50 * 1000.0).round() / 1000.0).collect::<Vec<_>>()
+        );
+        rows.push((
+            label,
+            r.p50,
+            r.p95,
+            m.gpu_frame_ms,
+            cluster,
+            census.lights_in_shader(),
+            census.overflowed_froxels,
+            shadowed,
+        ));
+    };
+    // THE CURVE — the light loop alone: every row at shadow budget 0, so the
+    // shadowed set (a virtual-shadow cost, priced below) cannot move between
+    // rows; the light-loop row is the 1 670 row minus the SAME frame with local
+    // lights off. `PAR0_BUDGET_ONLY=1` skips it; `PAR0_CURVE_ONLY=1` skips the
+    // budget rows.
+    let budget_only = std::env::var_os("PAR0_BUDGET_ONLY").is_some();
+    let curve_only = std::env::var_os("PAR0_CURVE_ONLY").is_some();
+    if !budget_only {
+        run(
+            &mut fx,
+            "strip fixtures only WITHOUT local lights".into(),
+            0,
+            false,
+            0,
+        );
+        run(&mut fx, "strip fixtures only".into(), 0, true, 0);
+        for n in [16usize, 500, 1670, 5000] {
+            run(&mut fx, format!("+{n} synthetic"), n, true, 0);
+        }
+        run(
+            &mut fx,
+            "+1670 synthetic WITHOUT local lights".into(),
+            1670,
+            false,
+            0,
+        );
+    }
+    // THE SHADOW BUDGET, priced: the same 1 670-light frame with 0 / 2 / 4 / 8
+    // shadowed local lights (the policy's N; the shipped `LOCAL_SHADOW_BUDGET`
+    // is the 8 row, which is the HEADLINE island-at-21:00 row).
+    if !curve_only {
+        for budget in [0usize, 2, 4, 8] {
+            run(
+                &mut fx,
+                format!("+1670 synthetic, shadow budget {budget}"),
+                1670,
+                true,
+                budget,
+            );
+        }
+    }
+    let get = |l: &str| {
+        rows.iter()
+            .find(|r| r.0 == l)
+            .map(|r| (r.2, r.3))
+            .unwrap_or((f64::NAN, f64::NAN))
+    };
+    let (with_p95, with_gpu) = get("+1670 synthetic");
+    let (without_p95, without_gpu) = get("+1670 synthetic WITHOUT local lights");
+    println!(
+        "THE LIGHT-LOOP ROW (1 670 synthetic + the strip's 99, 1080p LIT): p95 {with_p95:.3} - {without_p95:.3} = {:.3} ms; GPU {with_gpu:.3} - {without_gpu:.3} = {:.3} ms; SHIPPING_FRAME_CEILING_MS {SHIPPING_FRAME_CEILING_MS} (unchanged; the island frame is PERF1's)",
+        with_p95 - without_p95,
+        with_gpu - without_gpu
     );
 }

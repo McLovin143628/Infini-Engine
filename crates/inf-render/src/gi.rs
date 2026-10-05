@@ -662,7 +662,16 @@ pub fn scatter_batch_stages(
     near_distance: f64,
     voxel_size: f32,
     extent: f32,
+    transmission: f32,
 ) -> bool {
+    // **Glass is a window to the probe march, not a wall** (wave PAR0 clause 4,
+    // the FIX3 audit's CARRIED 68: a shop behind glass read as a SEALED room).
+    // The voxelizer's primitive is occupied or absent — there is no partial
+    // occupancy to weight — so the weighting is a threshold: a batch that
+    // passes more light than it stops is not staged.
+    if transmission >= 0.5 {
+        return false;
+    }
     // `!is_finite() || <` and NOT `!(>=)`: the two agree on every value
     // including a NaN, and only one of them is a spelling clippy will read (the
     // island wave I8a finding, met here for the third time). A NaN radius is
@@ -1490,27 +1499,48 @@ mod tests {
         // 0.6 m voxels (the 40 m volume at 64³), a 0.15 m grass tuft.
         let (vsize, extent) = (0.625_f32, 40.0_f32);
         assert!(
-            !scatter_batch_stages(false, 0.15, 0.0, vsize, extent),
+            !scatter_batch_stages(false, 0.15, 0.0, vsize, extent, 0.0),
             "a 0.15 m tuft is a third of a voxel and would occlude, not light"
         );
         assert!(
-            scatter_batch_stages(true, 0.02, 0.0, vsize, extent),
+            scatter_batch_stages(true, 0.02, 0.0, vsize, extent, 0.0),
             "a 40 mm bulb that EMITS is the reason this path exists"
         );
         // …and the rule really is the half-voxel and not some other number: a
         // wall panel clears it, and the exact boundary is inclusive.
-        assert!(scatter_batch_stages(false, 1.75, 0.0, vsize, extent));
-        assert!(scatter_batch_stages(false, vsize * 0.5, 0.0, vsize, extent));
+        assert!(scatter_batch_stages(false, 1.75, 0.0, vsize, extent, 0.0));
+        assert!(scatter_batch_stages(
+            false,
+            vsize * 0.5,
+            0.0,
+            vsize,
+            extent,
+            0.0
+        ));
         assert!(!scatter_batch_stages(
             false,
             vsize * 0.5 - 1e-4,
             0.0,
             vsize,
-            extent
+            extent,
+            0.0
         ));
+        // Wave PAR0: a pane that passes more light than it stops is a window
+        // to the probe march — a large, emitting-or-not batch of glass is not
+        // staged, and the same batch at 0.4 transmission is.
+        assert!(!scatter_batch_stages(false, 1.75, 0.0, vsize, extent, 0.85));
+        assert!(!scatter_batch_stages(true, 1.75, 0.0, vsize, extent, 0.5));
+        assert!(scatter_batch_stages(false, 1.75, 0.0, vsize, extent, 0.4));
         // A NaN radius is not "at least half a voxel", so it is dust — the
         // `!(a >= b)` spelling rather than `a < b`, the island wave I8a finding.
-        assert!(!scatter_batch_stages(false, f32::NAN, 0.0, vsize, extent));
+        assert!(!scatter_batch_stages(
+            false,
+            f32::NAN,
+            0.0,
+            vsize,
+            extent,
+            0.0
+        ));
     }
 
     /// **A structure SHELL never voxelizes**, because no point of the volume is
@@ -1521,14 +1551,14 @@ mod tests {
         // The volume reaches 34.6 m; a shell is banded from 96.
         assert!(volume_reach(extent) < 35.0);
         assert!(
-            !scatter_batch_stages(false, 12.0, 96.0, vsize, extent),
+            !scatter_batch_stages(false, 12.0, 96.0, vsize, extent, 0.0),
             "a 24 m shell box banded from 96 m has no instance in a 40 m volume"
         );
         // The same box with no inner cut is ordinary geometry and stages.
-        assert!(scatter_batch_stages(false, 12.0, 0.0, vsize, extent));
+        assert!(scatter_batch_stages(false, 12.0, 0.0, vsize, extent, 0.0));
         // An inner cut *inside* the volume's reach is not decidable here, so the
         // batch stages and the per-instance band test settles it.
-        assert!(scatter_batch_stages(false, 12.0, 10.0, vsize, extent));
+        assert!(scatter_batch_stages(false, 12.0, 10.0, vsize, extent, 0.0));
     }
 
     // ── emissive packing ──

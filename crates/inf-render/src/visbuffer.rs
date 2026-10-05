@@ -1289,15 +1289,17 @@ mod tests {
     fn the_resolve_derives_its_own_shading_rather_than_borrowing_the_forward_paths() {
         let resolve = include_str!("shaders/vis_resolve.wgsl");
         let forward = include_str!("shaders/vgeom_mesh.wgsl");
-        // The BRDF and the vertex pull: the arithmetic a parity claim is about.
-        for f in [
-            "shade_light",
-            "distribution_ggx",
-            "geometry_smith",
-            "fresnel_schlick",
-            "point_attenuation",
-            "read_tri_byte",
-        ] {
+        // **Wave PAR0 moved the boundary, and says so here.** The BRDF and the
+        // light loop (`shade_light`, `distribution_ggx`, `geometry_smith`,
+        // `fresnel_schlick`, `point_attenuation`, `lights_direct`) now live in
+        // `lights.wgsl`, the ONE shared light library the brief demanded in
+        // place of six private copies, and the parity suite stops seeing them
+        // the way it never saw `vt_sample` or `vsm_receive`: an error in the
+        // shared library shifts both paths together. What it still gates is
+        // the RECONSTRUCTION — the vertex pull and the barycentrics — and that
+        // is what this list pins. Neither file may declare the BRDF again
+        // (a second declaration of a composed symbol would not build anyway).
+        for f in ["read_tri_byte"] {
             let decl = format!("fn {f}(");
             for (name, src) in [("vis_resolve.wgsl", resolve), ("vgeom_mesh.wgsl", forward)] {
                 assert!(
@@ -1311,6 +1313,16 @@ mod tests {
                      that suite and being a mirror."
                 );
             }
+        }
+        for (name, src) in [("vis_resolve.wgsl", resolve), ("vgeom_mesh.wgsl", forward)] {
+            assert!(
+                src.contains("lo += lights_direct("),
+                "{name} no longer shades through the shared light library"
+            );
+            assert!(
+                !src.lines().any(|l| l.starts_with("fn shade_light(")),
+                "{name} grew a private BRDF again — the six-loop census reopens"
+            );
         }
         // …and no CODE line of the resolve reaches for the forward path's file.
         // Comments may cite it (one does, about branch order) — a citation is

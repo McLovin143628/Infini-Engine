@@ -1470,6 +1470,7 @@ pub fn population_of(out: inf_pcg::VolumeOutput) -> VolumePopulation {
                 metallic: i.surface.metallic,
                 roughness: i.surface.roughness,
                 tint: i.surface.tint,
+                transmission: i.surface.transmission,
             },
         })
         .collect();
@@ -1572,6 +1573,18 @@ pub fn population_of(out: inf_pcg::VolumeOutput) -> VolumePopulation {
             cycle_hz: l.cycle_hz,
             phase: l.phase,
             phases: l.phases,
+            schedule: match l.schedule {
+                inf_pcg::building::FixtureSchedule::Night => {
+                    inf_ecs::components::LightSchedule::Night
+                }
+                inf_pcg::building::FixtureSchedule::Day => inf_ecs::components::LightSchedule::Day,
+                inf_pcg::building::FixtureSchedule::Always => {
+                    inf_ecs::components::LightSchedule::Always
+                }
+                inf_pcg::building::FixtureSchedule::Dusk => {
+                    inf_ecs::components::LightSchedule::Dusk
+                }
+            },
         })
         .collect();
     (
@@ -1872,6 +1885,7 @@ fn population_from(instances: &[inf_pcg::PcgInstance]) -> Vec<ScatteredInstance>
                 metallic: i.surface.metallic,
                 roughness: i.surface.roughness,
                 tint: i.surface.tint,
+                transmission: i.surface.transmission,
             },
         })
         .collect()

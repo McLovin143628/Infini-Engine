@@ -414,6 +414,32 @@ pub struct PcgLight {
     pub phase: u32,
     /// How many slots the rig has, so the phase means something.
     pub phases: u32,
+    /// **When the fixture burns** (wave PAR0): the shift its room is worked
+    /// on ([`society::schedule_of`]), resolved to an intensity by the level
+    /// clock in the projector (`inf_ecs::sky::fixture_level`) — the same
+    /// division as the colour sweep: committed content says WHEN, the hour
+    /// says whether it is now.
+    pub schedule: FixtureSchedule,
+}
+
+/// **When a fixture burns** (wave PAR0) — derived, never serialized, on
+/// [`PcgLight`]'s own terms.
+///
+/// The night-schedule substrate PAR1 builds on: a room fixture takes its
+/// room's shift ([`society::schedule_of`]), a street lamp or a porch light
+/// will take [`Dusk`](FixtureSchedule::Dusk), and a headlamp will take
+/// whatever its vehicle decides. Nothing here names a kind of fixture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FixtureSchedule {
+    /// The evening and the small hours — a venue's public rooms.
+    Night,
+    /// The working day.
+    Day,
+    /// Never off — the rooms an institution never closes (EMS1's ruling).
+    Always,
+    /// Sunset to sunrise, read off the sun rather than the hour — the exterior
+    /// lights PAR1 hangs.
+    Dusk,
 }
 
 /// What a room is for. Drives the wall grammar chosen for its walls, whether it

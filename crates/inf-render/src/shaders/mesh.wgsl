@@ -62,85 +62,16 @@ fn vs(in: VsIn) -> VsOut {
 // from WGSL entirely; its last producer — deformed cloth and hair, which have no
 // authored parametrization — takes `inf_render::box_uv` once per vertex instead.
 
-// ── Lights (must match LightsUniform / MAX_LIGHTS in passes/mesh.rs) ──
-const MAX_LIGHTS: u32 = 16u;
-
-struct GpuLight {
-    color: vec4<f32>,   // rgb = color, a = intensity
-    pos_dir: vec4<f32>, // xyz = dir-to-light (dir) or render-local pos (point/spot); w = kind (0 dir, 1 point, 2 spot)
-    params: vec4<f32>,  // x = range, y = spot inner_cos, z = spot outer_cos
-    spot_dir: vec4<f32>, // xyz = normalized spot emission direction (spot only)
-};
-struct Lights {
-    count: vec4<u32>,   // x = active count
-    items: array<GpuLight, MAX_LIGHTS>,
-};
-@group(1) @binding(0) var<uniform> lights: Lights;
 
 // AO + cascaded shadows + dynamic GI ride the shared env bind group at @group(2)
 // (declared in env_lighting.wgsl, prepended by `lit_scene_shader`): `ao_tex`/`ao_smp`
 // (SSAO, white when off), `shadow_factor()`, and `ambient_irradiance()`.
 
-const PI: f32 = 3.14159265359;
 
-fn distribution_ggx(n_dot_h: f32, rough: f32) -> f32 {
-    let a = rough * rough;
-    let a2 = a * a;
-    let d = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
-    return a2 / max(PI * d * d, 1e-7);
-}
 
-fn geometry_smith(n_dot_v: f32, n_dot_l: f32, rough: f32) -> f32 {
-    let r = rough + 1.0;
-    let k = (r * r) / 8.0;
-    let gv = n_dot_v / (n_dot_v * (1.0 - k) + k);
-    let gl = n_dot_l / (n_dot_l * (1.0 - k) + k);
-    return gv * gl;
-}
 
-fn fresnel_schlick(cos_theta: f32, f0: vec3<f32>) -> vec3<f32> {
-    return f0 + (vec3<f32>(1.0) - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
-}
 
-// Single BRDF term for a light with unit direction `l` and incoming `radiance`.
-fn shade_light(
-    n: vec3<f32>, v: vec3<f32>, l: vec3<f32>, radiance: vec3<f32>,
-    albedo: vec3<f32>, metallic: f32, rough: f32, f0: vec3<f32>,
-) -> vec3<f32> {
-    let h = normalize(v + l);
-    let n_dot_l = max(dot(n, l), 0.0);
-    if (n_dot_l <= 0.0) {
-        return vec3<f32>(0.0);
-    }
-    let n_dot_v = max(dot(n, v), 1e-4);
-    let n_dot_h = max(dot(n, h), 0.0);
-    let v_dot_h = max(dot(v, h), 0.0);
 
-    let d = distribution_ggx(n_dot_h, rough);
-    let g = geometry_smith(n_dot_v, n_dot_l, rough);
-    let f = fresnel_schlick(v_dot_h, f0);
-
-    // Wave VIS1a: multi-scatter energy compensation. A single-scatter GGX
-    // drops whatever the Smith term masked instead of letting it bounce again,
-    // which is about a third of the lobe at roughness 1.0 and is why every
-    // rough metal in this engine has been too dark since P7.1. See
-    // `ggx_energy_compensation` in `env_lighting.wgsl`.
-    let spec = (d * g) * f / max(4.0 * n_dot_v * n_dot_l, 1e-4)
-        * ggx_energy_compensation(f0, rough, n_dot_v);
-    let kd = (vec3<f32>(1.0) - f) * (1.0 - metallic);
-    let diffuse = kd * albedo / PI;
-    return (diffuse + spec) * radiance * n_dot_l;
-}
-
-// UE-style windowed inverse-square point attenuation.
-fn point_attenuation(dist: f32, range: f32) -> f32 {
-    let inv_sq = 1.0 / max(dist * dist, 1e-4);
-    if (range <= 0.0) {
-        return inv_sq;
-    }
-    let t = clamp(1.0 - pow(dist / range, 4.0), 0.0, 1.0);
-    return inv_sq * t * t;
-}
 
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
@@ -252,70 +183,13 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let f0 = mix(vec3<f32>(0.04), albedo, metallic);
 
     var lo = vec3<f32>(0.0);
-    let count = lights.count.x;
-    if (count == 0u) {
-        // Fallback editor sun so unlit demo scenes still render (shadowed like the
-        // first directional light when CSM is on).
-        var d = shade_light(n, v, normalize(view.sun_dir.xyz), vec3<f32>(3.0),
-                          albedo, metallic, rough, f0);
-        if (sun_shadowing_enabled()) {
-            d = d * shadow_factor(in.world_pos, n);
-        }
-        // P17.3: large-scale cloud shadowing of the sun. Guarded exactly like the
-        // CSM block above, so a scene without clouds runs the identical
-        // instruction stream and its goldens stay byte-identical.
-        if (atmos.clouds.x > 0.5 && atmos.cloud_shadow.x > 0.0) {
-            d = d * cloud_shadow_factor(in.world_pos);
-        }
-        lo += d;
-    } else {
-        // The first directional light receives the cascaded shadow factor.
-        var shadowed = false;
-        for (var i = 0u; i < count && i < MAX_LIGHTS; i = i + 1u) {
-            let light = lights.items[i];
-            let radiance_base = light.color.rgb * light.color.a;
-            if (light.pos_dir.w < 0.5) {
-                // Directional.
-                var d = shade_light(n, v, normalize(light.pos_dir.xyz), radiance_base,
-                                 albedo, metallic, rough, f0);
-                if (sun_shadowing_enabled() && !shadowed) {
-                    d = d * shadow_factor(in.world_pos, n);
-                    shadowed = true;
-                }
-                // P17.3: cloud shadows darken every directional light, not just
-                // the first — a cloud layer is above all of them.
-                if (atmos.clouds.x > 0.5 && atmos.cloud_shadow.x > 0.0) {
-                    d = d * cloud_shadow_factor(in.world_pos);
-                }
-                lo += d;
-            } else {
-                // Point (w == 1) / spot (w == 2): shared windowed inverse-square
-                // attenuation; a spot additionally masks by its cone. `cone` stays
-                // 1.0 for a point light, so `* 1.0` leaves the point path exactly
-                // as before (byte-stable goldens).
-                let to_light = light.pos_dir.xyz - in.world_pos;
-                let dist = length(to_light);
-                let l = to_light / max(dist, 1e-4);
-                let att = point_attenuation(dist, light.params.x);
-                var cone = 1.0;
-                if (light.pos_dir.w > 1.5) {
-                    // Cosine of the angle between frag→light and the beam axis
-                    // (-spot_dir = toward-the-light), faded outer_cos→inner_cos.
-                    let cos_dir = dot(l, -light.spot_dir.xyz);
-                    cone = smoothstep(light.params.z, light.params.y, cos_dir);
-                }
-                // **P27.4: the engine's FIRST point/spot shadows.** A spot
-                // resolves through its single quadtree, a point through the
-                // cube-face quadtree its own direction selects. `params.w` is 0
-                // on every light without a page tree — which is every light of
-                // every scene with virtual shadows off — and `vsm_light_shadow`
-                // returns exactly 1.0 there, so this is a present-and-inert
-                // `* 1.0` on every committed golden.
-                let vsm_f = vsm_light_shadow(in.world_pos, n, light.params.w);
-                lo += shade_light(n, v, l, radiance_base * att * cone * vsm_f,
-                                 albedo, metallic, rough, f0);
-            }
-        }
+    // Wave PAR0: every directional light, then the local lights this
+    // fragment's froxel lists — the shared library (`lights.wgsl`).
+    lo += lights_direct(in.world_pos, in.pos.xy, n, v, view.sun_dir.xyz,
+                        albedo, metallic, rough, f0, LIGHT_SUN_SHADOW | LIGHT_CLOUD_SHADOW | LIGHT_LOCAL_SHADOW);
+    // Wave PAR0: the cluster-grid debug view paints the froxel's light count.
+    if (lights_debug_view()) {
+        return vec4<f32>(lights_debug_heat(in.world_pos, in.pos.xy), 1.0);
     }
 
     // Image-based ambient: hemispheric sky/ground irradiance by default, or the

@@ -430,6 +430,11 @@ pub struct VsmSystem {
     pools: VsmPools,
     marker: VsmMarker,
     trees: Vec<VsmLightDesc>,
+    /// Per scene light, whether it asked for a tree when this system was built
+    /// (wave PAR0: the authored `cast_shadows` through the renderer's shadow
+    /// policy). The one mask the projection walk and the receiver's slot walk
+    /// read, so handle `n` means the same light in all three.
+    casts: Vec<bool>,
     /// Table word offset per light, in handle order.
     blocks: Vec<u32>,
     /// First mask bit per light, in handle order.
@@ -467,21 +472,13 @@ impl VsmSystem {
         gpu: &GpuContext,
         scene: &RenderScene,
         settings: &VsmSettings,
+        casts: &[bool],
     ) -> Option<Self> {
-        let asked = vsm_light_trees(scene, settings);
+        let asked = vsm_light_trees(scene, settings, casts);
         // **Never a silent cap** (P27.2's doctrine, extended to the ceiling the
         // P27.4 audit found). Logged once at construction rather than per frame,
         // because a system is rebuilt when its tree list changes and this number
         // is part of that list's identity.
-        if asked.refused_past_shader_ceiling > 0 {
-            tracing::warn!(
-                "inf-render: {} shadow-casting light(s) sit past scene index {} — \
-                 the lights uniform's array — so they are not shaded at all and \
-                 get no page tree",
-                asked.refused_past_shader_ceiling,
-                crate::passes::mesh::MAX_LIGHTS,
-            );
-        }
         if asked.refused_past_projection_cap > 0 {
             tracing::warn!(
                 "inf-render: {} shadow-casting light(s) did not fit the {} \
@@ -555,6 +552,7 @@ impl VsmSystem {
             base += tree.faces();
         }
         Some(Self {
+            casts: casts.to_vec(),
             signature: VsmSignature {
                 // The list `vsm_light_trees` produced, **not** the truncated one:
                 // `matches` compares against that function's output, so storing
@@ -578,9 +576,10 @@ impl VsmSystem {
     }
 
     /// Whether this system still describes `scene` under `settings`.
-    pub fn matches(&self, scene: &RenderScene, settings: &VsmSettings) -> bool {
+    pub fn matches(&self, scene: &RenderScene, settings: &VsmSettings, casts: &[bool]) -> bool {
         self.signature.budget_bytes == settings.budget_bytes
-            && self.signature.trees == vsm_light_trees(scene, settings)
+            && self.casts == casts
+            && self.signature.trees == vsm_light_trees(scene, settings, casts)
     }
 
     /// The live residency, for a host or a gate that wants to assert the WORLD
@@ -647,7 +646,7 @@ impl VsmSystem {
     /// refusal must have *no* slot rather than another light's.
     pub fn receiver_slots(&self, scene: &RenderScene) -> Vec<u32> {
         crate::vsm_receiver::receiver_slots(
-            scene.lights.iter().map(|l| l.cast_shadows),
+            (0..scene.lights.len()).map(|i| self.casts.get(i).copied().unwrap_or(false)),
             self.trees.len(),
             &self.proj_base,
         )
@@ -702,6 +701,7 @@ impl VsmSystem {
     ) -> VsmTransaction {
         let (projections, layouts) = vsm_projections(
             scene,
+            &self.casts,
             view,
             settings,
             &self.trees,
@@ -758,6 +758,7 @@ impl VsmSystem {
         if let Some(p) = prediction {
             let (_proj, soon) = vsm_projections(
                 scene,
+                &self.casts,
                 &crate::vt_stream::predicted_view(view, &p),
                 settings,
                 &self.trees,

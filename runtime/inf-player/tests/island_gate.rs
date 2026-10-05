@@ -2828,7 +2828,12 @@ fn the_scattered_cover_draws_its_authored_meshes() {
         let mut n = 0usize;
         for e in w.iter_entities() {
             if let Some(v) = e.get::<inf_ecs::components::PcgVolume>() {
-                n += v.evaluated.iter().filter(|i| i.glow > 0.0).count();
+                // Wave PAR0: a window is glass (it glowed until then).
+                n += v
+                    .evaluated
+                    .iter()
+                    .filter(|i| i.surface.transmission > 0.0)
+                    .count();
             }
         }
         n
@@ -2869,8 +2874,8 @@ fn the_scattered_cover_draws_its_authored_meshes() {
         .collect();
     let lit_instances: usize = lit.iter().map(|b| b.data.len()).sum();
     println!(
-        "NIGHT WINDOWS: sun y {:.3} -> glow step {}; {} of {} batches emit, over \
-         {lit_instances} of {glowing_instances} glazed instances; brightest {:?}",
+        "NIGHT WINDOWS: sun y {:.3} -> glow step {}; {} of {} batches light up at \
+         night, over {lit_instances} of {glowing_instances} glazed (glass) instances; brightest {:?}",
         night.sun.direction.y,
         inf_render::night_glow_step(night.sun.direction),
         lit.len(),
@@ -2882,26 +2887,36 @@ fn the_scattered_cover_draws_its_authored_meshes() {
         "the clock did not put the sun below the horizon: y = {}",
         night.sun.direction.y
     );
+    // **WAVE PAR0: NOT ONE WINDOW LIGHTS ITSELF.** Until PAR0 every glazed
+    // instance reached a warm emissive batch at night (`GLAZING_GLOW` on the
+    // I8b ramp) whether or not anything stood behind it — the "glowing window
+    // panes" the user ruled out. A pane is glass now: it rides a TRANSMITTING
+    // batch, the same at noon and at midnight, and a lit window at night is
+    // the room's real fixture seen through it.
     assert!(
-        !lit.is_empty(),
-        "no batch lights up between day and midnight — every emitter in this \
-         scene was already on, so nothing here measures the night-window ramp"
+        lit.is_empty(),
+        "{} batch(es) light up between day and midnight from the clock alone — \
+         a pane glows again",
+        lit.len()
     );
+    let glass: Vec<&inf_render::ScatterBatch> =
+        night.scatter.iter().filter(|b| b.is_glass()).collect();
+    let glass_instances: usize = glass.iter().map(|b| b.data.len()).sum();
     assert_eq!(
-        lit_instances, glowing_instances,
-        "{lit_instances} instances reached a lit batch of {glowing_instances} \
-         that carry a glow"
+        glass_instances, glowing_instances,
+        "{glass_instances} instances reached a glass batch of {glowing_instances} \
+         glazed ones"
     );
-    for b in &lit {
-        assert!(
-            b.emissive[0] > b.emissive[1] && b.emissive[1] > b.emissive[2],
-            "a lit window is not warm: {:?}",
+    for b in &glass {
+        assert_eq!(
+            b.emissive, [0.0; 3],
+            "a glass batch emits: {:?}",
             b.emissive
         );
+        assert!(!b.casts_shadows, "a pane casts a shadow");
         assert!(
             b.data.geometry.is_some(),
-            "a lit batch draws a placeholder — a glowing cube is worse than a \
-             dark window"
+            "a glass batch draws a placeholder"
         );
     }
     // Every batch's cull radius is its OWN geometry's, not the proxy's — the one
@@ -5501,7 +5516,11 @@ fn pie_equals_shipping_over_a_day_in_the_life() {
             let mut n = 0usize;
             for e in w.iter_entities() {
                 if let Some(v) = e.get::<inf_ecs::components::PcgVolume>() {
-                    n += v.evaluated.iter().filter(|i| i.glow > 0.0).count();
+                    n += v
+                        .evaluated
+                        .iter()
+                        .filter(|i| i.surface.transmission > 0.0)
+                        .count();
                 }
             }
             n
@@ -8069,16 +8088,16 @@ fn pie_equals_shipping_inside_a_venue_at_night() {
             "{label}: the projector produced no emissive scatter batch — the bucket \
              key is not carrying the surface"
         );
-        // **THE LIGHT-BUDGET MEASUREMENT, at frame scale.** `MAX_LIGHTS` is 16
-        // for the whole scene and the truncation is first-N in projection order
-        // with no distance priority, so a rig that overran it would silently
-        // drop the sun.
+        // **THE LIGHT-BUDGET MEASUREMENT, at frame scale.** Before wave PAR0
+        // this was `MAX_LIGHTS` = 16, first-N in projection order; the light
+        // list is now a storage buffer whose ceiling is read BY NAME, and past
+        // it the plan cuts by on-screen footprint with directional lights
+        // always kept — so the sun can no longer be pushed out by a rig.
         assert!(
-            r.frame_lights <= inf_render::passes::mesh::MAX_LIGHTS,
-            "{label}: {} lights in one frame against a ceiling of {} — a venue rig \
-             has pushed the sun out of the uniform",
+            r.frame_lights <= inf_render::lights::LIGHTS_PER_FRAME_CEILING,
+            "{label}: {} lights in one frame against a ceiling of {}",
             r.frame_lights,
-            inf_render::passes::mesh::MAX_LIGHTS
+            inf_render::lights::LIGHTS_PER_FRAME_CEILING
         );
         assert!(
             r.frame_lights > 1,

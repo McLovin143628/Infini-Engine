@@ -407,6 +407,10 @@ pub struct RenderSettings {
     /// [`RenderTier::apply`](crate::caps::RenderTier::apply), which only clamps
     /// features **down**, so the byte-stable defaults are unaffected.
     pub tier_override: Option<crate::caps::RenderTier>,
+    /// The many-lights substrate's knobs (wave PAR0): culling, the local-light
+    /// switch the instrument's WITHOUT row turns off, the cluster debug view,
+    /// and the local-shadow budget. See [`crate::lights::LightSettings`].
+    pub lights: crate::lights::LightSettings,
 }
 
 /// Cascaded shadow map settings (P13.3b). The first directional light casts three
@@ -1472,6 +1476,7 @@ impl Default for RenderSettings {
             stream: StreamSettings::default(),
             raytrace: RaytraceSettings::default(),
             tier_override: None,
+            lights: crate::lights::LightSettings::default(),
         }
     }
 }

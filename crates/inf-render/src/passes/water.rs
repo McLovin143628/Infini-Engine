@@ -187,7 +187,11 @@ pub struct WaterNode {
 }
 
 impl WaterNode {
-    pub fn new(gpu: &GpuContext, view_bgl: &wgpu::BindGroupLayout) -> Self {
+    pub fn new(
+        gpu: &GpuContext,
+        view_bgl: &wgpu::BindGroupLayout,
+        lights_bgl: &wgpu::BindGroupLayout,
+    ) -> Self {
         let shader = gpu
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -300,7 +304,9 @@ impl WaterNode {
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("water"),
-                bind_group_layouts: &[Some(view_bgl), Some(&bgl)],
+                // Wave PAR0: `@group(2)` = the frame's light list (`LightGrid`'s
+                // standalone group), so a lamp on the quay lights the harbour.
+                bind_group_layouts: &[Some(view_bgl), Some(&bgl), Some(lights_bgl)],
                 immediate_size: 0,
             });
 
@@ -739,6 +745,7 @@ impl RenderNode for WaterNode {
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, frame.view_bg, &[]);
+        pass.set_bind_group(2, frame.lights.bare_bg(), &[]);
         pass.set_index_buffer(index_buf.slice(..), wgpu::IndexFormat::Uint32);
         for i in 0..bodies.len() {
             pass.set_bind_group(1, &bind_group, &[i as u32 * UNIFORM_STRIDE as u32]);

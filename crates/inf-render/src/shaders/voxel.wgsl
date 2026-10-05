@@ -227,109 +227,6 @@ fn seam_weight(world_y: f32, seam_nh: vec4<f32>, band: f32) -> f32 {
     return t * t * (3.0 - 2.0 * t);
 }
 
-// ── Lights (must match LightsUniform / MAX_LIGHTS in passes/mesh.rs) ──
-//
-// The SAME uniform block the mesh pass declares, bound at the same group by the
-// same `LightsUniform` type — the voxel node reuses that packing rather than
-// minting a second lights format.
-const MAX_LIGHTS: u32 = 16u;
-
-struct GpuLight {
-    color: vec4<f32>,   // rgb = color, a = intensity
-    pos_dir: vec4<f32>, // xyz = dir-to-light (dir) or render-local pos (point/spot); w = kind (0 dir, 1 point, 2 spot)
-    params: vec4<f32>,  // x = range, y = spot inner_cos, z = spot outer_cos
-    spot_dir: vec4<f32>, // xyz = normalized spot emission direction (spot only)
-};
-struct Lights {
-    count: vec4<u32>,   // x = active count
-    items: array<GpuLight, MAX_LIGHTS>,
-};
-@group(1) @binding(0) var<uniform> lights: Lights;
-
-const PI: f32 = 3.14159265359;
-
-fn distribution_ggx(n_dot_h: f32, rough: f32) -> f32 {
-    let a = rough * rough;
-    let a2 = a * a;
-    let d = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
-    return a2 / max(PI * d * d, 1e-7);
-}
-
-fn geometry_smith(n_dot_v: f32, n_dot_l: f32, rough: f32) -> f32 {
-    let r = rough + 1.0;
-    let k = (r * r) / 8.0;
-    let gv = n_dot_v / (n_dot_v * (1.0 - k) + k);
-    let gl = n_dot_l / (n_dot_l * (1.0 - k) + k);
-    return gv * gl;
-}
-
-fn fresnel_schlick(cos_theta: f32, f0: vec3<f32>) -> vec3<f32> {
-    return f0 + (vec3<f32>(1.0) - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
-}
-
-// **Multi-scatter energy compensation, and the one copy in the tree** (wave
-// VIS1a). Every other lit shader gets `ggx_energy_compensation` from
-// `env_lighting.wgsl`, which is prepended to them; this pass is composed `Plain`
-// and binds no environment group at all (the P21.1 ruling — see this file's
-// header), so it cannot see that library and carries its own copy of the two
-// functions instead.
-//
-// Duplicated deliberately rather than by moving the pair into `common_view.wgsl`:
-// that file is prepended to *every* pass in the engine, including the compute
-// bakes and the depth-only ones, and a lighting fit does not belong in the module
-// a shadow caster includes. The pair is small, pure, and pinned against its CPU
-// mirror by `the_ggx_furnace_test_is_white`, which is what keeps the two copies
-// from drifting.
-fn gi_env_brdf_ab(rough: f32, nov: f32) -> vec2<f32> {
-    let c0 = vec4<f32>(-1.0, -0.0275, -0.572, 0.022);
-    let c1 = vec4<f32>(1.0, 0.0425, 1.04, -0.04);
-    let r = rough * c0 + c1;
-    let a004 = min(r.x * r.x, exp2(-9.28 * nov)) * r.x + r.y;
-    return vec2<f32>(-1.04, 1.04) * a004 + r.zw;
-}
-
-fn ggx_energy_compensation(f0: vec3<f32>, rough: f32, nov: f32) -> vec3<f32> {
-    let ab = gi_env_brdf_ab(rough, nov);
-    let e = max(ab.x + ab.y, 1e-3);
-    return vec3<f32>(1.0) + f0 * (1.0 / e - 1.0);
-}
-
-// Single BRDF term for a light with unit direction `l` and incoming `radiance`.
-// Dielectric only — a terrain splat layer carries no metallic channel — so the
-// mesh version's `metallic` parameter collapses to 0 and is dropped.
-fn shade_light(
-    n: vec3<f32>, v: vec3<f32>, l: vec3<f32>, radiance: vec3<f32>,
-    albedo: vec3<f32>, rough: f32, f0: vec3<f32>,
-) -> vec3<f32> {
-    let h = normalize(v + l);
-    let n_dot_l = max(dot(n, l), 0.0);
-    if (n_dot_l <= 0.0) {
-        return vec3<f32>(0.0);
-    }
-    let n_dot_v = max(dot(n, v), 1e-4);
-    let n_dot_h = max(dot(n, h), 0.0);
-    let v_dot_h = max(dot(v, h), 0.0);
-
-    let d = distribution_ggx(n_dot_h, rough);
-    let g = geometry_smith(n_dot_v, n_dot_l, rough);
-    let f = fresnel_schlick(v_dot_h, f0);
-
-    let spec = (d * g) * f / max(4.0 * n_dot_v * n_dot_l, 1e-4)
-        * ggx_energy_compensation(f0, rough, n_dot_v);
-    let kd = vec3<f32>(1.0) - f;
-    let diffuse = kd * albedo / PI;
-    return (diffuse + spec) * radiance * n_dot_l;
-}
-
-// UE-style windowed inverse-square point attenuation.
-fn point_attenuation(dist: f32, range: f32) -> f32 {
-    let inv_sq = 1.0 / max(dist * dist, 1e-4);
-    if (range <= 0.0) {
-        return inv_sq;
-    }
-    let t = clamp(1.0 - pow(dist / range, 4.0), 0.0, 1.0);
-    return inv_sq * t * t;
-}
 
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
@@ -363,41 +260,10 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let f0 = vec3<f32>(0.04);
 
     var lo = vec3<f32>(0.0);
-    let count = lights.count.x;
-    if (count == 0u) {
-        // Fallback editor sun, exactly as the mesh pass's no-light path — a demo
-        // scene with no authored lights still renders. Unshadowed here: cascaded
-        // shadows are P21.2.
-        lo += shade_light(n, v, normalize(view.sun_dir.xyz), vec3<f32>(3.0),
-                          albedo, rough, f0);
-    } else {
-        for (var i = 0u; i < count && i < MAX_LIGHTS; i = i + 1u) {
-            let light = lights.items[i];
-            let radiance_base = light.color.rgb * light.color.a;
-            if (light.pos_dir.w < 0.5) {
-                // Directional.
-                lo += shade_light(n, v, normalize(light.pos_dir.xyz), radiance_base,
-                                  albedo, rough, f0);
-            } else {
-                // Point (w == 1) / spot (w == 2): shared windowed inverse-square
-                // attenuation; a spot additionally masks by its cone. `cone` stays
-                // 1.0 for a point light.
-                let to_light = light.pos_dir.xyz - in.world_pos;
-                let dist = length(to_light);
-                let l = to_light / max(dist, 1e-4);
-                let att = point_attenuation(dist, light.params.x);
-                var cone = 1.0;
-                if (light.pos_dir.w > 1.5) {
-                    // Cosine of the angle between frag→light and the beam axis
-                    // (-spot_dir = toward-the-light), faded outer_cos→inner_cos.
-                    let cos_dir = dot(l, -light.spot_dir.xyz);
-                    cone = smoothstep(light.params.z, light.params.y, cos_dir);
-                }
-                lo += shade_light(n, v, l, radiance_base * att * cone,
-                                  albedo, rough, f0);
-            }
-        }
-    }
+    // Wave PAR0: every directional light, then the local lights this
+    // fragment's froxel lists — the shared library (`lights.wgsl`).
+    lo += lights_direct(in.world_pos, in.pos.xy, n, v, view.sun_dir.xyz,
+                        albedo, 0.0, rough, f0, 0u);
 
     // Hemispheric ambient — the same sky/ground constants the mesh pass falls back
     // to when GI is off, unmodulated: there is no AO texture to multiply here (no

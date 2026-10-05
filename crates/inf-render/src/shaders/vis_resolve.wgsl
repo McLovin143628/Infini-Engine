@@ -148,78 +148,12 @@ const VIS_INSTANCE_SHIFT: u32 = 0u;
 // (`the_degenerate_floor_is_one_number`).
 const VIS_DET_EPS: f32 = 1e-20;
 
-const MAX_LIGHTS: u32 = 16u;
 
-struct GpuLight {
-    color: vec4<f32>,
-    pos_dir: vec4<f32>,
-    params: vec4<f32>,
-    spot_dir: vec4<f32>,
-};
-struct Lights {
-    count: vec4<u32>,
-    items: array<GpuLight, MAX_LIGHTS>,
-};
-@group(1) @binding(0) var<uniform> lights: Lights;
 
-const PI: f32 = 3.14159265359;
 
-fn distribution_ggx(n_dot_h: f32, rough: f32) -> f32 {
-    let a = rough * rough;
-    let a2 = a * a;
-    let d = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
-    return a2 / max(PI * d * d, 1e-7);
-}
 
-fn geometry_smith(n_dot_v: f32, n_dot_l: f32, rough: f32) -> f32 {
-    let r = rough + 1.0;
-    let k = (r * r) / 8.0;
-    let gv = n_dot_v / (n_dot_v * (1.0 - k) + k);
-    let gl = n_dot_l / (n_dot_l * (1.0 - k) + k);
-    return gv * gl;
-}
 
-fn fresnel_schlick(cos_theta: f32, f0: vec3<f32>) -> vec3<f32> {
-    return f0 + (vec3<f32>(1.0) - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
-}
 
-fn shade_light(
-    n: vec3<f32>, v: vec3<f32>, l: vec3<f32>, radiance: vec3<f32>,
-    albedo: vec3<f32>, metallic: f32, rough: f32, f0: vec3<f32>,
-) -> vec3<f32> {
-    let h = normalize(v + l);
-    let n_dot_l = max(dot(n, l), 0.0);
-    if (n_dot_l <= 0.0) {
-        return vec3<f32>(0.0);
-    }
-    let n_dot_v = max(dot(n, v), 1e-4);
-    let n_dot_h = max(dot(n, h), 0.0);
-    let v_dot_h = max(dot(v, h), 0.0);
-
-    let d = distribution_ggx(n_dot_h, rough);
-    let g = geometry_smith(n_dot_v, n_dot_l, rough);
-    let f = fresnel_schlick(v_dot_h, f0);
-
-    // Wave VIS1a: multi-scatter energy compensation. A single-scatter GGX
-    // drops whatever the Smith term masked instead of letting it bounce again,
-    // which is about a third of the lobe at roughness 1.0 and is why every
-    // rough metal in this engine has been too dark since P7.1. See
-    // `ggx_energy_compensation` in `env_lighting.wgsl`.
-    let spec = (d * g) * f / max(4.0 * n_dot_v * n_dot_l, 1e-4)
-        * ggx_energy_compensation(f0, rough, n_dot_v);
-    let kd = (vec3<f32>(1.0) - f) * (1.0 - metallic);
-    let diffuse = kd * albedo / PI;
-    return (diffuse + spec) * radiance * n_dot_l;
-}
-
-fn point_attenuation(dist: f32, range: f32) -> f32 {
-    let inv_sq = 1.0 / max(dist * dist, 1e-4);
-    if (range <= 0.0) {
-        return inv_sq;
-    }
-    let t = clamp(1.0 - pow(dist / range, 4.0), 0.0, 1.0);
-    return inv_sq * t * t;
-}
 
 fn read_tri_byte(byte_addr: u32) -> u32 {
     let word = v_meshlet_tris[byte_addr >> 2u];
@@ -448,42 +382,14 @@ fn fs(in: VsOut) -> FsOut {
     let f0 = mix(vec3<f32>(0.04), albedo, metallic);
 
     var lo = vec3<f32>(0.0);
-    let count = lights.count.x;
-    if (count == 0u) {
-        var d = shade_light(n, v, normalize(view.sun_dir.xyz), vec3<f32>(3.0),
-                            albedo, metallic, rough, f0);
-        if (sun_shadowing_enabled()) {
-            d = d * shadow_factor(world_pos, n);
-        }
-        lo += d;
-    } else {
-        var shadowed = false;
-        for (var i = 0u; i < count && i < MAX_LIGHTS; i = i + 1u) {
-            let light = lights.items[i];
-            let radiance_base = light.color.rgb * light.color.a;
-            if (light.pos_dir.w < 0.5) {
-                var d = shade_light(n, v, normalize(light.pos_dir.xyz), radiance_base,
-                                    albedo, metallic, rough, f0);
-                if (sun_shadowing_enabled() && !shadowed) {
-                    d = d * shadow_factor(world_pos, n);
-                    shadowed = true;
-                }
-                lo += d;
-            } else {
-                let to_light = light.pos_dir.xyz - world_pos;
-                let dist = length(to_light);
-                let ll = to_light / max(dist, 1e-4);
-                let att = point_attenuation(dist, light.params.x);
-                var cone = 1.0;
-                if (light.pos_dir.w > 1.5) {
-                    let cos_dir = dot(ll, -light.spot_dir.xyz);
-                    cone = smoothstep(light.params.z, light.params.y, cos_dir);
-                }
-                let vsm_f = vsm_light_shadow(world_pos, n, light.params.w);
-                lo += shade_light(n, v, ll, radiance_base * att * cone * vsm_f,
-                                 albedo, metallic, rough, f0);
-            }
-        }
+    // Wave PAR0: every directional light, then the local lights this
+    // fragment's froxel lists — the shared library (`lights.wgsl`).
+    lo += lights_direct(world_pos, in.pos.xy, n, v, view.sun_dir.xyz,
+                        albedo, metallic, rough, f0, LIGHT_SUN_SHADOW | LIGHT_LOCAL_SHADOW);
+    // Wave PAR0: the cluster-grid debug view paints the froxel's light count.
+    if (lights_debug_view()) {
+        out.color = vec4<f32>(lights_debug_heat(world_pos, in.pos.xy), 1.0);
+        return out;
     }
 
     let up = clamp(n.y * 0.5 + 0.5, 0.0, 1.0);

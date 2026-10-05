@@ -3425,3 +3425,39 @@ fn both_projectors_apply_the_cameras_near_fade() {
         );
     }
 }
+
+/// **THE LIGHT PROJECTION IS ONE BODY IN BOTH HOSTS** (wave PAR0 clause 3).
+///
+/// Every scheduled fixture's `RenderLight` — its colour sweep, its kind, its
+/// cone, its shadow request and, since PAR0, its intensity through the night
+/// schedule (`inf_ecs::sky::fixture_level`) — is built inside the
+/// `venue_rig_lights` fence, and the hour it is lit against inside the
+/// `fixture_clock` fence. Before PAR0 the rig loop was matched by a prose
+/// comment and one `scene.lights.push` needle; a schedule that drifted between
+/// hosts would light a venue in the editor that the shipped player leaves dark.
+/// The renderer's own light list is a pure function of these lights and the
+/// camera (`inf_render::lights::plan_lights`), so equal inputs here are what
+/// make the two hosts' GPU light lists byte-identical.
+#[test]
+fn the_light_projection_and_its_clock_are_one_body_in_both_projectors() {
+    for tag in ["venue_rig_lights", "fixture_clock"] {
+        // The editor host owns its scene (`self.scene`), the player is handed
+        // one (`scene`); that receiver is the one token allowed to differ.
+        let editor =
+            fenced(&read(VIEWPORT), tag, "the editor viewport").replace("self.scene.", "scene.");
+        let player = fenced(&read(PLAYER), tag, "the shipped player");
+        assert_eq!(
+            editor, player,
+            "the {tag} fences differ between the two projectors"
+        );
+    }
+    let rig = fenced(&read(PLAYER), "venue_rig_lights", "the shipped player");
+    for needle in [
+        "inf_ecs::sky::fixture_level(",
+        "intensity:l.intensity*level,",
+        "scene.lights.push(RenderLight{",
+        "cast_shadows:true,",
+    ] {
+        assert!(rig.contains(needle), "the rig fence lost `{needle}`");
+    }
+}

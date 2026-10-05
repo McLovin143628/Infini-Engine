@@ -191,7 +191,6 @@ use inf_vgeom::VgeomMesh;
 use crate::camera::{RenderView, DEPTH_COMPARE, DEPTH_FORMAT};
 use crate::gpu::GpuContext;
 use crate::graph::RenderNode;
-use crate::passes::mesh::LightsUniform;
 use crate::renderer::{FrameData, SCENE_FORMAT, SCENE_SAMPLES};
 use crate::scene::VgeomInstance;
 use crate::settings::VgeomSettings;
@@ -1395,8 +1394,6 @@ pub struct VgeomNode {
     cull: CullPipeline,
     raster: wgpu::RenderPipeline,
     raster_bgl: wgpu::BindGroupLayout,
-    lights_buf: wgpu::Buffer,
-    lights_bg: wgpu::BindGroup,
     /// AO + shadows + GI + atmosphere env bind at `@group(2)` (P17.2; was the
     /// AO-only bind, so aerial perspective now reaches meshlet geometry too).
     env: super::EnvBinding,
@@ -1414,8 +1411,6 @@ pub struct VgeomNode {
     /// The view layout, kept so the P28.1 visibility path can build its own
     /// pipelines the first time it is asked for one.
     view_bgl: wgpu::BindGroupLayout,
-    /// The lights layout, kept for the same reason.
-    lights_bgl: wgpu::BindGroupLayout,
     /// P28.1's visibility-buffer resources, built **lazily**: three pipelines and
     /// two viewport-sized targets are not free, and the mode is off by default on
     /// every tier. A renderer that never turns it on pays exactly what it paid
@@ -1503,43 +1498,7 @@ impl VgeomNode {
                 source: wgpu::ShaderSource::Wgsl(super::shader_source("vgeom_mesh").into()),
             });
 
-        // Lights (@group(1)) — shared model with the rigid mesh pass.
-        let lights_bgl = gpu
-            .device
-            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("vgeom-lights"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-            });
-        let lights_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("vgeom-lights"),
-            size: std::mem::size_of::<LightsUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let lights_bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("vgeom-lights"),
-            layout: &lights_bgl,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: lights_buf.as_entire_binding(),
-            }],
-        });
-
         let env = super::EnvBinding::new(gpu);
-        // Kept (P28.1) so the resolve pipeline's layout can name the SAME lights
-        // layout `lights_bg` was built against, rather than a structurally equal
-        // twin — "compatible" is a wgpu-internal judgement and a pipeline layout
-        // is not the place to rely on one.
-        let lights_bgl_kept = lights_bgl.clone();
 
         // Group 3: the vgeom storage buffers (vertex-visible) + flags uniform.
         let vs = wgpu::ShaderStages::VERTEX;
@@ -1615,12 +1574,7 @@ impl VgeomNode {
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("vgeom-raster"),
-                bind_group_layouts: &[
-                    Some(view_bgl),
-                    Some(&lights_bgl),
-                    Some(&env.bgl),
-                    Some(&raster_bgl),
-                ],
+                bind_group_layouts: &[Some(view_bgl), None, Some(&env.bgl), Some(&raster_bgl)],
                 immediate_size: 0,
             });
         let raster = gpu
@@ -1667,8 +1621,6 @@ impl VgeomNode {
             cull,
             raster,
             raster_bgl,
-            lights_buf,
-            lights_bg,
             env,
             dummy_hzb: dummy_hzb(gpu),
             pools: VgeomPoolBuffers::new(gpu),
@@ -1684,7 +1636,6 @@ impl VgeomNode {
             prev_view: None,
             report,
             view_bgl: view_bgl.clone(),
-            lights_bgl: lights_bgl_kept,
             vis: None,
             vis_bases: Vec::new(),
             vis_report,
@@ -2158,7 +2109,6 @@ impl RenderNode for VgeomNode {
                 self.vis = Some(super::visbuffer::VisState::new(
                     gpu,
                     &self.view_bgl,
-                    &self.lights_bgl,
                     &self.env.bgl,
                 ));
             }
@@ -2204,8 +2154,6 @@ impl RenderNode for VgeomNode {
             cull,
             raster,
             raster_bgl,
-            lights_buf,
-            lights_bg,
             env,
             dummy_hzb,
             pools,
@@ -2222,18 +2170,11 @@ impl RenderNode for VgeomNode {
             mismatched_textures: _,
             stale_tiles: _,
             view_bgl: _,
-            lights_bgl: _,
             vis,
             vis_bases,
             vis_report: _,
         } = self;
         vis_bases.clear();
-
-        // Lights (shared with the rigid pass).
-        let lights =
-            LightsUniform::from_scene(frame.scene, &frame.view.origin, frame.vsm_light_slots);
-        gpu.queue
-            .write_buffer(lights_buf, 0, bytemuck::bytes_of(&lights));
 
         let occlusion = settings.occlusion;
         let two_pass = occlusion && settings.two_pass;
@@ -2365,7 +2306,6 @@ impl RenderNode for VgeomNode {
                 });
                 pass.set_pipeline(raster);
                 pass.set_bind_group(0, frame.view_bg, &[]);
-                pass.set_bind_group(1, &*lights_bg, &[]);
                 pass.set_bind_group(2, &env_bg, &[]);
                 for (raster_bg, args) in items {
                     pass.set_bind_group(3, *raster_bg, &[]);
@@ -2602,7 +2542,7 @@ impl RenderNode for VgeomNode {
             // hole in the frame that no assertion about the buffer could see.
             if vis_cleared {
                 if let Some(v) = vis.as_ref() {
-                    vis_resolve_and_feedback(gpu, encoder, v, pools, frame, lights_bg, &env_bg);
+                    vis_resolve_and_feedback(gpu, encoder, v, pools, frame, &env_bg);
                     vis_record_readback(gpu, encoder, v, frame);
                 }
             }
@@ -2731,7 +2671,7 @@ impl RenderNode for VgeomNode {
 
         if vis_cleared {
             if let Some(v) = vis.as_ref() {
-                vis_resolve_and_feedback(gpu, encoder, v, pools, frame, lights_bg, &env_bg);
+                vis_resolve_and_feedback(gpu, encoder, v, pools, frame, &env_bg);
                 vis_record_readback(gpu, encoder, v, frame);
             }
         }
@@ -2753,7 +2693,7 @@ impl RenderNode for VgeomNode {
 /// One asset's indirect draw into the visibility buffer.
 ///
 /// A free function rather than a closure because the closure the forward path
-/// uses captures `env_bg`/`lights_bg` by reference, and this one has to be
+/// uses captures `env_bg` by reference, and this one has to be
 /// callable while `vis` is borrowed for its per-asset flags uniform. Every
 /// argument is spelled out for the P27.3 reason: a struct is where a field
 /// becomes easy to forget to fill.
@@ -2869,7 +2809,6 @@ fn vis_resolve_and_feedback(
     vis: &super::visbuffer::VisState,
     pools: &VgeomPoolBuffers,
     frame: &FrameData,
-    lights_bg: &wgpu::BindGroup,
     env_bg: &wgpu::BindGroup,
 ) {
     let Some(targets) = vis.targets.as_ref() else {
@@ -2949,7 +2888,6 @@ fn vis_resolve_and_feedback(
         });
         pass.set_pipeline(&vis.resolve);
         pass.set_bind_group(0, frame.view_bg, &[]);
-        pass.set_bind_group(1, lights_bg, &[]);
         pass.set_bind_group(2, env_bg, &[]);
         pass.set_bind_group(3, &resolve_bg, &[]);
         pass.draw(0..3, 0..1);

@@ -415,7 +415,7 @@ fn the_light_census_and_the_many_lights_number() {
         }
     }
 
-    let max = inf_render::passes::mesh::MAX_LIGHTS;
+    let max = inf_render::lights::LIGHTS_PER_FRAME_CEILING;
     let cap = inf_pcg::volume::VOLUME_LIGHT_CAP;
     // The sun/moon key light is pushed as `lights[0]` by the projector before any
     // entity light, so the frame's real budget for everything else is one less.
@@ -429,7 +429,7 @@ fn the_light_census_and_the_many_lights_number() {
     row("scattered instances", instances.to_string());
     row("…of which merely GLOW (panes)", glowing.to_string());
     row(
-        "MAX_LIGHTS per frame",
+        "LIGHTS_PER_FRAME_CEILING",
         format!("{max}  (VOLUME_LIGHT_CAP {cap} per block)"),
     );
     row(
@@ -454,24 +454,47 @@ fn the_light_census_and_the_many_lights_number() {
     // THE FINDING, asserted so it cannot quietly stop being true: the world is
     // lit by emissive geometry and not by lights. A block that glows and hangs
     // no fixture is the thing the user rejected, and there are a lot of them.
+    // (Wave PAR0 built the substrate — the list, the cull, the schedule, the
+    // shadows — and deleted the glazing glow; the per-room fixtures that turn
+    // this census over are PAR1's to author, so the inequality still holds.)
     assert!(
         volumes > 0,
         "no PcgVolume is resident, so this census counted an empty world"
     );
+    // Wave PAR0 deleted the pane glow: the windows are glass, so NOTHING in
+    // the resident set glows by the old rule, and the census's old finding
+    // ("lit by emissive geometry, not by lights") is retired rather than
+    // relaxed. The fixtures that light those windows from inside are PAR1's.
+    assert_eq!(glowing, 0, "{glowing} instances still glow like a lit pane");
+    let glass = w
+        .iter_entities()
+        .filter_map(|e| e.get::<inf_ecs::components::PcgVolume>())
+        .map(|v| {
+            v.evaluated
+                .iter()
+                .filter(|i| i.surface.transmission > 0.0)
+                .count()
+        })
+        .sum::<usize>();
+    row("…of which are GLASS (panes)", glass.to_string());
     assert!(
-        glowing > fixtures,
-        "the fixture island has {glowing} glowing instances against {fixtures} real \
-         fixtures — if this ever inverts, CP-B10 has been closed and this arm \
-         should be rewritten rather than relaxed"
+        glass > 0,
+        "the resident set holds no glass, so the zero above is about nothing"
     );
-    // …and the wall itself. FOUR blocks, not three: three at the cap is twelve
-    // fixtures beside the sun, which fits in sixteen. The first draft of this
-    // arm said three and the arm said so by failing — the wall is real and it
-    // is one block further out than the prose had it.
+    // …and the wall itself, which wave PAR0 took down. It used to be FOUR
+    // blocks at `VOLUME_LIGHT_CAP` = 4 overflowing a 16-light uniform; the list
+    // is now a storage buffer whose ceiling is read by name, and the cap was
+    // re-minted to keep a strip block whole. A whole settlement's worth of
+    // blocks at the cap must fit the frame with room for the island beside it.
     assert!(
-        cap * 4 + 1 > max,
-        "four blocks at VOLUME_LIGHT_CAP ({cap} each) no longer overflow \
-         MAX_LIGHTS ({max}) — the many-lights wall this row prices has moved"
+        cap * volumes.max(1) + 1 <= max,
+        "{volumes} blocks at VOLUME_LIGHT_CAP ({cap} each) overflow the frame's \
+         {max}-record light list — the many-lights wall is back"
+    );
+    assert!(
+        cap >= 48,
+        "VOLUME_LIGHT_CAP ({cap}) no longer keeps the densest strip block (48 \
+         fixtures) whole"
     );
 }
 

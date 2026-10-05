@@ -19,41 +19,31 @@ use crate::grammar::expand::GrammarOutput;
 use crate::scatter::{PcgCollider, PcgInstance};
 
 /// **The most real lights one `PcgVolume` may contribute to a frame** (wave
-/// VEN1a).
+/// VEN1a; re-minted by wave PAR0 against the many-lights substrate).
 ///
-/// # The measurement that forces it
+/// # What it was, and why
 ///
-/// `inf_render::MAX_LIGHTS` is **16 for the whole scene**, and the truncation
-/// is first-N in projection order with **no distance prioritization anywhere**
-/// between the ECS and the uniform — so the seventeenth light is not dimmed,
-/// it is deleted, and which sixteen survive depends on GUID order. A venue
-/// hangs up to four fixtures (three stage spots and a bar glow), and a
-/// settlement block is subdivided into LOTS: a 100 m city block at a
-/// nightclub's 32 m frontage is **nine** nightclubs, which is thirty-six
-/// lights, which is the sun going out.
+/// It was **4**. `inf_render::MAX_LIGHTS` was 16 for the whole scene, first-N
+/// in projection order with no prioritization, so the seventeenth light was
+/// deleted and which sixteen survived depended on GUID order; at most three
+/// venue blocks stand in one settlement (the nightlife strip), so `3 × 4 + 2`
+/// sky lights = 14 of 16 was the worst frame. It deleted **87 of the 99**
+/// fixtures a city's strip builds (the parity memo's CP-B10: a Bar block 15,
+/// a Nightclub block 36, a StripClub block 48 — 99 built, 12 kept).
 ///
-/// # Why the cap is here and not in the settlement generator
+/// # What it is now
 ///
-/// Because the scarce thing is *lights in a frame*, and a lot rule is a
-/// statement about *frontage*. Making venue lots whole-block does hold the
-/// budget — it was tried — and it also made the wave's gate arm run
-/// **11 s → 539 s**, because one 54 × 54 m building is a different shape of
-/// problem from six 20 × 30 ones with the same floor area. A rule about the
-/// scarce thing is smaller than a rule about a proxy for it.
-///
-/// # What it costs, stated
-///
-/// A block of six bars lights four of them. Which four is the volume's own
-/// building order — deterministic, identical on both hosts, and **not** a
-/// function of the camera, which is what keeps a level's content from
-/// depending on where somebody stood. What it is NOT is a distance-prioritized
-/// selection, which is the right long answer and belongs to the renderer,
-/// where the eye is; see the wave ledger's carried list.
-///
-/// Four, because at most three venue blocks stand in one settlement (the
-/// nightlife strip), so the worst frame is `3 × 4 + 2` sky lights = **14 of
-/// 16**.
-pub const VOLUME_LIGHT_CAP: usize = 4;
+/// The frame's list is a storage buffer of
+/// `inf_render::lights::LIGHTS_PER_FRAME_CEILING` = 8 192 records with the
+/// directional lights always kept, and a fragment walks only its froxel's list
+/// (`CLUSTER_MAX_LIGHTS` = 256). So the cap no longer guards the frame; it
+/// guards ONE BLOCK against a runaway palette. **64** keeps the densest block
+/// the strip builds (48) whole with a third to spare, and the worst strip frame
+/// is `3 × 64 + 2` = 194 records — 2.4 % of the ceiling. The arm
+/// `a_volume_never_contributes_more_than_its_share_of_the_frame` holds the
+/// first-N-in-building-order rule unchanged, so both hosts keep the same
+/// fixtures when a block does exceed it.
+pub const VOLUME_LIGHT_CAP: usize = 64;
 
 /// Everything one `PcgVolume` evaluates to.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -268,23 +258,24 @@ mod tests {
             cycle_hz: 0.11,
             phase: 0,
             phases: 3,
+            schedule: crate::building::FixtureSchedule::Night,
         };
         // Nine nightclubs' worth -- what a 100 m city block at a 32 m frontage
         // actually subdivides into.
         let grammar = GrammarOutput {
-            lights: (0..36).map(fixture).collect(),
+            lights: (0..(VOLUME_LIGHT_CAP + 36)).map(fixture).collect(),
             ..GrammarOutput::default()
         };
         let out = compose_volume(Vec::new(), grammar);
         assert_eq!(
             out.lights.len(),
             VOLUME_LIGHT_CAP,
-            "thirty-six fixtures reached the frame; `MAX_LIGHTS` is 16 for the whole scene"
+            "a runaway block reached the frame whole"
         );
-        // …and it is the FIRST four, in the volume's own building order, so two
-        // hosts composing the same volume light the same four buildings.
+        // …and it is the FIRST `VOLUME_LIGHT_CAP`, in the volume's own building
+        // order, so two hosts composing the same volume light the same buildings.
         for (k, l) in out.lights.iter().enumerate() {
-            assert_eq!(l.at.x, k as f64, "the cap kept a different four");
+            assert_eq!(l.at.x, k as f64, "the cap kept a different set");
         }
         // A volume under the cap is untouched, so every level that predates the
         // venues composes byte-identically.
@@ -296,15 +287,16 @@ mod tests {
         assert!(compose_volume(Vec::new(), GrammarOutput::default())
             .lights
             .is_empty());
-        // …and the cap really is small enough for the strip: three venue
-        // blocks plus the sky's two lights must clear the frame's sixteen.
-        // Measured through the length the arm just took, so this is an
-        // assertion about what `compose_volume` DID rather than one clippy can
-        // fold to a constant.
+        // …and the cap is small enough for the strip under the PAR0 substrate:
+        // three venue blocks at the cap plus the sky's two lights must fit ONE
+        // froxel's list (`inf_render::lights::CLUSTER_MAX_LIGHTS` = 256 — the
+        // per-fragment bound; the frame's 8 192 is far looser), so even a camera
+        // that sees the whole strip in one froxel shades every fixture.
+        // Measured through the length the arm just took.
         let worst = 3 * out.lights.len() + 2;
         assert!(
-            worst <= 16,
-            "three venue blocks at {} fixtures each is {worst} lights against a frame of 16",
+            worst <= 256,
+            "three venue blocks at {} fixtures each is {worst} lights against a froxel of 256",
             out.lights.len()
         );
     }

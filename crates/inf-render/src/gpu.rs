@@ -37,6 +37,37 @@ pub struct GpuContext {
     uncaptured_errors: Arc<AtomicU32>,
 }
 
+/// **Fragment storage buffers the lit path needs** (wave PAR0): the shared
+/// environment group's five (GI SH probes, the VT indirection table, the VSM
+/// page table and its projections, and since PAR0 the frame's light list) plus
+/// the visibility resolve's four meshlet pools = **9**, one past
+/// `wgpu::Limits::default()`'s eight.
+///
+/// The light list had to be a storage buffer (a uniform holds 1 023 records at
+/// most and the island wants ≈5 000) and every placement that avoided the ninth
+/// binding was measured shut: a texture instead spends a SAMPLED slot, and the
+/// terrain pipeline sits at exactly 16 of 16; a fifth bind group is refused by
+/// terrain, which uses all four. So the device asks for nine where the adapter
+/// grants it — every desktop adapter does (Vulkan/D3D12/Metal report 31 to
+/// millions); a WebGPU or mobile adapter capped at eight keeps the meshlet path
+/// off through [`crate::caps::VGEOM_MIN_STORAGE_BUFFERS_PER_STAGE`] and lights
+/// every other pass, which needs five.
+pub const LIT_FRAGMENT_STORAGE_BUFFERS: u32 = 9;
+
+/// The limits every engine device requests: `wgpu::Limits::default()` with the
+/// storage-buffer-per-stage count raised to [`LIT_FRAGMENT_STORAGE_BUFFERS`]
+/// where the adapter grants it — never above what it grants, so device creation
+/// cannot fail for it (the request-if-available rule).
+pub fn engine_limits(adapter: &wgpu::Limits) -> wgpu::Limits {
+    let base = wgpu::Limits::default();
+    wgpu::Limits {
+        max_storage_buffers_per_shader_stage: adapter
+            .max_storage_buffers_per_shader_stage
+            .min(LIT_FRAGMENT_STORAGE_BUFFERS),
+        ..base
+    }
+}
+
 impl GpuContext {
     /// Context for presenting to `surface` (picks a compatible adapter).
     pub fn for_surface(
@@ -135,7 +166,7 @@ impl GpuContext {
             max_tlas_instance_count: adapter_limits.max_tlas_instance_count,
             max_acceleration_structures_per_shader_stage: adapter_limits
                 .max_acceleration_structures_per_shader_stage,
-            ..wgpu::Limits::default()
+            ..engine_limits(&adapter_limits)
         };
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             required_features: features,
@@ -206,6 +237,7 @@ impl GpuContext {
         }
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             required_features: optional_features,
+            required_limits: engine_limits(&adapter.limits()),
             ..Default::default()
         }))
         .map_err(|e| format!("request_device: {e}"))?;

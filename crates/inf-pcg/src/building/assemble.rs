@@ -120,13 +120,19 @@ const RIG_TOE_IN: f64 = 0.35;
 /// inside the next building.
 const RIG_RANGE_STOREYS: f64 = 2.0;
 
-/// **The most spots one room's rig may hang** (wave VEN1a).
+/// **The most spots one room's rig may hang** (wave VEN1a; re-minted by wave
+/// PAR0).
 ///
-/// A ceiling rather than a hope, on `MAX_FURNITURE_PER_ROOM`'s own argument:
-/// `MAX_LIGHTS` is 16 for the whole FRAME, so a palette that asked for twenty
-/// would not merely be extravagant — it would push the sun out of the uniform,
-/// because the truncation is first-N in projection order with no priority.
-const MAX_RIG_SPOTS: u32 = 4;
+/// It was 4 because `MAX_LIGHTS` was 16 for the whole FRAME and a rig that
+/// overran it pushed the sun out of a first-N uniform. The light list is now a
+/// storage buffer (`inf_render::lights::LIGHTS_PER_FRAME_CEILING` = 8 192
+/// records, directional lights always kept) and a fragment walks only its own
+/// froxel's list, capped at `CLUSTER_MAX_LIGHTS` = 256 — so what bounds a rig
+/// is that 256: twelve spots over one stage keep a froxel on that stage under
+/// a twentieth of it with the room's bar light and every neighbour's rig
+/// beside them. Twelve is a real club's truss (two rows of six), and the
+/// palettes ask for three, so no committed content moves for the re-mint.
+pub(crate) const MAX_RIG_SPOTS: u32 = 12;
 
 /// How much a room-centre piece shrinks per attempt when it fouls an opening
 /// void or a door swing, and how many attempts it gets (wave VEN1a).
@@ -1043,6 +1049,7 @@ impl Ctx<'_> {
                         cycle_hz: rig.cycle_hz,
                         phase: k,
                         phases: n,
+                        schedule: super::society::schedule_of(room.kind),
                     });
                 }
             }
@@ -1066,6 +1073,7 @@ impl Ctx<'_> {
                     cycle_hz: 0.0,
                     phase: 0,
                     phases: 1,
+                    schedule: super::society::schedule_of(room.kind),
                 });
             }
             _ => {}
@@ -1767,9 +1775,10 @@ mod tests {
     ///
     /// Not a clamp — nothing enforces it at placement — but an asserted bound, so
     /// that a palette which grew a rig per room would fail a test rather than
-    /// quietly push the sun out of `inf_render::MAX_LIGHTS`. Eight is half the
-    /// frame budget, which is the most one building may claim while a settlement
-    /// can hold three venues and a sun.
+    /// quietly push the sun out of `inf_render::MAX_LIGHTS`. Eight was half the
+    /// 16-light frame budget (retired by wave PAR0: the frame's list is now a
+    /// storage buffer of `inf_render::lights::LIGHTS_PER_FRAME_CEILING`
+    /// records); the bound is kept as a palette-sanity ceiling.
     const VENUE_LIGHT_CEILING: usize = 8;
 
     fn lot(w: f64, h: f64) -> Rect2 {
@@ -1789,8 +1798,9 @@ mod tests {
 
     /// **THE LIGHT-BUDGET MEASUREMENT** (wave VEN1a).
     ///
-    /// `inf_render::MAX_LIGHTS` is **16 for the whole frame**, and the
-    /// truncation is first-N in projection order with no distance
+    /// `inf_render::MAX_LIGHTS` **was** 16 for the whole frame (until wave
+    /// PAR0 retired it for a storage-buffer list with a frustum + energy cull),
+    /// and the truncation was first-N in projection order with no distance
     /// prioritization anywhere between the ECS and the uniform. So a venue's
     /// rig is spending a budget it shares with the sun, and the honest question
     /// is not "does a rig look good" but "how many venues fit in a frame".
@@ -2969,7 +2979,13 @@ mod tests {
                 .expect("the palette declares its pane");
             for p in &decor[..windows] {
                 assert_eq!(p.kind_index, pane_kind, "{}: not a pane", arch.display);
-                assert!(p.glow > 0.0, "{}: a pane that does not glow", arch.display);
+                // Wave PAR0: a pane is glass, not a lamp.
+                assert_eq!(p.glow, 0.0, "{}: a pane still glows", arch.display);
+                assert!(
+                    p.surface.transmission > 0.5,
+                    "{}: a pane that does not transmit",
+                    arch.display
+                );
             }
             if let Some(sign) = arch.entrance_sign {
                 let plate = g
@@ -2994,18 +3010,19 @@ mod tests {
                     assert_eq!(tail[1].kind_index, fk, "{}: no festoon", arch.display);
                 }
             }
-            // …and nothing in the aligned prefix glows, so "the windows light
-            // up" is a statement about windows.
+            // …and only glass in the aligned prefix transmits, and nothing
+            // in it glows (wave PAR0 deleted the pane glow).
             for s in &out.instances[..out.colliders.len()] {
                 let is_glazed = super::super::modules::shape_of(
                     &archetype(arch.id).grammar().expect("parses").modules()[s.kind_index as usize]
                         .name,
                 )
                 .is_some_and(super::super::modules::ModuleShape::is_glazing);
+                assert_eq!(s.glow, 0.0, "{}: a solid module glows", arch.display);
                 assert_eq!(
-                    s.glow > 0.0,
+                    s.surface.transmission > 0.0,
                     is_glazed,
-                    "{}: a solid module's glow disagrees with its family",
+                    "{}: a solid module's transmission disagrees with its family",
                     arch.display
                 );
             }

@@ -879,6 +879,16 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
     }
     let ao = textureSampleLevel(ao_tex, ao_smp, in.clip.xy / view.grid_axis_viewport.zw, 0.0).r;
     var lo = albedo * (ambient * ao + direct) + spec_term;
+    // Wave PAR0: a lamp lights the road it stands on. Every local light the
+    // fragment's froxel lists, through the shared library, on the splat blend as
+    // a dielectric at its own roughness, shadowed through its page tree when it
+    // has one. No local light in the frame (every committed terrain golden) adds
+    // exactly zero.
+    lo = lo + lights_local(in.world_local, in.clip.xy, n, view_dir, albedo, 0.0, roughness,
+                           vec3<f32>(0.04), LIGHT_LOCAL_SHADOW);
+    if (lights_debug_view()) {
+        return vec4<f32>(lights_debug_heat(in.world_local, in.clip.xy), 1.0);
+    }
     // P18.4 GI specular. Terrain has no `f0` of its own (it is a dielectric splat
     // blend, and its existing glint is a direct-sun Blinn lobe), so this is an
     // ADDITIVE environment term at the dielectric 0.04 rather than a replacement —

@@ -34,7 +34,7 @@ use inf_vgeom::{pick_classic_level, VgeomMesh};
 use crate::camera::{RenderView, DEPTH_COMPARE, DEPTH_FORMAT};
 use crate::gpu::GpuContext;
 use crate::graph::RenderNode;
-use crate::passes::mesh::{vertex_layouts, InstanceRaw, LightsUniform, MeshVertex};
+use crate::passes::mesh::{vertex_layouts, InstanceRaw, MeshVertex};
 use crate::passes::vgeom::lod_threshold;
 use crate::renderer::{FrameData, SCENE_FORMAT, SCENE_SAMPLES};
 use crate::scene::{MeshInstance, VgeomAsset, VgeomInstance};
@@ -286,8 +286,6 @@ fn retain_live<G, B>(
 /// The classic-LOD fallback render node (P13.4).
 pub struct ClassicVgeomNode {
     pipeline: wgpu::RenderPipeline,
-    lights_buf: wgpu::Buffer,
-    lights_bg: wgpu::BindGroup,
     env: super::EnvBinding,
     geom: BTreeMap<u128, ClassicGpu>,
     /// Reused per-(asset,level) instance buffers, keyed `(asset_id, level)`.
@@ -304,42 +302,12 @@ impl ClassicVgeomNode {
                 source: wgpu::ShaderSource::Wgsl(super::shader_source("mesh").into()),
             });
 
-        let lights_bgl = gpu
-            .device
-            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("classic-vgeom-lights"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-            });
-        let lights_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("classic-vgeom-lights"),
-            size: std::mem::size_of::<LightsUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let lights_bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("classic-vgeom-lights"),
-            layout: &lights_bgl,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: lights_buf.as_entire_binding(),
-            }],
-        });
-
         let env = super::EnvBinding::new(gpu);
         let layout = gpu
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("classic-vgeom"),
-                bind_group_layouts: &[Some(view_bgl), Some(&lights_bgl), Some(&env.bgl)],
+                bind_group_layouts: &[Some(view_bgl), None, Some(&env.bgl)],
                 immediate_size: 0,
             });
         let pipeline = gpu
@@ -384,8 +352,6 @@ impl ClassicVgeomNode {
 
         Self {
             pipeline,
-            lights_buf,
-            lights_bg,
             env,
             geom: BTreeMap::new(),
             batches: BTreeMap::new(),
@@ -476,12 +442,6 @@ impl RenderNode for ClassicVgeomNode {
             .map(|a| (a.id, a.bounds()))
             .collect();
 
-        // Lights (shared model with the rigid mesh pass).
-        let lights =
-            LightsUniform::from_scene(frame.scene, &frame.view.origin, frame.vsm_light_slots);
-        gpu.queue
-            .write_buffer(&self.lights_buf, 0, bytemuck::bytes_of(&lights));
-
         let origin = frame.view.origin;
         let pixel_error = frame.settings.vgeom.pixel_error;
 
@@ -538,7 +498,6 @@ impl RenderNode for ClassicVgeomNode {
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, frame.view_bg, &[]);
-        pass.set_bind_group(1, &self.lights_bg, &[]);
         pass.set_bind_group(2, &env_bg, &[]);
 
         for (key, raw) in &grouped {

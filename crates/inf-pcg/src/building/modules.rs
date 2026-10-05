@@ -413,8 +413,8 @@ impl ModuleShape {
         }
     }
 
-    /// Whether this family is a window — the one thing that glows at night
-    /// (island wave I8b clause 3).
+    /// Whether this family is a window — glass since wave PAR0 (it glowed
+    /// at night from island wave I8b until then).
     pub fn is_glazing(self) -> bool {
         self == ModuleShape::Glazing
     }
@@ -548,7 +548,6 @@ impl ModuleShape {
         match self {
             // ── the twelve that predate the venue wave: unmoved ──
             ModuleShape::Panel
-            | ModuleShape::Glazing
             | ModuleShape::Column
             | ModuleShape::Deck
             | ModuleShape::Tread
@@ -566,6 +565,7 @@ impl ModuleShape {
             // Stage planks and benches: warm, worn wood with a little sheen, so
             // a red wash pools on it instead of going flat. The reference's
             // catwalk is the brightest surface in the room that is not a light.
+            ModuleShape::Glazing => GLAZING,
             ModuleShape::Stage => PcgSurface {
                 roughness: 0.55,
                 tint: Some(WOOD),
@@ -969,15 +969,20 @@ pub fn module_meshes() -> Vec<(Uuid, ModuleMesh)> {
         .collect()
 }
 
-/// How brightly a glazed module emits **at full night**, as a multiplier on its
-/// own colour.
+/// **The glass a window pane is made of** (wave PAR0 clause 4).
 ///
-/// One number for the whole engine rather than a per-archetype knob: a lit
-/// window is a lit window, and seven values would be seven chances for one
-/// district to be brighter than another for no authored reason. The *hour* is
-/// applied by the projector, not here — see
-/// [`PcgInstance::glow`](crate::scatter::PcgInstance::glow).
-pub const GLAZING_GLOW: f32 = 1.6;
+/// It replaced `GLAZING_GLOW`, the emissive multiplier that made every pane a
+/// lamp at night whatever stood behind it — the user's ruling was "actual
+/// lights, not glowing window panes". A lit window at night is now the real
+/// fixture behind real glass: 85 % of the light that is not reflected passes,
+/// the surface is smooth (roughness 0.05, a clean pane's highlight) and very
+/// slightly blue-green, the tint of ordinary soda-lime float glass seen edge on.
+pub const GLAZING: PcgSurface = PcgSurface {
+    roughness: 0.05,
+    tint: Some([0.86, 0.93, 0.92, 1.0]),
+    transmission: 0.85,
+    ..PcgSurface::DEFAULT
+};
 
 /// Every module name any shipped palette declares, sorted and deduplicated.
 ///
@@ -1147,6 +1152,8 @@ mod tests {
                     | ModuleShape::Sign
                     | ModuleShape::Festoon
                     | ModuleShape::Grille
+                    // Wave PAR0: glazing is glass (`GLAZING`).
+                    | ModuleShape::Glazing
             );
             if authored {
                 continue;
@@ -1163,7 +1170,17 @@ mod tests {
         assert_eq!(PcgSurface::DEFAULT.metallic, 0.0);
         assert_eq!(PcgSurface::DEFAULT.roughness, 0.75);
         assert_eq!(PcgSurface::DEFAULT.tint, None);
+        assert_eq!(PcgSurface::DEFAULT.transmission, 0.0);
         assert!(!PcgSurface::DEFAULT.emits());
+        // …and the one family that transmits is the window.
+        for s in ModuleShape::ALL {
+            assert_eq!(
+                s.surface().transmission > 0.0,
+                s.is_glazing(),
+                "{}",
+                s.name()
+            );
+        }
     }
 
     /// **A venue family is made of something, and the something is specific**

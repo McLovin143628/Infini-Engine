@@ -293,6 +293,12 @@ pub struct PcgSurface {
     /// colour since P18.5 and the batch never has. So this costs no extra
     /// bucket and a venue can hold six tints in one draw.
     pub tint: Option<[f32; 4]>,
+    /// **How much light passes through, `[0, 1]`** (wave PAR0 clause 4). `0.0`
+    /// is opaque — every surface that predates PAR0. A window pane is glass:
+    /// the renderer draws a transmitting batch in its glass pass (fresnel
+    /// reflection over the room behind it, no depth write) instead of the
+    /// opaque raster, and the GI voxelizer lets the probe march through it.
+    pub transmission: f32,
 }
 
 impl PcgSurface {
@@ -304,6 +310,7 @@ impl PcgSurface {
         metallic: 0.0,
         roughness: 0.75,
         tint: None,
+        transmission: 0.0,
     };
 
     /// Whether this surface emits anything at all — the test the projectors

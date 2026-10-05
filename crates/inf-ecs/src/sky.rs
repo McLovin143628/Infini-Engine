@@ -596,6 +596,71 @@ pub fn local_hour(world: &EcsWorld) -> f64 {
     ((tod.seconds + tod.longitude_deg * 240.0) / 3600.0).rem_euclid(24.0)
 }
 
+/// How long a scheduled fixture takes to come up or go down, hours (wave PAR0).
+/// A quarter hour: a building's lights do not all snap on at 18:00:00, and a
+/// ramp keeps a fixture's contribution continuous across the boundary, so a
+/// clock that crosses it moves no pixel by more than the ramp's own slope.
+pub const FIXTURE_RAMP_H: f64 = 0.25;
+
+/// The sun height (the `y` of its unit direction) above which a
+/// [`Dusk`](crate::components::LightSchedule::Dusk) fixture is fully off, and
+/// the height below which it is fully on — the same band the emissive night
+/// ramp (`inf_render::night_glow_step`) spans, so a lamp and a lit pane agree
+/// about when it is dark.
+pub const DUSK_SUN_Y: (f32, f32) = (0.10, -0.08);
+
+/// **THE NIGHT SCHEDULE** (wave PAR0 clause 5): a fixture's intensity
+/// multiplier, `[0, 1]`, as a pure function of its schedule, the level clock's
+/// LOCAL hour ([`local_hour`]), the sun's height and an occupancy factor.
+///
+/// One door, read by both projectors inside their MIRROR blocks, so PIE and
+/// the shipped player light the same fixtures at the same strength on the same
+/// clock. The windows are the society's own hours, so a room is lit exactly
+/// while its crew works it:
+///
+/// * `Night` — `NIGHT_WORK_START_H` (18:00) to `NIGHT_WORK_END_H` (03:00);
+/// * `Day` — `WORK_START_H` (08:00) to `HOME_H` (18:00);
+/// * `Always` — 1;
+/// * `Dusk` — by the sun, across [`DUSK_SUN_Y`].
+///
+/// Each edge ramps over [`FIXTURE_RAMP_H`], centred on the edge.
+///
+/// `occupancy` is **PAR1's hook**: today every caller passes `1.0`; PAR1
+/// wires a room's occupancy (a lit room is a room someone is in) without
+/// changing this signature. It multiplies, and is clamped to `[0, 1]`.
+pub fn fixture_level(
+    schedule: crate::components::LightSchedule,
+    local_hour: f64,
+    sun_y: f32,
+    occupancy: f32,
+) -> f32 {
+    use crate::components::LightSchedule as S;
+    use crate::society::{HOME_H, NIGHT_WORK_END_H, NIGHT_WORK_START_H, WORK_START_H};
+    let window = |start: f64, end: f64| -> f64 {
+        // `end` may be past midnight; unwrap the hour into the window's day.
+        let span = (end - start).rem_euclid(24.0);
+        let t = (local_hour - start).rem_euclid(24.0);
+        let half = FIXTURE_RAMP_H * 0.5;
+        // Distance inside the window from its nearer edge (negative outside).
+        let inside = if t <= span {
+            t.min(span - t)
+        } else {
+            -(t - span).min(24.0 - t)
+        };
+        ((inside + half) / FIXTURE_RAMP_H).clamp(0.0, 1.0)
+    };
+    let level = match schedule {
+        S::Always => 1.0,
+        S::Night => window(NIGHT_WORK_START_H, NIGHT_WORK_END_H),
+        S::Day => window(WORK_START_H, HOME_H),
+        S::Dusk => {
+            let (off, on) = DUSK_SUN_Y;
+            f64::from(((off - sun_y) / (off - on)).clamp(0.0, 1.0))
+        }
+    };
+    (level * f64::from(occupancy.clamp(0.0, 1.0))) as f32
+}
+
 /// The level clock's rate (simulated seconds per simulated second); `0` when the
 /// level has no clock, which is also what "frozen" means.
 pub fn time_of_day_rate(world: &EcsWorld) -> f64 {
@@ -738,6 +803,79 @@ pub fn weather_wind_speed(world: &EcsWorld) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    /// **THE NIGHT SCHEDULE, as a function of the hour** (wave PAR0 clause 5):
+    /// a night fixture is dark at 11:00 and fully lit at 21:00; the ramp is
+    /// half on at each edge and continuous; a round-the-clock room never goes
+    /// dark; a dusk fixture follows the sun; occupancy multiplies.
+    #[test]
+    fn a_night_fixture_is_dark_at_eleven_and_lit_at_nine_and_the_ramps_are_continuous() {
+        use crate::components::LightSchedule as S;
+        let sun_up = 0.8;
+        assert_eq!(
+            fixture_level(S::Night, 11.0, sun_up, 1.0),
+            0.0,
+            "a stage rig at 11:00"
+        );
+        assert_eq!(
+            fixture_level(S::Night, 21.0, sun_up, 1.0),
+            1.0,
+            "a stage rig at 21:00"
+        );
+        assert_eq!(
+            fixture_level(S::Night, 1.0, sun_up, 1.0),
+            1.0,
+            "past midnight"
+        );
+        assert_eq!(
+            fixture_level(S::Night, 4.0, sun_up, 1.0),
+            0.0,
+            "after closing"
+        );
+        assert!(
+            (fixture_level(S::Night, 18.0, sun_up, 1.0) - 0.5).abs() < 1e-6,
+            "opening edge"
+        );
+        assert!(
+            (fixture_level(S::Night, 3.0, sun_up, 1.0) - 0.5).abs() < 1e-6,
+            "closing edge"
+        );
+        assert_eq!(fixture_level(S::Day, 11.0, sun_up, 1.0), 1.0);
+        assert_eq!(fixture_level(S::Day, 21.0, sun_up, 1.0), 0.0);
+        for h in [0.0, 6.0, 11.0, 17.9, 21.0, 23.99] {
+            assert_eq!(
+                fixture_level(S::Always, h, sun_up, 1.0),
+                1.0,
+                "an institution at {h}"
+            );
+        }
+        assert_eq!(
+            fixture_level(S::Dusk, 12.0, sun_up, 1.0),
+            0.0,
+            "a street lamp at noon"
+        );
+        assert_eq!(
+            fixture_level(S::Dusk, 12.0, -0.3, 1.0),
+            1.0,
+            "a street lamp in the dark"
+        );
+        assert!(
+            (fixture_level(S::Night, 21.0, sun_up, 0.25) - 0.25).abs() < 1e-6,
+            "occupancy"
+        );
+        // Continuity: no step anywhere on a fine sweep larger than the ramp's
+        // slope allows (one minute of a quarter-hour ramp = 1/15).
+        let mut prev = fixture_level(S::Night, 0.0, sun_up, 1.0);
+        for k in 1..=24 * 60 {
+            let h = f64::from(k) / 60.0;
+            let now = fixture_level(S::Night, h.rem_euclid(24.0), sun_up, 1.0);
+            assert!(
+                (now - prev).abs() <= 1.0 / 15.0 + 1e-5,
+                "a step at {h:.3} h: {prev} -> {now}"
+            );
+            prev = now;
+        }
+    }
+
     use super::*;
 
     fn world_with(clocks: &[(Uuid, TimeOfDay)]) -> EcsWorld {

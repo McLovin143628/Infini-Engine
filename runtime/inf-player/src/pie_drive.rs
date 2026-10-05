@@ -621,6 +621,15 @@ const OCCUPY_NAME: &str = "occupy";
 /// metres.
 const OCCUPY_REACH_M: f64 = 25.0;
 
+/// **Freeze the level clock at a LOCAL hour for the preview** (wave PAR0),
+/// e.g. `21` for nine at night. The demo loop's door for photographing the
+/// night schedule — a nightlife strip at 21:00 and a stage rig dark at 11:00 —
+/// on the island whose clock otherwise starts mid-morning. Applied once, on
+/// the first frame, by setting every `TimeOfDay` to that local hour with rate
+/// zero. Read only in a `--pie` preview, for [`SPAWN_AT_ENV`]'s reason: no gate
+/// reads it and no level carries it.
+pub const HOUR_ENV: &str = "INF_PIE_HOUR";
+
 /// How long a preview waits before applying [`SPAWN_AT_ENV`], seconds.
 ///
 /// The island streams; a hero teleported on frame zero arrives before the
@@ -683,6 +692,9 @@ pub struct SpawnOverride {
     accum: f64,
     next: usize,
     cloth_done: bool,
+    /// [`HOUR_ENV`]'s local hour, and whether it has been applied.
+    hour: Option<f64>,
+    hour_done: bool,
 }
 
 impl SpawnOverride {
@@ -790,11 +802,17 @@ impl SpawnOverride {
                 Err(e) => eprintln!("inf-player: the weapon registry does not parse: {e}"),
             }
         }
+        let hour = std::env::var(HOUR_ENV)
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|h| h.is_finite())
+            .map(|h| h.rem_euclid(24.0));
         Self {
             at,
             cloth,
             weapons,
             tune,
+            hour,
             ..Self::default()
         }
     }
@@ -828,6 +846,21 @@ impl SpawnOverride {
     /// for the hero log when one fires, so a frame taken afterwards can be read
     /// against a record of where the hero was put.
     pub fn tick(&mut self, sim: &mut RuntimeSim, dt: f64) -> Option<String> {
+        if let (Some(h), false) = (self.hour, self.hour_done) {
+            self.hour_done = true;
+            let w = sim.world_mut();
+            let mut q = w.world_mut().query::<&mut inf_ecs::components::TimeOfDay>();
+            let mut wound = 0usize;
+            for mut tod in q.iter_mut(w.world_mut()) {
+                tod.seconds = (h * 3600.0 - tod.longitude_deg * 240.0).rem_euclid(86_400.0);
+                tod.rate = 0.0;
+                wound += 1;
+            }
+            w.mark_dirty();
+            return Some(format!(
+                "{HOUR_ENV} froze {wound} clock(s) at {h:.2} h local"
+            ));
+        }
         let done = self.next >= self.at.len();
         if done
             && (self.cloth.is_none() || self.cloth_done)

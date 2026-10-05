@@ -27,6 +27,10 @@ param(
     # measured drop and wrote down "the shipped player has no teleport" -- which
     # is a limitation of THIS SCRIPT, not of the game.
     [string]$SpawnAt = "",
+    # **THE NIGHT SCHEDULE** (wave PAR0), `INF_PIE_HOUR`: freeze the level clock
+    # at this LOCAL hour on the first frame (e.g. `21` for the nightlife strip lit,
+    # `11` for the same rig dark). Empty = the level's own clock.
+    [string]$Hour = "",
     # **THE HEADING THAT GOES WITH THE PLACEMENT** (carried 186, closed by the
     # COV1 audit). A `;`-separated list of yaw degrees, one per `-SpawnAt`
     # entry, folded into the same `INF_PIE_SPAWN_AT` string as an `/yaw` suffix
@@ -566,6 +570,8 @@ if ($SpawnAt -ne "") {
 else { Remove-Item env:INF_PIE_SPAWN_AT -ErrorAction Ignore }
 if ($WearCloth -ne "") { $env:INF_PIE_WEAR_CLOTH = $WearCloth; Say "wear cloth: $WearCloth" }
 else { Remove-Item env:INF_PIE_WEAR_CLOTH -ErrorAction Ignore }
+if ($Hour -ne "") { $env:INF_PIE_HOUR = $Hour; Say "clock frozen at $Hour h local" }
+else { Remove-Item env:INF_PIE_HOUR -ErrorAction Ignore }
 # WPN2a: the WHOLE list goes to the player, which puts every one of them in the
 # hero's bag and equips the first. The loop cycles the rest in with the SCROLL
 # WHEEL -- the shipped `weapon_switch` verb -- so one session photographs one

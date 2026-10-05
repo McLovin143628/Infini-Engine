@@ -42,7 +42,6 @@ use inf_math::FloatingOrigin;
 use crate::camera::{DEPTH_COMPARE, DEPTH_FORMAT};
 use crate::gpu::GpuContext;
 use crate::graph::RenderNode;
-use crate::passes::mesh::LightsUniform;
 use crate::renderer::{FrameData, SCENE_FORMAT, SCENE_SAMPLES};
 use crate::scene::{RenderVoxelChunk, RenderVoxelVertex, RenderVoxelVolume, VoxelChunkKey};
 use crate::settings::RenderSettings;
@@ -374,14 +373,17 @@ pub struct VoxelNode {
     /// the floating origin can rebase under any of them).
     instances: Option<wgpu::Buffer>,
     instance_capacity: usize,
-    lights_buf: wgpu::Buffer,
-    lights_bg: wgpu::BindGroup,
     /// The engagement counter (see [`VoxelReport`]).
     report: VoxelReport,
 }
 
 impl VoxelNode {
-    pub fn new(gpu: &GpuContext, view_bgl: &wgpu::BindGroupLayout, report: VoxelReport) -> Self {
+    pub fn new(
+        gpu: &GpuContext,
+        view_bgl: &wgpu::BindGroupLayout,
+        lights_bgl: &wgpu::BindGroupLayout,
+        report: VoxelReport,
+    ) -> Self {
         let shader = gpu
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -389,46 +391,16 @@ impl VoxelNode {
                 source: wgpu::ShaderSource::Wgsl(super::shader_source("voxel").into()),
             });
 
-        // Lights uniform block (@group(1)) — the same `LightsUniform` packing the
-        // mesh pass publishes, bound exactly as `classic_vgeom` binds it.
-        let lights_bgl = gpu
-            .device
-            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("voxel-lights"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-            });
-        let lights_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("voxel-lights"),
-            size: std::mem::size_of::<LightsUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let lights_bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("voxel-lights"),
-            layout: &lights_bgl,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: lights_buf.as_entire_binding(),
-            }],
-        });
-
-        // Two bind groups only: view + lights. There is deliberately no env group
+        // Two bind groups only: view + lights (wave PAR0: the frame's light list
+        // through `LightGrid`'s standalone group — the same two buffers the
+        // env-bound passes read). There is deliberately no env group
         // — see the header of shaders/voxel.wgsl for what that costs and why P21.1
         // pays it.
         let layout = gpu
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("voxel"),
-                bind_group_layouts: &[Some(view_bgl), Some(&lights_bgl)],
+                bind_group_layouts: &[Some(view_bgl), Some(lights_bgl)],
                 immediate_size: 0,
             });
         let pipeline = gpu
@@ -516,8 +488,6 @@ impl VoxelNode {
             chunks: BTreeMap::new(),
             instances: None,
             instance_capacity: 0,
-            lights_buf,
-            lights_bg,
             report,
         }
     }
@@ -637,11 +607,6 @@ impl VoxelNode {
             return draws;
         }
 
-        let lights =
-            LightsUniform::from_scene(frame.scene, &frame.view.origin, frame.vsm_light_slots);
-        gpu.queue
-            .write_buffer(&self.lights_buf, 0, bytemuck::bytes_of(&lights));
-
         if self.instances.is_none() || self.instance_capacity < raw.len() {
             let capacity = raw.len().next_power_of_two().max(16);
             self.instances = Some(gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -721,7 +686,7 @@ impl RenderNode for VoxelNode {
             return;
         };
         let draws = &self.draws;
-        let (chunks, pipeline, lights_bg) = (&self.chunks, &self.pipeline, &self.lights_bg);
+        let (chunks, pipeline, lights_bg) = (&self.chunks, &self.pipeline, frame.lights.bare_bg());
 
         // Past this line the encoder WILL be touched — the one place the counter
         // may move, so an unchanged count is a real statement about the command

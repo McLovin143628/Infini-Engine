@@ -81,7 +81,7 @@ use inf_math::FloatingOrigin;
 use crate::camera::{DEPTH_COMPARE, DEPTH_FORMAT};
 use crate::gpu::GpuContext;
 use crate::graph::RenderNode;
-use crate::passes::mesh::{InstanceRaw, LightsUniform};
+use crate::passes::mesh::InstanceRaw;
 use crate::renderer::{FrameData, SCENE_FORMAT, SCENE_SAMPLES};
 use crate::scene::{SkinnedInstance, SkinnedMeshData};
 use crate::settings::RenderSettings;
@@ -579,8 +579,6 @@ pub struct SkinnedMeshNode {
     joints_bgl: wgpu::BindGroupLayout,
     /// AO + shadows + GI env bind at `@group(2)` (P13.3b; was the AO-only bind).
     env: super::EnvBinding,
-    lights_buf: wgpu::Buffer,
-    lights_bg: wgpu::BindGroup,
     /// Per `RenderScene::skinned_meshes` entry, its key into
     /// [`mesh_cache`](Self::mesh_cache) — so `SkinnedInstance::mesh` (an index into
     /// the scene's list) still resolves in one hop.
@@ -619,37 +617,6 @@ impl SkinnedMeshNode {
                 source: wgpu::ShaderSource::Wgsl(super::shader_source("skinned").into()),
             });
 
-        // @group(1) lights (same layout/contents as the rigid mesh pass).
-        let lights_bgl = gpu
-            .device
-            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("skinned-lights"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-            });
-        let lights_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("skinned-lights"),
-            size: std::mem::size_of::<LightsUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let lights_bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("skinned-lights"),
-            layout: &lights_bgl,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: lights_buf.as_entire_binding(),
-            }],
-        });
-
         // @group(2) AO + shadows + GI env bind (byte-stable when all are off).
         let env = super::EnvBinding::new(gpu);
 
@@ -674,12 +641,7 @@ impl SkinnedMeshNode {
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("skinned-mesh"),
-                bind_group_layouts: &[
-                    Some(view_bgl),
-                    Some(&lights_bgl),
-                    Some(&env.bgl),
-                    Some(&joints_bgl),
-                ],
+                bind_group_layouts: &[Some(view_bgl), None, Some(&env.bgl), Some(&joints_bgl)],
                 immediate_size: 0,
             });
 
@@ -801,8 +763,6 @@ impl SkinnedMeshNode {
             pipeline_depth,
             joints_bgl,
             env,
-            lights_buf,
-            lights_bg,
             meshes: Vec::new(),
             mesh_cache: std::collections::HashMap::new(),
             atlas: None,
@@ -823,12 +783,6 @@ impl SkinnedMeshNode {
             return;
         }
         self.uploaded_version = Some(key);
-
-        // Lights (same projection as the rigid pass).
-        let lights =
-            LightsUniform::from_scene(frame.scene, &frame.view.origin, frame.vsm_light_slots);
-        gpu.queue
-            .write_buffer(&self.lights_buf, 0, bytemuck::bytes_of(&lights));
 
         // ── Mesh geometry, keyed on IDENTITY rather than on the frame (P18.3) ──
         //
@@ -1107,7 +1061,6 @@ impl RenderNode for SkinnedMeshNode {
         };
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, frame.view_bg, &[]);
-        pass.set_bind_group(1, &self.lights_bg, &[]);
         pass.set_bind_group(2, &env_bg, &[]);
         pass.set_vertex_buffer(1, instance_buf.slice(..));
         self.draw_runs(&mut pass, 3);

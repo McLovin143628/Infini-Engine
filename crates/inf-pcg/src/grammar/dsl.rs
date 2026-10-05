@@ -362,9 +362,6 @@ impl Grammar {
             if m.mesh.is_none() {
                 m.mesh = Some(crate::building::modules::module_mesh_guid(shape));
             }
-            if shape.is_glazing() {
-                m.glow = crate::building::modules::GLAZING_GLOW;
-            }
             // **Wave VEN1a**: the same stamp, one field wider. An authored
             // `mesh` still wins above; a surface has no authored spelling at
             // all, so this is unconditional -- a module of a family IS made of

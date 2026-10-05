@@ -835,6 +835,7 @@ mod tests {
                     draw_distance: base.draw_distance,
                     near_distance: base.near_distance,
                     casts_shadows: true,
+                    transmission: 0.0,
                 },
             ),
             (
@@ -849,6 +850,7 @@ mod tests {
                     draw_distance: base.draw_distance,
                     near_distance: base.near_distance,
                     casts_shadows: true,
+                    transmission: 0.0,
                 },
             ),
             (
@@ -863,6 +865,7 @@ mod tests {
                     draw_distance: base.draw_distance,
                     near_distance: base.near_distance,
                     casts_shadows: true,
+                    transmission: 0.0,
                 },
             ),
             (
@@ -877,6 +880,7 @@ mod tests {
                     draw_distance: base.draw_distance,
                     near_distance: base.near_distance,
                     casts_shadows: true,
+                    transmission: 0.0,
                 },
             ),
             (
@@ -891,6 +895,7 @@ mod tests {
                     draw_distance: base.draw_distance,
                     near_distance: base.near_distance,
                     casts_shadows: true,
+                    transmission: 0.0,
                 },
             ),
             (
@@ -905,6 +910,7 @@ mod tests {
                     draw_distance: base.draw_distance,
                     near_distance: base.near_distance,
                     casts_shadows: true,
+                    transmission: 0.0,
                 },
             ),
             (
@@ -919,6 +925,7 @@ mod tests {
                     draw_distance: 500.0,
                     near_distance: base.near_distance,
                     casts_shadows: true,
+                    transmission: 0.0,
                 },
             ),
             (
@@ -933,6 +940,7 @@ mod tests {
                     draw_distance: base.draw_distance,
                     near_distance: 192.0,
                     casts_shadows: true,
+                    transmission: 0.0,
                 },
             ),
             (
@@ -947,6 +955,7 @@ mod tests {
                     draw_distance: base.draw_distance,
                     near_distance: base.near_distance,
                     casts_shadows: false,
+                    transmission: 0.0,
                 },
             ),
         ];

@@ -562,6 +562,15 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 
     var color = mix(behind, sky, fresnel) + sky * sun_spec * 0.15;
 
+    // Wave PAR0: the harbour reads the lamps beside it. Every local light the
+    // fragment's froxel lists, through the shared library, on a dielectric
+    // surface at the water's own roughness: the specular lobe is the long
+    // reflected streak a quay lamp throws across a dark harbour, the diffuse
+    // term the faint glow of the suspended water column under it. No local
+    // light in the frame (every committed water golden) adds exactly zero.
+    color += lights_local(in.world, in.pos.xy, n, vdir, water.shallow.rgb * 0.08, 0.0,
+                          rough, vec3<f32>(WATER_F0), 0u);
+
     // ── foam ─────────────────────────────────────────────────────────────
     // Three sources, combined by max rather than added: foam is a coverage
     // fraction, and two overlapping causes do not make more than full white.

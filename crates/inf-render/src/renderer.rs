@@ -456,6 +456,10 @@ pub struct FrameData<'a> {
     /// no system, which is what keeps `params.w` at the `0.0` it has held since
     /// P7.1 and every pre-P27.4 golden byte-identical.
     pub vsm_light_slots: &'a [u32],
+    /// **The frame's light list** (wave PAR0) — the header + storage buffer the
+    /// environment group binds at 24/25 and the voxel/water passes bind as
+    /// their own group. See [`crate::lights::LightGrid`].
+    pub lights: &'a crate::lights::LightGrid,
     /// **The per-fragment virtual-texture feedback handover** (P28.1). `Some`
     /// only when the frame has a live VT pool AND the visibility path is on, and
     /// then it names the very mask `VtFeedback::record` cleared moments earlier
@@ -728,6 +732,9 @@ pub struct EngineRenderer {
     /// point. Held rather than passed so the borrow in `FrameData` is of a field
     /// and not of a temporary.
     vsm_light_slots: Vec<u32>,
+    /// **The many-lights substrate** (wave PAR0): the frame's light list on the
+    /// GPU, the froxel build, and the census readback.
+    lights: crate::lights::LightGrid,
     /// Frames drawn with the shadow atlas BOUND to the lit passes — the P27.4
     /// **engagement counter**, and the third of the phase's three.
     ///
@@ -772,6 +779,9 @@ impl EngineRenderer {
         });
 
         let settings = RenderSettings::default();
+        // Wave PAR0: the light list + froxel grid, before any lit pass is built
+        // (the voxel and water passes take its standalone layout).
+        let lights = crate::lights::LightGrid::new(gpu);
         let atmosphere = AtmosphereResources::new(gpu, settings.atmosphere.quality, 1);
 
         let mut graph = RenderGraph::default();
@@ -829,7 +839,12 @@ impl EngineRenderer {
         // ground. A no-op on a scene with no volumes — the node returns before
         // touching the encoder — so every existing golden is untouched.
         let voxel = passes::voxel::VoxelReport::default();
-        graph.add(passes::voxel::VoxelNode::new(gpu, &view_bgl, voxel.clone()));
+        graph.add(passes::voxel::VoxelNode::new(
+            gpu,
+            &view_bgl,
+            lights.bare_bgl(),
+            voxel.clone(),
+        ));
         // Fracture debris (P22.3): the chunks a destructible broke into. Beside
         // the mesh pass in the opaque block — a chunk IS the wall it came off, so
         // it is lit by the same shader and written to the same depth — and after
@@ -872,7 +887,11 @@ impl EngineRenderer {
         // rain (so a sea reflects the sky it is under), BEFORE translucency (so
         // glass composites over water like any other surface). A no-op unless the
         // scene carries water, so every existing golden stays byte-identical.
-        graph.add(passes::water::WaterNode::new(gpu, &view_bgl));
+        graph.add(passes::water::WaterNode::new(
+            gpu,
+            &view_bgl,
+            lights.bare_bgl(),
+        ));
         // Translucent forward pass (R-P5): alpha-blended, depth-tested but not
         // depth-writing, back-to-front sorted. Draws after all opaque geometry +
         // terrain, into the same MSAA scene target, before the grid. A no-op unless
@@ -980,6 +999,7 @@ impl EngineRenderer {
             vsm_receiver: crate::vsm_receiver::VsmReceiverResources::new(&gpu.device),
             vsm_receiver_params: crate::vsm_receiver::VsmReceiverParams::absent(),
             vsm_light_slots: Vec::new(),
+            lights,
             vsm_receiver_frames: 0,
         }
     }
@@ -1798,14 +1818,27 @@ impl EngineRenderer {
             self.vsm_receiver_params = crate::vsm_receiver::VsmReceiverParams::absent();
             return;
         }
+        // **THE SHADOW POLICY** (wave PAR0 clause 2): which lights may have a
+        // page tree this frame — the authored `cast_shadows` for directional
+        // lights, and for point/spot lights the brightest at the snapped camera,
+        // up to `LightSettings::local_shadow_budget`. A pure function of the
+        // scene and the camera lattice, read by the tree list, the projection
+        // walk and the receiver's slot walk alike.
+        let casts = crate::lights::shadow_policy(
+            scene,
+            view,
+            self.settings.lights.local_shadow_budget,
+            self.settings.exposure,
+        );
         if self
             .vsm
             .as_ref()
-            .is_none_or(|v| !v.matches(scene, &self.settings.vsm))
+            .is_none_or(|v| !v.matches(scene, &self.settings.vsm, &casts))
         {
             // A new light set is a new address space: the mask layout, the ring's
             // slot size and any mask still in flight all describe the old one.
-            self.vsm = crate::vsm_mark::VsmSystem::for_scene(gpu, scene, &self.settings.vsm);
+            self.vsm =
+                crate::vsm_mark::VsmSystem::for_scene(gpu, scene, &self.settings.vsm, &casts);
         }
         let frame = self.frame_index;
         // Read before the system is borrowed, and it is the SAME prediction the
@@ -1906,6 +1939,44 @@ impl EngineRenderer {
     }
 
     /// Per **scene light index**, the projection slot + 1 the lights uniform
+    /// carried this frame (P27.4). Empty when no system is live.
+    pub fn vsm_light_slots_view(&self) -> &[u32] {
+        &self.vsm_light_slots
+    }
+
+    /// **The light list the last frame uploaded** (wave PAR0) — the CPU plan
+    /// (records in GPU order + the scene index of each). A gate's door for the
+    /// PIE-vs-shipping byte compare; a light COUNT is the census's, not this.
+    pub fn light_plan(&self) -> &crate::lights::LightPlan {
+        self.lights.plan()
+    }
+
+    /// **What the shader saw** (wave PAR0): the froxel build's output read
+    /// back from the GPU buffer after the last submitted frame — blocking, a
+    /// gate's and the instrument's door, never the frame path.
+    pub fn light_census(&self, gpu: &GpuContext) -> Result<crate::lights::LightCensus, String> {
+        self.lights.read_census(gpu)
+    }
+
+    /// One froxel's light-index list, read back (a gate's door).
+    pub fn light_froxel(&self, gpu: &GpuContext, froxel: u32) -> Result<Vec<u32>, String> {
+        self.lights.read_froxel(gpu, froxel)
+    }
+
+    /// Glass batches the scatter node's glass pass has drawn, summed over
+    /// frames (wave PAR0) — the engagement counter for transmitting glazing.
+    pub fn scatter_glass_draws(&self) -> u64 {
+        self.graph
+            .node::<crate::passes::scatter::ScatterNode>()
+            .map_or(0, |n| n.glass_draws())
+    }
+
+    /// Frames that recorded the froxel build — the engagement counter.
+    pub fn light_cluster_frames(&self) -> u64 {
+        self.lights.frames()
+    }
+
+    /// Per **scene light index**, the projection slot + 1 the light list
     /// carried this frame (P27.4). Empty when no system is live.
     pub fn vsm_light_slots(&self) -> &[u32] {
         &self.vsm_light_slots
@@ -2195,6 +2266,24 @@ impl EngineRenderer {
         }
         rec.mark(crate::timing::record::VSM_SYNC);
 
+        // **THE LIGHT LIST** (wave PAR0): the pure CPU plan (cull + ceiling),
+        // staged on the queue, then the froxel build — one compute pass — so
+        // every lit pass the graph records below reads this frame's lists. After
+        // `vsm_sync` because each record carries its light's page-tree slot.
+        let plan = crate::lights::plan_lights(
+            scene,
+            view,
+            &self.vsm_light_slots,
+            &self.settings.lights,
+            self.settings.exposure,
+        );
+        self.lights
+            .upload(gpu, plan, view, self.settings.lights.debug_view);
+        self.lights.record_cluster(&mut encoder);
+        if let Some(t) = self.frame_timer.as_mut() {
+            t.mark(&mut encoder, "light-cluster");
+        }
+
         // **THE CASTER PASS** (P27.2), recorded here and deliberately BEFORE the
         // graph: it produces the depth P27.4's receivers sample from inside the
         // lit passes, so it has to precede them. (The marking pass is the mirror
@@ -2266,6 +2355,7 @@ impl EngineRenderer {
             vsm_absent: &self.vsm_absent,
             vsm_receiver: &self.vsm_receiver,
             vsm_light_slots: &self.vsm_light_slots,
+            lights: &self.lights,
             vt_feedback: match (
                 self.settings.vgeom.enabled && self.settings.vgeom.visbuffer,
                 self.vt_feedback.as_ref(),

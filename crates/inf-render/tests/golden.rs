@@ -12687,3 +12687,209 @@ fn shell_views() {
         }
     }
 }
+
+// ── wave PAR0: the many-lights substrate's three stated-purpose goldens ──────
+
+/// A 6 x 3 x 6 m room of 0.3 m walls on a floor slab; `window` cuts a 2 x 1.5 m
+/// opening in the front wall (z = -3.15) and glazes it with a transmitting
+/// scatter leaf; `fixture` hangs a shadow-asking point light inside.
+fn par0_room(window: bool, fixture: bool) -> RenderScene {
+    let mut scene = RenderScene {
+        grid_enabled: false,
+        ..Default::default()
+    };
+    scene.instances.push(MeshInstance::lit(
+        DVec3::new(0.0, -0.5, 0.0),
+        Quat::IDENTITY,
+        Vec3::new(60.0, 1.0, 60.0),
+        [0.62, 0.62, 0.64, 1.0],
+        1,
+    ));
+    let wall = [0.75, 0.72, 0.68, 1.0];
+    let mut boxes = vec![
+        (DVec3::new(0.0, 1.5, 3.15), Vec3::new(6.6, 3.0, 0.3)),
+        (DVec3::new(3.15, 1.5, 0.0), Vec3::new(0.3, 3.0, 6.0)),
+        (DVec3::new(-3.15, 1.5, 0.0), Vec3::new(0.3, 3.0, 6.0)),
+        (DVec3::new(0.0, 3.15, 0.0), Vec3::new(6.6, 0.3, 6.6)),
+    ];
+    if window {
+        boxes.extend([
+            (DVec3::new(-2.15, 1.5, -3.15), Vec3::new(2.3, 3.0, 0.3)),
+            (DVec3::new(2.15, 1.5, -3.15), Vec3::new(2.3, 3.0, 0.3)),
+            (DVec3::new(0.0, 0.5, -3.15), Vec3::new(2.0, 1.0, 0.3)),
+            (DVec3::new(0.0, 2.75, -3.15), Vec3::new(2.0, 0.5, 0.3)),
+        ]);
+    } else {
+        boxes.push((DVec3::new(0.0, 1.5, -3.15), Vec3::new(6.6, 3.0, 0.3)));
+    }
+    for (k, (c, s)) in boxes.iter().enumerate() {
+        scene.instances.push(MeshInstance::lit(
+            *c,
+            Quat::IDENTITY,
+            *s,
+            wall,
+            k as u32 + 2,
+        ));
+    }
+    scene.instances.push(MeshInstance::lit(
+        DVec3::new(0.0, 1.0, 2.6),
+        Quat::IDENTITY,
+        Vec3::new(2.4, 2.0, 0.6),
+        [0.85, 0.12, 0.08, 1.0],
+        20,
+    ));
+    if window {
+        let anchor = DVec3::new(0.0, 1.75, -3.15);
+        let mut b = ScatterBatch::lit(
+            Arc::new(ScatterData::build(
+                PrimMesh::Cube,
+                anchor,
+                vec![ScatterInstance {
+                    position: anchor,
+                    rotation: Quat::IDENTITY,
+                    scale: Vec3::new(2.0, 1.5, 0.3),
+                    color: [0.86, 0.93, 0.92, 1.0],
+                }],
+            )),
+            anchor,
+            0.05,
+            30,
+        );
+        b.transmission = 0.85;
+        b.casts_shadows = false;
+        scene.scatter.push(b);
+    }
+    scene.lights.push(RenderLight {
+        kind: LightKind::Directional,
+        color: [0.6, 0.7, 1.0],
+        intensity: 0.05,
+        direction: Vec3::new(0.3, 0.8, 0.2).normalize(),
+        cast_shadows: false,
+        ..RenderLight::default()
+    });
+    if fixture {
+        scene.lights.push(RenderLight {
+            kind: LightKind::Point,
+            color: [1.0, 0.85, 0.65],
+            intensity: if window { 30.0 } else { 120.0 },
+            position: DVec3::new(0.0, 2.4, 0.5),
+            range: 16.0,
+            cast_shadows: true,
+            ..RenderLight::default()
+        });
+    }
+    scene.mark_dirty();
+    scene
+}
+
+/// **par0_wall_leak** (wave PAR0, stated purpose: the WALL-LEAK proof). A
+/// closed room with a bright shadowed point light inside, seen from outside at
+/// night: the exterior reads as the moonlit room with NO fixture — before PAR0
+/// every point light was unshadowed and this frame was a bright pool through
+/// the walls. Measured in the frame itself: the exterior is within one 8-bit
+/// step of the fixture-free room except the shipped PCF kernel's corner
+/// penumbra (`par0_lights_gate` carries the per-pixel count and the one-tap
+/// control).
+#[test]
+fn golden_par0_wall_leak() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let view = look_view(DVec3::new(11.0, 6.0, 9.0), DVec3::new(3.0, 0.5, 2.0));
+    let lit = check_vsm_golden(
+        &gpu,
+        "par0_wall_leak",
+        &par0_room(false, true),
+        &view,
+        vsm_settings_on(),
+    );
+    let dark = render_warm(&gpu, &par0_room(false, false), &view, vsm_settings_on());
+    let (mean, _) = image_diff(&lit, &dark, W, H);
+    assert!(
+        mean < 0.002,
+        "the closed room leaks its fixture (mean diff {mean})"
+    );
+}
+
+/// **par0_window_night** (wave PAR0, stated purpose: a lit room at night seen
+/// through real glass from the street). The pane transmits — the red cabinet
+/// and the lamp-lit back wall show through it — and the fixture's light spills
+/// out of the window onto the pavement; no pixel glows by itself (the pane
+/// glow is deleted).
+#[test]
+fn golden_par0_window_night() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let view = look_view(DVec3::new(0.0, 1.8, -11.0), DVec3::new(0.0, 1.4, -3.0));
+    let img = check_vsm_golden(
+        &gpu,
+        "par0_window_night",
+        &par0_room(true, true),
+        &view,
+        vsm_settings_on(),
+    );
+    // The window's centre pixel is the lit red cabinet through the glass.
+    let [r, g, _, _] = px(&img, W / 2, H / 2 - 4);
+    assert!(
+        r as u16 > g as u16 + 20,
+        "the cabinet is not red through the pane ({r}, {g})"
+    );
+}
+
+/// **par0_cluster_debug** (wave PAR0, stated purpose: the cluster-grid debug
+/// view). Four hundred point lights over a floor, painted by the froxel each
+/// fragment walks: black where no light reaches, blue -> green -> red with the
+/// froxel's list length (log scale to the 256 capacity). The view is the one
+/// a scene author reads to see where a light budget is spent.
+#[test]
+fn golden_par0_cluster_debug() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let mut scene = RenderScene {
+        grid_enabled: false,
+        ..Default::default()
+    };
+    scene.instances.push(MeshInstance::lit(
+        DVec3::new(0.0, -0.5, 0.0),
+        Quat::IDENTITY,
+        Vec3::new(120.0, 1.0, 120.0),
+        [0.6, 0.6, 0.6, 1.0],
+        1,
+    ));
+    for k in 0..400u32 {
+        let (i, j) = (f64::from(k % 20), f64::from(k / 20));
+        // Denser toward the middle: the spacing grows with the row.
+        let x = -38.0 + i * 4.0;
+        let z = -30.0 + j * (2.0 + j * 0.15);
+        scene.lights.push(RenderLight {
+            kind: LightKind::Point,
+            color: [1.0, 0.9, 0.7],
+            intensity: 6.0,
+            position: DVec3::new(x, 1.0, z),
+            range: 3.0 + f32::from((k % 5) as u8),
+            cast_shadows: false,
+            ..RenderLight::default()
+        });
+    }
+    scene.mark_dirty();
+    let mut settings = RenderSettings::default();
+    settings.lights.debug_view = true;
+    let view = look_view(DVec3::new(0.0, 45.0, -60.0), DVec3::new(0.0, 0.0, 0.0));
+    let img = check_vsm_golden(&gpu, "par0_cluster_debug", &scene, &view, settings);
+    // The ramp spans a range: froxels listing more lights read warmer (red
+    // above blue) and froxels listing fewer read cooler (blue above red), and
+    // the frame holds many distinct froxel colours rather than one fill.
+    let warm = img
+        .chunks(4)
+        .filter(|p| u16::from(p[0]) > u16::from(p[2]) + 40)
+        .count();
+    let cool = img
+        .chunks(4)
+        .filter(|p| u16::from(p[2]) > u16::from(p[0]) + 40)
+        .count();
+    let tones: std::collections::BTreeSet<[u8; 3]> = img
+        .chunks(4)
+        .map(|p| [p[0] >> 4, p[1] >> 4, p[2] >> 4])
+        .collect();
+    assert!(
+        warm > 0 && cool > 0 && tones.len() >= 8,
+        "the debug ramp shows no range ({warm} warm, {cool} cool px, {} tones)",
+        tones.len()
+    );
+}

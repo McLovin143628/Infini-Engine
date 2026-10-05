@@ -51,7 +51,7 @@ struct ScatterParams {
     // x = metallic, y = roughness, **z = the primitive kind** (island wave I4b,
     // for `impostor_radius`), w unused.
     material: vec4<f32>,
-    // rgb = emissive, w unused.
+    // rgb = emissive, w = the batch's transmission (wave PAR0: > 0 is glass).
     emissive: vec4<f32>,
     // x = full-mesh band end (m), y = cull distance (m), z = fade width (m),
     // w = impostors enabled (1/0).
@@ -328,79 +328,12 @@ fn vs_impostor(@builtin(vertex_index) vidx: u32, @builtin(instance_index) iidx: 
     return out;
 }
 
-// ── Lights (must match LightsUniform / MAX_LIGHTS in passes/mesh.rs) ──
-const MAX_LIGHTS: u32 = 16u;
 
-struct GpuLight {
-    color: vec4<f32>,
-    pos_dir: vec4<f32>, // w = kind (0 dir, 1 point, 2 spot)
-    params: vec4<f32>,  // x = range, y = spot inner_cos, z = spot outer_cos
-    spot_dir: vec4<f32>,
-};
-struct Lights {
-    count: vec4<u32>,
-    items: array<GpuLight, MAX_LIGHTS>,
-};
-@group(1) @binding(0) var<uniform> lights: Lights;
 
-const PI: f32 = 3.14159265359;
 
-fn distribution_ggx(n_dot_h: f32, rough: f32) -> f32 {
-    let a = rough * rough;
-    let a2 = a * a;
-    let d = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
-    return a2 / max(PI * d * d, 1e-7);
-}
 
-fn geometry_smith(n_dot_v: f32, n_dot_l: f32, rough: f32) -> f32 {
-    let r = rough + 1.0;
-    let k = (r * r) / 8.0;
-    let gv = n_dot_v / (n_dot_v * (1.0 - k) + k);
-    let gl = n_dot_l / (n_dot_l * (1.0 - k) + k);
-    return gv * gl;
-}
 
-fn fresnel_schlick(cos_theta: f32, f0: vec3<f32>) -> vec3<f32> {
-    return f0 + (vec3<f32>(1.0) - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
-}
 
-fn shade_light(
-    n: vec3<f32>, v: vec3<f32>, l: vec3<f32>, radiance: vec3<f32>,
-    albedo: vec3<f32>, metallic: f32, rough: f32, f0: vec3<f32>,
-) -> vec3<f32> {
-    let h = normalize(v + l);
-    let n_dot_l = max(dot(n, l), 0.0);
-    if (n_dot_l <= 0.0) {
-        return vec3<f32>(0.0);
-    }
-    let n_dot_v = max(dot(n, v), 1e-4);
-    let n_dot_h = max(dot(n, h), 0.0);
-    let v_dot_h = max(dot(v, h), 0.0);
-
-    let d = distribution_ggx(n_dot_h, rough);
-    let g = geometry_smith(n_dot_v, n_dot_l, rough);
-    let f = fresnel_schlick(v_dot_h, f0);
-
-    // Wave VIS1a: multi-scatter energy compensation. A single-scatter GGX
-    // drops whatever the Smith term masked instead of letting it bounce again,
-    // which is about a third of the lobe at roughness 1.0 and is why every
-    // rough metal in this engine has been too dark since P7.1. See
-    // `ggx_energy_compensation` in `env_lighting.wgsl`.
-    let spec = (d * g) * f / max(4.0 * n_dot_v * n_dot_l, 1e-4)
-        * ggx_energy_compensation(f0, rough, n_dot_v);
-    let kd = (vec3<f32>(1.0) - f) * (1.0 - metallic);
-    let diffuse = kd * albedo / PI;
-    return (diffuse + spec) * radiance * n_dot_l;
-}
-
-fn point_attenuation(dist: f32, range: f32) -> f32 {
-    let inv_sq = 1.0 / max(dist * dist, 1e-4);
-    if (range <= 0.0) {
-        return inv_sq;
-    }
-    let t = clamp(1.0 - pow(dist / range, 4.0), 0.0, 1.0);
-    return inv_sq * t * t;
-}
 
 // A pure-integer avalanche of the pixel coordinate → [0,1). Wang hash: no trig,
 // no float reinterpretation, identical on every backend, and pinned bit-for-bit
@@ -469,67 +402,48 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let rough = clamp(sp.material.y, 0.04, 1.0);
     let f0 = mix(vec3<f32>(0.04), albedo, metallic);
 
+    // ── GLASS (wave PAR0 clause 4) ──────────────────────────────────────────
+    // A transmitting batch is drawn by the glass pass with premultiplied alpha
+    // over the opaque scene. What it returns is what the pane ADDS — its
+    // specular reflection of every light (directional + the froxel's local
+    // lights, through the shared library, with no diffuse term since a clear
+    // pane scatters nothing) and of the sky/probe field — and its alpha is the
+    // share of the background it HIDES: `1 - transmission × (1 - F)`, with the
+    // Schlick fresnel `F` of a 4 % dielectric. So the room behind a window
+    // shows through it at ~82 % head-on and less at a grazing angle, and its
+    // fixture's light reaches the street. The pane's tint colours the small
+    // share it absorbs rather than the background (premultiplied blending has
+    // one alpha, not three) — a stated v1 limit.
+    if (sp.emissive.w > 0.0) {
+        let transmission = clamp(sp.emissive.w, 0.0, 1.0);
+        let glass_f0 = vec3<f32>(0.04);
+        let nv = clamp(dot(n, v), 0.0, 1.0);
+        let fres = 0.04 + 0.96 * pow(1.0 - nv, 5.0);
+        var spec = lights_direct(in.world_pos, in.pos.xy, n, v, view.sun_dir.xyz,
+                                 vec3<f32>(0.0), 0.0, rough, glass_f0,
+                                 LIGHT_SUN_SHADOW | LIGHT_LOCAL_SHADOW);
+        let g_up = clamp(n.y * 0.5 + 0.5, 0.0, 1.0);
+        let g_amb = ambient_irradiance(
+            in.world_pos,
+            n,
+            mix(vec3<f32>(0.03, 0.03, 0.035), vec3<f32>(0.10, 0.13, 0.18), g_up),
+        );
+        let g_ao = textureSampleLevel(ao_tex, ao_smp, in.pos.xy / view.grid_axis_viewport.zw, 0.0).r;
+        spec += gi_ambient_specular(in.world_pos, n, v, rough, glass_f0, g_amb) * g_ao;
+        let t = transmission * (1.0 - fres);
+        let absorbed = max(1.0 - t - fres, 0.0);
+        let body = albedo * g_amb * absorbed / 3.14159265359;
+        return vec4<f32>(spec + body, 1.0 - t);
+    }
+
     var lo = vec3<f32>(0.0);
-    let count = lights.count.x;
-    if (count == 0u) {
-        var d = shade_light(n, v, normalize(view.sun_dir.xyz), vec3<f32>(3.0),
-                            albedo, metallic, rough, f0);
-        if (sun_shadowing_enabled()) {
-            d = d * shadow_factor(in.world_pos, n);
-        }
-        lo += d;
-    } else {
-        // The first directional light receives the sun's shadow factor — the
-        // virtual page atlas when one is bound, the cascade otherwise.
-        var shadowed = false;
-        for (var i = 0u; i < count && i < MAX_LIGHTS; i = i + 1u) {
-            let light = lights.items[i];
-            let radiance_base = light.color.rgb * light.color.a;
-            if (light.pos_dir.w < 0.5) {
-                // **P27.5: the sun's shadow reaches this surface at last.**
-                // Before this batch neither this path nor the other of the two
-                // had ever called `shadow_factor` — `git log -S` over both
-                // files' whole history returns nothing — so virtualized geometry
-                // and foliage took the analytic term and never the directional
-                // one, from the cascade either. A phase named Virtual Shadow
-                // MAPS whose flagship geometry path cannot RECEIVE a sun shadow
-                // is a hole, and this closes it.
-                //
-                // Spelled exactly as `mesh.wgsl` spells it, first directional
-                // only, and `sun_shadowing_enabled()` is false on every scene
-                // with both shadow paths off — which is every committed golden
-                // outside the four `vsm_*` ones, and those hold no meshlet and
-                // no scattered geometry. So this is present-and-false everywhere
-                // a golden looks.
-                var d = shade_light(n, v, normalize(light.pos_dir.xyz), radiance_base,
-                                    albedo, metallic, rough, f0);
-                if (sun_shadowing_enabled() && !shadowed) {
-                    d = d * shadow_factor(in.world_pos, n);
-                    shadowed = true;
-                }
-                lo += d;
-            } else {
-                let to_light = light.pos_dir.xyz - in.world_pos;
-                let dist = length(to_light);
-                let l = to_light / max(dist, 1e-4);
-                let att = point_attenuation(dist, light.params.x);
-                var cone = 1.0;
-                if (light.pos_dir.w > 1.5) {
-                    let cos_dir = dot(l, -light.spot_dir.xyz);
-                    cone = smoothstep(light.params.z, light.params.y, cos_dir);
-                }
-                // **P27.4: the engine's FIRST point/spot shadows.** A spot
-                // resolves through its single quadtree, a point through the
-                // cube-face quadtree its own direction selects. `params.w` is 0
-                // on every light without a page tree — which is every light of
-                // every scene with virtual shadows off — and `vsm_light_shadow`
-                // returns exactly 1.0 there, so this is a present-and-inert
-                // `* 1.0` on every committed golden.
-                let vsm_f = vsm_light_shadow(in.world_pos, n, light.params.w);
-                lo += shade_light(n, v, l, radiance_base * att * cone * vsm_f,
-                                 albedo, metallic, rough, f0);
-            }
-        }
+    // Wave PAR0: every directional light, then the local lights this
+    // fragment's froxel lists — the shared library (`lights.wgsl`).
+    lo += lights_direct(in.world_pos, in.pos.xy, n, v, view.sun_dir.xyz,
+                        albedo, metallic, rough, f0, LIGHT_SUN_SHADOW | LIGHT_LOCAL_SHADOW);
+    // Wave PAR0: the cluster-grid debug view paints the froxel's light count.
+    if (lights_debug_view()) {
+        return vec4<f32>(lights_debug_heat(in.world_pos, in.pos.xy), 1.0);
     }
 
     let up = clamp(n.y * 0.5 + 0.5, 0.0, 1.0);

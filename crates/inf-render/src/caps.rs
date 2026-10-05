@@ -23,7 +23,11 @@ use crate::settings::RenderSettings;
 /// per-pair visibility buffers, and the audit counters), so a High-tier GPU must
 /// expose at least this many storage buffers per stage. (The wgpu default limit
 /// is 8.)
-pub const VGEOM_MIN_STORAGE_BUFFERS_PER_STAGE: u32 = 8;
+///
+/// **Wave PAR0 raised it to 9**: the visibility resolve binds the environment
+/// group, which now carries the frame's light list as a fifth storage buffer,
+/// beside its own four meshlet pools ([`crate::gpu::LIT_FRAGMENT_STORAGE_BUFFERS`]).
+pub const VGEOM_MIN_STORAGE_BUFFERS_PER_STAGE: u32 = crate::gpu::LIT_FRAGMENT_STORAGE_BUFFERS;
 
 /// Storage textures a stage must expose for the P18.1 HZB build: the pyramid's
 /// destination mip is a write-only `r32float` storage texture, one at a time.

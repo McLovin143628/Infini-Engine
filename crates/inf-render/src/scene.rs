@@ -921,6 +921,15 @@ pub struct ScatterBatch {
     /// (`passes::scatter::PackPurpose`), and a batch that opts out of casting
     /// still draws.
     pub casts_shadows: bool,
+    /// **How much light passes through, `[0, 1]`** (wave PAR0 clause 4).
+    /// `0.0` — every batch that predates PAR0 — draws in the opaque raster.
+    /// Above zero the batch is GLASS: it is skipped by the opaque raster and
+    /// drawn afterwards by the scatter node's glass pass (fresnel reflection,
+    /// premultiplied alpha `1 - transmission·(1 - F)`, depth-tested, no depth
+    /// write, batches back to front), so the room behind a window shows
+    /// through it and its fixture's light escapes; the GI voxelizer does not
+    /// stage it (`gi::scatter_batch_stages`).
+    pub transmission: f32,
 }
 
 impl ScatterBatch {
@@ -936,7 +945,14 @@ impl ScatterBatch {
             draw_distance: 0.0,
             near_distance: 0.0,
             casts_shadows: true,
+            transmission: 0.0,
         }
+    }
+
+    /// Whether this batch draws in the glass pass rather than the opaque one.
+    #[inline]
+    pub fn is_glass(&self) -> bool {
+        self.transmission > 0.0
     }
 }
 

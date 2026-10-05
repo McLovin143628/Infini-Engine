@@ -14,7 +14,7 @@ use crate::gpu::GpuContext;
 use crate::graph::RenderNode;
 use crate::primitives::PrimGpu;
 use crate::renderer::{FrameData, SCENE_FORMAT, SCENE_SAMPLES};
-use crate::scene::{LightKind, MeshInstance, RenderScene};
+use crate::scene::MeshInstance;
 
 /// The five built-in primitive geometries live in one packed GPU buffer pair
 /// (`passes::mesh` re-exports the cube generator for existing call sites).
@@ -253,105 +253,6 @@ pub(crate) fn pack_bucketed(
 /// An empty per-kind range set (no draws) — the initial state before any upload.
 pub(crate) const EMPTY_RANGES: [Range<u32>; 5] = [0..0, 0..0, 0..0, 0..0, 0..0];
 
-/// Max scene lights uploaded per frame (must match `MAX_LIGHTS` in mesh.wgsl).
-pub const MAX_LIGHTS: usize = 16;
-
-/// One GPU light, std140-friendly (all vec4 → 64 B). `pos_dir.w` = kind
-/// (0 directional, 1 point, 2 spot); for directional, `pos_dir.xyz` is the unit
-/// direction toward the light; for point/spot, the render-local position.
-/// `color.a` = intensity. `spot_dir.xyz` is the normalized beam **emission**
-/// direction (spot only; unused otherwise).
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-pub(crate) struct GpuLight {
-    color: [f32; 4],
-    pos_dir: [f32; 4],
-    /// x = range, y = spot inner_cos, z = spot outer_cos, **w = the light's
-    /// virtual-shadow projection slot + 1** (P27.4; 0 = this light has no page
-    /// tree, which is every light on every scene with virtual shadows off).
-    ///
-    /// `w` has shipped as `0.0` on every light of every kind since P7.1, so the
-    /// receiver's `* 1.0` is structural rather than flagged — the same trick the
-    /// per-instance virtual-texture slots use, and the reason no golden could
-    /// move.
-    params: [f32; 4],
-    spot_dir: [f32; 4], // xyz = normalized spot emission direction (spot only)
-}
-
-/// The lights uniform block bound at `@group(1)`. Shared by the rigid mesh pass
-/// and the skinned mesh pass (identical lighting model).
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-pub(crate) struct LightsUniform {
-    count: [u32; 4], // x = active count
-    items: [GpuLight; MAX_LIGHTS],
-}
-
-impl LightsUniform {
-    /// Project world-space scene lights into render-local GPU lights.
-    ///
-    /// `vsm_slots` is the per-scene-light virtual-shadow projection slot + 1
-    /// ([`crate::vsm_mark::VsmSystem::receiver_slots`]), or **empty** when the
-    /// frame has no system — which leaves `params.w` at the `0.0` it has held
-    /// since P7.1 and every pre-P27.4 golden byte-identical.
-    pub(crate) fn from_scene(
-        scene: &RenderScene,
-        origin: &FloatingOrigin,
-        vsm_slots: &[u32],
-    ) -> Self {
-        let mut items = [GpuLight {
-            color: [0.0; 4],
-            pos_dir: [0.0; 4],
-            params: [0.0; 4],
-            spot_dir: [0.0; 4],
-        }; MAX_LIGHTS];
-        let count = scene.lights.len().min(MAX_LIGHTS);
-        for (i, (slot, light)) in items
-            .iter_mut()
-            .zip(scene.lights.iter())
-            .take(count)
-            .enumerate()
-        {
-            slot.color = [
-                light.color[0],
-                light.color[1],
-                light.color[2],
-                light.intensity,
-            ];
-            match light.kind {
-                LightKind::Directional => {
-                    let d = light.direction.normalize_or_zero();
-                    slot.pos_dir = [d.x, d.y, d.z, 0.0];
-                }
-                LightKind::Point => {
-                    // Render-local position (origin-relative), like instances.
-                    let p = (light.position - origin.origin()).as_vec3();
-                    slot.pos_dir = [p.x, p.y, p.z, 1.0];
-                    slot.params[0] = light.range;
-                }
-                LightKind::Spot => {
-                    // Render-local position (origin-relative), like point lights,
-                    // plus the cone data + the beam emission axis (= -direction).
-                    let p = (light.position - origin.origin()).as_vec3();
-                    slot.pos_dir = [p.x, p.y, p.z, 2.0];
-                    slot.params = [light.range, light.inner_cos, light.outer_cos, 0.0];
-                    let emit = (-light.direction).normalize_or_zero();
-                    slot.spot_dir = [emit.x, emit.y, emit.z, 0.0];
-                }
-            }
-            // P27.4: the light's own page tree, written LAST so the spot branch's
-            // whole-array assignment above cannot silently drop it. `0.0` when
-            // the light has none, which is every light of every scene with
-            // virtual shadows off.
-            slot.params[3] = vsm_slots.get(i).copied().unwrap_or(0) as f32;
-        }
-        Self {
-            count: [count as u32, 0, 0, 0],
-            items,
-        }
-    }
-}
-
 pub struct MeshNode {
     pipeline: wgpu::RenderPipeline,
     /// Wireframe (`PolygonMode::Line`) variant, present only when the device has
@@ -365,8 +266,6 @@ pub struct MeshNode {
     instance_count: u32,
     /// Per-primitive-kind sub-ranges of the packed instance buffer.
     ranges: [Range<u32>; 5],
-    lights_buf: wgpu::Buffer,
-    lights_bg: wgpu::BindGroup,
     env: super::EnvBinding,
 }
 
@@ -381,43 +280,12 @@ impl MeshNode {
 
         let prim = PrimGpu::new(gpu, "mesh");
 
-        // Lights uniform block (@group(1)).
-        let lights_bgl = gpu
-            .device
-            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("mesh-lights"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-            });
-        let lights_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("mesh-lights"),
-            size: std::mem::size_of::<LightsUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let lights_bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("mesh-lights"),
-            layout: &lights_bgl,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: lights_buf.as_entire_binding(),
-            }],
-        });
-
         let env = super::EnvBinding::new(gpu);
         let layout = gpu
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("mesh"),
-                bind_group_layouts: &[Some(view_bgl), Some(&lights_bgl), Some(&env.bgl)],
+                bind_group_layouts: &[Some(view_bgl), None, Some(&env.bgl)],
                 immediate_size: 0,
             });
 
@@ -496,8 +364,6 @@ impl MeshNode {
             uploaded_version: None,
             instance_count: 0,
             ranges: EMPTY_RANGES,
-            lights_buf,
-            lights_bg,
             env,
         }
     }
@@ -509,13 +375,6 @@ impl MeshNode {
         if self.uploaded_version == Some(key) {
             return;
         }
-
-        // Lights depend on the same key (scene version + origin, since point
-        // positions are render-local).
-        let lights =
-            LightsUniform::from_scene(frame.scene, &frame.view.origin, frame.vsm_light_slots);
-        gpu.queue
-            .write_buffer(&self.lights_buf, 0, bytemuck::bytes_of(&lights));
 
         // The mesh pass draws only the opaque+masked ranges; translucent
         // instances are packed into the same buffer's tail but drawn (sorted) by
@@ -603,7 +462,6 @@ impl RenderNode for MeshNode {
         };
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, frame.view_bg, &[]);
-        pass.set_bind_group(1, &self.lights_bg, &[]);
         pass.set_bind_group(2, &env_bg, &[]);
         self.draw_all(&mut pass);
     }
@@ -628,59 +486,6 @@ mod tests {
         assert_eq!(&v.misc as *const _ as usize - base, 128);
         assert_eq!(&v.pbr as *const _ as usize - base, 144);
         assert_eq!(&v.emissive as *const _ as usize - base, 160);
-    }
-
-    #[test]
-    fn gpu_light_layout_is_std140_64_bytes() {
-        // Four vec4 per light, all 16-byte aligned (std140-safe), 64 B total.
-        let l = GpuLight::zeroed();
-        let base = &l as *const GpuLight as usize;
-        assert_eq!(std::mem::size_of::<GpuLight>(), 64);
-        assert_eq!(&l.color as *const _ as usize - base, 0);
-        assert_eq!(&l.pos_dir as *const _ as usize - base, 16);
-        assert_eq!(&l.params as *const _ as usize - base, 32);
-        assert_eq!(&l.spot_dir as *const _ as usize - base, 48);
-    }
-
-    #[test]
-    fn from_scene_packs_kind_codes_and_spot_cone() {
-        use crate::scene::{RenderLight, RenderScene};
-        let origin = FloatingOrigin::new(DVec3::ZERO);
-        let mut scene = RenderScene::default();
-        // A directional (w=0), a point (w=1), a spot (w=2).
-        scene.lights.push(RenderLight {
-            kind: LightKind::Directional,
-            direction: Vec3::new(0.0, 1.0, 0.0),
-            ..RenderLight::default()
-        });
-        scene.lights.push(RenderLight {
-            kind: LightKind::Point,
-            position: DVec3::new(1.0, 2.0, 3.0),
-            range: 8.0,
-            ..RenderLight::default()
-        });
-        scene.lights.push(RenderLight {
-            kind: LightKind::Spot,
-            // "toward-the-light" +Z ⇒ emission = -Z.
-            direction: Vec3::Z,
-            position: DVec3::new(4.0, 5.0, 6.0),
-            range: 12.0,
-            inner_cos: 0.9,
-            outer_cos: 0.8,
-            ..RenderLight::default()
-        });
-        let u = LightsUniform::from_scene(&scene, &origin, &[]);
-        assert_eq!(u.count[0], 3);
-        // Kind codes.
-        assert_eq!(u.items[0].pos_dir[3], 0.0);
-        assert_eq!(u.items[1].pos_dir[3], 1.0);
-        assert_eq!(u.items[2].pos_dir[3], 2.0);
-        // Point carries range only.
-        assert_eq!(u.items[1].params, [8.0, 0.0, 0.0, 0.0]);
-        // Spot carries range + cone cosines + emission axis (-Z).
-        assert_eq!(u.items[2].params, [12.0, 0.9, 0.8, 0.0]);
-        assert!((u.items[2].spot_dir[2] + 1.0).abs() < 1e-6);
-        assert!(u.items[2].spot_dir[0].abs() < 1e-6 && u.items[2].spot_dir[1].abs() < 1e-6);
     }
 
     #[test]

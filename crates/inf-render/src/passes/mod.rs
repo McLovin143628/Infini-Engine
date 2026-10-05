@@ -54,6 +54,10 @@ pub(crate) fn scene_shader(source: &str) -> String {
 pub(crate) enum ShaderKind {
     /// [`scene_shader`]: common_view prepended.
     Plain,
+    /// [`scene_shader`] plus the shared light library at `group` (bindings 0
+    /// and 1) with the IDENTITY shadow hooks (wave PAR0) — a pass that reads
+    /// the frame's lights but binds no environment group (the voxel pass).
+    PlainLights(u32),
     /// [`lit_scene_shader`]: common_view + env_lighting + the atmosphere library
     /// at the given group.
     Lit(u32),
@@ -222,6 +226,41 @@ const ENV_SCENE_COLOR: u32 = 21;
 /// and the per-instance word did not move; which atlas a texture is in is a word
 /// in its own block (`inf_vt::table`).
 const ENV_VT_ATLAS_EXTRA: u32 = 22;
+/// **The frame's light list** (wave PAR0) — the header uniform at 24 and the
+/// one storage buffer (records + froxel counts + froxel index lists) at 25.
+///
+/// In the environment group because the environment group is the door every
+/// env-bound lit pass already walks through: the light list stopped being six
+/// private `@group(1)` uniforms and became one pair of bindings, declared once
+/// ([`crate::lights::light_bgl_entries`]) and bound from one resource
+/// ([`crate::lights::LightGrid`]). The terrain pass could not have taken a
+/// fifth bind group (it uses all four the default limit grants), which settled
+/// the placement on its own.
+pub(crate) const ENV_LIGHTS_HDR: u32 = 24;
+pub(crate) const ENV_LIGHTS_DATA: u32 = 25;
+
+/// **The shared light library** (wave PAR0): `lights.wgsl` bound at
+/// `group`/`hdr`/`data`, followed by the shadow hooks it calls — the
+/// environment shim when the pass binds the environment group (`env`), the
+/// identity shim otherwise. See `shaders/lights.wgsl`.
+pub(crate) fn lights_source(group: u32, hdr: u32, data: u32, env: bool) -> String {
+    let lib = include_str!("../shaders/lights.wgsl")
+        .replace("LIGHTS_GROUP", &group.to_string())
+        .replace("LIGHTS_HDR", &hdr.to_string())
+        .replace("LIGHTS_DATA", &data.to_string());
+    let hooks = if env {
+        include_str!("../shaders/lights_env.wgsl")
+    } else {
+        include_str!("../shaders/lights_bare.wgsl")
+    };
+    format!("{lib}\n{hooks}")
+}
+
+/// The froxel-build compute module (wave PAR0). Self-contained: the froxel
+/// box is built in view space from the header's own basis and tangents.
+pub(crate) fn light_cluster_source() -> String {
+    include_str!("../shaders/light_cluster.wgsl").to_string()
+}
 
 /// The atmosphere *medium* library, bound at `group`/`binding`.
 pub(crate) fn atmosphere_source(group: u32, binding: u32) -> String {
@@ -354,11 +393,14 @@ pub(crate) fn precip_shader(source: &str) -> String {
 /// `water.wgsl` itself at bindings 4..8, since it is the only consumer.
 pub(crate) fn water_shader(source: &str) -> String {
     format!(
-        "{}\n{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}\n{}",
         include_str!("../shaders/common_view.wgsl"),
         atmosphere_source(1, 0),
         atmosphere_lut_source(1, 1, 2, 3),
         atmosphere_apply_source(),
+        // Wave PAR0: the harbour reads the lamps beside it — the frame's light
+        // list through the water pass's own `@group(2)` over the same buffers.
+        lights_source(2, 0, 1, false),
         source
     )
 }
@@ -601,10 +643,11 @@ pub(crate) const SHADER_TABLE: &[(&str, &str, ShaderKind)] = &[
     (
         "voxel",
         include_str!("../shaders/voxel.wgsl"),
-        // Plain: common_view and nothing else. The voxel pass binds view + lights
-        // and deliberately has NO env group — see the shader's header comment for
-        // the P21.1/P21.2 split that composition encodes.
-        ShaderKind::Plain,
+        // PlainLights: common_view + the shared light library (wave PAR0) and
+        // nothing else. The voxel pass binds view + lights and deliberately has
+        // NO env group — see the shader's header comment for the P21.1/P21.2
+        // split that composition encodes.
+        ShaderKind::PlainLights(1),
     ),
     (
         "underwater",
@@ -644,6 +687,9 @@ pub(crate) fn shader_source(label: &str) -> String {
         .unwrap_or_else(|| panic!("unknown shader table entry: {label}"));
     match kind {
         ShaderKind::Plain => scene_shader(source),
+        ShaderKind::PlainLights(group) => {
+            scene_shader(&format!("{}{}", lights_source(*group, 0, 1, false), source))
+        }
         ShaderKind::Lit(group) => lit_scene_shader(source, *group),
         ShaderKind::LitDeform {
             env_group,
@@ -723,11 +769,15 @@ pub(crate) fn lit_deform_shader(
         Some((tg, tb, ug, ub)) => deform_source(tg, tb, ug, ub),
         None => String::new(),
     };
+    // Wave PAR0: the frame's light list + the shared BRDF and light loops,
+    // through the environment group's two light bindings.
+    let lights = lights_source(env_group, ENV_LIGHTS_HDR, ENV_LIGHTS_DATA, true);
     format!(
-        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         include_str!("../shaders/common_view.wgsl"),
         vsm,
         env,
+        lights,
         atmosphere_source(env_group, ENV_ATMOS_UNIFORM),
         atmosphere_lut_source(
             env_group,
@@ -1055,6 +1105,11 @@ pub(crate) fn env_bgl_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
         },
         count: None,
     }))
+    // ── wave PAR0: the frame's light list (24, 25) ──
+    .chain(crate::lights::light_bgl_entries(
+        ENV_LIGHTS_HDR,
+        ENV_LIGHTS_DATA,
+    ))
     .collect::<Vec<_>>()
 }
 
@@ -1256,6 +1311,21 @@ impl EnvBinding {
                     wgpu::BindGroupEntry {
                         binding: ENV_SCENE_COLOR,
                         resource: wgpu::BindingResource::TextureView(&frame.targets.scene_hdr),
+                    },
+                    // ── wave PAR0: the light list ──
+                    //
+                    // Both buffers are allocated once at their ceiling
+                    // (`LIGHTS_PER_FRAME_CEILING` records) and only ever
+                    // `write_buffer`-ed, so — like the wetness uniform — they
+                    // can never go stale behind this cached bind group and
+                    // contribute nothing to `resource_key`.
+                    wgpu::BindGroupEntry {
+                        binding: ENV_LIGHTS_HDR,
+                        resource: frame.lights.header_buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: ENV_LIGHTS_DATA,
+                        resource: frame.lights.data_buffer().as_entire_binding(),
                     },
                 ]
                 .into_iter()
@@ -1589,9 +1659,10 @@ mod shader_compose_tests {
     ///
     /// `ggx_energy_compensation` and the split-sum fit it reads (`gi_env_brdf_ab`)
     /// live in `env_lighting.wgsl`, which is prepended to `mesh`, `skinned_mesh`,
-    /// `vgeom_mesh`, `scatter_mesh` and `vis_resolve`. `voxel.wgsl` is composed
-    /// `Plain` and binds no environment group at all (the P21.1 ruling), so it
-    /// carries a **verbatim copy** of the pair.
+    /// `vgeom_mesh`, `scatter_mesh` and `vis_resolve`. The voxel and water
+    /// passes bind no environment group at all (the P21.1 ruling), so the
+    /// identity shadow shim they compose (`lights_bare.wgsl`, wave PAR0 — the
+    /// copy lived in `voxel.wgsl` before) carries a **verbatim copy** of the pair.
     ///
     /// Wave VIS1a's ledger said the two copies were "held together by the furnace
     /// test's CPU mirror". They were not: `gi::tests::the_ggx_furnace_test_is_white`
@@ -1602,12 +1673,14 @@ mod shader_compose_tests {
     /// Mutation-verified: changing `1e-3` to `1e-4` in either copy fails it, and
     /// so does deleting a line from either.
     #[test]
-    fn the_voxel_copy_of_the_energy_fit_is_character_for_character_the_env_one() {
+    fn the_bare_copy_of_the_energy_fit_is_character_for_character_the_env_one() {
         let env = include_str!("../shaders/env_lighting.wgsl");
-        let voxel = include_str!("../shaders/voxel.wgsl");
+        // Wave PAR0: the copy moved from `voxel.wgsl` into the identity
+        // shadow shim both no-env passes (voxel, water) compose.
+        let voxel = include_str!("../shaders/lights_bare.wgsl");
         for name in ["gi_env_brdf_ab", "ggx_energy_compensation"] {
             let a = wgsl_fn(env, name, "env_lighting.wgsl");
-            let b = wgsl_fn(voxel, name, "voxel.wgsl");
+            let b = wgsl_fn(voxel, name, "lights_bare.wgsl");
             // Anti-vacuity: an extractor that returned nothing would compare two
             // empty strings and pass.
             assert!(

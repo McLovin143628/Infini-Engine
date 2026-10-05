@@ -228,9 +228,11 @@ pub enum Placement {
 ///
 /// # Why the count is three and not thirty
 ///
-/// The frame light budget is `inf_render::MAX_LIGHTS = 16` for the WHOLE
-/// scene, and it is a first-`N`-in-projection-order truncation with no distance
-/// prioritization anywhere between the ECS and the uniform. Measured on the
+/// The frame light budget **was** `inf_render::MAX_LIGHTS = 16` for the WHOLE
+/// scene (until wave PAR0 replaced it with a storage-buffer list of
+/// `inf_render::lights::LIGHTS_PER_FRAME_CEILING` records), and it was a
+/// first-`N`-in-projection-order truncation with no distance prioritization
+/// anywhere between the ECS and the uniform. Measured on the
 /// committed island, a frame carries **two** lights — the sky's sun/moon and
 /// the level's one authored directional — so a venue's rig has fourteen slots
 /// to spend and a settlement holds at most three venues.

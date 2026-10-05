@@ -1756,6 +1756,12 @@ impl EngineHost {
         // the Ring-0 door that says what "now" is (P20.4), so a venue's stage
         // wash, a festoon's breath and a river's swell all read one number.
         let clock_s = inf_ecs::sky::water_environment(world).0;
+        // MIRROR-BEGIN fixture_clock
+        // Wave PAR0: the LOCAL hour every scheduled fixture is lit against
+        // (`inf_ecs::sky::fixture_level`), resolved once beside the clock.
+        let fixture_hour = inf_ecs::sky::local_hour(world);
+        // MIRROR-END fixture_clock
+        let fixture_sun_y = self.scene.sun.direction.y;
         let clock = inf_render::ScatterClock {
             glow_step: inf_render::night_glow_step(self.scene.sun.direction),
             pulse_tick: inf_render::pulse_tick(clock_s),
@@ -2096,7 +2102,17 @@ impl EngineHost {
                 // make visible rather than hide.
                 //
                 // MIRROR: the same block in the other host, in the same place.
+                // MIRROR-BEGIN venue_rig_lights
                 for l in &vol.lights {
+                    // **THE NIGHT SCHEDULE** (wave PAR0 clause 5): the fixture's
+                    // intensity is a pure function of the level clock through the one
+                    // Ring-0 door, so a stage rig is dark at 11:00 and lit at 21:00 in
+                    // both hosts alike. A fixture at zero is not pushed at all.
+                    let level =
+                        inf_ecs::sky::fixture_level(l.schedule, fixture_hour, fixture_sun_y, 1.0);
+                    if level <= 0.0 {
+                        continue;
+                    }
                     let colour =
                         inf_render::swept_colour(l.sweep, l.cycle_hz, l.phase, l.phases, clock_s);
                     // A cone that covers the sphere IS a point light, and the rig
@@ -2110,7 +2126,7 @@ impl EngineHost {
                             LightKind::Spot
                         },
                         color: colour,
-                        intensity: l.intensity,
+                        intensity: l.intensity * level,
                         // The renderer's convention is TOWARD the light; a fixture
                         // carries the direction its beam is emitted along.
                         direction: (-l.dir).as_vec3(),
@@ -2118,13 +2134,16 @@ impl EngineHost {
                         range: l.range_m,
                         inner_cos: l.inner_deg.to_radians().cos(),
                         outer_cos: l.outer_deg.to_radians().cos(),
-                        // **Never a shadow caster.** A venue rig is three lamps in
-                        // one room; giving each its own virtual-shadow quadtree
-                        // would spend `VSM_MAX_PROJECTIONS` on a pool whose whole
-                        // content is a stage floor and two benches.
-                        cast_shadows: false,
+                        // **The shadow policy decides** (wave PAR0 clause 2). The rig
+                        // ASKS for a shadow; `inf_render::lights::shadow_policy` grants
+                        // page trees to the brightest few local lights at the camera,
+                        // within `VSM_MAX_PROJECTIONS`, so a room's fixture stops lighting
+                        // the street through its walls. (It was `false` while every
+                        // shadowed light spent a slot of a 16-light uniform.)
+                        cast_shadows: true,
                     });
                 }
+                // MIRROR-END venue_rig_lights
                 if visible && !vol.evaluated.is_empty() {
                     let translation = w
                         .get::<GlobalTransform>(entity)
@@ -3306,7 +3325,7 @@ fn push_scatter(
     //
     // The TINT is deliberately not in the key: a scattered instance has carried
     // its own colour since P18.5, so a venue's six neon hues cost one draw.
-    type BucketKey = (Option<u128>, u32, [u32; 6]);
+    type BucketKey = (Option<u128>, u32, [u32; 7]);
     let mut buckets: std::collections::BTreeMap<BucketKey, Vec<ScatterInstance>> =
         std::collections::BTreeMap::new();
     for si in instances {
@@ -3397,7 +3416,10 @@ fn push_scatter(
             id,
             draw_distance: bucket_draw,
             near_distance,
-            casts_shadows,
+            // Wave PAR0: glass casts no shadow (a pane lets the sun into the
+            // room it glazes) and draws in the glass pass.
+            casts_shadows: casts_shadows && f32::from_bits(surface[6]) <= 0.0,
+            transmission: f32::from_bits(surface[6]),
         });
     }
     // MIRROR-END scatter_mesh_buckets
@@ -3453,6 +3475,7 @@ fn push_shells(
         // contains them, so this is the one batch of a building that must
         // always be `true`.
         casts_shadows: true,
+        transmission: 0.0,
     });
     // MIRROR-END pcg_shell_batch
 }
@@ -3801,6 +3824,7 @@ fn push_foliage_scatter(scene: &mut RenderScene, fol: &Foliage, translation: DVe
             draw_distance: 0.0,
             near_distance: 0.0,
             casts_shadows: true,
+            transmission: 0.0,
         });
     }
 }

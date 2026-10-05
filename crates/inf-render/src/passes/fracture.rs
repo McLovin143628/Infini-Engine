@@ -45,7 +45,7 @@ use inf_math::FloatingOrigin;
 use crate::camera::{DEPTH_COMPARE, DEPTH_FORMAT};
 use crate::gpu::GpuContext;
 use crate::graph::RenderNode;
-use crate::passes::mesh::{vertex_layouts, InstanceRaw, LightsUniform};
+use crate::passes::mesh::{vertex_layouts, InstanceRaw};
 use crate::renderer::{FrameData, SCENE_FORMAT, SCENE_SAMPLES};
 use crate::scene::{RenderFractureChunk, RenderFractureVertex};
 use crate::settings::RenderSettings;
@@ -184,8 +184,6 @@ pub struct FractureNode {
     instances: Option<wgpu::Buffer>,
     instance_capacity: usize,
     draw_order: Vec<FractureCacheKey>,
-    lights_buf: wgpu::Buffer,
-    lights_bg: wgpu::BindGroup,
     env: super::EnvBinding,
 }
 
@@ -198,41 +196,12 @@ impl FractureNode {
                 label: Some("fracture"),
                 source: wgpu::ShaderSource::Wgsl(super::shader_source("mesh").into()),
             });
-        let lights_bgl = gpu
-            .device
-            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("fracture-lights"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-            });
-        let lights_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("fracture-lights"),
-            size: std::mem::size_of::<LightsUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let lights_bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("fracture-lights"),
-            layout: &lights_bgl,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: lights_buf.as_entire_binding(),
-            }],
-        });
         let env = super::EnvBinding::new(gpu);
         let layout = gpu
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("fracture"),
-                bind_group_layouts: &[Some(view_bgl), Some(&lights_bgl), Some(&env.bgl)],
+                bind_group_layouts: &[Some(view_bgl), None, Some(&env.bgl)],
                 immediate_size: 0,
             });
         let pipeline = gpu
@@ -325,8 +294,6 @@ impl FractureNode {
             instances: None,
             instance_capacity: 0,
             draw_order: Vec::new(),
-            lights_buf,
-            lights_bg,
             env,
         }
     }
@@ -499,10 +466,6 @@ impl RenderNode for FractureNode {
         if !self.prepare(gpu, frame) {
             return;
         }
-        let lights =
-            LightsUniform::from_scene(frame.scene, &frame.view.origin, frame.vsm_light_slots);
-        gpu.queue
-            .write_buffer(&self.lights_buf, 0, bytemuck::bytes_of(&lights));
         let env_bg = self.env.bind_group(gpu, frame).clone();
         let Some(instances) = self.instances.as_ref() else {
             return;
@@ -533,7 +496,6 @@ impl RenderNode for FractureNode {
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, frame.view_bg, &[]);
-        pass.set_bind_group(1, &self.lights_bg, &[]);
         pass.set_bind_group(2, &env_bg, &[]);
         pass.set_vertex_buffer(1, instances.slice(..));
         for (i, key) in self.draw_order.iter().enumerate() {

@@ -25,6 +25,7 @@ pub mod golden;
 pub mod gpu;
 pub mod graph;
 pub mod headless;
+pub mod lights;
 pub mod passes;
 pub mod pick;
 pub mod pipeline;

@@ -307,6 +307,19 @@ impl SlotShift {
 /// what it was (`0 * n + k == k`), and the shift is the one element — which is
 /// the value `shift_of` returned. Every committed level is byte-identical, and
 /// `the_pre_ems1_rooms_are_worked_by_exactly_one_crew` is the arm that says so.
+/// **When a room's fixtures burn** (wave PAR0): the shifts [`crews_of`]
+/// says the room is worked on — night rooms burn at night, the rooms an
+/// institution never closes never go dark, every other room burns through the
+/// working day. One rule, so a fixture can never keep different hours from the
+/// crew that works under it.
+pub fn schedule_of(kind: RoomType) -> super::FixtureSchedule {
+    match crews_of(kind) {
+        [SlotShift::Night] => super::FixtureSchedule::Night,
+        [_, _, ..] => super::FixtureSchedule::Always,
+        _ => super::FixtureSchedule::Day,
+    }
+}
+
 pub fn crews_of(kind: RoomType) -> &'static [SlotShift] {
     /// The working day — every room in the twelve palettes that predate the
     /// venues.
@@ -617,6 +630,26 @@ pub fn station_slots(
 
 #[cfg(test)]
 mod tests {
+    /// **A fixture keeps its room's hours** (wave PAR0): the schedule is the
+    /// crew table read once — night rooms burn at night, the three rooms an
+    /// institution never closes never go dark, the rest burn by day.
+    #[test]
+    fn a_fixture_keeps_the_hours_of_the_crew_that_works_under_it() {
+        use crate::building::FixtureSchedule as F;
+        for (kind, want) in [
+            (RoomType::BarRoom, F::Night),
+            (RoomType::DanceFloor, F::Night),
+            (RoomType::Stage, F::Night),
+            (RoomType::Cell, F::Always),
+            (RoomType::ApparatusBay, F::Always),
+            (RoomType::Ward, F::Always),
+            (RoomType::Office, F::Day),
+            (RoomType::Bedroom, F::Day),
+        ] {
+            assert_eq!(schedule_of(kind), want, "{kind:?}");
+        }
+    }
+
     use super::*;
     use crate::building::{plan_building, ArchetypeId, BuildingParams, Rect2};
     use glam::DVec2;

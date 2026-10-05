@@ -80,7 +80,13 @@ pub const VIS_INSTANCE_TEXELS: u32 = 16;
 /// `the_resolve_spends_every_fragment_storage_binding_the_default_limit_grants`
 /// counts them, so the next binding the environment group grows fails a test
 /// here instead of failing `create_pipeline_layout` on a user's machine.
-pub const VIS_FRAGMENT_STORAGE_BINDINGS: u32 = 8;
+///
+/// **Wave PAR0 spent one more**: the frame's light list joined the environment
+/// group as its fifth storage buffer, so the resolve binds **nine** — one past
+/// the default — and the engine device now requests nine where the adapter
+/// grants it ([`crate::gpu::LIT_FRAGMENT_STORAGE_BUFFERS`], measured placement
+/// ruling there). The headroom is still zero, now against that request.
+pub const VIS_FRAGMENT_STORAGE_BINDINGS: u32 = crate::gpu::LIT_FRAGMENT_STORAGE_BUFFERS;
 
 /// The visibility buffer's own format. `Rg32Uint` because the packing is exactly
 /// sixty-four bits (IB-8) and an integer target neither filters nor blends — a
@@ -433,7 +439,6 @@ impl VisState {
     pub fn new(
         gpu: &GpuContext,
         view_bgl: &wgpu::BindGroupLayout,
-        lights_bgl: &wgpu::BindGroupLayout,
         env_bgl: &wgpu::BindGroupLayout,
     ) -> Self {
         let ro = wgpu::BindingType::Buffer {
@@ -556,12 +561,7 @@ impl VisState {
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("visbuffer-resolve"),
-                bind_group_layouts: &[
-                    Some(view_bgl),
-                    Some(lights_bgl),
-                    Some(env_bgl),
-                    Some(&resolve_bgl),
-                ],
+                bind_group_layouts: &[Some(view_bgl), None, Some(env_bgl), Some(&resolve_bgl)],
                 immediate_size: 0,
             });
         let resolve = gpu
@@ -906,11 +906,22 @@ mod tests {
     /// named for is the thing it sees.
     #[test]
     fn the_resolve_spends_every_fragment_storage_binding_the_default_limit_grants() {
+        // Wave PAR0: the device asks for nine where the adapter grants them, and
+        // the meshlet tier requires the same nine — so a device built from a
+        // generous adapter can always build the resolve.
+        let generous = wgpu::Limits {
+            max_storage_buffers_per_shader_stage: 1_000_000,
+            ..wgpu::Limits::default()
+        };
         assert_eq!(
-            wgpu::Limits::default().max_storage_buffers_per_shader_stage,
+            crate::gpu::engine_limits(&generous).max_storage_buffers_per_shader_stage,
             VIS_FRAGMENT_STORAGE_BINDINGS,
-            "the pinned wgpu's default storage-binding limit moved; the ruling in \
-             VIS_FRAGMENT_STORAGE_BINDINGS is arithmetic about the old one"
+            "the engine device no longer requests what the resolve binds"
+        );
+        assert_eq!(
+            crate::caps::VGEOM_MIN_STORAGE_BUFFERS_PER_STAGE,
+            VIS_FRAGMENT_STORAGE_BINDINGS,
+            "the meshlet tier admits an adapter that cannot build the resolve"
         );
         let is_fragment_storage = |e: &wgpu::BindGroupLayoutEntry| {
             e.visibility.contains(wgpu::ShaderStages::FRAGMENT)
@@ -923,8 +934,8 @@ mod tests {
                 )
         };
         // The environment group's: GI SH probes (5), the VT indirection table
-        // (16), the VSM page table (18) and its projections (19) — counted, not
-        // recited, and counted through `VtPools`/`vsm_receiver`'s own entry
+        // (16), the VSM page table (18) and its projections (19), and since
+        // wave PAR0 the light list (25) — counted, not recited, and counted through `VtPools`/`vsm_receiver`'s own entry
         // constructors, which is where two of the four actually come from.
         let env_storage = super::super::env_bgl_entries()
             .iter()
@@ -938,7 +949,7 @@ mod tests {
             .count() as u32;
         assert_eq!(
             (env_storage, resolve_storage),
-            (4, 4),
+            (5, 4),
             "the split moved: the ruling in VIS_FRAGMENT_STORAGE_BINDINGS is \
              arithmetic about four environment bindings and four pools"
         );

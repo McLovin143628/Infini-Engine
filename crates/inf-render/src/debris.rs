@@ -416,6 +416,7 @@ impl DebrisCache {
             draw_distance: 0.0,
             near_distance: 0.0,
             casts_shadows: true,
+            transmission: 0.0,
         })
     }
 }
@@ -460,6 +461,7 @@ pub fn debris_batch(
         draw_distance: 0.0,
         near_distance: 0.0,
         casts_shadows: true,
+        transmission: 0.0,
     })
 }
 

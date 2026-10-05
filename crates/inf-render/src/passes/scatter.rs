@@ -65,7 +65,7 @@ use std::sync::Arc;
 use glam::{DVec3, Mat3, Mat4, Vec3};
 use inf_math::FloatingOrigin;
 
-use super::mesh::{vertex_layouts, InstanceRaw, LightsUniform};
+use super::mesh::{vertex_layouts, InstanceRaw};
 use super::vgeom::{dummy_hzb, frustum_planes, HzbChain, HzbKey};
 use super::GenCache;
 use crate::camera::{DEPTH_COMPARE, DEPTH_FORMAT};
@@ -547,6 +547,14 @@ pub struct ScatterNode {
     raster_bgl: wgpu::BindGroupLayout,
     mesh_pipeline: wgpu::RenderPipeline,
     impostor_pipeline: wgpu::RenderPipeline,
+    /// Wave PAR0: the glass pass's pipeline (premultiplied blend, no depth
+    /// write) and its per-frame back-to-front order, kept to reuse the
+    /// allocation.
+    glass_pipeline: wgpu::RenderPipeline,
+    glass_order: Vec<(f64, u32, usize)>,
+    /// Glass batches drawn, summed over frames — the glass pass's engagement
+    /// counter.
+    glass_draws: u64,
     prim_storage: PrimStorage,
     hzb: HzbChain,
     dummy_hzb: wgpu::TextureView,
@@ -573,12 +581,15 @@ pub struct ScatterNode {
     fallback_ranges: [std::ops::Range<u32>; 5],
     fallback_key: Option<(u64, DVec3, [i64; 3], u32)>,
 
-    lights_buf: wgpu::Buffer,
-    lights_bg: wgpu::BindGroup,
     env: super::EnvBinding,
 }
 
 impl ScatterNode {
+    /// Glass batches the glass pass has drawn, summed over frames (wave PAR0).
+    pub fn glass_draws(&self) -> u64 {
+        self.glass_draws
+    }
+
     pub fn new(gpu: &GpuContext, view_bgl: &wgpu::BindGroupLayout) -> Self {
         // ── cull compute ──
         let cull_shader = gpu
@@ -723,50 +734,20 @@ impl ScatterNode {
                 ],
             });
 
-        let lights_bgl = gpu
-            .device
-            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("scatter-lights"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-            });
-        let lights_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("scatter-lights"),
-            size: std::mem::size_of::<LightsUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let lights_bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("scatter-lights"),
-            layout: &lights_bgl,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: lights_buf.as_entire_binding(),
-            }],
-        });
         let env = super::EnvBinding::new(gpu);
 
         let raster_layout = gpu
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("scatter-raster"),
-                bind_group_layouts: &[
-                    Some(view_bgl),
-                    Some(&lights_bgl),
-                    Some(&env.bgl),
-                    Some(&raster_bgl),
-                ],
+                bind_group_layouts: &[Some(view_bgl), None, Some(&env.bgl), Some(&raster_bgl)],
                 immediate_size: 0,
             });
-        let mk_raster = |label: &str, vs: &str, cull: Option<wgpu::Face>| {
+        // `glass` (wave PAR0 clause 4): premultiplied-alpha blending over the
+        // opaque scene, depth-TESTED but never depth-WRITTEN, so the room behind
+        // a pane is what the pane is composited over and nothing drawn later
+        // is occluded by a sheet of glass.
+        let mk_raster = |label: &str, vs: &str, cull: Option<wgpu::Face>, glass: bool| {
             gpu.device
                 .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some(label),
@@ -783,7 +764,7 @@ impl ScatterNode {
                         compilation_options: Default::default(),
                         targets: &[Some(wgpu::ColorTargetState {
                             format: SCENE_FORMAT,
-                            blend: None,
+                            blend: glass.then_some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
                             write_mask: wgpu::ColorWrites::ALL,
                         })],
                     }),
@@ -793,7 +774,7 @@ impl ScatterNode {
                     },
                     depth_stencil: Some(wgpu::DepthStencilState {
                         format: DEPTH_FORMAT,
-                        depth_write_enabled: Some(true),
+                        depth_write_enabled: Some(!glass),
                         depth_compare: Some(DEPTH_COMPARE),
                         stencil: Default::default(),
                         bias: Default::default(),
@@ -806,10 +787,13 @@ impl ScatterNode {
                     cache: None,
                 })
         };
-        let mesh_pipeline = mk_raster("scatter-mesh", "vs_mesh", Some(wgpu::Face::Back));
+        let mesh_pipeline = mk_raster("scatter-mesh", "vs_mesh", Some(wgpu::Face::Back), false);
         // A billboard has one winding and is viewed from one side; culling it would
         // make it vanish for half the camera orientations that produce it.
-        let impostor_pipeline = mk_raster("scatter-impostor", "vs_impostor", None);
+        let impostor_pipeline = mk_raster("scatter-impostor", "vs_impostor", None, false);
+        // Wave PAR0: the glass pass's pipeline — the same vertex pull and the
+        // same shader (`fs` takes its glass branch on `emissive.w`).
+        let glass_pipeline = mk_raster("scatter-glass", "vs_mesh", Some(wgpu::Face::Back), true);
 
         // ── CPU fallback: the rigid mesh pipeline, unmodified ──
         let fallback_shader = gpu
@@ -822,7 +806,7 @@ impl ScatterNode {
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("scatter-fallback"),
-                bind_group_layouts: &[Some(view_bgl), Some(&lights_bgl), Some(&env.bgl)],
+                bind_group_layouts: &[Some(view_bgl), None, Some(&env.bgl)],
                 immediate_size: 0,
             });
         let fallback_pipeline =
@@ -871,6 +855,9 @@ impl ScatterNode {
             raster_bgl,
             mesh_pipeline,
             impostor_pipeline,
+            glass_pipeline,
+            glass_order: Vec::new(),
+            glass_draws: 0,
             prim_storage: PrimStorage::new(gpu, "scatter"),
             hzb: HzbChain::new(gpu),
             dummy_hzb: dummy_hzb(gpu),
@@ -883,8 +870,6 @@ impl ScatterNode {
             fallback_capacity: 0,
             fallback_ranges: super::mesh::EMPTY_RANGES,
             fallback_key: None,
-            lights_buf,
-            lights_bg,
             env,
         }
     }
@@ -1376,20 +1361,10 @@ impl ScatterNode {
         if total == 0 {
             return;
         }
-        gpu.queue.write_buffer(
-            &self.lights_buf,
-            0,
-            bytemuck::bytes_of(&LightsUniform::from_scene(
-                frame.scene,
-                &frame.view.origin,
-                frame.vsm_light_slots,
-            )),
-        );
         let env_bg = self.env.bind_group(gpu, frame).clone();
         let mut pass = scene_pass(encoder, frame, "scatter-fallback");
         pass.set_pipeline(&self.fallback_pipeline);
         pass.set_bind_group(0, frame.view_bg, &[]);
-        pass.set_bind_group(1, &self.lights_bg, &[]);
         pass.set_bind_group(2, &env_bg, &[]);
         self.fallback_prim
             .draw(&mut pass, instances, &self.fallback_ranges);
@@ -1497,16 +1472,6 @@ impl RenderNode for ScatterNode {
         let planes = frustum_planes(vp);
         let eye = frame.view.eye_local();
 
-        gpu.queue.write_buffer(
-            &self.lights_buf,
-            0,
-            bytemuck::bytes_of(&LightsUniform::from_scene(
-                frame.scene,
-                &frame.view.origin,
-                frame.vsm_light_slots,
-            )),
-        );
-
         // ── 1. per-batch uniforms + the three cull dispatches ──
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -1578,7 +1543,9 @@ impl RenderNode for ScatterNode {
                                 .filter(|x| !x.is_empty())
                                 .map_or(0.0, |x| x.radius),
                         ],
-                        emissive: [b.emissive[0], b.emissive[1], b.emissive[2], 0.0],
+                        // `w` = the batch's transmission (wave PAR0): above
+                        // zero the fragment shader takes its glass branch.
+                        emissive: [b.emissive[0], b.emissive[1], b.emissive[2], b.transmission],
                         bands: [mesh_end, cull, fade, if impostors { 1.0 } else { 0.0 }],
                         geom: [
                             range.index_start,
@@ -1652,10 +1619,9 @@ impl RenderNode for ScatterNode {
         {
             let mut pass = scene_pass(encoder, frame, "scatter");
             pass.set_bind_group(0, frame.view_bg, &[]);
-            pass.set_bind_group(1, &self.lights_bg, &[]);
             pass.set_bind_group(2, &env_bg, &[]);
             for b in &frame.scene.scatter {
-                if b.data.is_empty() {
+                if b.data.is_empty() || b.is_glass() {
                     continue;
                 }
                 let Some(g) = self.scratch.get(&(b.data.key(), b.id)) else {
@@ -1669,6 +1635,41 @@ impl RenderNode for ScatterNode {
                     pass.draw_indirect(&g.args, 16);
                 }
             }
+            // ── 3. THE GLASS PASS (wave PAR0 clause 4) ──
+            //
+            // After every opaque scatter batch, in the same render pass: the
+            // transmitting batches, back to front by their anchor's distance
+            // (ties by batch id), so a far building's panes composite before a
+            // near one's. Order-independent transparency is NOT built in v1 —
+            // two panes of ONE batch overlapping on screen blend in the cull's
+            // compaction order — and the sort is per batch, which is the
+            // granularity a volume's glazing is drawn at. No impostor: a pane
+            // has no far-band card.
+            self.glass_order.clear();
+            let eye = frame.view.eye_world;
+            self.glass_order.extend(
+                frame
+                    .scene
+                    .scatter
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, b)| b.is_glass() && !b.data.is_empty())
+                    .map(|(i, b)| ((b.anchor - eye).length_squared(), b.id, i)),
+            );
+            self.glass_order
+                .sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+            if !self.glass_order.is_empty() {
+                pass.set_pipeline(&self.glass_pipeline);
+            }
+            for &(_, _, i) in &self.glass_order {
+                let b = &frame.scene.scatter[i];
+                let Some(g) = self.scratch.get(&(b.data.key(), b.id)) else {
+                    continue;
+                };
+                pass.set_bind_group(3, &g.raster_bg, &[]);
+                pass.draw_indirect(&g.args, 0);
+            }
+            self.glass_draws += self.glass_order.len() as u64;
         }
 
         if audit {

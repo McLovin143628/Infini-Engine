@@ -1049,6 +1049,7 @@ impl RenderNode for GiNode {
                 batch.near_distance,
                 vsize,
                 extent,
+                batch.transmission,
             ) {
                 scatter_rejected += 1;
                 continue;
@@ -1562,13 +1563,24 @@ mod boundary_tests {
             }
             // …and the DIRECT term above really does take it, or the ban is
             // satisfied by a shader with no shadows in it at all.
+            // Wave PAR0: the direct term is the shared library's
+            // `lights_direct`, asked for the sun's shadow by flag; the hook it
+            // calls is the env shim's `light_sun_shadow`, which is where
+            // `shadow_factor` now lives (pinned just below the loop).
             let head = &source[..at];
             assert!(
-                head.contains("shadow_factor(in.world_pos, n)"),
+                head.contains("lo += lights_direct(") && head.contains("LIGHT_SUN_SHADOW"),
                 "{label} takes no sun shadow at all, so this arm is measuring a \
                  shader that has nothing to keep out of its ambient term"
             );
         }
+        let hooks = include_str!("../shaders/lights_env.wgsl");
+        assert!(
+            hooks.contains("return shadow_factor(p, n);")
+                && hooks.contains("return vsm_light_shadow(p, n, slot);"),
+            "the env shadow hooks no longer reach the shadow receivers, so the \
+             direct-term half of this arm is about nothing"
+        );
 
         // **AND THE PLACE THE AMBIENT IS NOW COMPUTED** (wave FIX3). The six lit
         // passes used to spell the composition inline — `amb = gi_irradiance(..)`
