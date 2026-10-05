@@ -238,8 +238,15 @@ impl GpuContext {
         //    instrument reports CPU frame time alone.
         let timestamps =
             wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+        //  * `DUAL_SOURCE_BLENDING` (wave PAR0b, clause 6) — the glass pass
+        //    writes a per-channel transmittance as a second blend source, so a
+        //    tinted pane tints the room behind it. Absent, the glass pass
+        //    keeps premultiplied alpha (one grey alpha) — named in
+        //    `passes::scatter`.
         let mut optional_features = adapter.features()
-            & (wgpu::Features::POLYGON_MODE_LINE | wgpu::Features::TEXTURE_COMPRESSION_BC);
+            & (wgpu::Features::POLYGON_MODE_LINE
+                | wgpu::Features::TEXTURE_COMPRESSION_BC
+                | wgpu::Features::DUAL_SOURCE_BLENDING);
         if adapter.features().contains(timestamps) {
             optional_features |= timestamps;
         }

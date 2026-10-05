@@ -555,6 +555,8 @@ pub struct ScatterNode {
     /// Glass batches drawn, summed over frames — the glass pass's engagement
     /// counter.
     glass_draws: u64,
+    /// Whether `glass_pipeline` is the dual-source one (wave PAR0b).
+    glass_dual: bool,
     prim_storage: PrimStorage,
     hzb: HzbChain,
     dummy_hzb: wgpu::TextureView,
@@ -588,6 +590,11 @@ impl ScatterNode {
     /// Glass batches the glass pass has drawn, summed over frames (wave PAR0).
     pub fn glass_draws(&self) -> u64 {
         self.glass_draws
+    }
+
+    /// Whether the glass pass blends dual-source (wave PAR0b, clause 6).
+    pub fn glass_dual_source(&self) -> bool {
+        self.glass_dual
     }
 
     pub fn new(gpu: &GpuContext, view_bgl: &wgpu::BindGroupLayout) -> Self {
@@ -793,7 +800,37 @@ impl ScatterNode {
         let impostor_pipeline = mk_raster("scatter-impostor", "vs_impostor", None, false);
         // Wave PAR0: the glass pass's pipeline — the same vertex pull and the
         // same shader (`fs` takes its glass branch on `emissive.w`).
-        let glass_pipeline = mk_raster("scatter-glass", "vs_mesh", Some(wgpu::Face::Back), true);
+        let glass_dual = gpu
+            .device
+            .features()
+            .contains(wgpu::Features::DUAL_SOURCE_BLENDING);
+        let glass_pipeline = if glass_dual {
+            // **THE PANE'S OWN TINT** (wave PAR0b, clause 6): with dual-source
+            // blending the glass fragment writes TWO colours — what the pane
+            // adds (its reflection) and, per channel, how much of the room
+            // behind it passes (`transmission × (1 − F) × tint`) — and the
+            // blend is `src0 + dst × src1`, so a green-tinted pane tints the
+            // room it glazes. The module is the same raster source with the
+            // `dual_source_blending` extension enabled and one more entry.
+            let src = format!(
+                "enable dual_source_blending;\n{}\n{}",
+                super::shader_source("scatter_mesh"),
+                GLASS_DUAL_SOURCE_ENTRY
+            );
+            let module = gpu
+                .device
+                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("scatter-glass-dual"),
+                    source: wgpu::ShaderSource::Wgsl(src.into()),
+                });
+            self_dual_glass(&gpu.device, &raster_layout, &module)
+        } else {
+            // The honest single-source fallback: premultiplied alpha, one
+            // alpha for three channels — the room behind is dimmed by the
+            // pane's grey transmission and the tint colours only the share the
+            // pane absorbs (the PAR0 behaviour, named).
+            mk_raster("scatter-glass", "vs_mesh", Some(wgpu::Face::Back), true)
+        };
 
         // ── CPU fallback: the rigid mesh pipeline, unmodified ──
         let fallback_shader = gpu
@@ -858,6 +895,7 @@ impl ScatterNode {
             glass_pipeline,
             glass_order: Vec::new(),
             glass_draws: 0,
+            glass_dual,
             prim_storage: PrimStorage::new(gpu, "scatter"),
             hzb: HzbChain::new(gpu),
             dummy_hzb: dummy_hzb(gpu),
@@ -1108,6 +1146,15 @@ pub fn pack_fallback(
         // CPU raster runs through this same body on every tier below High, so
         // reading the field here unconditionally deleted the settlements from
         // the Medium-tier picture as well as from the shadow.
+        // **Glass on the CPU fallback** (wave PAR0b, clause 6): the fallback
+        // draws through the rigid mesh pipeline, which is opaque, so a pane
+        // drew as a solid box — a window you could not see through on every
+        // tier below High. It is now left out of the fallback's raster: the
+        // honest downlevel pane is an open window (the room behind it seen
+        // whole, no reflection), never a wall.
+        if purpose == PackPurpose::Raster && b.is_glass() {
+            continue;
+        }
         if purpose == PackPurpose::Casters && !b.casts_shadows {
             continue;
         }
@@ -1682,6 +1729,78 @@ impl RenderNode for ScatterNode {
             );
         }
     }
+}
+
+/// The dual-source glass fragment entry (wave PAR0b, clause 6), appended to the
+/// scatter raster source when the device has `DUAL_SOURCE_BLENDING`.
+const GLASS_DUAL_SOURCE_ENTRY: &str = r#"
+struct GlassDualOut {
+    @location(0) @blend_src(0) color: vec4<f32>,
+    @location(0) @blend_src(1) pass_through: vec4<f32>,
+};
+
+@fragment
+fn fs_glass_dual(in: VsOut) -> GlassDualOut {
+    let g = glass_terms(in);
+    var out: GlassDualOut;
+    out.color = vec4<f32>(g[0], 1.0);
+    out.pass_through = vec4<f32>(g[1], 1.0);
+    return out;
+}
+"#;
+
+/// The glass pipeline over the dual-source module: `src0 + dst × src1`, depth
+/// tested and never written (wave PAR0b, clause 6).
+fn self_dual_glass(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    module: &wgpu::ShaderModule,
+) -> wgpu::RenderPipeline {
+    let comp = wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::One,
+        dst_factor: wgpu::BlendFactor::Src1,
+        operation: wgpu::BlendOperation::Add,
+    };
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("scatter-glass-dual"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module,
+            entry_point: Some("vs_mesh"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module,
+            entry_point: Some("fs_glass_dual"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: SCENE_FORMAT,
+                blend: Some(wgpu::BlendState {
+                    color: comp,
+                    alpha: comp,
+                }),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            cull_mode: Some(wgpu::Face::Back),
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(false),
+            depth_compare: Some(DEPTH_COMPARE),
+            stencil: Default::default(),
+            bias: Default::default(),
+        }),
+        multisample: wgpu::MultisampleState {
+            count: SCENE_SAMPLES,
+            ..Default::default()
+        },
+        multiview_mask: None,
+        cache: None,
+    })
 }
 
 /// A conservative render-local model matrix for one scattered instance — the CPU

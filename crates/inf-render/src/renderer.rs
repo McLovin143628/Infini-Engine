@@ -1971,6 +1971,15 @@ impl EngineRenderer {
             .map_or(0, |n| n.glass_draws())
     }
 
+    /// Whether the glass pass composites through DUAL-SOURCE blending (wave
+    /// PAR0b, clause 6) — the per-channel tint path — or the single-source
+    /// premultiplied fallback.
+    pub fn scatter_glass_dual_source(&self) -> bool {
+        self.graph
+            .node::<crate::passes::scatter::ScatterNode>()
+            .is_some_and(|n| n.glass_dual_source())
+    }
+
     /// Frames that recorded the froxel build — the engagement counter.
     pub fn light_cluster_frames(&self) -> u64 {
         self.lights.frames()

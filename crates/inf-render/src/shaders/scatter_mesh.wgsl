@@ -360,6 +360,40 @@ fn scatter_dither(px: vec2<f32>) -> f32 {
     return f32(h >> 8u) * (1.0 / 16777216.0);
 }
 
+// **The glass pane's two terms** (wave PAR0 clause 4, split in PAR0b clause
+// 6): column 0 what the pane ADDS (its specular reflection of every light and
+// of the sky/probe field, plus the share it absorbs, tinted), column 1 how much
+// of the room behind it passes, PER CHANNEL — `transmission × (1 − F)` times
+// the pane's tint normalised to its brightest channel, so a clear pane passes
+// grey and a green one passes green. The dual-source pipeline uses both
+// (`src0 + dst × src1`); the single-source one only their mean.
+fn glass_terms(in: VsOut) -> mat2x3<f32> {
+    let n = normalize(in.normal);
+    let v = normalize(view.eye.xyz - in.world_pos);
+    let albedo = in.color.rgb;
+    let rough = clamp(sp.material.y, 0.04, 1.0);
+    let transmission = clamp(sp.emissive.w, 0.0, 1.0);
+    let glass_f0 = vec3<f32>(0.04);
+    let nv = clamp(dot(n, v), 0.0, 1.0);
+    let fres = 0.04 + 0.96 * pow(1.0 - nv, 5.0);
+    var spec = lights_direct(in.world_pos, in.pos.xy, n, v, view.sun_dir.xyz,
+                             vec3<f32>(0.0), 0.0, rough, glass_f0,
+                             LIGHT_SUN_SHADOW | LIGHT_LOCAL_SHADOW);
+    let g_up = clamp(n.y * 0.5 + 0.5, 0.0, 1.0);
+    let g_amb = ambient_irradiance(
+        in.world_pos,
+        n,
+        mix(vec3<f32>(0.03, 0.03, 0.035), vec3<f32>(0.10, 0.13, 0.18), g_up),
+    );
+    let g_ao = textureSampleLevel(ao_tex, ao_smp, in.pos.xy / view.grid_axis_viewport.zw, 0.0).r;
+    spec += gi_ambient_specular(in.world_pos, n, v, rough, glass_f0, g_amb) * g_ao;
+    let t = transmission * (1.0 - fres);
+    let absorbed = max(1.0 - t - fres, 0.0);
+    let body = albedo * g_amb * absorbed / 3.14159265359;
+    let tint = albedo / max(max(albedo.r, max(albedo.g, albedo.b)), 1.0e-4);
+    return mat2x3<f32>(spec + body, tint * t);
+}
+
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let is_impostor = in.fade.z > 0.5;
@@ -415,25 +449,11 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // share it absorbs rather than the background (premultiplied blending has
     // one alpha, not three) — a stated v1 limit.
     if (sp.emissive.w > 0.0) {
-        let transmission = clamp(sp.emissive.w, 0.0, 1.0);
-        let glass_f0 = vec3<f32>(0.04);
-        let nv = clamp(dot(n, v), 0.0, 1.0);
-        let fres = 0.04 + 0.96 * pow(1.0 - nv, 5.0);
-        var spec = lights_direct(in.world_pos, in.pos.xy, n, v, view.sun_dir.xyz,
-                                 vec3<f32>(0.0), 0.0, rough, glass_f0,
-                                 LIGHT_SUN_SHADOW | LIGHT_LOCAL_SHADOW);
-        let g_up = clamp(n.y * 0.5 + 0.5, 0.0, 1.0);
-        let g_amb = ambient_irradiance(
-            in.world_pos,
-            n,
-            mix(vec3<f32>(0.03, 0.03, 0.035), vec3<f32>(0.10, 0.13, 0.18), g_up),
-        );
-        let g_ao = textureSampleLevel(ao_tex, ao_smp, in.pos.xy / view.grid_axis_viewport.zw, 0.0).r;
-        spec += gi_ambient_specular(in.world_pos, n, v, rough, glass_f0, g_amb) * g_ao;
-        let t = transmission * (1.0 - fres);
-        let absorbed = max(1.0 - t - fres, 0.0);
-        let body = albedo * g_amb * absorbed / 3.14159265359;
-        return vec4<f32>(spec + body, 1.0 - t);
+        // The single-source path (the pipeline without dual-source blending):
+        // premultiplied alpha, one alpha — `1 - t` with `t` the grey share.
+        let g = glass_terms(in);
+        let t = (g[1].r + g[1].g + g[1].b) / 3.0;
+        return vec4<f32>(g[0], 1.0 - t);
     }
 
     var lo = vec3<f32>(0.0);

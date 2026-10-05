@@ -724,3 +724,272 @@ fn the_wall_leak_holds_with_gi_reading_the_local_lights() {
         "{moved} exterior pixels moved by more than 2 codes"
     );
 }
+
+/// A lit white wall 6 m behind one (or two) glass panes, at night, seen
+/// head-on: `tints` are the panes' colours, nearest first, each its own batch.
+fn panes_scene(tints: &[[f32; 4]], reverse: bool) -> RenderScene {
+    let mut s = RenderScene {
+        grid_enabled: false,
+        ..Default::default()
+    };
+    s.lights.push(RenderLight {
+        kind: LightKind::Directional,
+        color: [1.0, 1.0, 1.0],
+        intensity: 1.0e-4,
+        direction: Vec3::Y,
+        ..RenderLight::default()
+    });
+    let mut wall = MeshInstance::lit(
+        DVec3::new(0.0, 1.5, 6.0),
+        Quat::IDENTITY,
+        Vec3::new(8.0, 3.0, 0.3),
+        [0.9, 0.9, 0.9, 1.0],
+        1,
+    );
+    wall.roughness = 1.0;
+    s.instances.push(wall);
+    s.lights.push(RenderLight {
+        kind: LightKind::Point,
+        color: [1.0, 1.0, 1.0],
+        intensity: 8.0,
+        position: DVec3::new(0.0, 1.5, 4.0),
+        range: 8.0,
+        ..RenderLight::default()
+    });
+    let mut batches = Vec::new();
+    for (k, tint) in tints.iter().enumerate() {
+        let anchor = DVec3::new(0.15 * k as f64, 1.5, 1.0 + 1.5 * k as f64);
+        let leaf = inf_render::ScatterInstance {
+            position: anchor,
+            rotation: Quat::IDENTITY,
+            scale: Vec3::new(2.0, 2.0, 0.05),
+            color: *tint,
+        };
+        let mut b = inf_render::ScatterBatch::lit(
+            std::sync::Arc::new(inf_render::ScatterData::build(
+                inf_render::PrimMesh::Cube,
+                anchor,
+                vec![leaf],
+            )),
+            anchor,
+            0.05,
+            40 + k as u32,
+        );
+        b.transmission = 0.85;
+        b.casts_shadows = false;
+        batches.push(b);
+    }
+    if reverse {
+        batches.reverse();
+    }
+    s.scatter = batches;
+    s.mark_dirty();
+    s
+}
+
+/// Mean RGB over the centre 40 x 40 px.
+fn centre_rgb(img: &[u8]) -> [f64; 3] {
+    let mut acc = [0.0f64; 3];
+    let mut n = 0.0;
+    for y in H / 2 - 20..H / 2 + 20 {
+        for x in W / 2 - 20..W / 2 + 20 {
+            let i = ((y * W + x) * 4) as usize;
+            for (c, a) in acc.iter_mut().enumerate() {
+                *a += f64::from(img[i + c]);
+            }
+            n += 1.0;
+        }
+    }
+    acc.map(|v| v / n)
+}
+
+/// **A TINTED PANE TINTS THE ROOM BEHIND IT** (clause 6): a white wall lit by
+/// a lamp, seen through a clear pane and through a green one. On an adapter
+/// with dual-source blending (the glass pass's per-channel path; the arm
+/// prints which ran) the green pane's view is GREEN — its green channel over
+/// its red and blue by 20 codes — and the clear pane's is grey (channels
+/// within 8). Without the feature the honest single-source fallback cannot
+/// tint and the arm asserts only that the fallback ran and transmits.
+///
+/// Mutation: the dual entry writing a grey pass-through — the green view
+/// goes grey, RED.
+#[test]
+fn a_tinted_pane_tints_the_room_behind_it() {
+    let Some(gpu) = gpu() else { return };
+    let view = look(DVec3::new(0.0, 1.5, -3.0), DVec3::new(0.0, 1.5, 6.0));
+    let target = HeadlessTarget::new(&gpu, W, H);
+    let mut r = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+    r.set_settings(RenderSettings::default());
+    let mut shot = |scene: &RenderScene| {
+        for _ in 0..4 {
+            r.render(&gpu, scene, &view, &target.view, (W, H));
+        }
+        target.read_rgba(&gpu).expect("readback")
+    };
+    let clear = shot(&panes_scene(&[[0.92, 0.95, 0.95, 1.0]], false));
+    let green = shot(&panes_scene(&[[0.25, 0.95, 0.3, 1.0]], false));
+    dump("pane_clear", &clear);
+    dump("pane_green", &green);
+    let (c, g) = (centre_rgb(&clear), centre_rgb(&green));
+    let dual = r.scatter_glass_dual_source();
+    println!(
+        "PAR0b GLASS TINT: dual-source {dual}; through a clear pane {c:?}, through a green pane {g:?}; glass draws {}",
+        r.scatter_glass_draws()
+    );
+    assert!(r.scatter_glass_draws() > 0, "the glass pass drew nothing");
+    if dual {
+        assert!(
+            g[1] > g[0] + 20.0 && g[1] > g[2] + 20.0,
+            "the green pane does not tint the wall: {g:?}"
+        );
+        assert!(
+            (c[0] - c[1]).abs() < 8.0 && (c[1] - c[2]).abs() < 8.0,
+            "the clear pane tints: {c:?}"
+        );
+    } else {
+        assert!(
+            g[1] > 20.0,
+            "the single-source fallback transmits nothing: {g:?}"
+        );
+    }
+}
+
+/// **TWO OVERLAPPING PANES COMPOSITE IN ONE ORDER** (clause 6): two panes in
+/// two batches, one behind the other over the lit wall; the scene's batch
+/// order reversed — the glass pass sorts back to front by distance, so the
+/// frame must not change (max delta at most 1 code), and the overlap must
+/// differ from the near pane alone (both are drawn).
+#[test]
+fn two_overlapping_panes_composite_the_same_in_either_scene_order() {
+    let Some(gpu) = gpu() else { return };
+    let view = look(DVec3::new(0.0, 1.5, -3.0), DVec3::new(0.0, 1.5, 6.0));
+    let tints = [[0.9, 0.5, 0.5, 1.0], [0.5, 0.5, 0.9, 1.0]];
+    let a = render(
+        &gpu,
+        &panes_scene(&tints, false),
+        &view,
+        RenderSettings::default(),
+    );
+    let b = render(
+        &gpu,
+        &panes_scene(&tints, true),
+        &view,
+        RenderSettings::default(),
+    );
+    let one = render(
+        &gpu,
+        &panes_scene(&tints[..1], false),
+        &view,
+        RenderSettings::default(),
+    );
+    dump("panes_two", &a);
+    let max = a
+        .iter()
+        .zip(&b)
+        .map(|(x, y)| x.abs_diff(*y))
+        .max()
+        .unwrap_or(0);
+    let (ca, c1) = (centre_rgb(&a), centre_rgb(&one));
+    println!(
+        "PAR0b PANES: scene order reversed moves max {max} code(s); centre two panes {ca:?}, one pane {c1:?}"
+    );
+    assert!(
+        max <= 1,
+        "reversing the scene order moved the overlap by {max} codes"
+    );
+    assert!(
+        (ca[2] - c1[2]).abs() > 3.0 || (ca[0] - c1[0]).abs() > 3.0,
+        "the second pane is not drawn: {ca:?} vs {c1:?}"
+    );
+}
+
+/// **GLASS ON THE CPU FALLBACK IS A WINDOW, NOT A WALL** (clause 6): the
+/// fixture-lit room behind a pane with the scatter GPU path off (every tier
+/// below High). The pane must not draw as an opaque box: the window reads
+/// within 15 % of the same window with no pane, and brighter than the wall.
+#[test]
+fn the_cpu_fallback_draws_a_pane_as_an_opening() {
+    let Some(gpu) = gpu() else { return };
+    let view = look(DVec3::new(0.0, 1.8, -11.0), DVec3::new(0.0, 1.4, -3.0));
+    let mut s = gi_settings(false);
+    s.gi.enabled = false;
+    s.scatter.gpu = false;
+    let glazed = render(&gpu, &room(Opening::Glazed, false, true), &view, s);
+    let open = render(&gpu, &room(Opening::Window, false, true), &view, s);
+    dump("fallback_glazed", &glazed);
+    let (wx, wy) = project(&view, DVec3::new(0.0, 1.65, -HALF - T));
+    let (gx, gy) = project(&view, DVec3::new(2.0, 1.65, -HALF - T));
+    let g = p50(&glazed, wx - 20, wy - 15, 40, 30);
+    let o = p50(&open, wx - 20, wy - 15, 40, 30);
+    let wall = p50(&glazed, gx - 10, gy - 10, 20, 20);
+    println!("PAR0b FALLBACK GLASS: window glazed {g:.2}, open {o:.2}, wall {wall:.2}");
+    assert!(
+        (g - o).abs() <= 0.15 * o.max(1.0),
+        "the fallback's pane is not an opening: {g:.2} vs open {o:.2}"
+    );
+    assert!(
+        g > wall + 5.0,
+        "the fallback window reads like the wall: {g:.2} vs {wall:.2}"
+    );
+}
+
+/// **WATER READS THE LIGHTS** (clause 6, the PAR0 carried arm): a calm harbour
+/// at night with a lamp 3 m over it vs without — the water under the lamp
+/// brighter by 5 codes.
+#[test]
+fn a_lamp_over_the_harbour_raises_the_waters_luminance() {
+    let Some(gpu) = gpu() else { return };
+    let harbour = |lamp: bool| {
+        let mut s = RenderScene {
+            grid_enabled: false,
+            ..Default::default()
+        };
+        s.lights.push(RenderLight {
+            kind: LightKind::Directional,
+            color: [0.6, 0.7, 1.0],
+            intensity: 0.01,
+            direction: Vec3::new(0.2, 0.6, 0.3).normalize(),
+            ..RenderLight::default()
+        });
+        let mut bed = MeshInstance::lit(
+            DVec3::new(0.0, -4.5, 0.0),
+            Quat::IDENTITY,
+            Vec3::new(200.0, 1.0, 200.0),
+            [0.3, 0.3, 0.3, 1.0],
+            1,
+        );
+        bed.roughness = 1.0;
+        s.instances.push(bed);
+        s.waters = vec![inf_render::RenderWater {
+            id: 1,
+            kind: inf_render::WaterKindGpu::Ocean,
+            level_m: 0.0,
+            time_s: 10.0,
+            ..inf_render::RenderWater::default()
+        }];
+        if lamp {
+            s.lights.push(RenderLight {
+                kind: LightKind::Point,
+                color: [1.0, 0.85, 0.6],
+                intensity: 20.0,
+                position: DVec3::new(0.0, 3.0, 8.0),
+                range: 14.0,
+                ..RenderLight::default()
+            });
+        }
+        s.mark_dirty();
+        s
+    };
+    let view = look(DVec3::new(0.0, 4.0, -4.0), DVec3::new(0.0, 0.0, 8.0));
+    let lit = render(&gpu, &harbour(true), &view, RenderSettings::default());
+    let dark = render(&gpu, &harbour(false), &view, RenderSettings::default());
+    dump("harbour_lamp", &lit);
+    let at = DVec3::new(0.0, 0.0, 8.0);
+    let (l, d) = (patch_at(&lit, &view, at), patch_at(&dark, &view, at));
+    println!("PAR0b HARBOUR: water under the lamp {l:.2}, without it {d:.2}");
+    assert!(
+        l > d + 5.0,
+        "a lamp over the harbour raises the water by {:.2} codes",
+        l - d
+    );
+}
