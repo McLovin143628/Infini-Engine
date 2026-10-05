@@ -3283,6 +3283,10 @@ fn sixty_four_cars_drive_the_composed_city_at_shipping_resolution() {
 
 // ── wave PAR0: THE LIGHT LOOP ───────────────────────────────────────────────
 
+/// One light-loop row: label, p50, p95, GPU ms, light-cluster ms, lights in
+/// the shader, overflowed froxels, shadowed count.
+type LoopRow = (String, f64, f64, f64, f64, u32, u32, usize);
+
 /// `n` synthetic local lights over a disc of `radius` metres around `centre`,
 /// on a deterministic sunflower lattice (integer-indexed, `psin`/`pcos` — no
 /// std trig in committed test data), 3.2 m over `ground`: point lights of
@@ -3399,7 +3403,7 @@ fn the_light_loop_on_the_island_at_nine() {
         info.name, info.device_type, at.x, at.y, at.z
     );
     let path = move |step: u64, w: u32, h: u32| street_orbit(step, w, h, at);
-    let mut rows: Vec<(String, f64, f64, f64, f64, u32, u32, usize)> = Vec::new();
+    let mut rows: Vec<LoopRow> = Vec::new();
     let mut run = |fx: &mut Fixture, label: String, extra: usize, local: bool, budget: usize| {
         fx.extra_lights = synthetic_lights(extra, at, ground, 240.0);
         let mut settings = lit;

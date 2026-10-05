@@ -487,7 +487,7 @@ fn the_light_census_and_the_many_lights_number() {
     // re-minted to keep a strip block whole. A whole settlement's worth of
     // blocks at the cap must fit the frame with room for the island beside it.
     assert!(
-        cap * volumes.max(1) + 1 <= max,
+        cap * volumes.max(1) < max,
         "{volumes} blocks at VOLUME_LIGHT_CAP ({cap} each) overflow the frame's \
          {max}-record light list — the many-lights wall is back"
     );

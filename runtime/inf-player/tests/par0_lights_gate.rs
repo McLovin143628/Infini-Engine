@@ -152,10 +152,14 @@ fn point(at: DVec3, intensity: f32, range: f32, shadow: bool) -> RenderLight {
 fn two_thousand_lights_reach_their_froxels_through_the_ceiling_read_by_name() {
     let Some(gpu) = gpu() else { return };
     const N: usize = 2000;
-    assert!(
-        LIGHTS_PER_FRAME_CEILING >= N,
-        "the frame ceiling ({LIGHTS_PER_FRAME_CEILING}) no longer holds the arm's {N}"
-    );
+    // Read BY NAME, at compile time: a ceiling re-minted below the arm's
+    // population fails the build of this gate, not a run of it.
+    const {
+        assert!(
+            LIGHTS_PER_FRAME_CEILING >= N,
+            "the frame ceiling no longer holds the arm's 2 000 lights"
+        )
+    };
     let mut scene = RenderScene {
         grid_enabled: false,
         ..Default::default()
