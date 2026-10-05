@@ -965,7 +965,7 @@ impl EngineRenderer {
             prev_view_proj: None,
             prev_origin: None,
             shadow: ShadowResources::new(gpu),
-            gi: GiResources::new(gpu, settings.gi.quality, 1),
+            gi: GiResources::new(gpu, settings.gi.quality, 1, lights.data_buffer()),
             exposure: crate::exposure::ExposureResources::new(gpu),
             next_gi_generation: 2,
             gi_audit,
@@ -2045,7 +2045,12 @@ impl EngineRenderer {
         // reads as *wrong pixels*, not a validation error, which is why the key
         // exists.
         if self.gi.quality != self.settings.gi.quality {
-            self.gi = GiResources::new(gpu, self.settings.gi.quality, self.next_gi_generation);
+            self.gi = GiResources::new(
+                gpu,
+                self.settings.gi.quality,
+                self.next_gi_generation,
+                self.lights.data_buffer(),
+            );
             self.next_gi_generation += 1;
         }
 

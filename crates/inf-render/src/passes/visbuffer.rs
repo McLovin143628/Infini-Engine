@@ -82,10 +82,11 @@ pub const VIS_INSTANCE_TEXELS: u32 = 16;
 /// here instead of failing `create_pipeline_layout` on a user's machine.
 ///
 /// **Wave PAR0 spent one more**: the frame's light list joined the environment
-/// group as its fifth storage buffer, so the resolve binds **nine** — one past
-/// the default — and the engine device now requests nine where the adapter
-/// grants it ([`crate::gpu::LIT_FRAGMENT_STORAGE_BUFFERS`], measured placement
-/// ruling there). The headroom is still zero, now against that request.
+/// group as its fifth storage buffer, so the resolve bound **nine** — one past
+/// the default. **Wave PAR0b gave it back**: the GI probe records ride in the
+/// light buffer, the environment group binds four and the resolve eight
+/// ([`crate::gpu::LIT_FRAGMENT_STORAGE_BUFFERS`]). The headroom is zero again,
+/// against `wgpu::Limits::default()` itself.
 pub const VIS_FRAGMENT_STORAGE_BINDINGS: u32 = crate::gpu::LIT_FRAGMENT_STORAGE_BUFFERS;
 
 /// The visibility buffer's own format. `Rg32Uint` because the packing is exactly
@@ -947,9 +948,12 @@ mod tests {
             .iter()
             .filter(|e| is_fragment_storage(e))
             .count() as u32;
+        // PAR0b clause 5: the GI probe records moved into the light buffer, so
+        // the environment group is back to FOUR (VT table, VSM table, VSM
+        // projections, the light buffer) and the resolve to eight.
         assert_eq!(
             (env_storage, resolve_storage),
-            (5, 4),
+            (4, 4),
             "the split moved: the ruling in VIS_FRAGMENT_STORAGE_BINDINGS is \
              arithmetic about four environment bindings and four pools"
         );

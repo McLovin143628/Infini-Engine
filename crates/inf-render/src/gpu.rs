@@ -52,7 +52,15 @@ pub struct GpuContext {
 /// millions); a WebGPU or mobile adapter capped at eight keeps the meshlet path
 /// off through [`crate::caps::VGEOM_MIN_STORAGE_BUFFERS_PER_STAGE`] and lights
 /// every other pass, which needs five.
-pub const LIT_FRAGMENT_STORAGE_BUFFERS: u32 = 9;
+///
+/// **Back to 8 since wave PAR0b (clause 5)**: the GI probe records left the
+/// environment group and ride behind the light words in the light buffer
+/// (`crate::lights::GI_PROBE_OFFSET_BYTES`), so the environment group binds
+/// four storage buffers (the VT table, the VSM table and projections, the
+/// light buffer) and the resolve eight — `wgpu::Limits::default()` exactly, and
+/// an 8-limit WebGPU / mobile adapter keeps the meshlet tier it had before
+/// PAR0.
+pub const LIT_FRAGMENT_STORAGE_BUFFERS: u32 = 8;
 
 /// The limits every engine device requests: `wgpu::Limits::default()` with the
 /// storage-buffer-per-stage count raised to [`LIT_FRAGMENT_STORAGE_BUFFERS`]

@@ -4088,6 +4088,9 @@ pub struct ScatteredSurface {
     /// How much light passes through, `[0, 1]` (wave PAR0) — the twin of
     /// `inf_pcg::PcgSurface::transmission`; `0.0` is opaque.
     pub transmission: f32,
+    /// **When a powered emitter is on** (wave PAR0b, clause 8) — the twin of
+    /// `inf_pcg::PcgSurface::schedule`; `None` emits as authored at every hour.
+    pub schedule: Option<LightSchedule>,
 }
 
 impl ScatteredSurface {
@@ -4104,6 +4107,7 @@ impl ScatteredSurface {
         roughness: 0.75,
         tint: None,
         transmission: 0.0,
+        schedule: None,
     };
 
     /// Whether this surface emits anything at all.
@@ -4120,7 +4124,7 @@ impl ScatteredSurface {
     /// `PartialOrd` on `f32` has no total order to build a `BTreeMap` on. The
     /// `tint` is deliberately absent — it rides the instance.
     #[inline]
-    pub fn batch_key(&self) -> [u32; 7] {
+    pub fn batch_key(&self) -> [u32; 8] {
         [
             self.emissive[0].to_bits(),
             self.emissive[1].to_bits(),
@@ -4130,6 +4134,17 @@ impl ScatteredSurface {
             self.roughness.to_bits(),
             // Wave PAR0: glass is its own batch — it draws in the glass pass.
             self.transmission.to_bits(),
+            // Wave PAR0b: a powered emitter keeps its room's hours, so two
+            // emitters on different shifts cannot share a batch. The code is
+            // `inf_render::powered_gain`'s: 0 = not powered, then 1 + the
+            // schedule's index (Night, Day, Always, Dusk).
+            match self.schedule {
+                None => 0,
+                Some(LightSchedule::Night) => 1,
+                Some(LightSchedule::Day) => 2,
+                Some(LightSchedule::Always) => 3,
+                Some(LightSchedule::Dusk) => 4,
+            },
         ]
     }
 }

@@ -1027,6 +1027,13 @@ pub struct ScatterSource {
     pub pulse_tick: u32,
     /// The world anchor the payload's offsets were packed against.
     pub anchor: DVec3,
+    /// **The quantized schedule levels a powered emitter was written at**
+    /// (wave PAR0b, clause 8), from [`ScatterClock::powered`] — the same
+    /// carry-forward argument as [`glow_step`](Self::glow_step): the level is in
+    /// the batch record, not in the uploaded bytes. They only move during a
+    /// schedule's quarter-hour ramp, so carrying them in every key costs a
+    /// handful of re-packs a day.
+    pub powered: [u8; 4],
 }
 
 impl ScatterSource {
@@ -1044,6 +1051,7 @@ impl ScatterSource {
         glow_step: 0,
         pulse_tick: 0,
         anchor: DVec3::ZERO,
+        powered: [0; 4],
     };
 
     /// Is this a key a carry-forward may match on at all?
@@ -1272,6 +1280,52 @@ pub struct ScatterClock {
     pub glow_step: u16,
     /// The pulse tick, from [`pulse_tick`].
     pub pulse_tick: u32,
+    /// **The level each fixture schedule burns at now** (wave PAR0b, clause
+    /// 8), quantized by [`powered_step`]: `[Night, Day, Always, Dusk]` — the
+    /// order of [`POWERED_SCHEDULES`]. A powered emitter (a TV, a bar's rim, a
+    /// venue sign) is scaled by its schedule's level, the same door a fixture
+    /// in its room is lit through.
+    pub powered: [u8; 4],
+}
+
+/// The schedule codes a powered surface's batch key carries (wave PAR0b):
+/// `0` = not powered (emits as authored at every hour), then `1 + ` the index
+/// into [`ScatterClock::powered`] — Night, Day, Always, Dusk.
+pub const POWERED_SCHEDULES: usize = 4;
+
+/// Quantization of a schedule level `[0, 1]` into the scatter key: sixteen
+/// steps, so a quarter-hour ramp re-packs sixteen times and a steady hour none.
+pub fn powered_step(level: f32) -> u8 {
+    if !level.is_finite() {
+        return 0;
+    }
+    (level.clamp(0.0, 1.0) * 16.0).round() as u8
+}
+
+/// **The radiance a powered emitter's authored value stands for** (wave PAR0b,
+/// clause 8). The content's emissives (a TV's `[0.9, 1.15, 1.7]`, a sign's
+/// `3.6`) were tuned under manual exposure 1.0 and were drawn at that
+/// radiance — at night, under an eye that opens eight stops, 5 of 5 emitters on
+/// the strip clipped to white plates (measured, PAR0b). A powered thing is a
+/// light seen at NIGHT, so its authored value is now read as its brightness
+/// at the night eye: radiance = authored / 256 (the island's
+/// `ISLAND_NIGHT_GAIN_STOPS` = 8), which puts the brightest sign (3.6) at 3.6
+/// on screen under the full night gain — under ACES's clip (≈ 4.5) — and a TV
+/// at 1.7. By day (exposure 1) they are the faint things a screen and a sign
+/// are under the sun. Unpowered emitters (code 0) are untouched.
+pub const POWERED_RADIANCE_SCALE: f32 = 1.0 / 256.0;
+
+/// The gain a powered surface with schedule `code` is drawn at under `clock`:
+/// `1.0` for code `0` (not powered), else its schedule's quantized level times
+/// [`POWERED_RADIANCE_SCALE`].
+pub fn powered_gain(code: u32, clock: ScatterClock) -> f32 {
+    match code {
+        0 => 1.0,
+        c => clock
+            .powered
+            .get(c as usize - 1)
+            .map_or(1.0, |&s| f32::from(s) / 16.0 * POWERED_RADIANCE_SCALE),
+    }
 }
 
 /// **The scatter carry-forward memo** — the scatter twin of what

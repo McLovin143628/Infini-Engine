@@ -329,8 +329,16 @@ struct GiTerrainColumnGpu {
 pub struct GiResources {
     /// Occupancy+albedo+emissive volume (`dim³ × 2` packed `u32`s).
     pub voxels: wgpu::Buffer,
-    /// One record per probe (`probe_count × PROBE_STRIDE_VEC4 vec4<f32>`).
+    /// The buffer the probe records live in — since wave PAR0b (clause 5) the
+    /// frame's LIGHT buffer (`crate::lights::LightGrid`), behind
+    /// [`sh_offset`](Self::sh_offset): one record per probe
+    /// (`probe_count × PROBE_STRIDE_VEC4 vec4<f32>`).
     pub sh: wgpu::Buffer,
+    /// Byte offset of the probe records in [`sh`](Self::sh)
+    /// (`crate::lights::GI_PROBE_OFFSET_BYTES`).
+    pub sh_offset: u64,
+    /// Byte size of THIS tier's probe records (the region is sized for High).
+    pub sh_size: u64,
     /// Shared `GiData` uniform (written by the node, read by everyone).
     pub uniform: wgpu::Buffer,
     /// Bumped on every recreation. Bind-group caches MUST key on this.
@@ -340,7 +348,12 @@ pub struct GiResources {
 }
 
 impl GiResources {
-    pub fn new(gpu: &GpuContext, quality: GiQuality, generation: u64) -> Self {
+    pub fn new(
+        gpu: &GpuContext,
+        quality: GiQuality,
+        generation: u64,
+        light_buffer: &wgpu::Buffer,
+    ) -> Self {
         let dim = quality.voxel_dim() as u64;
         let voxels = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("gi-voxels"),
@@ -353,14 +366,10 @@ impl GiResources {
             mapped_at_creation: false,
         });
         let probes = crate::gi::probe_count_of(quality.probe_dims()) as u64;
-        let sh = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("gi-sh"),
-            // `PROBE_STRIDE_VEC4` vec4<f32> per probe (PAR0b: the SH, the
-            // visibility cells, the relocation offset).
-            size: probes * u64::from(crate::gi::PROBE_STRIDE_VEC4) * 16,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
+        // PAR0b clause 5: no buffer of its own — a sub-range of the light buffer.
+        let sh = light_buffer.clone();
+        let sh_size = probes * u64::from(crate::gi::PROBE_STRIDE_VEC4) * 16;
+        debug_assert!(sh_size <= crate::lights::GI_PROBE_REGION_BYTES);
         let uniform = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("gi-data"),
             size: std::mem::size_of::<GiDataGpu>() as u64,
@@ -372,6 +381,8 @@ impl GiResources {
         Self {
             voxels,
             sh,
+            sh_offset: crate::lights::GI_PROBE_OFFSET_BYTES,
+            sh_size,
             uniform,
             generation,
             quality,
@@ -391,7 +402,8 @@ impl GiResources {
 
     /// Blocking readback of the L1 SH probe buffer. See [`Self::read_voxels`].
     pub fn read_sh(&self, gpu: &GpuContext) -> Vec<u8> {
-        read_buffer(gpu, &self.sh, "gi-sh-readback")
+        let all = read_buffer(gpu, &self.sh, "gi-sh-readback");
+        all[self.sh_offset as usize..(self.sh_offset + self.sh_size) as usize].to_vec()
     }
 }
 
@@ -1453,7 +1465,13 @@ impl RenderNode for GiNode {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: frame.gi.sh.as_entire_binding(),
+                    // PAR0b clause 5: the probe records' sub-range of the
+                    // light buffer, read-write for the march.
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &frame.gi.sh,
+                        offset: frame.gi.sh_offset,
+                        size: std::num::NonZeroU64::new(frame.gi.sh_size),
+                    }),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,

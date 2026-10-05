@@ -25,8 +25,10 @@ use crate::settings::RenderSettings;
 /// is 8.)
 ///
 /// **Wave PAR0 raised it to 9**: the visibility resolve binds the environment
-/// group, which now carries the frame's light list as a fifth storage buffer,
+/// group, which carried the frame's light list as a fifth storage buffer,
 /// beside its own four meshlet pools ([`crate::gpu::LIT_FRAGMENT_STORAGE_BUFFERS`]).
+/// **Wave PAR0b brought it back to 8** (the GI probe records joined the light
+/// buffer), the capability table's pre-PAR0 value.
 pub const VGEOM_MIN_STORAGE_BUFFERS_PER_STAGE: u32 = crate::gpu::LIT_FRAGMENT_STORAGE_BUFFERS;
 
 /// Storage textures a stage must expose for the P18.1 HZB build: the pyramid's

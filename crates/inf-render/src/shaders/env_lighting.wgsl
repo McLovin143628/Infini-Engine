@@ -72,7 +72,8 @@ struct GiData {
 @group(GROUP_ENV) @binding(2) var shadow_map: texture_depth_2d_array;
 @group(GROUP_ENV) @binding(3) var shadow_smp: sampler_comparison;
 @group(GROUP_ENV) @binding(4) var<uniform> shadow: ShadowData;
-@group(GROUP_ENV) @binding(5) var<storage, read> gi_sh: array<vec4<f32>>;
+// Binding 5 (the GI probe records) left this group in wave PAR0b: they ride in
+// the light buffer and are read through `gi_probe_word` (`lights.wgsl`).
 @group(GROUP_ENV) @binding(6) var<uniform> gi: GiData;
 // P18.4: the single-sample scene depth (the SSAO/TAA prepass target), read by the
 // SSR raymarch with `textureLoad` — no sampler, so this costs one binding, not two.
@@ -219,7 +220,7 @@ fn gi_oct_encode(d: vec3<f32>) -> vec2<f32> {
 fn gi_vis_texel(flat: u32, tx: i32, ty: i32) -> f32 {
     let side = i32(GI_VIS_SIDE);
     let t = u32(clamp(ty, 0, side - 1) * side + clamp(tx, 0, side - 1));
-    return gi_sh[flat + 4u + t / 4u][t % 4u];
+    return gi_probe_word(flat + 4u + t / 4u)[t % 4u];
 }
 
 /// The trilinearly probe-interpolated L1 SH coefficients at `world_pos`, as four
@@ -263,10 +264,10 @@ fn gi_fetch_sh(world_pos: vec3<f32>, n: vec3<f32>) -> mat4x3<f32> {
         let weight = w.x * w.y * w.z;
         let gc = clamp(vec3<i32>(base + off), vec3<i32>(0), maxc);
         let flat = u32((gc.z * i32(pd.y) + gc.y) * i32(pd.x) + gc.x) * GI_PROBE_STRIDE;
-        let s0 = gi_sh[flat + 0u];
-        let s1 = gi_sh[flat + 1u].rgb;
-        let s2 = gi_sh[flat + 2u].rgb;
-        let s3 = gi_sh[flat + 3u].rgb;
+        let s0 = gi_probe_word(flat + 0u);
+        let s1 = gi_probe_word(flat + 1u).rgb;
+        let s2 = gi_probe_word(flat + 2u).rgb;
+        let s3 = gi_probe_word(flat + 3u).rgb;
         c0 = c0 + weight * s0.rgb;
         c1 = c1 + weight * s1;
         c2 = c2 + weight * s2;
@@ -291,7 +292,7 @@ fn gi_fetch_sh(world_pos: vec3<f32>, n: vec3<f32>) -> mat4x3<f32> {
         // + the probe's own relocation (PAR0b): a buried probe gathered from the
         // open voxel it moved to, and is weighted from there.
         let probe_pos = pmin + vec3<f32>(gc) * (extent / max(pd - 1.0, vec3<f32>(1.0)))
-            + gi_sh[flat + 20u].xyz;
+            + gi_probe_word(flat + 20u).xyz;
         let to_probe = probe_pos - world_pos;
         let facing = max(dot(normalize(to_probe + n * 1.0e-4), n), 0.0);
         // **CAN THIS PROBE SEE THE SURFACE?** (PAR0b.) Chebyshev's bound over

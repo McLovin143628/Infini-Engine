@@ -72,6 +72,15 @@ struct LightHeader {
 @group(LIGHTS_GROUP) @binding(LIGHTS_HDR) var<uniform> light_hdr: LightHeader;
 @group(LIGHTS_GROUP) @binding(LIGHTS_DATA) var<storage, read> light_words: array<vec4<u32>>;
 
+// **The GI probe records ride in this buffer** (wave PAR0b, clause 5): behind
+// the light words at `crate::lights::GI_PROBE_BASE_VEC4` (substituted at
+// compose time), written by the probe march through its own sub-range binding.
+// `env_lighting.wgsl` reads probe vec4 `i` through here instead of a ninth
+// fragment storage binding.
+fn gi_probe_word(i: u32) -> vec4<f32> {
+    return bitcast<vec4<f32>>(light_words[GI_PROBE_BASE_VEC4u + i]);
+}
+
 fn light_at(i: u32) -> GpuLight {
     let b = i * 4u;
     return GpuLight(

@@ -245,6 +245,10 @@ pub(crate) const ENV_LIGHTS_DATA: u32 = 25;
 /// identity shim otherwise. See `shaders/lights.wgsl`.
 pub(crate) fn lights_source(group: u32, hdr: u32, data: u32, env: bool) -> String {
     let lib = include_str!("../shaders/lights.wgsl")
+        .replace(
+            "GI_PROBE_BASE_VEC4",
+            &crate::lights::GI_PROBE_BASE_VEC4.to_string(),
+        )
         .replace("LIGHTS_GROUP", &group.to_string())
         .replace("LIGHTS_HDR", &hdr.to_string())
         .replace("LIGHTS_DATA", &data.to_string());
@@ -983,16 +987,10 @@ pub(crate) fn env_bgl_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
             },
             count: None,
         },
-        wgpu::BindGroupLayoutEntry {
-            binding: 5,
-            visibility: frag,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Storage { read_only: true },
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
-            count: None,
-        },
+        // Binding 5 — the GI probe records — left the environment group in
+        // wave PAR0b: they ride in the light buffer behind
+        // `crate::lights::GI_PROBE_OFFSET_BYTES` (binding 25), which brought the
+        // lit path back to eight fragment storage buffers.
         wgpu::BindGroupLayoutEntry {
             binding: 6,
             visibility: frag,
@@ -1213,10 +1211,6 @@ impl EnvBinding {
                     wgpu::BindGroupEntry {
                         binding: 4,
                         resource: frame.shadow.uniform.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 5,
-                        resource: frame.gi.sh.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 6,

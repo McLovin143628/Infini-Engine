@@ -70,7 +70,8 @@ struct Water {
     absorption: vec4<f32>,
     // rgb = foam colour, a = crest threshold.
     foam: vec4<f32>,
-    // x = foam shore depth (m), y = foam flow speed (m/s), zw reserved.
+    // x = foam shore depth (m), y = foam flow speed (m/s), z = the body light
+    // (PAR0b: how lit the water's own colours are, 1 by day), w reserved.
     foam2: vec4<f32>,
     // Authored sky gradient (zenith / horizon / ground) — the reflection source
     // when the physical atmosphere is off.
@@ -523,7 +524,11 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 
     // ── absorption (Beer-Lambert, the P17 fog math) ──────────────────────
     let transmit = exp(-water.absorption.rgb * column);
-    let body = mix(water.deep.rgb, water.shallow.rgb, transmit);
+    // PAR0b: the authored colours are daylight radiances; scale them by the
+    // light that reaches the water now (`passes::water::water_body_light`).
+    let body_light = water.foam2.z;
+    let deep = water.deep.rgb * body_light;
+    let body = mix(deep, water.shallow.rgb * body_light, transmit);
 
     // ── refraction ───────────────────────────────────────────────────────
     var behind = body;
@@ -542,7 +547,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         let ok = (od > 0.0) && (od <= in.pos.z);
         let pick = select(base_uv, uv, ok);
         behind = textureSampleLevel(water_scene_color, water_scene_smp, pick, 0.0).rgb * transmit
-            + water.deep.rgb * (1.0 - transmit);
+            + deep * (1.0 - transmit);
     }
 
     // ── reflection + Fresnel ─────────────────────────────────────────────
@@ -594,7 +599,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // A river also foams against its banks, where the flow drags on the bed.
     let bank_foam = select(0.0, smoothstep(0.75, 1.0, in.profile.y) * flow_foam, flow_foam > 0.0);
     let foam = clamp(max(max(crest_foam, shore_band), max(flow_foam * 0.5, bank_foam)), 0.0, 1.0);
-    color = mix(color, water.foam.rgb, foam);
+    color = mix(color, water.foam.rgb * body_light, foam);
 
     // ── aerial perspective ───────────────────────────────────────────────
     color = atmos_apply(color, in.world);

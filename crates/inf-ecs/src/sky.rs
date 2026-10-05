@@ -95,17 +95,19 @@ pub struct ResolvedWeather {
 pub use inf_math::solar::{moon_phase_brightness, MOON_HORIZON_BAND};
 
 /// **The honest moon, as a ratio** (wave PAR0b, clause 3a): the full moon at
-/// altitude lights a surface `1 / 1024` as brightly as the sun does — ten
+/// altitude lights a surface `1 / 256` as brightly as the sun does — eight
 /// stops. Reality is ~400 000 : 1 (≈ 18.6 stops: 0.25 lx against ~100 000 lx).
-/// The other ~8.6 stops are what the EYE takes back: the shipped exposure
-/// adapts up to seven stops at night (`inf_render`'s eye adaptation, bounded by
-/// the level's `exposure_min_luminance`), which leaves a moonlit street about
-/// three stops under noon on screen — the day-for-night photograph, dark and
-/// readable, with the moon's blue cast from its authored colour. A level that
-/// authors its moon through this ratio gets that night; the component default
-/// (`0.15`, 20 : 1) predates the eye and is what the levels without adaptation
-/// still carry.
-pub const MOON_SUN_RATIO: f32 = 1.0 / 1024.0;
+/// The rest is the photograph: the shipped eye opens up to eight stops at night
+/// (the island's `exposure_min_luminance`), and the last ~2.6 stops are the
+/// darkness a night frame KEEPS on screen — the day-for-night exposure, a
+/// moonlit street dark and readable with the moon's blue cast from its
+/// authored colour, which is what a night photograph exposed for the moon
+/// shows. (1/1024 was measured first: on the island at 21:00 and 02:00 — a
+/// June full moon stands only 5–12° up at 49° N — the road read 2–8 / 255,
+/// "nearly not" visible on a CLEAR night, which is the overcast night's look.)
+/// The component default (`0.15`, 20 : 1) predates the eye and is what levels
+/// without adaptation still carry.
+pub const MOON_SUN_RATIO: f32 = 1.0 / 256.0;
 
 /// The resolved sky: the authority's components plus the astronomy they imply.
 ///

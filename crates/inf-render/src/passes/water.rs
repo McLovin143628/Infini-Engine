@@ -416,6 +416,44 @@ impl WaterNode {
     }
 }
 
+/// **How lit the water's own body is** (wave PAR0b, clause 3): the authored
+/// `shallow` / `deep` / foam colours are RADIANCES calibrated under a daylight
+/// sun, and before this wave they were drawn at that radiance at every hour —
+/// at night, under the eye's ×200, the sea was a white-cyan band brighter than
+/// anything on the island. The body is now scaled by the light that actually
+/// reaches it: the sun's and the moon's irradiance on a level surface plus the
+/// sky's, against a sun at 30° (`WATER_DAY_IRRADIANCE`), capped at 1 — so any
+/// daytime sun above 30° draws the authored colours bit for bit, and a scene
+/// without a physical sky (every water golden but the night ones) is 1.0.
+pub(crate) fn water_body_light(
+    sun: &crate::scene::SunParams,
+    atmos: &crate::atmosphere::AtmosphereParams,
+) -> f32 {
+    if !atmos.enabled {
+        return 1.0;
+    }
+    let sd = sun.unit_direction();
+    let md = sun.unit_moon_direction();
+    let lum = |c: [f32; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    let sun_e = lum(sun.color) * sun.intensity.max(0.0) * sd.y.max(0.0);
+    let moon_level =
+        inf_math::solar::moon_light_level(f64::from(md.y), f64::from(sun.moon_phase)) as f32;
+    let moon_e = lum(sun.moon_color) * sun.moon_intensity.max(0.0) * moon_level * md.y.max(0.0);
+    // The night floor (starlight + airglow) the ambient carries, on a level
+    // surface: π · L over the upper hemisphere.
+    let floor_e = lum(sun.moon_color)
+        * sun.moon_intensity.max(0.0)
+        * crate::atmosphere::NIGHT_FLOOR_OF_FULL_MOON;
+    // Twilight: the sun's sky lingers ~7° under the horizon; ramp it out over
+    // the same band `night_fade` uses.
+    let twilight = (1.0 - crate::passes::sky_lut::night_fade(sd.y)) * 0.05 * sun.intensity.max(0.0);
+    ((sun_e + moon_e + floor_e + twilight) / WATER_DAY_IRRADIANCE).min(1.0)
+}
+
+/// The irradiance at which the authored water colours are drawn as authored:
+/// a sun of intensity 3 at 30° elevation (wave PAR0b).
+pub(crate) const WATER_DAY_IRRADIANCE: f32 = 1.5;
+
 /// Pack one body's uniform. Split out of `run` so it is testable without a GPU.
 fn pack_uniform(
     w: &RenderWater,
@@ -528,7 +566,9 @@ fn pack_uniform(
             w.foam_color[2],
             w.foam_crest_threshold,
         ],
-        foam2: [w.foam_shore_m, w.foam_flow_m_s, 0.0, 0.0],
+        // z = the body light (`water_body_light`), written by `run`; 1.0 here so
+        // a uniform packed outside a frame draws the authored colours.
+        foam2: [w.foam_shore_m, w.foam_flow_m_s, 1.0, 0.0],
         zenith: [sky.zenith[0], sky.zenith[1], sky.zenith[2], 0.0],
         horizon: [sky.horizon[0], sky.horizon[1], sky.horizon[2], 0.0],
         ground: [sky.ground[0], sky.ground[1], sky.ground[2], 0.0],
@@ -615,8 +655,9 @@ impl RenderNode for WaterNode {
 
         // ── per-body uniforms ─────────────────────────────────────────────
         let eye = frame.view.eye_local();
+        let light = water_body_light(&frame.scene.sun, &frame.scene.atmosphere);
         for (i, w) in bodies.iter().enumerate() {
-            let u = pack_uniform(
+            let mut u = pack_uniform(
                 w,
                 &frame.view.origin,
                 eye,
@@ -625,6 +666,7 @@ impl RenderNode for WaterNode {
                 &frame.scene.sky,
                 &frame.settings.ssr,
             );
+            u.foam2[2] = light;
             gpu.queue.write_buffer(
                 &self.uniforms,
                 i as u64 * UNIFORM_STRIDE,

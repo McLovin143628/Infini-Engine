@@ -343,10 +343,13 @@ fn hero_height_m() -> f64 {
 /// query. The rest keep their carved channels and are dry beds.
 pub const MAX_RIVER_BODIES: usize = 10;
 
-/// The darkest scene average the island's eye adapts to (wave PAR0b): the 18 %
-/// key over `2^ISLAND_NIGHT_GAIN_STOPS`, so the night can open the exposure at
-/// most that many stops above the day's 1.0.
-pub const ISLAND_EXPOSURE_MIN_LUMINANCE: f32 = 0.18 / 256.0;
+/// The darkest scene average the island's eye adapts to (wave PAR0b): the
+/// day's key over `2^ISLAND_NIGHT_GAIN_STOPS`, so the night can open the
+/// exposure at most that many stops above the day's 1.0.
+pub const ISLAND_EXPOSURE_MIN_LUMINANCE: f32 = ISLAND_EXPOSURE_MAX_LUMINANCE / 256.0;
+/// The compensation that puts the meter's key at the island's own noon street
+/// rather than at the 18 % card: `log2(0.012 / 0.18)` = −3.907 stops.
+pub const ISLAND_EXPOSURE_COMPENSATION_EV: f32 = -3.906_891;
 /// **The island's date** (wave PAR0b): June 12, nine days before the solstice
 /// the clock defaulted to — the noon sun is 0.2° lower, which no frame can see —
 /// and the night of a FULL moon (phase 0.52 at 22:00; the solstice default sat
@@ -355,10 +358,10 @@ pub const ISLAND_EXPOSURE_MIN_LUMINANCE: f32 = 0.18 / 256.0;
 pub const ISLAND_DAY_OF_YEAR: u32 = 163;
 /// How many stops the island's eye may open at night (wave PAR0b).
 pub const ISLAND_NIGHT_GAIN_STOPS: f32 = 8.0;
-/// The brightest scene average the island's eye adapts to: the key itself, so
-/// a daylight frame (average at or above the key) exposes at exactly 1.0 —
-/// the manual frame every daylight number and golden was taken at.
-pub const ISLAND_EXPOSURE_MAX_LUMINANCE: f32 = 0.18;
+/// The brightest scene average the island's eye adapts to — the island's noon
+/// street (measured 0.013 – 0.018), so a daylight street frame exposes at
+/// 1.0, the manual frame every daylight number was taken at.
+pub const ISLAND_EXPOSURE_MAX_LUMINANCE: f32 = 0.012;
 
 /// **How far the island's sun casts a shadow**, metres (wave CERT1, CP-B5).
 ///
@@ -910,14 +913,15 @@ pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
             // **THE EYE** (wave PAR0b, clause 3c). Manual 1.0 cannot show both
             // noon and a moonlit street: the night is ten stops under the day
             // (`inf_ecs::sky::MOON_SUN_RATIO`). Auto exposure, bounded so the
-            // DAY is exactly the manual frame it always was — every scene whose
-            // average is at or above the 18 % key (a lit street at noon) clamps
-            // to `ISLAND_EXPOSURE_MAX_LUMINANCE` = the key, i.e. a multiplier of
-            // exactly 1.0 — and the NIGHT may open up to
-            // `ISLAND_NIGHT_GAIN_STOPS` stops, no further: a moonlit street then
-            // sits about two stops under the key, dark and readable, instead of
-            // being lifted to a grey noon.
+            // DAY is the manual frame it always was: the compensation moves the
+            // meter's key down to `ISLAND_EXPOSURE_MAX_LUMINANCE` (the island's
+            // noon street measures a log-average of 0.013 – 0.018 — sunlit
+            // facades over deep shade — against the 18 % card's 0.18), and
+            // every frame at or above that average clamps to a multiplier of
+            // 1.0. The NIGHT may open up to `ISLAND_NIGHT_GAIN_STOPS` stops, no
+            // further, and the highlight guard keeps lit windows under white.
             exposure_mode: 1,
+            exposure_compensation_ev: ISLAND_EXPOSURE_COMPENSATION_EV,
             exposure_min_luminance: ISLAND_EXPOSURE_MIN_LUMINANCE,
             exposure_max_luminance: ISLAND_EXPOSURE_MAX_LUMINANCE,
             ..crate::scene::serialize::RenderSettingsRecord::lit_showcase()

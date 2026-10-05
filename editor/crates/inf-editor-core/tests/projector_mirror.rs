@@ -3444,7 +3444,14 @@ fn both_projectors_apply_the_cameras_near_fade() {
 /// make the two hosts' GPU light lists byte-identical.
 #[test]
 fn the_light_projection_and_its_clock_are_one_body_in_both_projectors() {
-    for tag in ["venue_rig_lights", "fixture_clock", "authored_sun"] {
+    // + PAR0b: `powered_clock`, the schedule levels a powered emitter (a TV, a
+    // venue sign) is drawn at.
+    for tag in [
+        "venue_rig_lights",
+        "fixture_clock",
+        "authored_sun",
+        "powered_clock",
+    ] {
         // The editor host owns its scene (`self.scene`), the player is handed
         // one (`scene`); that receiver is the one token allowed to differ.
         let editor =
@@ -3464,4 +3471,9 @@ fn the_light_projection_and_its_clock_are_one_body_in_both_projectors() {
     ] {
         assert!(rig.contains(needle), "the rig fence lost `{needle}`");
     }
+    let powered = fenced(&read(PLAYER), "powered_clock", "the shipped player");
+    assert!(
+        powered.contains("inf_ecs::sky::fixture_level(") && powered.contains("powered_step("),
+        "the powered_clock fence no longer resolves the schedules through the fixture door"
+    );
 }

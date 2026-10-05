@@ -228,6 +228,20 @@ fn population_of(out: inf_pcg::VolumeOutput) -> VolumePopulation {
                 roughness: i.surface.roughness,
                 tint: i.surface.tint,
                 transmission: i.surface.transmission,
+                schedule: i.surface.schedule.map(|s| match s {
+                    inf_pcg::building::FixtureSchedule::Night => {
+                        inf_ecs::components::LightSchedule::Night
+                    }
+                    inf_pcg::building::FixtureSchedule::Day => {
+                        inf_ecs::components::LightSchedule::Day
+                    }
+                    inf_pcg::building::FixtureSchedule::Always => {
+                        inf_ecs::components::LightSchedule::Always
+                    }
+                    inf_pcg::building::FixtureSchedule::Dusk => {
+                        inf_ecs::components::LightSchedule::Dusk
+                    }
+                }),
             },
         })
         .collect();
@@ -1246,6 +1260,20 @@ pub async fn pcg_evaluate_biomes(
                         roughness: i.surface.roughness,
                         tint: i.surface.tint,
                         transmission: i.surface.transmission,
+                        schedule: i.surface.schedule.map(|s| match s {
+                            inf_pcg::building::FixtureSchedule::Night => {
+                                inf_ecs::components::LightSchedule::Night
+                            }
+                            inf_pcg::building::FixtureSchedule::Day => {
+                                inf_ecs::components::LightSchedule::Day
+                            }
+                            inf_pcg::building::FixtureSchedule::Always => {
+                                inf_ecs::components::LightSchedule::Always
+                            }
+                            inf_pcg::building::FixtureSchedule::Dusk => {
+                                inf_ecs::components::LightSchedule::Dusk
+                            }
+                        }),
                     },
                 })
                 .collect();

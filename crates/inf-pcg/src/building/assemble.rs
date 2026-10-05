@@ -472,6 +472,25 @@ impl Ctx<'_> {
     /// `Wall::inside` names that room, so the outward normal is derived rather
     /// than authored -- a palette cannot know which way a lot happened to face.
     fn street_face(&self, out: &mut GrammarOutput) {
+        // The sign over the door keeps the hours of the room the door opens
+        // into (PAR0b clause 8) — a venue's neon is lit when the venue is.
+        let start = out.decor.len();
+        self.street_face_pieces(out);
+        let schedule = self
+            .plan
+            .entrance
+            .and_then(|wi| self.plan.walls.get(wi))
+            .and_then(|w| self.plan.rooms.get(w.inside))
+            .map(|r| super::society::schedule_of(r.kind));
+        for inst in &mut out.decor[start..] {
+            if inst.surface.emits() {
+                inst.surface.schedule = schedule;
+            }
+        }
+    }
+
+    /// [`Self::street_face`]'s placement half.
+    fn street_face_pieces(&self, out: &mut GrammarOutput) {
         let Some(sign) = self.arch.entrance_sign else {
             return;
         };
@@ -1082,6 +1101,30 @@ impl Ctx<'_> {
 
     /// Populate one room from its type's furniture set.
     fn furnish(
+        &self,
+        out: &mut GrammarOutput,
+        room_index: usize,
+        room: &Room,
+        y: f64,
+        blockers: &Blockers,
+    ) {
+        // **A powered thing keeps its room's hours** (wave PAR0b, clause 8):
+        // every emitting piece this room's furniture places — the TV, the
+        // bar's rim light, a sign on the wall — takes the room's shift, the
+        // same door a fixture in it does (`society::schedule_of`), so a closed
+        // venue's screens are off. Derived, never serialized.
+        let start = out.instances.len();
+        self.furnish_pieces(out, room_index, room, y, blockers);
+        let schedule = super::society::schedule_of(room.kind);
+        for inst in &mut out.instances[start..] {
+            if inst.surface.emits() {
+                inst.surface.schedule = Some(schedule);
+            }
+        }
+    }
+
+    /// [`Self::furnish`]'s placement half.
+    fn furnish_pieces(
         &self,
         out: &mut GrammarOutput,
         room_index: usize,

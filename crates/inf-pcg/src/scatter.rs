@@ -299,6 +299,12 @@ pub struct PcgSurface {
     /// reflection over the room behind it, no depth write) instead of the
     /// opaque raster, and the GI voxelizer lets the probe march through it.
     pub transmission: f32,
+    /// **When a powered emitter is on** (wave PAR0b, clause 8): the shift of
+    /// the room it stands in, resolved to a level by the projector through the
+    /// same door a fixture uses (`inf_ecs::sky::fixture_level`). `None` — every
+    /// surface that is not a powered thing, and every one that predates the
+    /// wave — emits as authored at every hour.
+    pub schedule: Option<crate::building::FixtureSchedule>,
 }
 
 impl PcgSurface {
@@ -311,6 +317,7 @@ impl PcgSurface {
         roughness: 0.75,
         tint: None,
         transmission: 0.0,
+        schedule: None,
     };
 
     /// Whether this surface emits anything at all — the test the projectors

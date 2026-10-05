@@ -1739,12 +1739,14 @@ pub fn exposure_target_ev(avg: f32, min_luminance: f32, max_luminance: f32) -> f
 }
 
 /// **The highlight guard's percentile** (wave PAR0b, clause 3c): the
-/// brightest `EXPOSURE_HIGHLIGHT_FRACTION` of the frame (2 %) is what the eye
-/// must not blow out.
-pub const EXPOSURE_HIGHLIGHT_FRACTION: f32 = 0.02;
+/// brightest `EXPOSURE_HIGHLIGHT_FRACTION` of the frame (1 %) is what the eye
+/// must not blow out. (2 % at a white of 4.0 was measured first and held the
+/// island's 21:00 street at ×120 for a pair of headlamps.)
+pub const EXPOSURE_HIGHLIGHT_FRACTION: f32 = 0.01;
 /// The scene luminance × exposure the guarded percentile is allowed to reach:
-/// `4.0` is where the engine's ACES fit reaches ~0.97 of white.
-pub const EXPOSURE_HIGHLIGHT_WHITE: f32 = 4.0;
+/// `6.0` is where the engine's ACES fit reaches ~0.99 of white — a lamp lens
+/// may touch white, a lit wall may not pass it.
+pub const EXPOSURE_HIGHLIGHT_WHITE: f32 = 6.0;
 
 /// **THE HIGHLIGHT GUARD** (wave PAR0b, clause 3c): the most exposure, in
 /// stops, the frame can take before its brightest
@@ -2406,11 +2408,11 @@ mod tests {
     /// the brightest 2 % under white, and only bites when something bright is
     /// in the frame.
     #[test]
-    fn the_highlight_guard_keeps_the_brightest_two_percent_under_white() {
+    fn the_highlight_guard_keeps_the_brightest_percent_under_white() {
         let mut bins = vec![0u32; EXPOSURE_BINS as usize];
         bins[exposure_bin(1.0e-4) as usize] = 9_700;
         let dark = exposure_highlight_cap_ev(&bins);
-        // 3 % of the frame is a lit window at luminance 1.0.
+        // 3 % of the frame is a lit window at luminance 1.0 (over the 1 % guard).
         bins[exposure_bin(1.0) as usize] = 300;
         let lit = exposure_highlight_cap_ev(&bins);
         assert!(
@@ -2420,8 +2422,8 @@ mod tests {
         let want = (EXPOSURE_HIGHLIGHT_WHITE / exposure_bin_luminance(exposure_bin(1.0))).log2();
         assert_eq!(lit, want);
         assert!(
-            (lit - 2.0).abs() < 0.2,
-            "a window at 1.0 caps the eye near two stops: {lit}"
+            (lit - EXPOSURE_HIGHLIGHT_WHITE.log2()).abs() < 0.1,
+            "a window at 1.0 caps the eye at log2(white): {lit}"
         );
         assert_eq!(exposure_highlight_cap_ev(&vec![0u32; 256]), f32::MAX);
     }

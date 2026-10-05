@@ -190,9 +190,30 @@ const _: () = assert!(CLUSTER_COUNT.is_multiple_of(4));
 pub const COUNT_BASE_VEC4: u32 = (LIGHTS_PER_FRAME_CEILING as u32) * 4;
 /// `vec4` index of the first froxel index list.
 pub const INDEX_BASE_VEC4: u32 = COUNT_BASE_VEC4 + CLUSTER_COUNT / 4;
-/// Bytes of the one storage buffer.
+/// Bytes of the light half of the one storage buffer.
 pub const LIGHT_DATA_BYTES: u64 =
     (INDEX_BASE_VEC4 as u64 + (CLUSTER_COUNT as u64 * CLUSTER_MAX_LIGHTS as u64) / 4) * 16;
+
+/// **Where the GI probe records live: in THIS buffer** (wave PAR0b, clause 5).
+///
+/// PAR0 put the light list in the environment group as its fifth fragment
+/// storage buffer, which with the visibility resolve's four meshlet pools made
+/// nine — one past `wgpu::Limits::default()` — and an 8-limit adapter lost the
+/// meshlet tier. The GI probe records (`gi_sh`, the environment group's other
+/// storage buffer that every lit fragment reads) now ride behind the light data
+/// at a 256-byte-aligned offset (the storage-offset alignment every backend
+/// grants): the probe march binds that sub-range read-write as its own
+/// `array<vec4<f32>>`, the lit passes read it through the light words they
+/// already bind (`gi_probe_word` in `lights.wgsl`). Back to eight.
+pub const GI_PROBE_OFFSET_BYTES: u64 = LIGHT_DATA_BYTES.div_ceil(256) * 256;
+/// The probe region's first `vec4` in the light words.
+pub const GI_PROBE_BASE_VEC4: u32 = (GI_PROBE_OFFSET_BYTES / 16) as u32;
+/// Bytes of the probe region — sized for the HIGHEST GI tier (the most probes),
+/// so a tier change never reallocates the buffer the environment group binds.
+pub const GI_PROBE_REGION_BYTES: u64 =
+    crate::gi::probe_count() as u64 * crate::gi::PROBE_STRIDE_VEC4 as u64 * 16;
+/// The whole buffer: the light words, the alignment pad, the probe records.
+pub const LIGHT_BUFFER_BYTES: u64 = GI_PROBE_OFFSET_BYTES + GI_PROBE_REGION_BYTES;
 
 /// **The frame's light list** — what [`plan_lights`] decided, before upload.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -615,7 +636,9 @@ impl LightGrid {
         });
         let data = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("lights-data"),
-            size: LIGHT_DATA_BYTES,
+            // PAR0b: the light words AND the GI probe records (see
+            // `GI_PROBE_OFFSET_BYTES`).
+            size: LIGHT_BUFFER_BYTES,
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC,

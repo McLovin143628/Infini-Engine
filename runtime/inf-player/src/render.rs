@@ -914,9 +914,29 @@ pub fn project_scene_full(
     let fixture_hour = inf_ecs::sky::local_hour(world);
     // MIRROR-END fixture_clock
     let fixture_sun_y = scene.sun.direction.y;
+    // MIRROR-BEGIN powered_clock
+    // Wave PAR0b clause 8: the level every fixture schedule burns at now, for
+    // the POWERED emitters (a TV, a bar's rim, a venue sign) — the same door
+    // a fixture in their room is lit through, quantized for the scatter key.
+    let powered = [
+        inf_ecs::components::LightSchedule::Night,
+        inf_ecs::components::LightSchedule::Day,
+        inf_ecs::components::LightSchedule::Always,
+        inf_ecs::components::LightSchedule::Dusk,
+    ]
+    .map(|s| {
+        inf_render::powered_step(inf_ecs::sky::fixture_level(
+            s,
+            fixture_hour,
+            fixture_sun_y,
+            1.0,
+        ))
+    });
+    // MIRROR-END powered_clock
     let clock = inf_render::ScatterClock {
         glow_step: inf_render::night_glow_step(scene.sun.direction),
         pulse_tick: inf_render::pulse_tick(clock_s),
+        powered,
     };
     // The clock and wind every water body responds to, resolved ONCE per
     // projection in Ring 0 (`inf_ecs::sky`) so the two MIRROR projectors cannot
@@ -1852,7 +1872,7 @@ fn push_scatter(
     //
     // The TINT is deliberately not in the key: a scattered instance has carried
     // its own colour since P18.5, so a venue's six neon hues cost one draw.
-    type BucketKey = (Option<u128>, u32, [u32; 7]);
+    type BucketKey = (Option<u128>, u32, [u32; 8]);
     let mut buckets: std::collections::BTreeMap<BucketKey, Vec<ScatterInstance>> =
         std::collections::BTreeMap::new();
     for si in instances {
@@ -1929,6 +1949,9 @@ fn push_scatter(
             f32::from_bits(surface[3]),
             clock.pulse_tick,
         );
+        // PAR0b clause 8: a powered emitter at its schedule's level now.
+        let gain = inf_render::powered_gain(surface[7], clock);
+        let authored = [authored[0] * gain, authored[1] * gain, authored[2] * gain];
         let glow = inf_render::glow_emissive(f32::from_bits(glow_bits), clock.glow_step);
         scene.scatter.push(ScatterBatch {
             data: Arc::new(data),
@@ -2190,6 +2213,8 @@ fn carry_or_push_pcg_scatter(
         // 20 020-instance fixture, the hit path went 0.009 ms -> 0.350 ms.
         pulse_tick: if vol.pulses { clock.pulse_tick } else { 0 },
         anchor: translation,
+        // PAR0b clause 8: the powered emitters' schedule levels.
+        powered: clock.powered,
     };
     if let Some(batches) = prev.take(source) {
         for b in &batches {
