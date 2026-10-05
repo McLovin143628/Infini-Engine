@@ -1777,6 +1777,10 @@ mod shader_compose_tests {
             ("const EXPOSURE_LOG_MIN: f32 = ", crate::EXPOSURE_LOG_MIN),
             ("const EXPOSURE_LOG_MAX: f32 = ", crate::EXPOSURE_LOG_MAX),
             ("const EXPOSURE_KEY: f32 = ", crate::EXPOSURE_KEY),
+            (
+                "const EXPOSURE_LIGHT_ADAPTATION_RATIO: f32 = ",
+                crate::settings::EXPOSURE_LIGHT_ADAPTATION_RATIO,
+            ),
         ] {
             let at = src
                 .find(decl)
@@ -1816,7 +1820,9 @@ mod shader_compose_tests {
         assert_eq!(crate::adapt_exposure_ev(0.0, 4.0, 2.0, 0.0), 0.0);
         assert_eq!(crate::adapt_exposure_ev(0.0, 4.0, 2.0, 0.5), 1.0);
         assert_eq!(crate::adapt_exposure_ev(0.0, 4.0, 2.0, 100.0), 4.0);
-        assert_eq!(crate::adapt_exposure_ev(0.0, -4.0, 2.0, 0.5), -1.0);
+        // Toward LESS exposure the eye adapts `EXPOSURE_LIGHT_ADAPTATION_RATIO`
+        // times faster (PAR0b): 2 stops/s x 0.5 s x 3.
+        assert_eq!(crate::adapt_exposure_ev(0.0, -4.0, 2.0, 0.5), -3.0);
         assert_eq!(crate::adapt_exposure_ev(1.0, 4.0, 0.0, 100.0), 1.0);
     }
 

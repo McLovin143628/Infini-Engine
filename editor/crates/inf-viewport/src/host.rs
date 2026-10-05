@@ -1857,15 +1857,21 @@ impl EngineHost {
                         .map(|g| g.0)
                         .unwrap_or(glam::DAffine3::IDENTITY);
                     // MIRROR-BEGIN authored_sun
-                    // PAR0 audit (d'): the sky authority's own directional fades with
-                    // the sun (`inf_ecs::sky::authored_sun_level`) — a fixed daylight
-                    // fill must not shine at night.
+                    // PAR0 audit (d') + PAR0b clause 4: the sky authority's own
+                    // directional is never a second sun (`inf_ecs::sky::authored_sun_level`)
+                    // — while the clock lights the scene it is not projected at all.
                     let mut projected = project_light(light, &affine);
-                    if light.kind == EcsLightKind::Directional {
-                        projected.intensity *= inf_ecs::sky::authored_sun_level(world, guid);
-                    }
+                    let level = if light.kind == EcsLightKind::Directional {
+                        inf_ecs::sky::authored_sun_level(world, guid)
+                    } else {
+                        1.0
+                    };
+                    projected.intensity *= level;
+                    let shines = level > 0.0;
                     // MIRROR-END authored_sun
-                    self.scene.lights.push(projected);
+                    if shines {
+                        self.scene.lights.push(projected);
+                    }
                     // Cache a cone gizmo for spot lights (R-P3), drawn for the
                     // selection only in `render_frame`.
                     if light.kind == EcsLightKind::Spot {
@@ -4103,7 +4109,10 @@ fn project_sky(scene: &mut RenderScene, world: &inf_ecs::EcsWorld) {
             direction: direction.as_vec3(),
             position: DVec3::ZERO,
             range: 0.0,
-            cast_shadows: true,
+            // A set moon is a zero-intensity key light (the list must not be
+            // empty, or the fallback editor sun would shine at night); it
+            // casts no shadow, so no shadow map is drawn for nothing.
+            cast_shadows: intensity > 0.0,
             ..RenderLight::default()
         });
     }

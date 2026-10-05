@@ -53,6 +53,14 @@ struct GiData {
     sky_sh1: vec4<f32>,
     sky_sh2: vec4<f32>,
     sky_sh3: vec4<f32>,
+    // Wave PAR0b: the NIGHT sky's share of `sky_sh*` on its own (moonlit dome,
+    // starlight + airglow, the city-glow hook) — already summed into `sky_sh*`;
+    // the probe march reads it apart because its blocked-sky subtraction reads
+    // the sun-only sky-view LUT. See `crate::atmosphere::night_sky_sh`.
+    night_sh0: vec4<f32>,
+    night_sh1: vec4<f32>,
+    night_sh2: vec4<f32>,
+    night_sh3: vec4<f32>,
 };
 
 @group(GROUP_ENV) @binding(0) var ao_tex: texture_2d<f32>;
@@ -176,6 +184,40 @@ fn sh_basis(d: vec3<f32>) -> vec4<f32> {
     return vec4<f32>(0.282095, 0.488603 * d.y, 0.488603 * d.z, 0.488603 * d.x);
 }
 
+// Wave PAR0b: a probe's record is TWENTY-ONE vec4s (four L1 coefficients, the
+// 8 x 8 octahedral visibility map of hit distances, the relocation offset).
+// MIRROR: `crate::gi::PROBE_STRIDE_VEC4` and `gi_probes.wgsl`.
+const GI_PROBE_STRIDE: u32 = 21u;
+const GI_VIS_SIDE: u32 = 8u;
+// The probe-visibility test (wave PAR0b, clause 1): how far along its normal a
+// surface is lifted before it is looked up, in voxels (so a probe in front of
+// a floor is not refused by the floor itself), and the floor on the distance
+// variance, in voxels² (so a neighbourhood whose rays all struck one flat wall
+// still fades a probe over about a voxel instead of cutting it like a knife).
+// MIRROR: `crate::gi::PROBE_VIS_NORMAL_BIAS_VOXELS` /
+// `PROBE_VIS_MIN_VARIANCE_VOXELS2`.
+const GI_VIS_NORMAL_BIAS: f32 = 1.0;
+const GI_VIS_MIN_VARIANCE: f32 = 0.25;
+
+// **The octahedral map of the sphere** (wave PAR0b). MIRROR of
+// `gi_oct_encode` in `gi_probes.wgsl`, character-for-character — see there.
+fn gi_oct_encode(d: vec3<f32>) -> vec2<f32> {
+    let n = d / max(abs(d.x) + abs(d.y) + abs(d.z), 1.0e-6);
+    var uv = n.xz;
+    if (n.y < 0.0) {
+        let s = select(vec2<f32>(-1.0), vec2<f32>(1.0), n.xz >= vec2<f32>(0.0));
+        uv = (vec2<f32>(1.0) - abs(n.zx)) * s;
+    }
+    return uv * 0.5 + vec2<f32>(0.5);
+}
+
+// One texel of probe `flat`'s visibility map, clamped to the map.
+fn gi_vis_texel(flat: u32, tx: i32, ty: i32) -> f32 {
+    let side = i32(GI_VIS_SIDE);
+    let t = u32(clamp(ty, 0, side - 1) * side + clamp(tx, 0, side - 1));
+    return gi_sh[flat + 4u + t / 4u][t % 4u];
+}
+
 /// The trilinearly probe-interpolated L1 SH coefficients at `world_pos`, as four
 /// RGB triples in a 3×4 matrix (`[c0, c1, c2, c3]` in columns). Both the diffuse
 /// irradiance and the P18.4 specular reconstruction start here, so the 8-tap fetch
@@ -184,9 +226,20 @@ fn gi_fetch_sh(world_pos: vec3<f32>, n: vec3<f32>) -> mat4x3<f32> {
     let pmin = gi.probe_min.xyz;
     let extent = gi.probe_min.w;
     let pd = vec3<f32>(gi.dims.y, gi.dims.z, gi.dims.w);
-    let coord = clamp((world_pos - pmin) / extent, vec3<f32>(0.0), vec3<f32>(1.0)) * (pd - 1.0);
+    let raw = (world_pos - pmin) / extent;
+    let coord = clamp(raw, vec3<f32>(0.0), vec3<f32>(1.0)) * (pd - 1.0);
     let base = floor(coord);
     let f = coord - base;
+    // **PROBE VISIBILITY** (wave PAR0b, clause 1) only inside the probe volume:
+    // a surface beyond it is clamped onto the boundary probes, which are about
+    // somewhere else whatever their cells say, and refusing them there would
+    // black out a distant street rather than shadow anything.
+    // `gi.sky_sh0.w` is `GiSettings::probe_visibility`.
+    let inside = all(raw >= vec3<f32>(-0.02)) && all(raw <= vec3<f32>(1.02))
+        && gi.sky_sh0.w > 0.5;
+    let vsize = gi.vol_min.w;
+    let q = world_pos + n * (GI_VIS_NORMAL_BIAS * vsize);
+    let min_var = GI_VIS_MIN_VARIANCE * vsize * vsize;
 
     var c0 = vec3<f32>(0.0);
     var c1 = vec3<f32>(0.0);
@@ -205,7 +258,7 @@ fn gi_fetch_sh(world_pos: vec3<f32>, n: vec3<f32>) -> mat4x3<f32> {
         let w = mix(1.0 - f, f, off);
         let weight = w.x * w.y * w.z;
         let gc = clamp(vec3<i32>(base + off), vec3<i32>(0), maxc);
-        let flat = u32((gc.z * i32(pd.y) + gc.y) * i32(pd.x) + gc.x) * 4u;
+        let flat = u32((gc.z * i32(pd.y) + gc.y) * i32(pd.x) + gc.x) * GI_PROBE_STRIDE;
         let s0 = gi_sh[flat + 0u];
         let s1 = gi_sh[flat + 1u].rgb;
         let s2 = gi_sh[flat + 2u].rgb;
@@ -231,10 +284,45 @@ fn gi_fetch_sh(world_pos: vec3<f32>, n: vec3<f32>) -> mat4x3<f32> {
         // for the FETCH — so a position built from the unclamped index would be
         // a cell away from the probe whose coefficients are being weighted.
         // Mirrors `cs_probes`' own `probe_min.xyz + frac * extent`.
-        let probe_pos = pmin + vec3<f32>(gc) * (extent / max(pd - 1.0, vec3<f32>(1.0)));
+        // + the probe's own relocation (PAR0b): a buried probe gathered from the
+        // open voxel it moved to, and is weighted from there.
+        let probe_pos = pmin + vec3<f32>(gc) * (extent / max(pd - 1.0, vec3<f32>(1.0)))
+            + gi_sh[flat + 20u].xyz;
         let to_probe = probe_pos - world_pos;
         let facing = max(dot(normalize(to_probe + n * 1.0e-4), n), 0.0);
-        let vwi = weight * s0.w * facing;
+        // **CAN THIS PROBE SEE THE SURFACE?** (PAR0b.) Chebyshev's bound over
+        // the 2 x 2 neighbourhood of the probe's visibility map in the
+        // surface's direction: nearer than the mean hit, it is seen; beyond
+        // it, the chance a ray gets that far is at most
+        // var / (var + (len - mean)²) — cubed, DDGI's sharpening, so the far
+        // side of a wall falls to nothing within a voxel or two.
+        var vis = 1.0;
+        if (inside) {
+            let d = q - probe_pos;
+            let len = length(d);
+            if (len > 1.0e-4) {
+                let st = gi_oct_encode(d / len) * f32(GI_VIS_SIDE) - vec2<f32>(0.5);
+                let i0 = vec2<i32>(floor(st));
+                let fw = st - floor(st);
+                let d00 = gi_vis_texel(flat, i0.x, i0.y);
+                let d10 = gi_vis_texel(flat, i0.x + 1, i0.y);
+                let d01 = gi_vis_texel(flat, i0.x, i0.y + 1);
+                let d11 = gi_vis_texel(flat, i0.x + 1, i0.y + 1);
+                let w00 = (1.0 - fw.x) * (1.0 - fw.y);
+                let w10 = fw.x * (1.0 - fw.y);
+                let w01 = (1.0 - fw.x) * fw.y;
+                let w11 = fw.x * fw.y;
+                let mean = w00 * d00 + w10 * d10 + w01 * d01 + w11 * d11;
+                let msq = w00 * d00 * d00 + w10 * d10 * d10 + w01 * d01 * d01 + w11 * d11 * d11;
+                if (len > mean) {
+                    let variance = max(msq - mean * mean, min_var);
+                    let dd = len - mean;
+                    let p = variance / (variance + dd * dd);
+                    vis = p * p * p;
+                }
+            }
+        }
+        let vwi = weight * s0.w * facing * vis;
         v0 = v0 + vwi * s0.rgb;
         v1 = v1 + vwi * s1;
         v2 = v2 + vwi * s2;
@@ -254,6 +342,17 @@ fn gi_fetch_sh(world_pos: vec3<f32>, n: vec3<f32>) -> mat4x3<f32> {
     if (vw > 1.0e-5) {
         let inv = 1.0 / vw;
         return mat4x3<f32>(v0 * inv, v1 * inv, v2 * inv, v3 * inv);
+    }
+    // **NO PROBE CAN SEE THIS SURFACE** (PAR0b, clause 1) — every corner is on
+    // the far side of something, which inside the volume means the surface is
+    // in a space no probe stands in: a sealed room between probe layers. No
+    // light reaches it but its own direct lights, so the probe term returns the
+    // NEGATIVE of the sky the consumer is about to add: the ambient is zero.
+    // (Before this wave it returned the plain blend — the probes above the roof
+    // and below the floor — and a sealed room read as bright as the street.)
+    if (inside) {
+        let k = -1.0 / max(gi.params.y, 1.0e-4);
+        return mat4x3<f32>(gi.sky_sh0.rgb * k, gi.sky_sh1.rgb * k, gi.sky_sh2.rgb * k, gi.sky_sh3.rgb * k);
     }
     return mat4x3<f32>(c0, c1, c2, c3);
 }

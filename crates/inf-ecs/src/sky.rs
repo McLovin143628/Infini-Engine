@@ -92,6 +92,21 @@ pub struct ResolvedWeather {
     pub snowiness: f32,
 }
 
+pub use inf_math::solar::{moon_phase_brightness, MOON_HORIZON_BAND};
+
+/// **The honest moon, as a ratio** (wave PAR0b, clause 3a): the full moon at
+/// altitude lights a surface `1 / 1024` as brightly as the sun does — ten
+/// stops. Reality is ~400 000 : 1 (≈ 18.6 stops: 0.25 lx against ~100 000 lx).
+/// The other ~8.6 stops are what the EYE takes back: the shipped exposure
+/// adapts up to seven stops at night (`inf_render`'s eye adaptation, bounded by
+/// the level's `exposure_min_luminance`), which leaves a moonlit street about
+/// three stops under noon on screen — the day-for-night photograph, dark and
+/// readable, with the moon's blue cast from its authored colour. A level that
+/// authors its moon through this ratio gets that night; the component default
+/// (`0.15`, 20 : 1) predates the eye and is what the levels without adaptation
+/// still carry.
+pub const MOON_SUN_RATIO: f32 = 1.0 / 1024.0;
+
 /// The resolved sky: the authority's components plus the astronomy they imply.
 ///
 /// Returned by [`resolve_sky`]; consumed by both scene projectors and by any
@@ -137,8 +152,42 @@ impl ResolvedSky {
             Some((self.sun, [c.r, c.g, c.b], a.sun_intensity))
         } else {
             let c = a.moon_color;
-            Some((self.moon, [c.r, c.g, c.b], a.moon_intensity))
+            // Behind an overcast deck the moon's beam is gone (PAR0b): the same
+            // veil the renderer's night-sky ambient applies, from the same
+            // coverage, so the beam and the dome dim together.
+            let veil = if a.clouds_enabled {
+                inf_math::solar::night_cloud_veil(self.weather().cloud_coverage) as f32
+            } else {
+                1.0
+            };
+            Some((
+                self.moon,
+                [c.r, c.g, c.b],
+                a.moon_intensity * self.moon_level() * veil,
+            ))
         }
+    }
+
+    /// **How much of the authored moon lights the scene now** (wave PAR0b,
+    /// clause 3a), `[0, 1]`: the product of an ELEVATION fade and the lunar
+    /// PHASE LAW.
+    ///
+    /// * Elevation: a smoothstep on the moon's height over
+    ///   [`MOON_HORIZON_BAND`] — `0.0` at and below the geometric horizon (a
+    ///   moon under the ground lit the undersides of everything before this
+    ///   wave: the key light kept its direction and its full 0.15 when the moon
+    ///   had set), `1.0` once it is more than ~5.7° up.
+    /// * Phase: the moon is not a lamp whose output scales with its lit area.
+    ///   Its brightness falls far faster than the illuminated fraction because
+    ///   of the opposition surge — a quarter moon is about a tenth of a full one,
+    ///   not a half. [`moon_phase_brightness`] is the standard photometric phase
+    ///   law (Allen), `1.0` at full, ~0.09 at quarter, `0` at new.
+    ///
+    /// The authored [`SkyAtmosphere::moon_intensity`] is therefore the FULL
+    /// moon at altitude: what an author types is the brightest night the level
+    /// can have, and the clock and the date decide how much of it tonight gets.
+    pub fn moon_level(&self) -> f32 {
+        inf_math::solar::moon_light_level(self.moon.y, self.moon_phase) as f32
     }
 
     /// How much the authored sky gradient is scaled at this time of day, `[0, 1]`.
@@ -418,8 +467,18 @@ fn warn_orphan_atmosphere(world: &EcsWorld, authority: Option<Entity>) {
 /// daytime sun lit every wall on the strip (measured: the 21:00 strip frame's
 /// mean 15.7 / 255 with it, 4.6 without — and the warm interiors in the PAR0
 /// demo's look-right frame were that sun, not the fixtures). A daylight fill
-/// that ignores the clock is a defect at night; by day it is unchanged here (the
-/// two-sun daytime is carried, not moved, by this audit).
+/// that ignores the clock is a defect at night.
+///
+/// **ONE SUN** (wave PAR0b, clause 4): and by day it was a SECOND sun — 3.2 at a
+/// fixed 10:30 bearing beside the clock's 3.0, two shadows on every kerb and a
+/// noon frame lit by 6.2. While the authority's atmosphere lights the scene
+/// (`SkyAtmosphere::enabled`), the clock's key light IS the sun: its direction
+/// from [`ResolvedSky::sun`], its colour and intensity from
+/// `SkyAtmosphere::sun_color` / `sun_intensity`, which is what the editor's
+/// Details grid edits on the authority entity. A directional `Light` on that
+/// same entity is therefore never projected (`0.0` at every hour — both
+/// projectors skip a light at zero). A level that wants to author its own sun
+/// turns the atmosphere off, and then its `Light` is the sun again (`1.0`).
 pub fn authored_sun_level(world: &EcsWorld, guid: Uuid) -> f32 {
     let Some(sky) = resolve_sky(world) else {
         return 1.0;
@@ -427,9 +486,7 @@ pub fn authored_sun_level(world: &EcsWorld, guid: Uuid) -> f32 {
     if sky.guid != guid || !sky.atmosphere.enabled {
         return 1.0;
     }
-    const BAND: f64 = 0.15; // sin(≈8.6°), `sky_dim`'s band
-    let t = ((sky.sun.y + BAND) / (2.0 * BAND)).clamp(0.0, 1.0);
-    (t * t * (3.0 - 2.0 * t)) as f32
+    0.0
 }
 
 /// Resolve the level's sky, or `None` when no entity carries a [`TimeOfDay`].
@@ -945,10 +1002,12 @@ mod tests {
         assert_eq!(resolve_sky(&w1).unwrap().time_of_day.seconds, 1.0);
     }
 
-    /// PAR0 audit (d'): the authority's own directional is dark at midnight,
-    /// whole at mid-morning, and every OTHER light is never scaled.
+    /// PAR0 audit (d') + PAR0b clause 4: the authority's own directional is dark
+    /// at midnight AND at mid-morning (the clock's key light is the one sun),
+    /// whole again once the atmosphere stops lighting the scene, and every
+    /// OTHER light is never scaled.
     #[test]
-    fn the_authoritys_own_sun_fades_at_night_and_nothing_else_does() {
+    fn the_authoritys_own_sun_is_never_a_second_sun_and_nothing_else_is_scaled() {
         let a = uuid(0x31);
         let midnight = TimeOfDay {
             seconds: 0.0,
@@ -966,9 +1025,55 @@ mod tests {
             1.0,
             "another light was scaled"
         );
-        let w = world_with(&[(a, TimeOfDay::default())]);
+        let mut w = world_with(&[(a, TimeOfDay::default())]);
         assert!(resolve_sky(&w).unwrap().sun.y > 0.15);
-        assert_eq!(authored_sun_level(&w, a), 1.0, "the daytime fill moved");
+        assert_eq!(
+            authored_sun_level(&w, a),
+            0.0,
+            "a second sun shines beside the clock's by day"
+        );
+        let e = sky_authority(&w).unwrap();
+        w.world_mut().entity_mut(e).insert(SkyAtmosphere {
+            enabled: false,
+            ..SkyAtmosphere::default()
+        });
+        assert_eq!(
+            authored_sun_level(&w, a),
+            1.0,
+            "a level that authors its own sun lost it"
+        );
+    }
+
+    /// PAR0b clause 3a: the moon lights by its elevation and its phase — dark
+    /// below the horizon, a tenth at quarter, whole at a full moon overhead.
+    #[test]
+    fn the_moon_fades_below_the_horizon_and_follows_its_phase() {
+        assert!((moon_phase_brightness(0.5) - 1.0).abs() < 1e-12);
+        let q = moon_phase_brightness(0.25);
+        assert!((0.07..0.11).contains(&q), "quarter moon {q}");
+        assert!(moon_phase_brightness(0.0) < 1e-3, "new moon");
+        assert_eq!(moon_phase_brightness(0.25), moon_phase_brightness(0.75));
+        let base = ResolvedSky {
+            guid: uuid(1),
+            time_of_day: TimeOfDay::default(),
+            atmosphere: SkyAtmosphere::default(),
+            sun: DVec3::new(0.0, -0.5, 0.866),
+            moon: DVec3::new(0.0, 1.0, 0.0),
+            moon_phase: 0.5,
+        };
+        assert_eq!(base.moon_level(), 1.0);
+        let (_, _, i) = base.key_light().unwrap();
+        assert_eq!(i, base.atmosphere.moon_intensity);
+        let set = ResolvedSky {
+            moon: DVec3::new(0.0, -0.2, 0.98),
+            ..base
+        };
+        assert_eq!(set.moon_level(), 0.0, "a set moon lights the scene");
+        let low = ResolvedSky {
+            moon: DVec3::new(0.0, 0.05, 0.9987),
+            ..base
+        };
+        assert!(low.moon_level() > 0.0 && low.moon_level() < 1.0);
     }
 
     #[test]
@@ -994,7 +1099,7 @@ mod tests {
         assert!(!sky.is_day(), "00:00 UTC at longitude 0 is night");
         let (dir, _, intensity) = sky.key_light().unwrap();
         assert_eq!(dir, sky.moon);
-        assert_eq!(intensity, 0.15);
+        assert_eq!(intensity, 0.15 * sky.moon_level());
     }
 
     #[test]

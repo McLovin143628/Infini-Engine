@@ -205,6 +205,27 @@ pub struct GiDataGpu {
     // `sky_horizon` are the probe march's own two-colour approximation of this
     // same sky, and the day the march stops needing them they can go.
     pub sky_sh: [[f32; 4]; 4],
+    /// **The night sky's share of `sky_sh`, on its own** (wave PAR0b, clause
+    /// 3b): [`crate::atmosphere::night_sky_sh`] — the moonlit dome, starlight
+    /// and airglow, the city's skyglow hook. `sky_sh` already INCLUDES it (the
+    /// lit passes read one ambient); the probe march reads it separately
+    /// because its blocked-sky subtraction reads the sky-view LUT, which is
+    /// sun-only — without this a sealed room would subtract the sun's sky and
+    /// keep the night's, i.e. the night floor would shine through every wall.
+    pub night_sh: [[f32; 4]; 4],
+}
+
+/// The sum of two L1 triple sets, coefficient by coefficient. A sum with an
+/// all-zero set returns the other set's exact bits (`x + 0.0 == x`), which is
+/// what keeps the daytime ambient bit-identical under the night term.
+fn add_sh(a: [[f32; 3]; 4], b: [[f32; 3]; 4]) -> [[f32; 3]; 4] {
+    let mut c = a;
+    for (ck, bk) in c.iter_mut().zip(b) {
+        for (v, w) in ck.iter_mut().zip(bk) {
+            *v += w;
+        }
+    }
+    c
 }
 
 /// Pad an SH triple set into the uniform's `vec4` lanes.
@@ -242,6 +263,7 @@ impl GiDataGpu {
             // `shaders/env_lighting.wgsl` for the gate and the ledger for why
             // this wave did not widen it.
             sky_sh: [[0.0; 4]; 4],
+            night_sh: [[0.0; 4]; 4],
         }
     }
 
@@ -301,7 +323,7 @@ struct GiTerrainColumnGpu {
 pub struct GiResources {
     /// Occupancy+albedo+emissive volume (`dim³ × 2` packed `u32`s).
     pub voxels: wgpu::Buffer,
-    /// L1 SH per probe (`probe_count × 4 vec4<f32>`).
+    /// One record per probe (`probe_count × PROBE_STRIDE_VEC4 vec4<f32>`).
     pub sh: wgpu::Buffer,
     /// Shared `GiData` uniform (written by the node, read by everyone).
     pub uniform: wgpu::Buffer,
@@ -327,8 +349,9 @@ impl GiResources {
         let probes = crate::gi::probe_count_of(quality.probe_dims()) as u64;
         let sh = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("gi-sh"),
-            // 4 vec4<f32> per probe.
-            size: probes * 4 * 16,
+            // `PROBE_STRIDE_VEC4` vec4<f32> per probe (PAR0b: the SH, the
+            // visibility cells, the relocation offset).
+            size: probes * u64::from(crate::gi::PROBE_STRIDE_VEC4) * 16,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
@@ -1301,7 +1324,15 @@ impl RenderNode for GiNode {
             .write_buffer(&self.terrain, 0, bytemuck::cast_slice(&columns));
 
         let sky = &frame.scene.sky;
-        let data = GiDataGpu {
+        let r_km = crate::atmosphere::camera_radius_km(
+            &frame.scene.atmosphere,
+            frame.view.eye_world.y as f32,
+        );
+        // The night sky's ambient (PAR0b clause 3b) — zero while the sun is up,
+        // so every daylight frame keeps the sun-only coefficients bit for bit.
+        let night =
+            crate::passes::sky_lut::night_sky_memo(&frame.scene.atmosphere, r_km, &frame.scene.sun);
+        let mut data = GiDataGpu {
             vol_min: [vol_min.x, vol_min.y, vol_min.z, vsize],
             probe_min: [vol_min.x, vol_min.y, vol_min.z, extent],
             dims: [
@@ -1333,26 +1364,30 @@ impl RenderNode for GiNode {
             // from and `AtmosphereGpu::build` bakes the LUT for — so the
             // ambient and the sky the player can see behind it can never
             // disagree about where the sun is. One door, and it is the sky's.
-            sky_sh: sky_sh_lanes(crate::passes::sky_lut::sky_irradiance_memo(
-                &frame.scene.atmosphere,
-                crate::atmosphere::camera_radius_km(
+            sky_sh: sky_sh_lanes(add_sh(
+                crate::passes::sky_lut::sky_irradiance_memo(
                     &frame.scene.atmosphere,
-                    frame.view.eye_world.y as f32,
+                    r_km,
+                    frame.scene.sun.unit_direction().into(),
+                    {
+                        let i = frame.scene.sun.intensity.max(0.0);
+                        [
+                            frame.scene.sun.color[0] * i,
+                            frame.scene.sun.color[1] * i,
+                            frame.scene.sun.color[2] * i,
+                        ]
+                    },
+                    sky.horizon,
+                    sky.zenith,
                 ),
-                frame.scene.sun.unit_direction().into(),
-                {
-                    let i = frame.scene.sun.intensity.max(0.0);
-                    [
-                        frame.scene.sun.color[0] * i,
-                        frame.scene.sun.color[1] * i,
-                        frame.scene.sun.color[2] * i,
-                    ]
-                },
-                sky.horizon,
-                sky.zenith,
+                night,
             )),
+            night_sh: sky_sh_lanes(night),
         }
         .with_ssr(frame);
+        // PAR0b: the probe-visibility switch rides the unused `w` of the first
+        // sky coefficient (`gi.sky_sh0.w` in `env_lighting.wgsl`).
+        data.sky_sh[0][3] = if s.probe_visibility { 1.0 } else { 0.0 };
         gpu.queue
             .write_buffer(&frame.gi.uniform, 0, bytemuck::bytes_of(&data));
 
@@ -1725,6 +1760,76 @@ env_lighting:
 gi_probes:
 {b}"
         );
+    }
+
+    /// PAR0b: the march writes the visibility map and the fetch reads it
+    /// through ONE octahedral encoding, and the probe record's layout constants
+    /// agree in all three places.
+    #[test]
+    fn the_two_octahedral_encodings_are_the_same() {
+        const ENV: &str = include_str!("../shaders/env_lighting.wgsl");
+        const PROBES: &str = include_str!("../shaders/gi_probes.wgsl");
+        let sig = "fn gi_oct_encode(d: vec3<f32>) -> vec2<f32>";
+        let a = body(ENV, sig, "env_lighting.wgsl");
+        let b = body(PROBES, sig, "gi_probes.wgsl");
+        assert!(
+            a.contains("n.zx") && a.contains("0.5"),
+            "extraction broken: {a:?}"
+        );
+        assert_eq!(a, b, "the two `gi_oct_encode` copies have drifted");
+        for (src, decl, v) in [
+            (
+                ENV,
+                "const GI_PROBE_STRIDE: u32 = ",
+                crate::gi::PROBE_STRIDE_VEC4 as f32,
+            ),
+            (
+                PROBES,
+                "const GI_PROBE_STRIDE: u32 = ",
+                crate::gi::PROBE_STRIDE_VEC4 as f32,
+            ),
+            (
+                PROBES,
+                "const GI_RELOCATE_VOXELS: i32 = ",
+                crate::gi::PROBE_RELOCATE_VOXELS as f32,
+            ),
+            (
+                ENV,
+                "const GI_VIS_NORMAL_BIAS: f32 = ",
+                crate::gi::PROBE_VIS_NORMAL_BIAS_VOXELS,
+            ),
+            (
+                ENV,
+                "const GI_VIS_MIN_VARIANCE: f32 = ",
+                crate::gi::PROBE_VIS_MIN_VARIANCE_VOXELS2,
+            ),
+            (
+                ENV,
+                "const GI_VIS_SIDE: u32 = ",
+                crate::gi::PROBE_VIS_SIDE as f32,
+            ),
+            (
+                PROBES,
+                "const GI_VIS_SIDE: u32 = ",
+                crate::gi::PROBE_VIS_SIDE as f32,
+            ),
+            (
+                PROBES,
+                "const GI_VIS_MISS_SPACINGS: f32 = ",
+                crate::gi::PROBE_VIS_MISS_SPACINGS,
+            ),
+        ] {
+            let at = src.find(decl).unwrap_or_else(|| panic!("missing `{decl}`"));
+            let lit: String = src[at + decl.len()..]
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '.')
+                .collect();
+            assert_eq!(
+                lit.parse::<f32>().unwrap(),
+                v,
+                "`{decl}` disagrees with the Rust constant"
+            );
+        }
     }
 
     /// The probe march must not gather the sky on a miss any more — that is the

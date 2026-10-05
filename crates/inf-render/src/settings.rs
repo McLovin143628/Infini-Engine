@@ -521,6 +521,14 @@ pub struct GiSettings {
     /// already does) and therefore **on by default** — but only reachable when
     /// [`enabled`](GiSettings::enabled) is set, so no non-GI golden is affected.
     pub specular: bool,
+    /// **Probe visibility** (wave PAR0b, clause 1): the fetch weighs each probe
+    /// by whether it can SEE the surface (Chebyshev over the probe's twelve
+    /// cells of hit distances) and a surface no probe can see — a sealed room
+    /// between probe layers — receives no ambient at all. On by default: it is
+    /// the reason an unlit room is dark. Render-side only (never persisted);
+    /// `false` restores the pre-PAR0b blend for an A/B and for the gate's
+    /// mutation.
+    pub probe_visibility: bool,
 }
 // **SSR left this struct in wave VIS1a.** `ssr` / `ssr_distance` /
 // `ssr_thickness` lived here from P18.4 because all SSR did was move the GI
@@ -540,6 +548,7 @@ impl Default for GiSettings {
             instance_budget: 4096,
             probe_budget: 0,
             specular: true,
+            probe_visibility: true,
         }
     }
 }
@@ -1599,8 +1608,28 @@ impl RenderSettings {
 /// is what makes the reduction a single fixed-shape tree rather than a loop whose
 /// order depends on the dispatch.
 pub const EXPOSURE_BINS: u32 = 256;
-/// Lowest log2 luminance the histogram resolves (2⁻¹⁰ ≈ 0.001).
-pub const EXPOSURE_LOG_MIN: f32 = -10.0;
+/// Lowest log2 luminance the histogram resolves (2⁻¹⁶ ≈ 1.5·10⁻⁵).
+///
+/// **Was 2⁻¹⁰ until wave PAR0b**, and the night could not vote: a moonlit
+/// street's asphalt sits near 5·10⁻⁵ in the renderer's linear units (the moon
+/// at 1/1024 of the sun), so every pixel of it landed in the black bin, the
+/// log-average was made of the few lit windows alone, and the eye stopped the
+/// frame DOWN at night. Sixteen stops under 1.0 puts a moonlit kerb, road and
+/// parked car inside the measured range; true black (and the unlit backdrop the
+/// black bin exists for) still falls below it. No golden runs auto exposure,
+/// so the wider range moves no committed pixel.
+pub const EXPOSURE_LOG_MIN: f32 = -16.0;
+
+/// **How much faster the eye adapts to LIGHT than to DARK** (wave PAR0b, clause
+/// 3c): a step toward LESS exposure (the scene got brighter — walking out of a
+/// tunnel into noon) runs at `adaptation_speed × this`; a step toward MORE
+/// exposure (the scene got darker — stepping out of a lit bar into the night)
+/// at `adaptation_speed`. The human eye's light adaptation takes seconds and its
+/// dark adaptation minutes; three is the conventional game ratio that keeps the
+/// "flash" of a bright exit short and the "eyes adjusting" of a dark one
+/// readable. A derived constant rather than an authored field: the record's one
+/// `exposure_adaptation_speed` is scene schema and the wave moves none.
+pub const EXPOSURE_LIGHT_ADAPTATION_RATIO: f32 = 3.0;
 /// Highest log2 luminance the histogram resolves (2¹⁰ = 1024).
 pub const EXPOSURE_LOG_MAX: f32 = 10.0;
 /// The average scene luminance auto exposure aims to place at the tonemapper's
@@ -1616,7 +1645,7 @@ pub fn luminance(rgb: [f32; 3]) -> f32 {
 /// Which histogram bin a linear luminance falls in.
 ///
 /// **Bin 0 is the black bin and is deliberately special**: everything at or below
-/// 2⁻¹⁰ lands in it, and [`exposure_log_average`] then ignores it. A frame is
+/// 2⁻¹⁶ lands in it, and [`exposure_log_average`] then ignores it. A frame is
 /// mostly sky or mostly unlit background far more often than it is mostly
 /// mid-tone, and letting a black backdrop vote drags the average toward nothing
 /// and blows the exposure open on the few pixels that *are* lit.
@@ -1714,6 +1743,10 @@ pub fn exposure_target_ev(avg: f32, min_luminance: f32, max_luminance: f32) -> f
 /// `dt == 0` returns `prev_ev` unchanged. That is not an edge case, it is the
 /// contract: `dt` is a **level-clock** delta, so a paused clock is a frozen
 /// adaptation, and a frame counter can never get in.
+///
+/// **Asymmetric since wave PAR0b**: a step DOWN in exposure (the scene got
+/// brighter) moves [`EXPOSURE_LIGHT_ADAPTATION_RATIO`] times faster than a step
+/// up — the eye adapts to light in seconds and to dark in minutes.
 pub fn adapt_exposure_ev(prev_ev: f32, target_ev: f32, speed: f32, dt: f32) -> f32 {
     let step = if speed.is_finite() {
         speed.max(0.0)
@@ -1721,7 +1754,8 @@ pub fn adapt_exposure_ev(prev_ev: f32, target_ev: f32, speed: f32, dt: f32) -> f
         0.0
     } * if dt.is_finite() { dt.max(0.0) } else { 0.0 };
     let delta = target_ev - prev_ev;
-    prev_ev + delta.clamp(-step, step)
+    let down = step * EXPOSURE_LIGHT_ADAPTATION_RATIO;
+    prev_ev + delta.clamp(-down, step)
 }
 
 /// The linear multiplier `stops` of exposure compensation is worth.
@@ -2317,6 +2351,22 @@ mod tests {
             frozen = adapt_exposure_ev(frozen, target, speed, 0.0);
         }
         assert_eq!(frozen, 0.5);
+    }
+
+    /// PAR0b clause 3c: the eye adapts to light faster than to dark — the same
+    /// four stops of change take a third of the clock going down as going up.
+    #[test]
+    fn the_eye_adapts_to_light_faster_than_to_dark() {
+        let speed = 1.0f32;
+        let up = adapt_exposure_ev(0.0, 4.0, speed, 1.0);
+        let down = adapt_exposure_ev(4.0, 0.0, speed, 1.0);
+        assert_eq!(up, 1.0, "toward more exposure at the authored rate");
+        assert_eq!(
+            down,
+            4.0 - EXPOSURE_LIGHT_ADAPTATION_RATIO,
+            "toward less exposure at the light-adaptation rate"
+        );
+        assert!(EXPOSURE_LIGHT_ADAPTATION_RATIO > 1.0);
     }
 
     #[test]

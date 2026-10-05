@@ -190,6 +190,15 @@ pub struct AtmosphereParams {
     /// [`crate::precip::PrecipParams`]. Projected from the weather block, never
     /// authored directly — which is why it has no knobs of its own here.
     pub precip: crate::precip::PrecipParams,
+    /// **THE CITY'S OWN SKYGLOW — PAR1's hook** (wave PAR0b, clause 3b): the
+    /// radiance, linear RGB, that a lit city scatters back down out of the
+    /// night sky, applied as a uniform upper-hemisphere term of
+    /// [`night_sky_sh`]. ZERO here and in both projectors: no fixture's light
+    /// is counted into it yet. PAR1b (street lamps) derives it from the lit
+    /// fixtures it places — a function of how much light the city emits, not
+    /// an authored constant — and writes it on this field; nothing else needs
+    /// to change for the ambient, the probe march and the eye to see it.
+    pub city_glow: [f32; 3],
 }
 
 impl Default for AtmosphereParams {
@@ -223,6 +232,7 @@ impl Default for AtmosphereParams {
             fog: HeightFog::default(),
             clouds: crate::clouds::CloudParams::default(),
             precip: crate::precip::PrecipParams::default(),
+            city_glow: [0.0; 3],
         }
     }
 }
@@ -834,6 +844,88 @@ pub fn sky_irradiance_sh(
     for ck in c.iter_mut() {
         for v in ck.iter_mut() {
             *v *= norm;
+        }
+    }
+    c
+}
+
+/// **The night floor's starlight + airglow, as a fraction of the full moon**
+/// (wave PAR0b, clause 3b). A clear moonless night is lit at ~0.002 lx by
+/// starlight, airglow and zodiacal light against a full moon's ~0.25 lx:
+/// about one percent. Expressed against the level's OWN authored full moon so
+/// the floor scales with whatever night the author chose, and so a scene that
+/// never projected a moon (intensity 0, every scene without a clock) has no
+/// floor at all.
+pub const NIGHT_FLOOR_OF_FULL_MOON: f32 = 0.01;
+
+/// How much of the night sky an overcast deck lets through, from the cloud
+/// coverage `[0, 1]` (wave PAR0b): `1.0` clear, `0.1` under a full deck. An
+/// overcast night is nearly black away from the city's lights — the moon and
+/// the stars are behind the cloud. Read by the key light's moon
+/// (`inf_ecs::sky::ResolvedSky::key_light`, through
+/// [`inf_math::solar::night_cloud_veil`]) and by [`night_sky_sh`].
+pub use inf_math::solar::night_cloud_veil;
+
+/// **THE NIGHT SKY'S OWN IRRADIANCE** (wave PAR0b, clause 3b) — the term the
+/// sun-driven [`sky_irradiance_sh`] cannot carry, as four L1 coefficients in
+/// its exact convention (so the consumer simply adds them):
+///
+/// 1. **the moonlit sky** — the same medium marched with the MOON as its light
+///    ([`sky_radiance`] with `moon_dir` and `moon_irradiance`): a blue dome,
+///    brighter toward the moon, `moon_irradiance / sun_irradiance` as bright as
+///    the daytime sky — which is what a moonlit sky IS;
+/// 2. **starlight + airglow** — a uniform floor of
+///    `full_moon × NIGHT_FLOOR_OF_FULL_MOON / π` radiance, there on a moonless
+///    night;
+/// 3. **the city's skyglow** — `params.city_glow` over the upper hemisphere
+///    (zero until PAR1 derives it);
+///
+/// (1) and (2) veiled by the cloud deck ([`night_cloud_veil`]), and ALL of it
+/// faded in with the sun's departure (`night_fade`, `0` while the sun is up),
+/// so every daytime frame — every daylight golden — is bit-identical to the
+/// sun-only ambient. `moon_irradiance` is the moon's light NOW (colour × the
+/// authored full intensity × [`inf_math::solar::moon_light_level`]);
+/// `full_moon` the authored full-moon colour × intensity.
+pub fn night_sky_sh(
+    params: &AtmosphereParams,
+    r_km: f32,
+    night_fade: f32,
+    moon_dir: [f32; 3],
+    moon_irradiance: [f32; 3],
+    full_moon: [f32; 3],
+) -> [[f32; 3]; 4] {
+    let mut c = [[0.0f32; 3]; 4];
+    if night_fade <= 0.0 || !params.enabled {
+        return c;
+    }
+    let veil = if params.clouds_active() {
+        night_cloud_veil(params.clouds.coverage) as f32
+    } else {
+        1.0
+    };
+    if moon_irradiance.iter().any(|&v| v > 0.0) {
+        c = sky_irradiance_sh(params, r_km, moon_dir, moon_irradiance, [0.0; 3], [0.0; 3]);
+        for ck in c.iter_mut() {
+            for v in ck.iter_mut() {
+                *v *= veil;
+            }
+        }
+    }
+    // A uniform radiance L projects to c0 = L · Y00 · 4π (the consumer's
+    // `c0 · Y00` then returns exactly L); an upper-hemisphere one to
+    // c0 = G · Y00 · 2π and c_y = G · 0.488603 · π.
+    let y00 = 0.282_095_f32;
+    let four_pi = 4.0 * std::f32::consts::PI;
+    for ch in 0..3 {
+        let floor = full_moon[ch] * NIGHT_FLOOR_OF_FULL_MOON / std::f32::consts::PI * veil;
+        c[0][ch] += floor * y00 * four_pi;
+        let g = params.city_glow[ch].max(0.0);
+        c[0][ch] += g * y00 * 2.0 * std::f32::consts::PI;
+        c[1][ch] += g * 0.488_603 * std::f32::consts::PI;
+    }
+    for ck in c.iter_mut() {
+        for v in ck.iter_mut() {
+            *v *= night_fade;
         }
     }
     c

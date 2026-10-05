@@ -61,9 +61,12 @@ struct ExposureState {
 // `EXPOSURE_LOG_MAX` / `EXPOSURE_KEY`. Pinned by
 // `the_cpu_and_wgsl_exposure_rules_agree`.
 const EXPOSURE_BINS: u32 = 256u;
-const EXPOSURE_LOG_MIN: f32 = -10.0;
+const EXPOSURE_LOG_MIN: f32 = -16.0;
 const EXPOSURE_LOG_MAX: f32 = 10.0;
 const EXPOSURE_KEY: f32 = 0.18;
+// MIRROR: `inf_render::settings::EXPOSURE_LIGHT_ADAPTATION_RATIO` (PAR0b) — a
+// step toward less exposure runs this many times faster than one toward more.
+const EXPOSURE_LIGHT_ADAPTATION_RATIO: f32 = 3.0;
 
 var<workgroup> tile: array<atomic<u32>, 256>;
 var<workgroup> red_w: array<f32, 256>;
@@ -167,7 +170,7 @@ fn cs_resolve(@builtin(local_invocation_index) li: u32) {
     if (params.step.y > 0.5) {
         let step = max(params.control.z, 0.0) * max(params.step.x, 0.0);
         let delta = target_ev - state.v.y;
-        ev = state.v.y + clamp(delta, -step, step);
+        ev = state.v.y + clamp(delta, -step * EXPOSURE_LIGHT_ADAPTATION_RATIO, step);
     }
 
     // Compensation rides on the OUTPUT, not on the adapted value: turning the

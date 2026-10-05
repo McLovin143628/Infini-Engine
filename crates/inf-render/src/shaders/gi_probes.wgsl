@@ -46,6 +46,14 @@ struct GiData {
     sky_sh1: vec4<f32>,
     sky_sh2: vec4<f32>,
     sky_sh3: vec4<f32>,
+    // Wave PAR0b: the NIGHT sky's share of `sky_sh*` on its own (moonlit dome,
+    // starlight + airglow, the city-glow hook) — already summed into `sky_sh*`;
+    // the probe march reads it apart because its blocked-sky subtraction reads
+    // the sun-only sky-view LUT. See `crate::atmosphere::night_sky_sh`.
+    night_sh0: vec4<f32>,
+    night_sh1: vec4<f32>,
+    night_sh2: vec4<f32>,
+    night_sh3: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> gi: GiData;
 @group(0) @binding(1) var<storage, read> voxels: array<u32>;
@@ -53,6 +61,22 @@ struct GiData {
 
 const PI: f32 = 3.14159265359;
 const GI_EMISSIVE_MAX: f32 = 16.0;
+// Wave PAR0b: a probe's record is TWENTY-ONE vec4s — the four L1
+// coefficients, then the probe's VISIBILITY MAP (an 8 x 8 octahedral map of
+// the distance to the nearest surface in each direction, metres, sixteen
+// vec4s), then the relocation offset (xyz, w = validity). MIRROR:
+// `crate::gi::PROBE_STRIDE_VEC4`.
+const GI_PROBE_STRIDE: u32 = 21u;
+// The visibility map's side, texels (`GI_VIS_SIDE`² dedicated rays a probe).
+// MIRROR: `crate::gi::PROBE_VIS_SIDE`.
+const GI_VIS_SIDE: u32 = 8u;
+// A visibility ray that hits nothing within this many probe spacings records
+// that distance: no surface a probe is ever blended for lies further than its
+// cell diagonal. MIRROR: `crate::gi::PROBE_VIS_MISS_SPACINGS`.
+const GI_VIS_MISS_SPACINGS: f32 = 2.0;
+// How far (voxels) a buried probe searches for open space. MIRROR:
+// `crate::gi::PROBE_RELOCATE_VOXELS`.
+const GI_RELOCATE_VOXELS: i32 = 2;
 
 fn unpack_rgba8(v: u32) -> vec4<f32> {
     return vec4<f32>(
@@ -127,6 +151,32 @@ fn sky_irradiance(n: vec3<f32>) -> vec3<f32> {
         + 0.66666667 * (gi.sky_sh1.rgb * b.y + gi.sky_sh2.rgb * b.z + gi.sky_sh3.rgb * b.w);
 }
 
+// **The octahedral map of the sphere** (wave PAR0b, clause 1): a unit
+// direction to `[0, 1]²`, +Y at the centre. MIRROR of `gi_oct_encode` in
+// `env_lighting.wgsl`, character-for-character, pinned by
+// `passes::gi::tests::the_two_octahedral_encodings_are_the_same` — the march
+// writes a texel along a direction and the fetch reads one back along
+// another, so the two must be the same map.
+fn gi_oct_encode(d: vec3<f32>) -> vec2<f32> {
+    let n = d / max(abs(d.x) + abs(d.y) + abs(d.z), 1.0e-6);
+    var uv = n.xz;
+    if (n.y < 0.0) {
+        let s = select(vec2<f32>(-1.0), vec2<f32>(1.0), n.xz >= vec2<f32>(0.0));
+        uv = (vec2<f32>(1.0) - abs(n.zx)) * s;
+    }
+    return uv * 0.5 + vec2<f32>(0.5);
+}
+
+// The direction through a texel's centre — the inverse of `gi_oct_encode`.
+fn gi_oct_decode(uv: vec2<f32>) -> vec3<f32> {
+    let f = uv * 2.0 - vec2<f32>(1.0);
+    var n = vec3<f32>(f.x, 1.0 - abs(f.x) - abs(f.y), f.y);
+    let t = max(-n.y, 0.0);
+    n.x = n.x + select(t, -t, n.x >= 0.0);
+    n.z = n.z + select(t, -t, n.z >= 0.0);
+    return normalize(n);
+}
+
 // March toward the sun from `p`; 0 if an occluder is hit before leaving the volume.
 fn sun_visibility(p: vec3<f32>) -> f32 {
     let vsize = gi.vol_min.w;
@@ -148,7 +198,14 @@ fn sun_visibility(p: vec3<f32>) -> f32 {
 // deferral); otherwise the authored two-colour gradient, byte-identical to v1.
 fn gi_sky_radiance(dir: vec3<f32>) -> vec3<f32> {
     if (gi.sched.w > 0.5) {
-        return atmos_sample_skyview(atmos.planet.z, dir);
+        // + the night sky (PAR0b): the LUT is the sun's sky only, and a blocked
+        // ray must subtract ALL the sky the consumer adds back — or the night's
+        // moonlit dome and starlight would light the inside of a sealed room.
+        // Radiance along `dir` from its L1 set (lobe 1), zero by day.
+        let b = sh_basis(dir);
+        let night = gi.night_sh0.rgb * b.x + gi.night_sh1.rgb * b.y + gi.night_sh2.rgb * b.z
+            + gi.night_sh3.rgb * b.w;
+        return atmos_sample_skyview(atmos.planet.z, dir) + night;
     }
     let t = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
     return mix(gi.sky_horizon.rgb, gi.sky_zenith.rgb, t);
@@ -179,11 +236,49 @@ fn cs_probes(@builtin(global_invocation_id) gid: vec3<u32>) {
         select(f32(iy) / f32(py - 1u), 0.5, py <= 1u),
         select(f32(iz) / f32(pz - 1u), 0.5, pz <= 1u),
     );
-    let origin = gi.probe_min.xyz + frac * extent;
+    let lattice = gi.probe_min.xyz + frac * extent;
 
     let vsize = gi.vol_min.w;
     let dim = gi.dims.x;
     let rays = u32(gi.params.z);
+
+    // **A BURIED PROBE MOVES OUT** (wave PAR0b, clause 1). A probe standing in a
+    // floor slab, a wall or the ground used to be dropped from every blend (the
+    // FIX3 audit's validity flag) — and on a 3 m storey under a 5.7 m (or even a
+    // 2.7 m) probe pitch, the probe that would have been INSIDE a room is very
+    // often the one in its slab. So it searches the six axis directions out to
+    // `GI_RELOCATE_VOXELS` voxels, nearest first and +Y before -Y (a probe in a
+    // floor slab belongs to the room above it), and gathers from the first open
+    // voxel centre it finds. The fetch reads the offset (lane 7) and weights the
+    // probe from where it actually stands. Only if nothing within reach is open
+    // is it invalid.
+    var origin = lattice;
+    var probe_valid = 1.0;
+    if (sample_point(origin).solid > 0.5) {
+        probe_valid = 0.0;
+        var axes = array<vec3<f32>, 6>(
+            vec3<f32>(0.0, 1.0, 0.0),
+            vec3<f32>(0.0, -1.0, 0.0),
+            vec3<f32>(1.0, 0.0, 0.0),
+            vec3<f32>(-1.0, 0.0, 0.0),
+            vec3<f32>(0.0, 0.0, 1.0),
+            vec3<f32>(0.0, 0.0, -1.0),
+        );
+        for (var k = 1; k <= GI_RELOCATE_VOXELS; k = k + 1) {
+            for (var a = 0; a < 6; a = a + 1) {
+                let cand = lattice + axes[a] * (vsize * f32(k));
+                if (probe_valid < 0.5 && sample_point(cand).solid < 0.5) {
+                    origin = cand;
+                    probe_valid = 1.0;
+                }
+            }
+            if (probe_valid > 0.5) {
+                break;
+            }
+        }
+    }
+    // The longest a visibility ray needs to be (see `GI_VIS_MISS_SPACINGS`).
+    let far_d = GI_VIS_MISS_SPACINGS * extent / max(min(f32(px), min(f32(py), f32(pz))) - 1.0, 1.0);
 
     // **IS THIS PROBE INSIDE SOMETHING?** (wave FIX3 audit.) A probe buried in a
     // wall, a floor slab or the ground marches every one of its rays into the
@@ -198,7 +293,6 @@ fn cs_probes(@builtin(global_invocation_id) gid: vec3<u32>) {
     // costs no memory and no bandwidth, and `gi_fetch_sh` drops those corners
     // from the blend — falling back to the plain blend when every corner is
     // buried, because "no opinion" must not read as "black".
-    let probe_valid = select(1.0, 0.0, sample_point(origin).solid > 0.5);
 
     var c0 = vec3<f32>(0.0);
     var c1 = vec3<f32>(0.0);
@@ -361,9 +455,42 @@ fn cs_probes(@builtin(global_invocation_id) gid: vec3<u32>) {
     c3 = c3 + s3 * sky_view;
 
     let norm = 4.0 * PI / f32(max(rays, 1u));
-    let base = pi * 4u;
+    let base = pi * GI_PROBE_STRIDE;
     sh[base + 0u] = vec4<f32>(c0 * norm, probe_valid);
     sh[base + 1u] = vec4<f32>(c1 * norm, 0.0);
     sh[base + 2u] = vec4<f32>(c2 * norm, 0.0);
     sh[base + 3u] = vec4<f32>(c3 * norm, 0.0);
+    // **THE VISIBILITY MAP** (PAR0b, clause 1): one occupancy-only ray through
+    // each of the 64 texel centres, recording how far the probe can see that
+    // way (capped at `far_d`, past which nothing the probe lights can lie). The
+    // fetch reads it bilinearly and runs Chebyshev's bound on the 2 x 2
+    // neighbourhood — DDGI's visibility at an 8 x 8 map. The march is short:
+    // `far_d` is a few probe spacings, a few dozen voxels at most.
+    let side = GI_VIS_SIDE;
+    let vsteps = i32(ceil(far_d / vsize));
+    var vis_d = array<f32, 64>();
+    for (var t = 0u; t < side * side; t = t + 1u) {
+        let uv = (vec2<f32>(f32(t % side), f32(t / side)) + vec2<f32>(0.5)) / f32(side);
+        let vdir = gi_oct_decode(uv);
+        var vpos = origin + vdir * vsize * 0.5;
+        var d = far_d;
+        for (var s = 0; s < vsteps; s = s + 1) {
+            if (sample_point(vpos).solid > 0.5) {
+                d = min(vsize * (0.5 + f32(s)), far_d);
+                break;
+            }
+            vpos = vpos + vdir * vsize;
+        }
+        vis_d[t] = d;
+    }
+    // Whole vec4 words, never single lanes (the PAR0 Metal law).
+    for (var k = 0u; k < 16u; k = k + 1u) {
+        sh[base + 4u + k] = vec4<f32>(
+            vis_d[k * 4u],
+            vis_d[k * 4u + 1u],
+            vis_d[k * 4u + 2u],
+            vis_d[k * 4u + 3u],
+        );
+    }
+    sh[base + 20u] = vec4<f32>(origin - lattice, probe_valid);
 }

@@ -118,13 +118,30 @@ fn cs_voxelize(@builtin(global_invocation_id) gid: vec3<u32>) {
     for (var i = lo; i < hi; i = i + 1u) {
         let inst = instances[cell_items[i]];
         let local = (inst.inv_model * vec4<f32>(center, 1.0)).xyz;
+        // **CONSERVATIVE OCCUPANCY** (wave PAR0b, clause 1). The test used to be
+        // the voxel CENTRE against the primitive, so a wall thinner than a voxel
+        // (the island's 0.3 m walls and slabs against a 0.625 m voxel) was
+        // solid in about half the voxel columns it crossed and open in the rest
+        // — the probe march saw daylight through the walls of a sealed room. The
+        // primitive is now dilated by half a voxel along each of its own axes
+        // (a world half-voxel is `0.5 · vsize · |row i|` in instance-local units,
+        // the row lengths of the inverse model's 3 x 3 being 1 / scale), so any
+        // primitive that touches a voxel's half-width band claims it.
+        let m = inst.inv_model;
+        let rows = vec3<f32>(
+            length(vec3<f32>(m[0].x, m[1].x, m[2].x)),
+            length(vec3<f32>(m[0].y, m[1].y, m[2].y)),
+            length(vec3<f32>(m[0].z, m[1].z, m[2].z)),
+        );
+        let grow = 0.5 * vsize * rows;
         var inside = false;
         if (inst.albedo.w > 0.5) {
             // Unit sphere in instance-local space (vgeom meshlet bounds).
-            inside = dot(local, local) <= 0.25;
+            let r = 0.5 + max(grow.x, max(grow.y, grow.z));
+            inside = dot(local, local) <= r * r;
         } else {
             // Unit cube ±0.5 in instance-local space (rigid + skinned joints).
-            inside = all(abs(local) <= vec3<f32>(0.5));
+            inside = all(abs(local) <= vec3<f32>(0.5) + grow);
         }
         if (inside) {
             out = vec4<f32>(inst.albedo.rgb, 1.0);

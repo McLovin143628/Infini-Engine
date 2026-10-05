@@ -343,6 +343,17 @@ fn hero_height_m() -> f64 {
 /// query. The rest keep their carved channels and are dry beds.
 pub const MAX_RIVER_BODIES: usize = 10;
 
+/// The darkest scene average the island's eye adapts to (wave PAR0b): the 18 %
+/// key over `2^ISLAND_NIGHT_GAIN_STOPS`, so the night can open the exposure at
+/// most that many stops above the day's 1.0.
+pub const ISLAND_EXPOSURE_MIN_LUMINANCE: f32 = 0.18 / 256.0;
+/// How many stops the island's eye may open at night (wave PAR0b).
+pub const ISLAND_NIGHT_GAIN_STOPS: f32 = 8.0;
+/// The brightest scene average the island's eye adapts to: the key itself, so
+/// a daylight frame (average at or above the key) exposes at exactly 1.0 —
+/// the manual frame every daylight number and golden was taken at.
+pub const ISLAND_EXPOSURE_MAX_LUMINANCE: f32 = 0.18;
+
 /// **How far the island's sun casts a shadow**, metres (wave CERT1, CP-B5).
 ///
 /// `RenderSettingsRecord::default().shadows_max_distance` is 60 m, which on a
@@ -855,9 +866,8 @@ fn island_ground_layers() -> [inf_ecs::components::TerrainLayer; 4] {
 /// Author the island's level from its committed design.
 pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
     use inf_ecs::components::{
-        ActorClass, AlwaysLoaded, AudioListener, Light, LightKind, MeshRef, PcgVolume,
-        SkyAtmosphere, Spline, SplineInterp, StreamingSource, Terrain, TimeOfDay, Transform,
-        WaterBody, WaterKind,
+        ActorClass, AlwaysLoaded, AudioListener, MeshRef, PcgVolume, SkyAtmosphere, Spline,
+        SplineInterp, StreamingSource, Terrain, TimeOfDay, Transform, WaterBody, WaterKind,
     };
     use inf_ecs::math::{Color, Vec2d, Vec3d};
 
@@ -891,6 +901,19 @@ pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
         },
         render: crate::scene::serialize::RenderSettingsRecord {
             shadows_max_distance: ISLAND_SHADOW_DISTANCE_M,
+            // **THE EYE** (wave PAR0b, clause 3c). Manual 1.0 cannot show both
+            // noon and a moonlit street: the night is ten stops under the day
+            // (`inf_ecs::sky::MOON_SUN_RATIO`). Auto exposure, bounded so the
+            // DAY is exactly the manual frame it always was — every scene whose
+            // average is at or above the 18 % key (a lit street at noon) clamps
+            // to `ISLAND_EXPOSURE_MAX_LUMINANCE` = the key, i.e. a multiplier of
+            // exactly 1.0 — and the NIGHT may open up to
+            // `ISLAND_NIGHT_GAIN_STOPS` stops, no further: a moonlit street then
+            // sits about two stops under the key, dark and readable, instead of
+            // being lifted to a grey noon.
+            exposure_mode: 1,
+            exposure_min_luminance: ISLAND_EXPOSURE_MIN_LUMINANCE,
+            exposure_max_luminance: ISLAND_EXPOSURE_MAX_LUMINANCE,
             ..crate::scene::serialize::RenderSettingsRecord::lit_showcase()
         },
         ..LevelSettings::default()
@@ -908,16 +931,12 @@ pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
             scale: Vec3d::ONE,
         },
     );
-    insert!(
-        doc,
-        sun,
-        Light {
-            kind: LightKind::Directional,
-            color: Color::WHITE,
-            intensity: 3.2,
-            ..Default::default()
-        },
-    );
+    // **ONE SUN** (wave PAR0b, clause 4). This entity carried an authored
+    // directional `Light` (3.2, a fixed 10:30 bearing) on top of the clock's
+    // own sun until this wave: two shadows on every kerb and a noon lit by 6.2.
+    // The clock is the one authority now (`inf_ecs::sky::authored_sun_level`);
+    // the entity is its handle — its `SkyAtmosphere` carries the sun's colour
+    // and intensity and the moon's, which is what the Details grid edits.
     insert!(
         doc,
         sun,
@@ -927,7 +946,18 @@ pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
             ..TimeOfDay::default()
         },
     );
-    insert!(doc, sun, SkyAtmosphere::default());
+    // The honest moon (PAR0b clause 3a): the full moon at altitude lights a
+    // surface `MOON_SUN_RATIO` (1/1024, ten stops) as brightly as the sun; the
+    // clock and the date scale it by elevation and phase.
+    let sky = SkyAtmosphere::default();
+    insert!(
+        doc,
+        sun,
+        SkyAtmosphere {
+            moon_intensity: sky.sun_intensity * inf_ecs::sky::MOON_SUN_RATIO,
+            ..sky
+        },
+    );
     insert!(doc, sun, AlwaysLoaded);
 
     // ── the ground ────────────────────────────────────────────────────────────

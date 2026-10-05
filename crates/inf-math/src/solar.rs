@@ -401,6 +401,89 @@ pub fn moon_direction(input: &SolarInput) -> DVec3 {
     }
 }
 
+/// Sine of the elevation over which the moon's light fades in at moonrise and
+/// out at moonset (wave PAR0b): ~5.7°, one-sided — a moon at the horizon gives
+/// nothing, and one below it lights nothing.
+pub const MOON_HORIZON_BAND: f64 = 0.10;
+
+/// The moon's brightness relative to FULL, from its phase `[0, 1)` (`0` new,
+/// `0.5` full) — wave PAR0b, clause 3a.
+///
+/// The moon is not a lamp whose output scales with its lit area: its brightness
+/// falls far faster than the illuminated fraction because of the opposition
+/// surge, so a quarter moon is about a tenth of a full one, not a half. This is
+/// the standard photometric phase law (Allen: `0.026·α + 4·10⁻⁹·α⁴` magnitudes
+/// at phase angle `α` degrees). `1.0` at full, `≈ 0.09` at either quarter,
+/// `≈ 3·10⁻⁴` at new — dark, which is what a new moon is.
+///
+/// Portable: `10^x` is evaluated through [`exp2_portable`], not `powf`, so the
+/// answer is the same bits on every target (the P14 law, kept even though no
+/// committed byte depends on this yet).
+pub fn moon_phase_brightness(phase: f64) -> f64 {
+    let p = phase.rem_euclid(1.0);
+    // Phase angle: 0° at full (p = 0.5), 180° at new.
+    let alpha = (180.0 - 360.0 * p).abs();
+    let a2 = alpha * alpha;
+    let magnitudes = 0.026 * alpha + 4.0e-9 * a2 * a2;
+    // 10^(-0.4 m) = 2^(-0.4 m · log2 10).
+    exp2_portable(-0.4 * magnitudes * std::f64::consts::LOG2_10)
+}
+
+/// **How much of a level's authored (full, overhead) moon lights the scene**:
+/// the elevation fade over [`MOON_HORIZON_BAND`] times
+/// [`moon_phase_brightness`]. One function, read by the scene projectors' key
+/// light (`inf_ecs::sky::ResolvedSky::moon_level`) AND the renderer's night-sky
+/// ambient (`inf_render::atmosphere`), so the moonlight on a wall and the
+/// moonlit sky it sits under can never disagree.
+pub fn moon_light_level(moon_up: f64, phase: f64) -> f64 {
+    let t = (moon_up / MOON_HORIZON_BAND).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t) * moon_phase_brightness(phase)
+}
+
+/// How much of the night sky — the moon's beam, its scattered dome, the stars
+/// and the airglow — an overcast deck lets through, from the cloud coverage
+/// `[0, 1]` (wave PAR0b): `1.0` clear, `0.1` under a full deck, quadratic in
+/// between so scattered cloud costs little and a closing deck costs a lot. An
+/// overcast night away from the city's lights is nearly black, which is what
+/// the brief's "under overcast they are nearly not [visible]" asks for.
+pub fn night_cloud_veil(coverage: f32) -> f64 {
+    let c = f64::from(coverage).clamp(0.0, 1.0);
+    1.0 - 0.9 * c * c
+}
+
+/// `2^x` for `x` in roughly `[-1000, 1000]`, bit-identical on every target:
+/// integer part by exponent construction, fractional part by a Taylor series
+/// of `e^(f·ln 2)` (terms to `f¹⁴`, error below `1e-15` on `[0, 1)`).
+pub fn exp2_portable(x: f64) -> f64 {
+    if !x.is_finite() {
+        return if x > 0.0 { f64::INFINITY } else { 0.0 };
+    }
+    let x = x.clamp(-1000.0, 1000.0);
+    let i = x.floor();
+    let f = (x - i) * std::f64::consts::LN_2;
+    let mut term = 1.0;
+    let mut sum = 1.0;
+    for k in 1..=14 {
+        term *= f / f64::from(k);
+        sum += term;
+    }
+    let mut scale = 1.0;
+    let (base, mut n) = if i >= 0.0 {
+        (2.0, i as i64)
+    } else {
+        (0.5, -i as i64)
+    };
+    let mut b = base;
+    while n > 0 {
+        if n & 1 == 1 {
+            scale *= b;
+        }
+        b *= b;
+        n >>= 1;
+    }
+    sum * scale
+}
+
 /// Both bodies plus the phase, in one pass — what the scene projectors call.
 pub fn bodies(input: &SolarInput) -> SkyBodies {
     SkyBodies {
@@ -751,5 +834,22 @@ mod tests {
             assert!((elevation_deg(d) - el).abs() < 1e-9, "el {el}");
             assert!((azimuth_deg(d) - az).abs() < 1e-9, "az {az}");
         }
+    }
+
+    /// PAR0b: the portable `2^x` agrees with `std` to rounding, and the moon's
+    /// light is whole only for a full moon overhead.
+    #[test]
+    fn exp2_portable_and_the_moon_level() {
+        for k in -400..=400 {
+            let x = f64::from(k) * 0.0371;
+            let (a, b) = (exp2_portable(x), x.exp2());
+            assert!(((a - b) / b).abs() < 1e-13, "2^{x}: {a} vs {b}");
+        }
+        assert_eq!(exp2_portable(0.0), 1.0);
+        assert_eq!(moon_light_level(1.0, 0.5), 1.0);
+        assert_eq!(moon_light_level(-0.3, 0.5), 0.0);
+        assert_eq!(moon_light_level(0.0, 0.5), 0.0);
+        let q = moon_light_level(1.0, 0.25);
+        assert!((0.07..0.11).contains(&q), "quarter {q}");
     }
 }

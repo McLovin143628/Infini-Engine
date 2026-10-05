@@ -307,6 +307,62 @@ pub(crate) fn sky_irradiance_memo(
     v
 }
 
+/// **The night sky's L1 set for this frame** (wave PAR0b, clause 3b) —
+/// [`crate::atmosphere::night_sky_sh`] from the scene's own sun/moon block,
+/// memoized on the exact bits it reads for the same reason
+/// [`sky_irradiance_memo`] is (the moonlit-sky march is the same 48-direction
+/// integral; a frame whose moon has not moved pays nothing).
+pub(crate) fn night_sky_memo(p: &AtmosphereParams, r_km: f32, sun: &SunParams) -> [[f32; 3]; 4] {
+    let fade = night_fade(sun.unit_direction().y);
+    let md = sun.unit_moon_direction();
+    let mi = sun.moon_intensity.max(0.0);
+    let level =
+        inf_math::solar::moon_light_level(f64::from(md.y), f64::from(sun.moon_phase)) as f32;
+    let full = [
+        sun.moon_color[0] * mi,
+        sun.moon_color[1] * mi,
+        sun.moon_color[2] * mi,
+    ];
+    let now = [full[0] * level, full[1] * level, full[2] * level];
+    let key: Vec<u32> = [
+        r_km,
+        fade,
+        md.x,
+        md.y,
+        md.z,
+        now[0],
+        now[1],
+        now[2],
+        full[0],
+        full[1],
+        full[2],
+        p.city_glow[0],
+        p.city_glow[1],
+        p.city_glow[2],
+        p.clouds.coverage,
+        p.sky_intensity,
+        p.turbidity,
+        p.mie_g,
+        p.sun_disc_deg,
+        p.ground_albedo,
+    ]
+    .iter()
+    .map(|v| v.to_bits())
+    .chain([u32::from(p.enabled), u32::from(p.clouds_active())])
+    .collect();
+    type Slot = Option<(Vec<u32>, [[f32; 3]; 4])>;
+    static MEMO: std::sync::Mutex<Slot> = std::sync::Mutex::new(None);
+    let mut slot = MEMO.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((k, v)) = slot.as_ref() {
+        if *k == key {
+            return *v;
+        }
+    }
+    let v = crate::atmosphere::night_sky_sh(p, r_km, fade, md.into(), now, full);
+    *slot = Some((key, v));
+    v
+}
+
 impl AtmosphereGpu {
     /// The `enabled = 0` block every pre-P17.2 scene renders under. The medium
     /// values are still the physical ones so a debugger shows something sane, but
@@ -631,7 +687,7 @@ const NIGHT_FADE_ELEVATION_SIN: f32 = 0.12;
 
 /// Star/night blend from the sun's elevation sine: `0` while the sun is up,
 /// smoothly `1` by the end of civil twilight.
-fn night_fade(sun_y: f32) -> f32 {
+pub(crate) fn night_fade(sun_y: f32) -> f32 {
     let t = (-sun_y / NIGHT_FADE_ELEVATION_SIN).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }

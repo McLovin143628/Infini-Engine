@@ -54,7 +54,28 @@ use crate::scene::{RenderTerrain, RenderTerrainLayer};
 pub const GI_DIM: u32 = 64;
 /// Probe grid dimensions `[x, y, z]` at [`GiQuality::High`] (16×8×16 = 2048
 /// probes). Fewer probes vertically since scenes are wider than tall.
-pub const PROBE_DIMS: [u32; 3] = [16, 8, 16];
+pub const PROBE_DIMS: [u32; 3] = [16, 16, 16];
+
+/// **`vec4`s per probe record** (wave PAR0b, clause 1): the four L1 SH
+/// coefficients, then the probe's visibility map — `PROBE_VIS_SIDE`² hit
+/// distances on an octahedral map (sixteen `vec4`s) for the fetch's Chebyshev
+/// test — then the relocation offset of a probe that moved out of a wall.
+/// Mirrors `GI_PROBE_STRIDE` in `gi_probes.wgsl` and `env_lighting.wgsl`.
+pub const PROBE_STRIDE_VEC4: u32 = 21;
+/// The visibility map's side, texels (wave PAR0b): one occupancy-only ray per
+/// texel. Mirrors `GI_VIS_SIDE` in both shaders.
+pub const PROBE_VIS_SIDE: u32 = 8;
+/// How long a ray that hits nothing counts as, in probe spacings (wave PAR0b).
+/// Mirrors `GI_VIS_MISS_SPACINGS` in `gi_probes.wgsl`.
+pub const PROBE_VIS_MISS_SPACINGS: f32 = 2.0;
+/// How many voxels a buried probe searches along each axis for open space
+/// (wave PAR0b). Mirrors `GI_RELOCATE_VOXELS` in `gi_probes.wgsl`.
+pub const PROBE_RELOCATE_VOXELS: u32 = 2;
+/// The visibility test's normal lift (voxels) and its variance floor (voxels²)
+/// (wave PAR0b). Mirror `GI_VIS_NORMAL_BIAS` / `GI_VIS_MIN_VARIANCE` in
+/// `env_lighting.wgsl`.
+pub const PROBE_VIS_NORMAL_BIAS_VOXELS: f32 = 1.0;
+pub const PROBE_VIS_MIN_VARIANCE_VOXELS2: f32 = 0.25;
 
 /// Macro-cell edge in **voxels**: the voxel grid is partitioned into
 /// `(dim/MACRO_DIM)³` cells, and each cell carries the list of primitives whose

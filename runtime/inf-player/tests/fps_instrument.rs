@@ -3791,3 +3791,261 @@ fn the_shipped_island_at_nine_prices_its_shadowed_fixtures() {
         }
     }
 }
+
+/// One frame of the shipped island at `view`, after `settle` frames on a
+/// renderer of its own, and the exposure the eye settled on (wave PAR0b).
+fn shipped_frame(
+    gpu: &GpuContext,
+    fx: &mut Fixture,
+    settings: inf_render::RenderSettings,
+    view: &RenderView,
+    settle: usize,
+) -> (Vec<u8>, inf_render::ExposureState, RenderScene) {
+    let (w, h) = (view.width, view.height);
+    let target = HeadlessTarget::new(gpu, w, h);
+    let mut renderer = EngineRenderer::new(gpu, HEADLESS_FORMAT);
+    renderer.set_settings(settings);
+    bind_virtual_textures(gpu, &mut renderer, fx);
+    let mut scene = RenderScene {
+        grid_enabled: false,
+        ..Default::default()
+    };
+    let mut voxels = inf_voxel::VoxelVolumes::new();
+    let mut debris = inf_render::DebrisCache::default();
+    for _ in 0..settle.max(1) {
+        fx.sim.sync_render_terrain(view.eye_world);
+        sync_voxel_store(&mut voxels, &fx.voxel_assets, &fx.sim, view.eye_world);
+        project_scene_full(
+            &mut scene,
+            &fx.sim,
+            1.0,
+            &fx.vmeshes,
+            &fx.skinned,
+            &voxels,
+            &mut debris,
+            renderer.vt_textures(),
+            &fx.scatter_meshes,
+            &std::collections::HashMap::new(),
+        );
+        renderer.render(gpu, &scene, view, &target.view, (w, h));
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+    let img = target.read_rgba(gpu).expect("readback");
+    let exposure = renderer.read_exposure(gpu).expect("exposure readback");
+    (img, exposure, scene)
+}
+
+/// Mean and p95 of the 8-bit luma over a frame.
+fn luma_stats(img: &[u8]) -> (f64, u8) {
+    let mut v: Vec<u8> = img
+        .chunks_exact(4)
+        .map(|p| {
+            ((u32::from(p[0]) * 2126 + u32::from(p[1]) * 7152 + u32::from(p[2]) * 722) / 10_000)
+                as u8
+        })
+        .collect();
+    let mean = v.iter().map(|&x| f64::from(x)).sum::<f64>() / v.len().max(1) as f64;
+    v.sort_unstable();
+    (mean, v[v.len() * 95 / 100])
+}
+
+/// **THE SHIPPED ISLAND BY THE HOUR** (wave PAR0b — the night floor, the one
+/// sun, the eye). The island's OWN authored render block through
+/// `shipped_settings`, at Harbour City's strip, 1080p, for each hour in
+/// `PAR0B_HOURS` (default `12,21,2`): p50 / p95 / GPU ms over the shipped
+/// orbit, the exposure the eye settled on (read back from the GPU), the frame's
+/// mean / p95 luma at the street and from above, and — at night — the emissive
+/// census against that exposure. With `PAR0_DUMP` naming a directory the street
+/// frame (orbit steps 0 and 60) and the wide frame are written there as raw
+/// RGBA. REPORTS, never asserts (the island frame is PERF1's).
+///
+/// ```text
+/// INF_ISLAND_PACK=<cooked island> cargo test --release -p inf-player --test fps_instrument -- --ignored the_shipped_island_by_the_hour --nocapture
+/// ```
+#[test]
+#[ignore = "needs a cooked island pack (INF_ISLAND_PACK) and a real GPU"]
+fn the_shipped_island_by_the_hour() {
+    let Some(pack) = std::env::var_os("INF_ISLAND_PACK").map(PathBuf::from) else {
+        println!("SKIP the_shipped_island_by_the_hour: INF_ISLAND_PACK names no pack");
+        return;
+    };
+    let Ok(gpu) = GpuContext::headless() else {
+        println!("SKIP the_shipped_island_by_the_hour: no GPU adapter");
+        return;
+    };
+    let recipe = inf_island::IslandRecipe::load(&island_recipe()).expect("recipe");
+    let design = inf_island::read_design(&recipe).expect("design");
+    let plans = inf_editor_core::settlement::settlements(&design);
+    let city = plans.iter().find(|p| p.name == "Harbour City").expect("hc");
+    let strip: Vec<DVec3> = city
+        .blocks
+        .iter()
+        .filter(|b| b.archetype.is_venue())
+        .map(|b| DVec3::new(b.centre.x, 0.0, b.centre.y))
+        .collect();
+    let centre = strip.iter().fold(DVec3::ZERO, |a, &b| a + b) / strip.len().max(1) as f64;
+    // The KERB: the strip centroid lands inside a venue building (the audit's
+    // orbit rows are taken there, and kept there for continuity), so the
+    // frames a viewer reads are also taken from the street outside the venue
+    // block nearest that centroid, 4 m beyond its +X face.
+    let kerb_block = city
+        .blocks
+        .iter()
+        .filter(|b| b.archetype.is_venue())
+        .min_by(|a, b| {
+            let da = (DVec3::new(a.centre.x, 0.0, a.centre.y) - centre).length();
+            let db = (DVec3::new(b.centre.x, 0.0, b.centre.y) - centre).length();
+            da.total_cmp(&db)
+        })
+        .expect("a venue block");
+    let mut fx = open_streamed(&pack);
+    let ground = fx.sim.terrain_height_at(centre.x, centre.z);
+    let at = DVec3::new(centre.x, ground, centre.z);
+    let kx = kerb_block.centre.x + kerb_block.half.x + 4.0;
+    let kz = kerb_block.centre.y;
+    let kerb = DVec3::new(kx, fx.sim.terrain_height_at(kx, kz), kz);
+    let kerb_view = |toward: Vec3| RenderView {
+        origin: FloatingOrigin::new(DVec3::ZERO),
+        eye_world: kerb + DVec3::new(0.0, 1.7, 0.0),
+        forward: toward.normalize(),
+        up: Vec3::Y,
+        fov_y: 70f32.to_radians(),
+        near: 0.05,
+        width: 1920,
+        height: 1080,
+        ortho: None,
+    };
+    set_hero(&mut fx.sim, at + DVec3::new(0.0, 2.0, 0.0));
+    for _ in 0..TRAFFIC_WARMUP_STEPS {
+        fx.sim
+            .step_once(inf_player::runtime_sim::RuntimeInput::default());
+    }
+    let (shipped, tier) = shipped_settings(&gpu, fx.record);
+    println!(
+        "=== THE SHIPPED ISLAND BY THE HOUR on {} (tier {tier:?}): exposure {:?}, vsm {}, gi {} ===",
+        gpu.adapter.get_info().name,
+        shipped.exposure_control,
+        shipped.vsm.enabled,
+        shipped.gi.enabled
+    );
+    let hours: Vec<f64> = std::env::var("PAR0B_HOURS")
+        .unwrap_or_else(|_| "12,21,2".into())
+        .split(',')
+        .filter_map(|h| h.trim().parse().ok())
+        .collect();
+    let timing = std::env::var_os("PAR0B_NO_TIMING").is_none();
+    let dump = std::env::var_os("PAR0_DUMP").map(PathBuf::from);
+    for hour in hours {
+        {
+            let w = fx.sim.world_mut().world_mut();
+            let mut q = w.query::<&mut inf_ecs::components::TimeOfDay>();
+            for mut tod in q.iter_mut(w) {
+                tod.seconds = (hour * 3600.0 - tod.longitude_deg * 240.0).rem_euclid(86_400.0);
+                tod.rate = 0.0;
+            }
+        }
+        fx.sim.world_mut().mark_dirty();
+        fx.sim
+            .step_once(inf_player::runtime_sim::RuntimeInput::default());
+        let sky = inf_ecs::sky::resolve_sky(fx.sim.world()).expect("the island has a clock");
+        println!(
+            "HOUR {hour:05.2}: sun.y {:.3} moon.y {:.3} phase {:.3} key light {:?}",
+            sky.sun.y,
+            sky.moon.y,
+            sky.moon_phase,
+            sky.key_light().map(|(_, c, i)| (c, i))
+        );
+        let wide = RenderView {
+            origin: FloatingOrigin::new(DVec3::ZERO),
+            eye_world: at + DVec3::new(-140.0, 90.0, -140.0),
+            forward: Vec3::new(1.0, -0.55, 1.0).normalize(),
+            up: Vec3::Y,
+            fov_y: 60f32.to_radians(),
+            near: 0.1,
+            width: 1920,
+            height: 1080,
+            ortho: None,
+        };
+        for (tag, view) in [
+            ("street0", street_orbit(0, 1920, 1080, at)),
+            ("street60", street_orbit(60, 1920, 1080, at)),
+            ("wide", wide),
+            ("kerb-north", kerb_view(Vec3::new(0.0, -0.08, -1.0))),
+            ("kerb-south", kerb_view(Vec3::new(0.0, -0.08, 1.0))),
+            ("kerb-venue", kerb_view(Vec3::new(-1.0, -0.05, 0.15))),
+        ] {
+            let (img, e, scene) = shipped_frame(&gpu, &mut fx, shipped, &view, 40);
+            let (mean, p95) = luma_stats(&img);
+            println!(
+                "HOUR {hour:05.2} {tag}: luma mean {mean:.2} p95 {p95}; exposure x{:.3} (ev {:.3}, scene avg luminance {:.6}); {} lights ({} directional)",
+                e.multiplier,
+                e.ev,
+                e.avg_luminance,
+                scene.lights.len(),
+                scene
+                    .lights
+                    .iter()
+                    .filter(|l| l.kind == inf_render::LightKind::Directional)
+                    .count()
+            );
+            if tag == "street0" {
+                // The emissive census against the exposure the frame is seen
+                // at: each emissive scatter batch within 40 m, its radiance
+                // times the eye's multiplier, and the tonemapped peak channel
+                // (the engine's ACES fit) -- over 0.98 is "clipping".
+                let aces = |x: f32| (x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14);
+                let mut over = 0usize;
+                let mut seen = 0usize;
+                for b in &scene.scatter {
+                    if b.emissive.iter().all(|&v| v <= 0.0) {
+                        continue;
+                    }
+                    let near =
+                        b.data.instances.iter().any(|i| {
+                            (b.anchor + Vec3::from(i.offset).as_dvec3() - at).length() < 40.0
+                        });
+                    if !near {
+                        continue;
+                    }
+                    seen += 1;
+                    let peak = b.emissive.iter().fold(0.0f32, |m, &v| m.max(v)) * e.multiplier;
+                    let out = aces(peak);
+                    if out > 0.98 {
+                        over += 1;
+                    }
+                    println!(
+                        "HOUR {hour:05.2} emissive {:?} x exposure {:.3} -> peak {peak:.3} tonemapped {out:.3}{}",
+                        b.emissive,
+                        e.multiplier,
+                        if out > 0.98 { "  CLIPS" } else { "" }
+                    );
+                }
+                println!(
+                    "HOUR {hour:05.2} EMISSIVE CENSUS: {over} of {seen} emissive batches within 40 m clip at the exposure the frame is seen at"
+                );
+            }
+            if let Some(dir) = dump.as_ref() {
+                let _ = std::fs::create_dir_all(dir);
+                let _ = std::fs::write(
+                    dir.join(format!("island-{:02}-{tag}.rgba", hour as u32)),
+                    &img,
+                );
+            }
+        }
+        if timing {
+            let path = move |step: u64, w: u32, h: u32| street_orbit(step, w, h, at);
+            let m = measure(&gpu, &mut fx, 1920, 1080, shipped, &path);
+            let r = m.round();
+            let mut dear: Vec<(&str, f64, f64)> = m.passes.clone();
+            dear.sort_by(|a, b| b.1.total_cmp(&a.1));
+            println!(
+                "SHIPPED ISLAND {hour:05.2}: p50 {:.2} p95 {:.2} GPU {:.2}; rounds {:?}; dearest {:?}",
+                r.p50,
+                r.p95,
+                m.gpu_frame_ms,
+                m.rounds.iter().map(|r| (r.p50, r.p95)).collect::<Vec<_>>(),
+                &dear[..dear.len().min(8)]
+            );
+        }
+    }
+}
