@@ -41998,3 +41998,74 @@ wave (base `7a0d9070`: `terrain` 0.000498, `terrain_lod` 0.000554, `terrain_spla
 No daylight golden without GI moved; no golden of the 2D, sky, cloud, terrain, scatter,
 skinned, shell or vgeom families moved beyond the base's own residue. Each re-bless has a
 before/after pair in the session scratchpad (`PAR0b-FINAL\goldens-moved\`).
+
+### Clause by clause (implementer; MEASURED unless marked)
+
+1. **Interiors dark when unlit — BUILT.** Chosen by measurement over a 6 x 3 x 6 m room
+   with the island's 0.3 m walls (`par0b_night_gate`): the dominant cause was not probe
+   placement but **voxel occupancy** — the voxelizer tested a voxel's CENTRE, so a 0.3 m
+   wall against a 0.625 m voxel was open in about half the columns it crossed and the
+   probe march saw daylight through sealed walls (sealed floor p50 66.8 / 255 with 16
+   probe layers and centre-sampled voxels). Built: half-voxel conservative dilation of
+   every non-emitting primitive (`gi_voxelize.wgsl`), 16 probe layers at High (2.67 m
+   vertical pitch, 4 096 probes), buried-probe relocation (two voxels, +Y first), an
+   8 x 8 octahedral visibility map per probe (64 occupancy rays) with a Chebyshev fetch,
+   and a fully-occluded fallback that returns minus the sky. Sealed unlit floor p50
+   **0.14** (bound 3, frame p95 6.29); one lamp: floor p50 144, pool 159 vs 104 at
+   2.5 m; doorway (exposure 16) [142.9, 58.4, 68.8, 80.5, 82.1] by depth; glazed 4.16
+   = open 4.16 vs sealed 0.22; porch 1.37x open ground; the open courtyard unchanged with
+   visibility on vs off (140.2 / 136.8 / 211.0 / 206.1). Visibility's own share on the
+   sealed room: 1.22 -> 0.14 (it is not load-bearing there once voxels are conservative;
+   it was with centre-sampled voxels: 96 -> 62).
+2. **GI reads local lights — BUILT.** The probe march bounces the eight strongest
+   point/spot lights reaching the volume (`gi::gi_local_lights`), each shadowed by a voxel
+   march, inverse square floored at one voxel. A downlit room's ceiling 3.00 -> 90.63;
+   ceiling/floor 0.240 in linear against the slabs' albedo bound 0.7; the closed room's
+   exterior with GI and the lamp: mean delta 0.0005, max 1, 0 px over 2 codes.
+3. **The night floor — BUILT.** (a) moon by elevation (one-sided 5.7° band) x Allen's
+   phase law, shared by key light and ambient (`inf_math::solar::moon_light_level`),
+   veiled by cloud cover; the island's moon `MOON_SUN_RATIO` = 1/256 of the sun (8 stops;
+   reality 18.6; the eye takes 10, the frame keeps the rest), its date day 163 (a full
+   moon at night). (b) `atmosphere::night_sky_sh`: the moonlit dome (the medium marched
+   with the moon), starlight + airglow at 1 % of the full moon, and the city-glow hook
+   `AtmosphereParams::city_glow` (zero; PAR1b derives it from lit fixtures); the probe
+   march subtracts it for blocked rays (`GiData::night_sh`). (c) the eye: the histogram
+   floor 2^-16 (was 2^-10: the moonlit street fell into the black bin), light adaptation
+   3x faster than dark, a highlight guard (the brightest 1 % kept under 6.0), the shader's
+   luminance floor 1e-6 (1e-4 capped the gain); the island authors auto exposure keyed to
+   its own noon street (`max_luminance` 0.012, compensation -3.907 stops) with a ten-stop
+   night ceiling. Noon x1.000 on the street views; 21:00 x256 (street mean 7.6 at the
+   fixture), 02:00 x172 (10.7). The moon up vs down on asphalt: 30.02 vs 0.07. Terrain
+   takes the frame's key light once the sun is down (it shaded `view.sun_dir` only).
+4. **One sun — BUILT.** The sky authority's directional is never projected while its
+   atmosphere lights the scene; the island's Sun entity carries only TimeOfDay +
+   SkyAtmosphere. Noon street frame before (two suns, exposure 1): kerb luma — not
+   measured before (the before run's spot was inside a venue); after: kerb-north 53.3,
+   south 61.7 at x1.000. The two suns were not compensating for a dim SKY: the sun-only
+   street meters 0.013–0.018, which the compensated key places at 1.0.
+5. **Eight storage buffers — BUILT.** The probe records ride the light buffer behind
+   `GI_PROBE_OFFSET_BYTES` (256-aligned); the march binds its sub-range read-write; the
+   environment group binds four (VT table, VSM table, VSM projections, the light buffer),
+   the resolve eight; `LIT_FRAGMENT_STORAGE_BUFFERS` 8, the meshlet tier's need 8,
+   `engine_limits` asks min(adapter, 8). The capability table and the wasm check are
+   pre-PAR0's values again.
+6. **Glass — BUILT except the order with water.** Dual-source blending where the adapter
+   has it (`src0 + dst x src1`, per-channel `transmission x (1-F) x tint`; this RTX
+   4070 Ti: dual), premultiplied single-source otherwise (named). Green pane: [120, 208,
+   138] through vs clear [205, 208, 210]. CPU fallback: a pane draws as an opening
+   (window 128.4 glazed = 128.4 open vs wall 65.8). Two overlapping panes: scene order
+   reversed moves 0 codes. Water reads a lamp: 74.9 vs 58.7. Water behind glass / glass
+   over water: CARRIED (the glass draws inside the scatter pass, before water).
+7. **Corner penumbra — FIXED.** A point/spot light's slope bias is capped at 0.1 m
+   (`VSM_LOCAL_MAX_BIAS_M`): PAR0's closed room exterior max 121 (10 px) -> **0**; the new
+   arm reads max over three views: 0 codes (mutation 100 m: 10 codes, 9 px).
+8. **Emissives — BUILT.** A powered emitter (TV, bar rim, sign, festoon) takes its room's
+   shift (`PcgSurface::schedule` / `ScatteredSurface::schedule`, the `powered_clock`
+   fence) and draws at `POWERED_RADIANCE_SCALE` = 1/256 of its authored value (the night
+   eye's gain). Strip census at 21:00, ACES > 0.9: before 2 of 5 (sign 0.954, TV 0.895
+   near) at x1; after 0 of 5 (max 0.279) at x15.9.
+9. **Tight golden class — BUILT.** Mean <= 0.006, region max <= 0.06 for the light
+   frames; a halved light: par0_window_night 0.0064 / 0.177 (the suite tolerance PASSES
+   it), par0b_sealed_lit 0.173 / 0.201, par0b_moonlit_street 0.075 / 0.172 — all red.
+10. **Goldens — 74 -> 78**, eight re-blessed with the causes above, before/after pairs in
+   `PAR0b-FINAL\goldens-moved\`.

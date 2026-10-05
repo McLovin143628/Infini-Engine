@@ -445,7 +445,7 @@ pub fn moon_light_level(moon_up: f64, phase: f64) -> f64 {
 /// `[0, 1]` (wave PAR0b): `1.0` clear, `0.1` under a full deck, quadratic in
 /// between so scattered cloud costs little and a closing deck costs a lot. An
 /// overcast night away from the city's lights is nearly black, which is what
-/// the brief's "under overcast they are nearly not [visible]" asks for.
+/// the brief's "under overcast they are nearly not visible" asks for.
 pub fn night_cloud_veil(coverage: f32) -> f64 {
     let c = f64::from(coverage).clamp(0.0, 1.0);
     1.0 - 0.9 * c * c
