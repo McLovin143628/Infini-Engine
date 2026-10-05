@@ -993,3 +993,82 @@ fn a_lamp_over_the_harbour_raises_the_waters_luminance() {
         l - d
     );
 }
+
+/// **THE CORNER PENUMBRA IS GONE, READ BY MAX** (clause 7): the sealed room at
+/// night with one shadowed 30-intensity point lamp, seen from outside across
+/// two of its outer corners, against the same room with no lamp — the shipped
+/// virtual-shadow settings (radius-1 PCF). PAR0's audit measured 10 exterior
+/// pixels of up to 121 steps at a closed room's outer corners (the slope bias
+/// of a grazing local light reaching past a 0.3 m wall); the arm reads the
+/// MAXIMUM per-channel delta, not the mean, and bounds it at 2 codes.
+///
+/// Mutation: `VSM_LOCAL_MAX_BIAS_M` raised to 1.0 (no cap within a wall) —
+/// RED (the corner pixels return).
+#[test]
+fn a_closed_rooms_outer_corners_stay_dark_by_max() {
+    let Some(gpu) = gpu() else { return };
+    let lamp = |on: bool| {
+        let mut s = room(Opening::Sealed, false, false);
+        if on {
+            s.lights.push(RenderLight {
+                kind: LightKind::Point,
+                color: [1.0, 0.9, 0.75],
+                intensity: 30.0,
+                position: DVec3::new(0.0, 2.0, 0.0),
+                range: 16.0,
+                cast_shadows: true,
+                ..RenderLight::default()
+            });
+        }
+        s.mark_dirty();
+        s
+    };
+    let mut set = RenderSettings::default();
+    set.vsm.enabled = true;
+    set.shadows.enabled = true;
+    let mut worst = 0u8;
+    let mut over = 0usize;
+    for eye in [
+        DVec3::new(9.0, 4.0, 9.0),
+        DVec3::new(-9.0, 4.0, -9.0),
+        DVec3::new(8.0, 1.2, -8.0),
+    ] {
+        let view = look(eye, DVec3::new(0.0, 0.5, 0.0));
+        let a = render(&gpu, &lamp(true), &view, set);
+        let b = render(&gpu, &lamp(false), &view, set);
+        dump("corner_leak", &a);
+        for (x, y) in a.chunks_exact(4).zip(b.chunks_exact(4)) {
+            let d = (0..3).map(|k| x[k].abs_diff(y[k])).max().unwrap_or(0);
+            worst = worst.max(d);
+            if d > 2 {
+                over += 1;
+            }
+        }
+    }
+    println!("PAR0b CORNER: exterior max delta {worst} code(s), {over} px over 2 codes, three views");
+    assert!(worst <= 2, "a closed room's corner leaks {worst} codes ({over} px)");
+}
+
+/// **EIGHT STORAGE BUFFERS** (clause 5): the engine device asks for exactly
+/// `wgpu::Limits::default()`'s eight fragment storage buffers and the meshlet
+/// tier admits an adapter that grants eight — the capability an 8-limit
+/// WebGPU / mobile adapter lost in PAR0. The binding census itself is
+/// `passes::visbuffer`'s unit arm (environment 4 + resolve 4).
+#[test]
+fn the_lit_path_fits_eight_storage_buffers_again() {
+    let generous = wgpu::Limits {
+        max_storage_buffers_per_shader_stage: 1_000_000,
+        ..wgpu::Limits::default()
+    };
+    let asked = inf_render::gpu::engine_limits(&generous).max_storage_buffers_per_shader_stage;
+    println!(
+        "PAR0b STORAGE: the device asks {asked}; the meshlet tier needs {}; wgpu default {}",
+        inf_render::caps::VGEOM_MIN_STORAGE_BUFFERS_PER_STAGE,
+        wgpu::Limits::default().max_storage_buffers_per_shader_stage
+    );
+    assert_eq!(asked, wgpu::Limits::default().max_storage_buffers_per_shader_stage);
+    assert_eq!(
+        inf_render::caps::VGEOM_MIN_STORAGE_BUFFERS_PER_STAGE,
+        wgpu::Limits::default().max_storage_buffers_per_shader_stage
+    );
+}

@@ -62,6 +62,9 @@ const VSM_PROJ_ORTHO_KIND: u32 = 0u;
 const VSM_DEPTH_ULP_BIAS: f32 = 2.3841858e-7;
 const VSM_NORMAL_BIAS_TEXELS: f32 = 1.0;
 const VSM_MAX_SLOPE: f32 = 8.0;
+// PAR0b clause 7: the world-space ceiling on a point/spot light's slope bias,
+// metres. MIRROR: `inf_render::vsm_receiver::VSM_LOCAL_MAX_BIAS_M`.
+const VSM_LOCAL_MAX_BIAS_M: f32 = 0.1;
 const VSM_NO_DATA: f32 = -1.0;
 
 struct VsmProjection {
@@ -383,7 +386,20 @@ fn vsm_shadow(world_pos: vec3<f32>, n: vec3<f32>, slot: u32) -> f32 {
     // constant and this literal are the same `f32`, which is what makes the
     // shipped path unchanged.
     let slope = vsm.params.w * tan_t * ndc_per_m;
-    let bias = VSM_DEPTH_ULP_BIAS + slope * texel0 * exp2(f32(level));
+    // **A LOCAL LIGHT'S BIAS NEVER OUTGROWS A WALL** (wave PAR0b, clause 7).
+    // The slope term grows with the texel and with `tan` up to
+    // `VSM_MAX_SLOPE`; for a point or spot light at a grazing receiver — the
+    // pavement just outside a lit room, seen at the corner where the light
+    // skims the wall — it reached past a 0.3 m wall's thickness, so the
+    // receiver compared as nearer than the wall that hid it: the PAR0 audit's
+    // 10 px of up to 121 steps (the one-tap kernel, whose slope bias is
+    // smaller, read 0). Capped at `VSM_LOCAL_MAX_BIAS_M` in world metres,
+    // under half the thinnest wall the content builds.
+    var slope_max = 1.0e9;
+    if (!ortho) {
+        slope_max = VSM_LOCAL_MAX_BIAS_M * ndc_per_m;
+    }
+    let bias = VSM_DEPTH_ULP_BIAS + min(slope * texel0 * exp2(f32(level)), slope_max);
 
     var f = vsm_level_factor(p, l, level, bias);
     if (f < 0.0) {
@@ -397,7 +413,7 @@ fn vsm_shadow(world_pos: vec3<f32>, n: vec3<f32>, slot: u32) -> f32 {
     if (w <= 0.0) {
         return f;
     }
-    let nbias = VSM_DEPTH_ULP_BIAS + slope * texel0 * exp2(f32(level + 1u));
+    let nbias = VSM_DEPTH_ULP_BIAS + min(slope * texel0 * exp2(f32(level + 1u)), slope_max);
     let nf = vsm_level_factor(p, l, level + 1u, nbias);
     // The coarser level can miss the receiver too — a clipmap's rings are not
     // nested about one centre since P27.3. Keep this level's answer rather than

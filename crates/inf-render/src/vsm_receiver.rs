@@ -178,6 +178,12 @@ pub fn vsm_slope_bias_texels(radius: u32) -> f32 {
 /// 0.78 % of a page, which bounds how far the resolve can be moved.
 pub const VSM_NORMAL_BIAS_TEXELS: f32 = 1.0;
 
+/// **The world-space ceiling on a point or spot light's slope bias**, metres
+/// (wave PAR0b, clause 7): under half the 0.3 m walls the content builds, so a
+/// grazing receiver behind a wall can never compare as nearer than the wall.
+/// Mirrors `VSM_LOCAL_MAX_BIAS_M` in `vsm_receive.wgsl`.
+pub const VSM_LOCAL_MAX_BIAS_M: f32 = 0.1;
+
 /// The largest slope the bias scales by — `tan θ` at about 83°.
 ///
 /// Past it a surface is nearly edge-on to the light and `n · l` has already
@@ -1649,6 +1655,7 @@ mod tests {
             f64::from(VSM_NORMAL_BIAS_TEXELS)
         );
         assert_eq!(value("VSM_MAX_SLOPE"), f64::from(VSM_MAX_SLOPE));
+        assert_eq!(value("VSM_LOCAL_MAX_BIAS_M") as f32, VSM_LOCAL_MAX_BIAS_M);
         assert_eq!(value("VSM_NO_DATA"), f64::from(VSM_NO_DATA));
         // …and the sentinel and the table magic, which are the two values a
         // receiver that got them wrong would read as "every page is resident".
@@ -2139,13 +2146,16 @@ mod tests {
     fn the_shaders_bias_and_blend_are_the_expressions_this_module_derives() {
         let src = include_str!("shaders/vsm_receive.wgsl");
         assert!(
-            src.contains("let bias = VSM_DEPTH_ULP_BIAS + slope * texel0 * exp2(f32(level));"),
+            // PAR0b clause 7: the slope term is capped for a local light.
+            src.contains(
+                "let bias = VSM_DEPTH_ULP_BIAS + min(slope * texel0 * exp2(f32(level)), slope_max);"
+            ) && src.contains("slope_max = VSM_LOCAL_MAX_BIAS_M * ndc_per_m;"),
             "the shader's bias is no longer the two derived terms — the depth \
              FORMAT's constant plus the page's texel DENSITY times the slope"
         );
         assert!(
             src.contains(
-                "let nbias = VSM_DEPTH_ULP_BIAS + slope * texel0 * exp2(f32(level + 1u));"
+                "let nbias = VSM_DEPTH_ULP_BIAS + min(slope * texel0 * exp2(f32(level + 1u)), slope_max);"
             ),
             "the blend's coarser tap no longer takes the coarser level's own \
              bias, so it is under-biased by exactly the factor of two between \
