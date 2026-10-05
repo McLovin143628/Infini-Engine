@@ -41849,3 +41849,15 @@ is now a function of the snapped camera POSITION.
 - **No exterior fixture exists** — porches, street lamps, room fixtures and car
   headlights are PAR1's, on this door (`RenderLight` cone/range/`cast_shadows` +
   `fixture_level`'s `Dusk`/`Day`/`Always` + the occupancy argument).
+
+### the close (2026-10-05, implementer)
+
+The full battery on `41b4e24e` (-j 3, `INF_GOLDEN_STRICT=1`): `AGGREGATE over 406
+binaries: 7867 passed, 0 failed, 32 ignored` (the first run on `8d07cdf1` red five arms —
+the four golden pins and the scatter-fold needle — fixed in `41b4e24e`). clippy
+`--workspace --all-targets --keep-going -D warnings` clean after `38376e8b` (three
+test-only lints; `par0_lights_gate`, `parity_cert` and inf-player's lib tests re-run
+green after it). rustdoc 399 warnings, 0 errors (the base's 399). wasm32 `cargo check -p
+inf-player` ok. CRLF 0 in every text file touched. Goldens 74 (three added, the 71
+byte-identical). `Cargo.lock`, `crates/inf-scene` and every `.inf_lvl` untouched. No
+frame, log, CSV or Unreal file committed.
