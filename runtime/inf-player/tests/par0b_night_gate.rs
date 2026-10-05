@@ -1424,6 +1424,9 @@ fn the_moon_above_the_horizon_raises_the_asphalts_luminance() {
 /// off — and ON at 21:00, and at 21:00 every one of them, times the exposure
 /// the shipped eye settles on at the venue's street, tonemaps under clipping
 /// (the census the brief names: emissives above clipping at 21:00 = 0).
+/// "Clipping" is the engine's ACES fit past 0.9 (sRGB ~243): on the strip
+/// before PAR0b the venue sign (3.0) tonemapped to 0.954 and the TV (1.7) to
+/// 0.895 at manual exposure 1 — the white plates of the PAR0 frames.
 #[test]
 fn a_closed_venues_emitters_are_off_and_an_open_ones_sit_under_clipping() {
     let Some(gpu) = gpu() else { return };
@@ -1454,7 +1457,7 @@ fn a_closed_venues_emitters_are_off_and_an_open_ones_sit_under_clipping() {
     let clipping: Vec<f32> = night
         .iter()
         .map(|em| aces(em.iter().fold(0.0f32, |m, &c| m.max(c)) * e.multiplier))
-        .filter(|&t| t > 0.98)
+        .filter(|&t| t > 0.9)
         .collect();
     println!(
         "PAR0b POWERED: emitting batches near the venue — 11:00 {} lit, 21:00 {} lit; eye at the venue's street x{:.3}; clipping at 21:00: {} ({clipping:?})",

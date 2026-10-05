@@ -3993,7 +3993,7 @@ fn the_shipped_island_by_the_hour() {
                 // The emissive census against the exposure the frame is seen
                 // at: each emissive scatter batch within 40 m, its radiance
                 // times the eye's multiplier, and the tonemapped peak channel
-                // (the engine's ACES fit) -- over 0.98 is "clipping".
+                // (the engine's ACES fit) -- over 0.9 (sRGB ~243) is "clipping".
                 let aces = |x: f32| (x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14);
                 let mut over = 0usize;
                 let mut seen = 0usize;
@@ -4011,14 +4011,14 @@ fn the_shipped_island_by_the_hour() {
                     seen += 1;
                     let peak = b.emissive.iter().fold(0.0f32, |m, &v| m.max(v)) * e.multiplier;
                     let out = aces(peak);
-                    if out > 0.98 {
+                    if out > 0.9 {
                         over += 1;
                     }
                     println!(
                         "HOUR {hour:05.2} emissive {:?} x exposure {:.3} -> peak {peak:.3} tonemapped {out:.3}{}",
                         b.emissive,
                         e.multiplier,
-                        if out > 0.98 { "  CLIPS" } else { "" }
+                        if out > 0.9 { "  CLIPS" } else { "" }
                     );
                 }
                 println!(

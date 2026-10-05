@@ -346,7 +346,7 @@ pub const MAX_RIVER_BODIES: usize = 10;
 /// The darkest scene average the island's eye adapts to (wave PAR0b): the
 /// day's key over `2^ISLAND_NIGHT_GAIN_STOPS`, so the night can open the
 /// exposure at most that many stops above the day's 1.0.
-pub const ISLAND_EXPOSURE_MIN_LUMINANCE: f32 = ISLAND_EXPOSURE_MAX_LUMINANCE / 256.0;
+pub const ISLAND_EXPOSURE_MIN_LUMINANCE: f32 = ISLAND_EXPOSURE_MAX_LUMINANCE / 1024.0;
 /// The compensation that puts the meter's key at the island's own noon street
 /// rather than at the 18 % card: `log2(0.012 / 0.18)` = −3.907 stops.
 pub const ISLAND_EXPOSURE_COMPENSATION_EV: f32 = -3.906_891;
@@ -356,8 +356,12 @@ pub const ISLAND_EXPOSURE_COMPENSATION_EV: f32 = -3.906_891;
 /// at 0.79, a waning crescent that lights a street at 5 % of a full moon). The
 /// showcase's night is a moonlit one; the date is how a level says so.
 pub const ISLAND_DAY_OF_YEAR: u32 = 163;
-/// How many stops the island's eye may open at night (wave PAR0b).
-pub const ISLAND_NIGHT_GAIN_STOPS: f32 = 8.0;
+/// How many stops the island's eye may open at night (wave PAR0b). Ten: eight
+/// were measured first and the editor's Play at 21:00 — a June full moon five
+/// degrees up — read the street black (the headless street frame's mean 7.6 /
+/// 255); the highlight guard, not this ceiling, is what keeps a lit bar or a
+/// pair of headlamps under white.
+pub const ISLAND_NIGHT_GAIN_STOPS: f32 = 10.0;
 /// The brightest scene average the island's eye adapts to — the island's noon
 /// street (measured 0.013 – 0.018), so a daylight street frame exposes at
 /// 1.0, the manual frame every daylight number was taken at.
@@ -958,7 +962,7 @@ pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
         },
     );
     // The honest moon (PAR0b clause 3a): the full moon at altitude lights a
-    // surface `MOON_SUN_RATIO` (1/1024, ten stops) as brightly as the sun; the
+    // surface `MOON_SUN_RATIO` (1/256, eight stops) as brightly as the sun; the
     // clock and the date scale it by elevation and phase.
     let sky = SkyAtmosphere::default();
     insert!(
