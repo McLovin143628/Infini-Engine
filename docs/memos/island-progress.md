@@ -41968,3 +41968,33 @@ binaries: 7869 passed, 0 failed, 33 ignored`. clippy `--workspace --all-targets
 check -p inf-player` ok. Goldens 74, none moved. Schema, `Cargo.lock` and every
 `.inf_lvl` unmoved. Frames are headless shipped-path renders; the editor was not
 relaunched (carried).
+
+## Wave PAR0b — THE NIGHT AND THE ROOM (implementer, 2026-10-05)
+
+Base `7a0d9070`. The PAR0 audit's carried list as clauses: interiors dark when unlit, GI
+reading local lights, the night floor (moon, night-sky ambient, the eye), one sun, eight
+storage buffers, glass finished, the corner penumbra, emissives scheduled and calibrated,
+a tight golden class, the goldens. The report is `campaign-briefs/par0b-implementer-report.md`.
+
+### Goldens that MOVE — written before any re-bless (clause 10)
+
+Measured with `INF_GOLDEN_STRICT=1` against the committed frames, and against the BASE
+tree's own render of the same frames so a pre-existing residue is not credited to this
+wave (base `7a0d9070`: `terrain` 0.000498, `terrain_lod` 0.000554, `terrain_splat`
+0.003746, `water_ocean_noon` 0.000614, `water_river` 0.005565, `water_wetness_shore`
+0.001755 already — unmoved by PAR0b, NOT re-blessed).
+
+| golden | mean / max (PAR0b vs committed) | base | cause |
+|---|---|---|---|
+| `venue_interior` | 0.0852 / 0.892 (FAILS the suite tolerance) | 0 | GI: the venue's interior is enclosed — 16 probe layers + relocation + conservative voxels + probe visibility make its ambient the room's own (dark where unlit), and its rig's spots now BOUNCE (GI reads local lights) |
+| `gi_emissive` | 0.0658 / 0.683 (FAILS) | 0 | GI: conservative voxel occupancy fattens the emitter and the walls by half a voxel; 16 layers sample the emitter's pool more densely |
+| `gi_scatter_neon` | 0.0446 / 0.443 (FAILS) | 0 | the same two causes on the scattered neon plates |
+| `gi_specular` | 0.0552 / 0.341 | 0 | GI: denser probes + visibility change the SH the reflection reconstructs |
+| `gi_bleed` | 0.0417 / 0.180 | 0 | GI: the colour-bleed box's walls fatten by half a voxel; denser probes |
+| `gi_terrain` | 0.0095 / 0.036 | 0 | GI: the floating wall's fattened voxels self-occlude (bare wall green 184.35 → 174.93); the arm's luminance asserts retired with the numbers in place |
+| `water_lake_dusk` | 0.0254 / 0.171 | 0.0020 | the water body is lit by the hour (`passes::water::water_body_light`): at dusk the authored colours are scaled by the light that reaches them |
+| `vsm_point` | 0.0036 / 0.040 | 0 | a local light's slope bias is capped at 0.1 m (clause 7, the corner penumbra) |
+
+No daylight golden without GI moved; no golden of the 2D, sky, cloud, terrain, scatter,
+skinned, shell or vgeom families moved beyond the base's own residue. Each re-bless has a
+before/after pair in the session scratchpad (`PAR0b-FINAL\goldens-moved\`).
