@@ -233,9 +233,11 @@ pub const PERSPECTIVE_BUCKET: u32 = 1 << 31;
 /// falls on, which is P27.2's ruling restated as the half of the sandwich it
 /// always was.
 ///
-/// A perspective light keeps the camera's rule outright ([`PERSPECTIVE_BUCKET`]):
-/// its pages nest inside one frustum and their texel size falls off with
-/// distance, so there is no per-level constant to pick against.
+/// A perspective light ([`PERSPECTIVE_BUCKET`]) draws the COARSEST level since
+/// the PAR0 audit: its pages nest inside one frustum and their texel size falls
+/// off with distance, so there is no per-level constant to pick against, and the
+/// camera's threshold (the rule until then) was measured submitting the island's
+/// meshlet assets whole into every dirty point-light page.
 ///
 /// # What it returns
 ///
@@ -259,7 +261,18 @@ pub fn vgeom_caster_levels(
         return by_level.into_iter().collect();
     }
     for &(bit, wpt) in buckets {
-        let t = if bit == PERSPECTIVE_BUCKET || !wpt.is_finite() || wpt <= 0.0 {
+        let t = if bit == PERSPECTIVE_BUCKET {
+            // **A local light's pages draw a meshlet caster at its COARSEST
+            // classic level** (PAR0 audit). A cube face nests six levels in one
+            // frustum, so it has no per-level texel to pick against, and the
+            // camera's threshold — the old rule — submitted the island's road and
+            // kerb network whole, at full detail, into every dirty page: measured
+            // ~10 M indices a page and +30 ms GPU for the first shadowed fixture.
+            // What a room lamp's shadow shows of a city-spanning slab is its edge,
+            // which the coarsest level keeps; measured after: eight shadowed
+            // lights cost +5.6 ms GPU orbiting, +1.8 ms with the camera still.
+            f32::MAX
+        } else if !wpt.is_finite() || wpt <= 0.0 {
             cam
         } else {
             (pixel_error.max(0.0) * wpt / s).max(cam)
@@ -2868,6 +2881,12 @@ pub struct PageGeometry<'a> {
     pub proj_base: &'a [u32],
     /// One entry per **light**: where its clipmap levels sit this frame.
     pub layouts: &'a [ClipmapLayout],
+    /// One entry per **light**, in handle order (PAR0 audit): the metres past
+    /// which a point/spot light lights nothing (its `range`), or infinity for a
+    /// directional light and a light with no range. A caster whose sphere lies
+    /// wholly outside that ball cannot shadow any receiver the light reaches,
+    /// so it neither stamps nor masks that light's pages.
+    pub reach: &'a [f32],
 }
 
 /// **What an atlas slot's texels depict**, independent of the grid label the page
@@ -3223,6 +3242,18 @@ fn scatter_caster_stamps(
             for &i in &perspective {
                 touches += 1;
                 let p = &mut pages[i];
+                // **THE LIGHT'S RANGE BOUNDS ITS CASTERS** (PAR0 audit). A cube
+                // face or a spot cone has an INFINITE far plane, so before this
+                // test every car and pedestrian anywhere in a face's frustum
+                // re-stamped that face's pages every frame: one shadowed room
+                // fixture on the island re-rasterized ~154 pages a frame with a
+                // STATIC camera (~1.0 G indices, 33 ms GPU). A receiver the light
+                // reaches is inside its range ball, and so is the segment from it
+                // to the light, so a caster wholly outside the ball shadows
+                // nothing this light lights — exact, not a heuristic.
+                if !caster_within_reach(geom, p.light, centre, radius) {
+                    continue;
+                }
                 if crate::vsm::vsm_page_sees_sphere(&p.view_proj, centre, radius) {
                     fold_into(&mut p.caster_fold, hash);
                     p.casters += 1;
@@ -3241,6 +3272,32 @@ fn scatter_caster_stamps(
             .done();
     }
     touches
+}
+
+/// **Whether a caster's sphere reaches into a perspective light's range ball**
+/// (PAR0 audit) — see the call site in [`scatter_caster_stamps`]. `true` for a
+/// light with no finite reach, so a missing entry can only over-stamp (a page
+/// re-rasterized for nothing), never miss a caster (a stale shadow).
+fn caster_within_reach(
+    geom: PageGeometry<'_>,
+    light: u32,
+    centre: glam::Vec3,
+    radius: f32,
+) -> bool {
+    let i = light as usize;
+    let reach = geom.reach.get(i).copied().unwrap_or(f32::INFINITY);
+    if !reach.is_finite() {
+        return true;
+    }
+    let Some(proj) = geom
+        .proj_base
+        .get(i)
+        .and_then(|&b| geom.projections.get(b as usize))
+    else {
+        return true;
+    };
+    let at = glam::Vec3::new(proj.light[0], proj.light[1], proj.light[2]);
+    (centre - at).length() - radius <= reach
 }
 
 /// **Whether one more geometry group fits this frame's ceiling** — one door for
@@ -4088,10 +4145,17 @@ mod tests {
             );
         }
 
-        // (4) A PERSPECTIVE PAGE KEEPS THE CAMERA'S RULE, and an empty bucket list
-        // (a frame with no shadow page at all) degrades to exactly P27.2.
+        // (4) A PERSPECTIVE PAGE DRAWS THE COARSEST LEVEL (PAR0 audit — it kept
+        // the camera's rule until the island measured ~10 M indices a dirty
+        // point-light page), and an empty bucket list (a frame with no shadow
+        // page at all) degrades to exactly P27.2.
         let persp = vgeom_caster_levels(&errors, cam, 1.0, 1.0, &[(PERSPECTIVE_BUCKET, 0.0)]);
-        assert_eq!(persp, vec![(camera_level, PERSPECTIVE_BUCKET)]);
+        let coarsest = inf_vgeom::pick_classic_level(&errors, f32::MAX);
+        assert!(
+            coarsest > camera_level,
+            "the fixture has no coarser level to pick"
+        );
+        assert_eq!(persp, vec![(coarsest, PERSPECTIVE_BUCKET)]);
         assert_eq!(
             vgeom_caster_levels(&errors, cam, 1.0, 1.0, &[]),
             vec![(camera_level, 0)],

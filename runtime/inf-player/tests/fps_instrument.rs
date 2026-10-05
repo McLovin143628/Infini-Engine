@@ -3539,3 +3539,143 @@ fn the_light_loop_on_the_island_at_nine() {
         with_gpu - without_gpu
     );
 }
+
+/// **THE SHIPPED ISLAND AT 21:00, PRICED BY ITS SHADOWED FIXTURES** (PAR0
+/// audit, (a')). The island's OWN authored render block through
+/// `shipped_settings` — the configuration a player runs, which since the audit
+/// turns the virtual shadow maps on for a level that asks for shadows — at
+/// Harbour City's strip, 1080p, camera turning 3 deg a frame (or held, `static`
+/// rows). Rows: as shipped (local shadow budget `LOCAL_SHADOW_BUDGET` = 8), the
+/// same at budget 0, the pre-audit shipped frame (VSM off, CSM for the sun, no
+/// local shadow anywhere), and the shipped frame with the 1 670 synthetic
+/// fixtures. Each prints p50 / p95 / GPU ms and the VSM raster's per-frame
+/// pages / indices / dirty split, so a cost is a stated delta with its cause.
+/// REPORTS, never asserts (the island frame is PERF1's).
+///
+/// ```text
+/// INF_ISLAND_PACK=<cooked island> cargo test --release -p inf-player ///   --test fps_instrument -- --ignored the_shipped_island_at_nine --nocapture
+/// ```
+#[test]
+#[ignore = "needs a cooked island pack (INF_ISLAND_PACK) and a real GPU"]
+fn the_shipped_island_at_nine_prices_its_shadowed_fixtures() {
+    let Some(pack) = std::env::var_os("INF_ISLAND_PACK").map(PathBuf::from) else {
+        println!("SKIP the_shipped_island_at_nine: INF_ISLAND_PACK names no pack");
+        return;
+    };
+    let Ok(gpu) = GpuContext::headless() else {
+        println!("SKIP the_shipped_island_at_nine: no GPU adapter");
+        return;
+    };
+    let recipe = inf_island::IslandRecipe::load(&island_recipe()).expect("recipe");
+    let design = inf_island::read_design(&recipe).expect("design");
+    let plans = inf_editor_core::settlement::settlements(&design);
+    let city = plans.iter().find(|p| p.name == "Harbour City").expect("hc");
+    let strip: Vec<DVec3> = city
+        .blocks
+        .iter()
+        .filter(|b| b.archetype.is_venue())
+        .map(|b| DVec3::new(b.centre.x, 0.0, b.centre.y))
+        .collect();
+    let centre = strip.iter().fold(DVec3::ZERO, |a, &b| a + b) / strip.len().max(1) as f64;
+    let mut fx = open_streamed(&pack);
+    let ground = fx.sim.terrain_height_at(centre.x, centre.z);
+    let at = DVec3::new(centre.x, ground, centre.z);
+    set_hero(&mut fx.sim, at + DVec3::new(0.0, 2.0, 0.0));
+    {
+        let w = fx.sim.world_mut().world_mut();
+        let mut q = w.query::<&mut inf_ecs::components::TimeOfDay>();
+        for mut tod in q.iter_mut(w) {
+            tod.seconds = (21.0 * 3600.0 - tod.longitude_deg * 240.0).rem_euclid(86_400.0);
+            tod.rate = 0.0;
+        }
+    }
+    fx.sim.world_mut().mark_dirty();
+    for _ in 0..TRAFFIC_WARMUP_STEPS {
+        fx.sim
+            .step_once(inf_player::runtime_sim::RuntimeInput::default());
+    }
+    let (shipped, tier) = shipped_settings(&gpu, fx.record);
+    println!(
+        "=== THE SHIPPED ISLAND AT 21:00 on {} (tier {tier:?}): vsm {}, shadows {}, gi {}, local shadow budget {} ===",
+        gpu.adapter.get_info().name,
+        shipped.vsm.enabled,
+        shipped.shadows.enabled,
+        shipped.gi.enabled,
+        shipped.lights.local_shadow_budget
+    );
+    // (label, synthetic fixtures, camera turning, local shadow budget, VSM).
+    let all: Vec<(&str, usize, bool, usize, bool)> = vec![
+        (
+            "shipped, N=8",
+            0,
+            true,
+            shipped.lights.local_shadow_budget,
+            true,
+        ),
+        ("shipped, N=0", 0, true, 0, true),
+        ("pre-audit shipped (VSM off, CSM)", 0, true, 0, false),
+        (
+            "shipped, N=8, static",
+            0,
+            false,
+            shipped.lights.local_shadow_budget,
+            true,
+        ),
+        ("shipped, N=0, static", 0, false, 0, true),
+        (
+            "shipped +1670 synthetic, N=8",
+            1670,
+            true,
+            shipped.lights.local_shadow_budget,
+            true,
+        ),
+        ("shipped +1670 synthetic, N=0", 1670, true, 0, true),
+    ];
+    let pick = std::env::var("PAR0_ROWS").unwrap_or_default();
+    let configs: Vec<_> = all
+        .into_iter()
+        .enumerate()
+        .filter(|(k, _)| pick.is_empty() || pick.split(',').any(|p| p == k.to_string()))
+        .map(|(_, c)| c)
+        .collect();
+    for (label, extra, orbit, budget, vsm) in configs {
+        fx.extra_lights = synthetic_lights(extra, at, ground, 240.0);
+        let mut s = shipped;
+        s.vsm.enabled = vsm;
+        s.lights.local_shadow_budget = budget;
+        let path =
+            move |step: u64, w: u32, h: u32| street_orbit(if orbit { step } else { 0 }, w, h, at);
+        let m = measure(&gpu, &mut fx, 1920, 1080, s, &path);
+        let r = m.round();
+        let mut dear: Vec<(&str, f64, f64)> = m.passes.clone();
+        dear.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let n = (FRAMES * (ROUNDS + 1)) as f64;
+        println!(
+            "SHIPPED ISLAND 21:00 {label}: p50 {:.2} p95 {:.2} GPU {:.2}; cpu stages {:?}; dearest {:?}",
+            r.p50,
+            r.p95,
+            m.gpu_frame_ms,
+            m.cpu_ms.map(|v| (v * 100.0).round() / 100.0),
+            &dear[..dear.len().min(5)]
+        );
+        if let Some(v) = m.vsm {
+            println!(
+                "SHIPPED ISLAND 21:00 {label} vsm per frame: pages {:.1} draws {:.1} indices {:.0} (terrain {:.0} vgeom {:.0}) casters {:.0} cached {:.1} dirty {:.1} (slot {:.1} geo {:.1} casters {:.1}) deferred {:.1} cut flushes {}",
+                v.pages as f64 / n,
+                v.draws as f64 / n,
+                v.indices_drawn as f64 / n,
+                v.indices_terrain as f64 / n,
+                v.indices_vgeom as f64 / n,
+                v.casters as f64 / n,
+                v.cached_pages as f64 / n,
+                v.dirty_pages as f64 / n,
+                v.dirty_slot as f64 / n,
+                v.dirty_geometry as f64 / n,
+                v.dirty_casters as f64 / n,
+                v.deferred_pages as f64 / n,
+                v.cut_flushes
+            );
+            println!("SHIPPED ISLAND 21:00 {label} vsm summary: {}", v.summary());
+        }
+    }
+}

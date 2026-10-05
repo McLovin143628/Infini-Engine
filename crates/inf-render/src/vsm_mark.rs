@@ -425,6 +425,27 @@ impl VsmMarker {
 /// removed and toggled — unlike a virtual-texture registry, which is level load
 /// state. [`signature`](Self::signature) is what decides when it has to be built
 /// again.
+/// **Each tree's reach, in handle order** (PAR0 audit): the scene lights that
+/// own a tree are the `casts` lights in scene order, the first `trees` of them —
+/// the walk `receiver_slots` makes — and a point/spot light's reach is its
+/// `range`; anything else reaches everywhere.
+fn light_reach(scene: &RenderScene, casts: &[bool], trees: usize) -> Vec<f32> {
+    scene
+        .lights
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| casts.get(*i).copied().unwrap_or(false))
+        .take(trees)
+        .map(|(_, l)| {
+            if l.kind != crate::scene::LightKind::Directional && l.range > 0.0 {
+                l.range
+            } else {
+                f32::INFINITY
+            }
+        })
+        .collect()
+}
+
 pub struct VsmSystem {
     residency: VsmResidency,
     pools: VsmPools,
@@ -446,6 +467,10 @@ pub struct VsmSystem {
     /// on the world lattice, and the NDC offset that says so. One entry per
     /// **light**, unlike [`projections`](Self::projections), which is per face.
     layouts: Vec<crate::vsm::ClipmapLayout>,
+    /// Per light, in handle order: its range in metres, or infinity (PAR0
+    /// audit) — see `PageGeometry::reach`. Rebuilt at every sync from the same
+    /// walk [`receiver_slots`](Self::receiver_slots) makes.
+    reach: Vec<f32>,
     /// Index of each light's **first** projection in [`projections`](Self::projections),
     /// in handle order. A cube light owns six consecutive entries, so a page's
     /// face indexes off this base rather than off its handle — the one place the
@@ -569,6 +594,7 @@ impl VsmSystem {
             bases,
             projections: Vec::new(),
             layouts: Vec::new(),
+            reach: Vec::new(),
             proj_base,
             raster: crate::vsm_raster::VsmRaster::new(gpu),
             stats: VsmStreamStats::default(),
@@ -710,6 +736,7 @@ impl VsmSystem {
         );
         self.projections = projections;
         self.layouts = layouts;
+        self.reach = light_reach(scene, &self.casts, self.trees.len());
         // On the GPU **now**, not after the graph — see
         // `VsmMarker::upload_projections`.
         self.marker
@@ -826,6 +853,7 @@ impl VsmSystem {
                 projections: &self.projections,
                 proj_base: &self.proj_base,
                 layouts: &self.layouts,
+                reach: &self.reach,
             },
             self.pools.atlas_view(),
             scene,

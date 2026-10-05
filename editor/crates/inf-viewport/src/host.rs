@@ -663,6 +663,15 @@ fn requested_render_settings(record: &RenderSettingsRecord) -> RenderSettings {
             enabled: true,
             ..base.vgeom
         },
+        // **Shadowed local lights ship** (PAR0 audit, (a')): a level that asks
+        // for shadows gets the virtual shadow maps on desktop, which is the only
+        // path that shadows a point or spot light — before this nothing in either
+        // host turned VSM on, so every room fixture lit through its walls in the
+        // build a player runs. The tier still clamps it off on Low (CSM).
+        vsm: inf_render::VsmSettings {
+            enabled: base.shadows.enabled,
+            ..base.vsm
+        },
         ..base
     }
 }

@@ -378,6 +378,10 @@ fn editor_settings(gpu: &GpuContext, record: RenderSettingsRecord) -> (RenderSet
             enabled: true,
             ..base.vgeom
         },
+        vsm: inf_render::VsmSettings {
+            enabled: base.shadows.enabled,
+            ..base.vsm
+        },
         ..base
     };
     (caps.clamp_occlusion(tier.apply(requested)), tier)
@@ -486,6 +490,7 @@ fn the_transcribed_editor_chain_is_the_editor_viewports_own() {
         "fn requested_render_settings(record: &RenderSettingsRecord) -> RenderSettings {",
         "let base = apply_record(record);",
         "vgeom: inf_render::VgeomSettings { enabled: true, ..base.vgeom },",
+        "vsm: inf_render::VsmSettings { enabled: base.shadows.enabled, ..base.vsm },",
     ] {
         let want: String = needle.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
@@ -526,6 +531,7 @@ fn the_transcribed_editor_chain_is_the_editor_viewports_own() {
         "let tier = detect_tier(gpu, &RenderSettings::default());",
         "let caps = AdapterCaps::probe(gpu);",
         "enabled: true,",
+        "enabled: base.shadows.enabled,",
         "(caps.clamp_occlusion(tier.apply(requested)), tier)",
     ] {
         let want: String = needle.split_whitespace().collect::<Vec<_>>().join(" ");

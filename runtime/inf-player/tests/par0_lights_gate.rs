@@ -303,6 +303,135 @@ fn closed_room(fixture: Option<RenderLight>) -> RenderScene {
     scene
 }
 
+/// **A MOVER OUTSIDE A FIXTURE'S RANGE DOES NOT RE-RASTER ITS SHADOW** (PAR0
+/// audit, (a')). A cube face or spot cone has an infinite far plane, so until
+/// the audit any caster anywhere in a face's frustum stamped that face's pages:
+/// on the island one shadowed room fixture re-rasterized ~154 pages a frame with
+/// the camera still (33 ms GPU), every car and pedestrian on the strip
+/// invalidating it. READS `VsmRasterStats::pages` (the pages the raster pass
+/// actually drew) over six frames in which one cube moves: far outside the
+/// lamp's range it must draw ZERO pages, and the control — the same cube moving
+/// inside the range — must draw some, or the counter proves nothing. The only
+/// shadow-casting light is the lamp (the moon casts nothing), and both movers
+/// stand behind the camera so no page is newly MARKED by their pixels.
+#[test]
+fn a_mover_outside_a_fixtures_range_does_not_re_raster_its_shadow() {
+    let Some(gpu) = gpu() else { return };
+    let view = look(DVec3::new(0.0, 6.0, 10.0), DVec3::new(0.0, 0.0, 0.0));
+    let lamp = point(DVec3::new(0.0, 2.2, 0.0), 60.0, 12.0, true);
+    let pages_while_moving = |mover_x: f64| -> u64 {
+        let target = HeadlessTarget::new(&gpu, W, H);
+        let mut r = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+        r.set_settings(vsm_on());
+        let mut scene = RenderScene {
+            grid_enabled: false,
+            ..Default::default()
+        };
+        floor(&mut scene, 40.0, 1);
+        scene.instances.push(MeshInstance::lit(
+            DVec3::new(1.5, 0.5, 0.5),
+            Quat::IDENTITY,
+            Vec3::ONE,
+            [0.6, 0.6, 0.6, 1.0],
+            2,
+        ));
+        // Behind the camera (which looks toward -z from z = 10).
+        let mover = scene.instances.len();
+        scene.instances.push(MeshInstance::lit(
+            DVec3::new(mover_x, 1.0, 14.0),
+            Quat::IDENTITY,
+            Vec3::ONE,
+            [0.6, 0.6, 0.6, 1.0],
+            3,
+        ));
+        scene.lights.push(moon());
+        scene.lights.push(lamp);
+        scene.mark_dirty();
+        for _ in 0..WARM {
+            r.render(&gpu, &scene, &view, &target.view, (W, H));
+            let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        }
+        let before = r.vsm_raster_stats().expect("VSM is on").pages;
+        for k in 0..6 {
+            scene.instances[mover] = MeshInstance::lit(
+                DVec3::new(mover_x, 1.0, 14.0 + 0.4 * f64::from(k + 1)),
+                Quat::IDENTITY,
+                Vec3::ONE,
+                [0.6, 0.6, 0.6, 1.0],
+                3,
+            );
+            scene.mark_dirty();
+            r.render(&gpu, &scene, &view, &target.view, (W, H));
+            let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        }
+        assert!(
+            r.vsm_light_slots().iter().any(|&s| s > 0),
+            "the lamp holds no page tree — the arm measures nothing"
+        );
+        r.vsm_raster_stats().expect("VSM is on").pages - before
+    };
+    // Lamp at the origin, range 12 m: the far mover is ~62 m from it; the
+    // control mover ~11 m, inside the ball. Both stand behind the camera.
+    let far = pages_while_moving(60.0);
+    let near = pages_while_moving_near(&gpu, &view, lamp);
+    println!(
+        "PAR0 audit reach: pages re-rasterized while a cube moves 62 m from a 12 m-range lamp {far}; while it moves ~11 m from it {near}"
+    );
+    assert_eq!(
+        far, 0,
+        "a caster outside the lamp's range re-rasterized its shadow pages"
+    );
+    assert!(
+        near > 0,
+        "a caster inside the lamp's range re-rasterized nothing — the counter is dead"
+    );
+}
+
+/// The control half of the reach arm: a cube moving ~11 m from the lamp (inside
+/// its 12 m range), behind the camera.
+fn pages_while_moving_near(gpu: &GpuContext, view: &RenderView, lamp: RenderLight) -> u64 {
+    let target = HeadlessTarget::new(gpu, W, H);
+    let mut r = EngineRenderer::new(gpu, HEADLESS_FORMAT);
+    r.set_settings(vsm_on());
+    let mut scene = RenderScene {
+        grid_enabled: false,
+        ..Default::default()
+    };
+    floor(&mut scene, 40.0, 1);
+    scene.instances.push(MeshInstance::lit(
+        DVec3::new(1.5, 0.5, 0.5),
+        Quat::IDENTITY,
+        Vec3::ONE,
+        [0.6, 0.6, 0.6, 1.0],
+        2,
+    ));
+    let mover = scene.instances.len();
+    let at = |k: u32| DVec3::new(-3.0 + 0.4 * f64::from(k), 1.0, 10.6);
+    scene.instances.push(MeshInstance::lit(
+        at(0),
+        Quat::IDENTITY,
+        Vec3::ONE,
+        [0.6, 0.6, 0.6, 1.0],
+        3,
+    ));
+    scene.lights.push(moon());
+    scene.lights.push(lamp);
+    scene.mark_dirty();
+    for _ in 0..WARM {
+        r.render(gpu, &scene, view, &target.view, (W, H));
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+    let before = r.vsm_raster_stats().expect("VSM is on").pages;
+    for k in 1..=6 {
+        scene.instances[mover] =
+            MeshInstance::lit(at(k), Quat::IDENTITY, Vec3::ONE, [0.6, 0.6, 0.6, 1.0], 3);
+        scene.mark_dirty();
+        r.render(gpu, &scene, view, &target.view, (W, H));
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+    r.vsm_raster_stats().expect("VSM is on").pages - before
+}
+
 /// **THE WALL-LEAK ARM** (clause 2): a shadowed fixture in a closed room lights
 /// nothing outside it — the exterior frame is within one 8-bit step of the
 /// same room with no fixture at all — and the CONTROL, the same fixture with
@@ -313,9 +442,29 @@ fn a_closed_room_lights_nothing_outside_and_the_control_leaks() {
     let lamp = point(DVec3::new(0.0, 2.2, 0.0), 120.0, 16.0, true);
     let view = look(DVec3::new(11.0, 6.0, 9.0), DVec3::new(3.0, 0.5, 2.0));
 
-    let (dark, _) = render(&gpu, &closed_room(None), &view, vsm_on());
-    let (shadowed, r) = render(&gpu, &closed_room(Some(lamp)), &view, vsm_on());
-    let mut control_settings = vsm_on();
+    // **THE SHIPPED CONFIGURATION** (PAR0 audit, (a')): the settings the
+    // player renders a level that asks for shadows with, through the one door
+    // (`shipped_settings`) — not a hand-built `vsm.enabled = true`. Until the
+    // audit that door kept VSM off, so this arm proved the wall in a fixture
+    // and every room fixture leaked in the build a player runs.
+    let (ship, tier) = inf_player::render::shipped_settings(
+        &gpu,
+        inf_scene::RenderSettingsRecord {
+            shadows_enabled: true,
+            ..Default::default()
+        },
+    );
+    if matches!(tier, inf_render::RenderTier::Low) {
+        println!("SKIP the shipped wall-leak arm: tier Low keeps CSM (no local shadows)");
+        return;
+    }
+    assert!(
+        ship.vsm.enabled && ship.lights.local_shadow_budget > 0,
+        "the shipped settings do not shadow local lights on tier {tier:?}"
+    );
+    let (dark, _) = render(&gpu, &closed_room(None), &view, ship);
+    let (shadowed, r) = render(&gpu, &closed_room(Some(lamp)), &view, ship);
+    let mut control_settings = ship;
     control_settings.lights.local_shadow_budget = 0;
     let (leaky, _) = render(&gpu, &closed_room(Some(lamp)), &view, control_settings);
 
@@ -370,7 +519,7 @@ fn a_closed_room_lights_nothing_outside_and_the_control_leaks() {
         "{} exterior pixels moved by more than one step — more than the corner penumbra",
         over.len()
     );
-    let mut hard = vsm_on();
+    let mut hard = ship;
     hard.vsm.pcf_radius = 0;
     let (hard_dark, _) = render(&gpu, &closed_room(None), &view, hard);
     let (hard_lit, _) = render(&gpu, &closed_room(Some(lamp)), &view, hard);
