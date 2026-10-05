@@ -41861,3 +41861,110 @@ green after it). rustdoc 399 warnings, 0 errors (the base's 399). wasm32 `cargo 
 inf-player` ok. CRLF 0 in every text file touched. Goldens 74 (three added, the 71
 byte-identical). `Cargo.lock`, `crates/inf-scene` and every `.inf_lvl` untouched. No
 frame, log, CSV or Unreal file committed.
+
+## Wave PAR0 — THE AUDIT (2026-10-05)
+
+Adversarial audit of `e2577bd0..223ee3ac` (the squashed `feat(PAR0)` re-derived from
+the tree). Every implementer number in the gate reproduced on this machine (RTX 4070 Ti):
+2 000 lights → 2 000 distinct in the read-back grid, wall leak mean 0.0022 step / 10
+corner px up to 121 / control 152, glass 189.8 vs 69.8 vs 82.8, rig 0 at 11:00 / 6 at
+21:00, PIE == shipping 60/60. The census of WGSL light loops holds (one `lights_local`
+loop, one directional loop, the froxel build; `sprite.wgsl`'s 2D loop and
+`wetness.wgsl`'s body loop are not light loops). Four findings, three fixed.
+
+### (a') shadowed local lights did not ship — FIXED (`b91439be`)
+
+Isolated with an island probe (1080p, Harbour City at 21:00, LIT, release, VSM
+per-frame counters): with the camera HELD still, ONE shadowed fixture re-rasterized
+~154 point-light pages a frame — all `dirty_casters` — drawing ~1.0 G indices, 90 % of
+them meshlet geometry. Two causes:
+
+1. **A cube face / spot cone has an infinite far plane**, so every car and pedestrian
+   anywhere in a face's frustum re-stamped that face's pages each frame. A receiver a
+   point/spot light reaches is inside its range ball and so is the segment to the light,
+   so a caster wholly outside the ball cannot shadow anything the light lights:
+   `caster_within_reach` now keeps it out of the light's stamps and group masks (per-light
+   `reach` through `PageGeometry`).
+2. **Each dirty point-light page drew the island's meshlet road/kerb network whole at the
+   camera's detail** (~10 M indices a page). Perspective pages now draw a meshlet caster
+   at its coarsest classic level.
+
+| LIT island 21:00, N shadowed | GPU ms before | after reach | after reach + coarse |
+|---|---|---|---|
+| N=0 orbit | 31.16 | 31.08 | — |
+| N=1 held | 61.03 | 36.74 | 30.86 |
+| N=8 orbit | 107.98 | 59.61 | 36.65 |
+| N=8 held | 109.88 | 38.88 | 31.26 |
+
+Then VSM was turned ON in the shipped configuration of both hosts
+(`shipped_settings` and `requested_render_settings`: `vsm.enabled = shadows.enabled`;
+Low still clamps to CSM). **Shipped island at 21:00** (the level's own record, 3 rounds ×
+120 frames, min round, release, `the_shipped_island_at_nine_prices_its_shadowed_fixtures`):
+
+| shipped row | p50 | p95 | GPU ms |
+|---|---|---|---|
+| N=8 (as shipped) | 93.87 | 100.48 | 34.57 |
+| N=0 | 90.15 | 94.10 | 31.27 |
+| pre-audit shipped (VSM off, CSM, no local shadow) | 81.17 | 85.22 | 27.18 |
+| N=8, camera held | 93.30 | 97.23 | 32.78 |
+| +1 670 synthetic fixtures, N=8 | 102.83 | 108.21 | 39.29 |
+
+Shadowed fixtures ON costs +3.3 ms GPU at N=8 over N=0 and the VSM switch +4.1 ms over
+the CSM frame; the frame stays CPU-bound (p50 ~90 against GPU ~35) — PERF1's. N stays 8.
+New arm `par0_lights_gate::a_mover_outside_a_fixtures_range_does_not_re_raster_its_shadow`
+(far mover 0 pages, near mover 20; reach test disabled → 12, RED). The wall-leak arm now
+reads `shipped_settings` and asserts VSM + a local budget there (numbers unchanged).
+
+### (d') the 21:00 street — the night was lit by a fixed daytime sun — FIXED (`4517656e`)
+
+A census of the projected strip scene (`STRIP CENSUS` lines) showed two directional
+lights at 21:00: the sky's moon (0.15, below the horizon) and the island Sun entity's own
+authored `Light` (directional 3.2, fixed 10:30 bearing) beside a running clock, projected
+at every hour. Strip frame mean 15.7 / 255 with it, 4.6 without; the warm interiors of
+the PAR0 demo's look-right frame were that sun, not the fixtures.
+`inf_ecs::sky::authored_sun_level` fades the sky authority's own directional on the sky's
+elevation band (1.0 by day — unchanged —, 0 at night, 0.069 at the island's 21:00) in
+both projectors inside a new `authored_sun` fence. The white plates are `Screen`
+emissives ([0.90, 1.15, 1.70], always on, clipping at exposure 1); the blue boxes are the
+Bar counters' rim emissive ([0.06, 0.16, 0.42]) — content, routed to PAR1. Night ambient,
+measured: the key light at 21:00 is the moon at 0.15, below the horizon; the sky SH is
+sun-driven only, so the night floor is ABSENT (manual exposure 1.0). Priced for PAR1: a
+moon scaled by elevation and phase plus a night-sky / light-pollution floor in
+`atmosphere::sky_irradiance_sh` (~1 d; moves no golden with GI off; the two-sun DAYTIME
+— the authored 3.2 beside the sky's 3.0 — is carried, since removing it halves every
+daylight arm's calibration).
+
+### (e') no golden moved — explained by mutation
+
+Halving every point/spot light in `lights.wgsl` reds ONE of 134 strict goldens
+(`vsm_point`, mean 0.069 against the 0.06 tolerance); weakening the range window reds
+none. The harness's tolerance (mean ≤ 6 %, region ≤ 35 %) cannot see a 2× change of a
+local light that covers a small part of a frame, so "none of the 71 moved" means "within
+tolerance", not "bit-identical". Carried: a tight-tolerance mode for the light frames.
+
+### (i') `veh3h_gate`'s headlamp doc — FIXED (`efed6e34`, text only)
+
+### OPEN, with cause and price
+
+- (b') the ninth storage binding: the env group spends five storage buffers (`gi_sh`,
+  VT page table, VSM table + projections, the light words) and the resolve four meshlet
+  pools; the cheapest return to 8 is `gi_sh` and the light words in ONE buffer behind an
+  offset (GI writes its SH sub-range, the env group binds the whole), ~1 d. Until then an
+  8-limit adapter loses the meshlet tier only.
+- (c') interiors are not dark: High's probe grid is 16 × 8 × 16 over a 40 m cube (2.7 m
+  across, 5.7 m vertical), so a 3 m-tall room usually has no probe layer and its floor
+  blends a probe above the roof. The fix is per-probe visibility (six axis distances
+  packed into the three free `w` lanes as f16 pairs, tested in `gi_fetch_sh`) plus a
+  fully-occluded fallback, ~1.5–2 d; moves every GI-on golden.
+- (f') glass tint grey / CPU-fallback opaque / water after glass; water's lights arm.
+- (g') the corner penumbra (10 px up to 121 steps at 640 × 360).
+- (h') editor frames — the frames this audit delivers are headless shipped-path renders.
+
+### the close (2026-10-05, auditor)
+
+The full battery on `4517656e` (-j 3, `INF_GOLDEN_STRICT=1`): `AGGREGATE over 406
+binaries: 7869 passed, 0 failed, 33 ignored`. clippy `--workspace --all-targets
+--keep-going -D warnings` clean after it; rustdoc 398 warnings, 0 errors; wasm32 `cargo
+check -p inf-player` ok. Goldens 74, none moved. Schema, `Cargo.lock` and every
+`.inf_lvl` unmoved. Frames are headless shipped-path renders; the editor was not
+relaunched (carried).
