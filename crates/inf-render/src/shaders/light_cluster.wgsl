@@ -30,12 +30,26 @@ struct LightHeader {
 };
 
 @group(0) @binding(0) var<uniform> light_hdr: LightHeader;
-@group(0) @binding(1) var<storage, read_write> light_words: array<vec4<u32>>;
+// **Addressed as `array<u32>`, not `array<vec4<u32>>`** (PAR0 audit). The
+// lit passes read the same buffer as `vec4<u32>` records (`lights.wgsl`); this
+// pass WRITES single words, and a froxel's count shares a vec4 with three
+// neighbours' counts. Written as `light_words[w >> 2u][w & 3u] = n`, Metal
+// lowers the lane store to a read-modify-write of the whole vector, so four
+// invocations raced on one vec4 and three of every four counts were lost —
+// macOS CI measured 22 non-empty froxels where this machine builds 92, and
+// 868 of 2 000 lights in the grid. A `u32` element is its own memory location
+// on every backend, so these stores cannot clobber each other.
+@group(0) @binding(1) var<storage, read_write> light_words: array<u32>;
+
+fn light_vec4(v: u32) -> vec4<u32> {
+    let b = v * 4u;
+    return vec4<u32>(light_words[b], light_words[b + 1u], light_words[b + 2u], light_words[b + 3u]);
+}
 
 fn light_pos_radius(i: u32) -> vec4<f32> {
     let b = i * 4u;
-    let pos = bitcast<vec4<f32>>(light_words[b + 1u]);
-    let sd = bitcast<vec4<f32>>(light_words[b + 3u]);
+    let pos = bitcast<vec4<f32>>(light_vec4(b + 1u));
+    let sd = bitcast<vec4<f32>>(light_vec4(b + 3u));
     return vec4<f32>(pos.xyz, sd.w);
 }
 
@@ -111,11 +125,11 @@ fn cs_cluster(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (dot(e, e) <= s.w * s.w) {
             if (n < cap) {
                 let w = index_base + n;
-                light_words[w >> 2u][w & 3u] = i;
+                light_words[w] = i;
             }
             n = n + 1u;
         }
     }
     let cw = light_hdr.bases.x * 4u + c;
-    light_words[cw >> 2u][cw & 3u] = n;
+    light_words[cw] = n;
 }
