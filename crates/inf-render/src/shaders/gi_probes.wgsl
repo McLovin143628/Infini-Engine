@@ -54,6 +54,10 @@ struct GiData {
     night_sh1: vec4<f32>,
     night_sh2: vec4<f32>,
     night_sh3: vec4<f32>,
+    // Wave PAR0b clause 2: the local lights the probe march bounces —
+    // GI_LOCAL_LIGHTS records of (pos.xyz, range), (colour x intensity, kind),
+    // (emit dir, outer cos); the count rides `night_sh0.w`.
+    local_lights: array<vec4<f32>, 24>,
 };
 @group(0) @binding(0) var<uniform> gi: GiData;
 @group(0) @binding(1) var<storage, read> voxels: array<u32>;
@@ -175,6 +179,50 @@ fn gi_oct_decode(uv: vec2<f32>) -> vec3<f32> {
     n.x = n.x + select(t, -t, n.x >= 0.0);
     n.z = n.z + select(t, -t, n.z >= 0.0);
     return normalize(n);
+}
+
+// **A HIT SURFACE LIT BY THE LOCAL LIGHTS** (wave PAR0b, clause 2): the
+// irradiance/π a Lambert surface at `p` facing `nh` receives from the frame's
+// strongest local lights — the same windowed inverse square and spot cone as
+// `lights.wgsl`, each shadowed by a voxel march toward the light (so a lamp in
+// a closed room bounces off its own walls and nothing outside them). The
+// caller multiplies by the voxel's albedo (≤ 1, an RGBA8 colour), which is the
+// whole energy bound: a bounce never returns more than the light that arrived.
+fn gi_local_bounce(p: vec3<f32>, nh: vec3<f32>) -> vec3<f32> {
+    let n = u32(gi.night_sh0.w);
+    let vsize = gi.vol_min.w;
+    var sum = vec3<f32>(0.0);
+    for (var k = 0u; k < min(n, 8u); k = k + 1u) {
+        let a = gi.local_lights[k * 3u];
+        let to_l = a.xyz - p;
+        let dist = length(to_l);
+        if (dist >= a.w || dist < 1.0e-3) {
+            continue;
+        }
+        let l = to_l / dist;
+        let ndl = dot(nh, l);
+        if (ndl <= 0.0) {
+            continue;
+        }
+        let b = gi.local_lights[k * 3u + 1u];
+        let c = gi.local_lights[k * 3u + 2u];
+        var cone = 1.0;
+        if (b.w > 1.5) {
+            cone = smoothstep(c.w, min(c.w + 0.05, 1.0), dot(-l, c.xyz));
+        }
+        let inv_sq = 1.0 / max(dist * dist, 1.0e-4);
+        let t = clamp(1.0 - pow(dist / a.w, 4.0), 0.0, 1.0);
+        var vis = 1.0;
+        let steps = i32(dist / vsize);
+        for (var s = 1; s < min(steps, 48); s = s + 1) {
+            if (sample_point(p + l * (vsize * f32(s))).solid > 0.5) {
+                vis = 0.0;
+                break;
+            }
+        }
+        sum = sum + b.rgb * (inv_sq * t * t * cone * ndl * vis / PI);
+    }
+    return sum;
 }
 
 // March toward the sun from `p`; 0 if an occluder is hit before leaving the volume.
@@ -381,7 +429,10 @@ fn cs_probes(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let nh = -dir;
                 let ndl = max(dot(nh, normalize(gi.sun_dir.xyz)), 0.0);
                 let direct = gi.sun_color.rgb * vis * ndl * (1.0 / PI);
-                radiance = v.albedo * direct + v.emissive;
+                // + the local lights (PAR0b clause 2), from the open voxel the
+                // ray stood in before it hit — the hit voxel itself is solid.
+                let bounce = gi_local_bounce(pos - dir * vsize, nh);
+                radiance = v.albedo * (direct + bounce) + v.emissive;
                 sky_lit = v.albedo * max(sky_irradiance(nh), vec3<f32>(0.0));
                 hit = true;
                 break;

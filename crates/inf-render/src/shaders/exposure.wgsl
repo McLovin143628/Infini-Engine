@@ -67,6 +67,10 @@ const EXPOSURE_KEY: f32 = 0.18;
 // MIRROR: `inf_render::settings::EXPOSURE_LIGHT_ADAPTATION_RATIO` (PAR0b) — a
 // step toward less exposure runs this many times faster than one toward more.
 const EXPOSURE_LIGHT_ADAPTATION_RATIO: f32 = 3.0;
+// MIRROR: `inf_render::settings::EXPOSURE_HIGHLIGHT_FRACTION` /
+// `EXPOSURE_HIGHLIGHT_WHITE` (PAR0b) — the highlight guard.
+const EXPOSURE_HIGHLIGHT_FRACTION: f32 = 0.02;
+const EXPOSURE_HIGHLIGHT_WHITE: f32 = 4.0;
 
 var<workgroup> tile: array<atomic<u32>, 256>;
 var<workgroup> red_w: array<f32, 256>;
@@ -162,7 +166,30 @@ fn cs_resolve(@builtin(local_invocation_index) li: u32) {
     let lo = max(params.control.x, 1e-4);
     let hi = max(params.control.y, lo);
     let l = clamp(avg, lo, hi);
-    let target_ev = log2(EXPOSURE_KEY / l);
+    var target_ev = log2(EXPOSURE_KEY / l);
+
+    // THE HIGHLIGHT GUARD (PAR0b) — `inf_render::settings::exposure_highlight_cap_ev`,
+    // transliterated: walk the bins from the top until the brightest
+    // EXPOSURE_HIGHLIGHT_FRACTION of ALL samples (the black bin counts toward the
+    // total) is found, and refuse an exposure that would push that luminance
+    // past EXPOSURE_HIGHLIGHT_WHITE — never below what `max_luminance` allows.
+    var total = 0.0;
+    for (var b = 0u; b < EXPOSURE_BINS; b = b + 1u) {
+        total = total + f32(atomicLoad(&histogram[b]));
+    }
+    if (total > 0.0) {
+        let want = max(total * EXPOSURE_HIGHLIGHT_FRACTION, 1.0);
+        var acc = 0.0;
+        for (var k = 1u; k < EXPOSURE_BINS; k = k + 1u) {
+            let b = EXPOSURE_BINS - k;
+            acc = acc + f32(atomicLoad(&histogram[b]));
+            if (acc >= want) {
+                let cap = log2(EXPOSURE_HIGHLIGHT_WHITE / exp2(exposure_bin_log(b)));
+                target_ev = max(min(target_ev, cap), log2(EXPOSURE_KEY / hi));
+                break;
+            }
+        }
+    }
 
     // Adapt, linearly in stops — `adaptation_speed` is documented in stops per
     // second and a linear ramp is the only rule that makes that sentence true.

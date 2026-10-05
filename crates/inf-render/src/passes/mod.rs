@@ -1781,6 +1781,14 @@ mod shader_compose_tests {
                 "const EXPOSURE_LIGHT_ADAPTATION_RATIO: f32 = ",
                 crate::settings::EXPOSURE_LIGHT_ADAPTATION_RATIO,
             ),
+            (
+                "const EXPOSURE_HIGHLIGHT_FRACTION: f32 = ",
+                crate::settings::EXPOSURE_HIGHLIGHT_FRACTION,
+            ),
+            (
+                "const EXPOSURE_HIGHLIGHT_WHITE: f32 = ",
+                crate::settings::EXPOSURE_HIGHLIGHT_WHITE,
+            ),
         ] {
             let at = src
                 .find(decl)

@@ -61,6 +61,10 @@ struct GiData {
     night_sh1: vec4<f32>,
     night_sh2: vec4<f32>,
     night_sh3: vec4<f32>,
+    // Wave PAR0b clause 2: the local lights the probe march bounces —
+    // GI_LOCAL_LIGHTS records of (pos.xyz, range), (colour x intensity, kind),
+    // (emit dir, outer cos); the count rides `night_sh0.w`.
+    local_lights: array<vec4<f32>, 24>,
 };
 
 @group(GROUP_ENV) @binding(0) var ao_tex: texture_2d<f32>;

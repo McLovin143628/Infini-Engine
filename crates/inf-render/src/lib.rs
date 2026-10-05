@@ -164,17 +164,17 @@ pub use scene::{
 };
 pub use settings::{
     adapt_exposure_ev, exposure_bin, exposure_bin_luminance, exposure_compensation_factor,
-    exposure_log_average, exposure_target_ev, halton, halton_jitter, luminance,
-    manual_exposure_multiplier, mip_chain_sizes, soft_knee_factor, ssao_hemisphere_kernel,
-    BloomSettings, ExposureMode, ExposureSettings, FilmSettings, FlareSettings, GiSettings,
-    PredictSettings, RaytraceSettings, RenderSettings, ScatterSettings, ShadowSettings,
-    SsaoSettings, SsrQuality, SsrSettings, StreamSettings, VgeomSettings, VirtualTextureSettings,
-    VsmSettings, VsmSettingsError, DEFAULT_PREDICT_HORIZON_TICKS, DEFAULT_STREAM_BUDGET_BYTES,
-    EXPOSURE_BINS, EXPOSURE_KEY, EXPOSURE_LOG_MAX, EXPOSURE_LOG_MIN, ROADMAP_PREDICT_HORIZON_TICKS,
-    STREAM_BUDGET_LOW_BYTES, STREAM_BUDGET_MEDIUM_BYTES, VGEOM_BUDGET_LOW_BYTES,
-    VGEOM_BUDGET_MEDIUM_BYTES, VSM_BUDGET_LOW_BYTES, VSM_BUDGET_MEDIUM_BYTES,
-    VSM_CLIPMAP_PAGES_MEDIUM, VSM_MARK_STRIDE_MEDIUM, VSM_MAX_MARK_STRIDE, VSM_MAX_PCF_RADIUS,
-    VSM_PCF_RADIUS_MEDIUM,
+    exposure_highlight_cap_ev, exposure_log_average, exposure_target_ev, halton, halton_jitter,
+    luminance, manual_exposure_multiplier, mip_chain_sizes, soft_knee_factor,
+    ssao_hemisphere_kernel, BloomSettings, ExposureMode, ExposureSettings, FilmSettings,
+    FlareSettings, GiSettings, PredictSettings, RaytraceSettings, RenderSettings, ScatterSettings,
+    ShadowSettings, SsaoSettings, SsrQuality, SsrSettings, StreamSettings, VgeomSettings,
+    VirtualTextureSettings, VsmSettings, VsmSettingsError, DEFAULT_PREDICT_HORIZON_TICKS,
+    DEFAULT_STREAM_BUDGET_BYTES, EXPOSURE_BINS, EXPOSURE_KEY, EXPOSURE_LOG_MAX, EXPOSURE_LOG_MIN,
+    ROADMAP_PREDICT_HORIZON_TICKS, STREAM_BUDGET_LOW_BYTES, STREAM_BUDGET_MEDIUM_BYTES,
+    VGEOM_BUDGET_LOW_BYTES, VGEOM_BUDGET_MEDIUM_BYTES, VSM_BUDGET_LOW_BYTES,
+    VSM_BUDGET_MEDIUM_BYTES, VSM_CLIPMAP_PAGES_MEDIUM, VSM_MARK_STRIDE_MEDIUM, VSM_MAX_MARK_STRIDE,
+    VSM_MAX_PCF_RADIUS, VSM_PCF_RADIUS_MEDIUM,
 };
 pub use timing::{
     record, FrameTimer, FrameTimings, PassTime, RecordProfile, MAX_FRAME_MARKS, RECORD_PHASES,

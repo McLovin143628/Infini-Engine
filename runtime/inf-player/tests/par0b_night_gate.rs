@@ -613,3 +613,114 @@ fn the_open_air_does_not_darken_under_probe_visibility() {
         );
     }
 }
+
+/// The same sealed room at night (no sun), lit by one downlight: a spot at
+/// 2.9 m aimed straight down, 60 deg cone, so the ceiling receives NO direct
+/// light and reads its bounce alone.
+fn downlit_room(bounce: bool) -> (RenderScene, RenderSettings) {
+    let mut s = room(Opening::Sealed, false, false);
+    s.lights.push(RenderLight {
+        kind: LightKind::Spot,
+        color: [1.0, 0.9, 0.75],
+        intensity: 12.0,
+        position: DVec3::new(0.0, 2.9, 0.0),
+        direction: Vec3::Y,
+        range: 10.0,
+        inner_cos: 50f32.to_radians().cos(),
+        outer_cos: 60f32.to_radians().cos(),
+        cast_shadows: true,
+        ..RenderLight::default()
+    });
+    s.mark_dirty();
+    let mut set = gi_settings(true);
+    set.gi.local_lights = bounce;
+    (s, set)
+}
+
+/// **GI READS LOCAL LIGHTS** (clause 2): a sealed room at night lit by one
+/// downlight. The ceiling gets no direct light, so what it shows is bounce:
+/// with the local lights in the probe march it must read brighter than
+/// without (by 5 codes), and — the energy bound — no brighter than the lit
+/// floor times the slabs' albedo (0.7): a bounce cannot return more light than
+/// arrived.
+///
+/// Mutation: `GiSettings::local_lights = false` IS the control here; the arm's
+/// own mutation is the probe march dropping `gi_local_bounce` (RED: ceiling
+/// on == off).
+#[test]
+fn a_lit_rooms_ceiling_receives_its_fixtures_bounce_within_the_albedo_bound() {
+    let Some(gpu) = gpu() else { return };
+    let up = look(DVec3::new(0.0, 1.2, 2.0), DVec3::new(0.0, 3.0, -1.0));
+    let down = look(DVec3::new(0.0, 2.0, 2.4), DVec3::new(0.0, 0.0, 0.0));
+    let (on_scene, on_set) = downlit_room(true);
+    let (off_scene, off_set) = downlit_room(false);
+    let ceil_on = render(&gpu, &on_scene, &up, on_set);
+    let ceil_off = render(&gpu, &off_scene, &up, off_set);
+    let floor_on = render(&gpu, &on_scene, &down, on_set);
+    dump("downlit_ceiling_bounce", &ceil_on);
+    dump("downlit_ceiling_no_bounce", &ceil_off);
+    dump("downlit_floor", &floor_on);
+    let c_on = patch_at(&ceil_on, &up, DVec3::new(0.0, TALL, -1.0));
+    let c_off = patch_at(&ceil_off, &up, DVec3::new(0.0, TALL, -1.0));
+    let f = patch_at(&floor_on, &down, DVec3::new(0.0, 0.0, 0.0));
+    // Codes are not radiance; compare in (approximately) linear terms through
+    // the sRGB decode — the tonemap's toe is near-linear at these levels.
+    let lin = |c: f64| {
+        let v = c / 255.0;
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    println!(
+        "PAR0b BOUNCE: ceiling with the fixture in the march {c_on:.2}, without {c_off:.2}; lit floor {f:.2}; ceiling/floor (linear) {:.3} against the albedo bound 0.7",
+        lin(c_on) / lin(f).max(1e-6)
+    );
+    assert!(
+        c_on > c_off + 5.0,
+        "the ceiling shows no bounce from its own fixture ({c_on:.2} vs {c_off:.2})"
+    );
+    assert!(
+        lin(c_on) <= 0.7 * lin(f) + 1e-3,
+        "the bounce returns more light than arrived: ceiling {c_on:.2} vs floor {f:.2}"
+    );
+}
+
+/// **NO LIGHT LEAKS THROUGH A WALL VIA THE PROBES** (clause 2): PAR0's wall-leak
+/// arm with GI on and the local lights in the march — the closed room's
+/// exterior with its lamp vs without, seen from the street at night: the mean
+/// delta under 0.05 of a step and no more than 1 % of pixels moved by more
+/// than 2 codes (the PCF corner penumbra is clause 7's, read by max there).
+#[test]
+fn the_wall_leak_holds_with_gi_reading_the_local_lights() {
+    let Some(gpu) = gpu() else { return };
+    let view = look(DVec3::new(9.0, 2.5, -9.0), DVec3::new(0.0, 0.8, 0.0));
+    let (lamp, set) = downlit_room(true);
+    let dark = room(Opening::Sealed, false, false);
+    let a = render(&gpu, &lamp, &view, set);
+    let b = render(&gpu, &dark, &view, set);
+    dump("gi_wall_leak", &a);
+    let mut sum = 0u64;
+    let mut moved = 0usize;
+    let mut max = 0u8;
+    for (x, y) in a.chunks_exact(4).zip(b.chunks_exact(4)) {
+        let d = (0..3).map(|k| x[k].abs_diff(y[k])).max().unwrap_or(0);
+        sum += u64::from(d);
+        max = max.max(d);
+        if d > 2 {
+            moved += 1;
+        }
+    }
+    let n = (W * H) as f64;
+    let mean = sum as f64 / n;
+    println!("PAR0b GI WALL LEAK: exterior delta mean {mean:.4} max {max}, {moved} px over 2 codes ({:.3} %)", 100.0 * moved as f64 / n);
+    assert!(
+        mean < 0.05,
+        "light leaks out of a closed room through the probes: mean {mean:.4}"
+    );
+    assert!(
+        (moved as f64) < 0.01 * n,
+        "{moved} exterior pixels moved by more than 2 codes"
+    );
+}

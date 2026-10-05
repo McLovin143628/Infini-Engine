@@ -213,6 +213,11 @@ pub struct GiDataGpu {
     /// sun-only — without this a sealed room would subtract the sun's sky and
     /// keep the night's, i.e. the night floor would shine through every wall.
     pub night_sh: [[f32; 4]; 4],
+    /// **The local lights the probe march bounces** (wave PAR0b, clause 2):
+    /// [`crate::gi::GI_LOCAL_LIGHTS`] records of three `vec4`s from
+    /// [`crate::gi::gi_local_lights`]; the count rides `night_sh[0].w`, the
+    /// spot inner cosines `night_sh[1..=2].w` and `sky_sh[1..=3].w` are unused.
+    pub local_lights: [[f32; 4]; 3 * crate::gi::GI_LOCAL_LIGHTS],
 }
 
 /// The sum of two L1 triple sets, coefficient by coefficient. A sum with an
@@ -264,6 +269,7 @@ impl GiDataGpu {
             // this wave did not widen it.
             sky_sh: [[0.0; 4]; 4],
             night_sh: [[0.0; 4]; 4],
+            local_lights: [[0.0; 4]; 3 * crate::gi::GI_LOCAL_LIGHTS],
         }
     }
 
@@ -1383,11 +1389,22 @@ impl RenderNode for GiNode {
                 night,
             )),
             night_sh: sky_sh_lanes(night),
+            local_lights: [[0.0; 4]; 3 * crate::gi::GI_LOCAL_LIGHTS],
         }
         .with_ssr(frame);
         // PAR0b: the probe-visibility switch rides the unused `w` of the first
         // sky coefficient (`gi.sky_sh0.w` in `env_lighting.wgsl`).
         data.sky_sh[0][3] = if s.probe_visibility { 1.0 } else { 0.0 };
+        // PAR0b clause 2: the local lights the march bounces (none with
+        // `GiSettings::local_lights` off — the A/B and the gate's mutation).
+        if s.local_lights {
+            let picked =
+                crate::gi::gi_local_lights(&frame.scene.lights, origin.origin(), eye, extent);
+            for (k, rec) in picked.iter().enumerate() {
+                data.local_lights[3 * k..3 * k + 3].copy_from_slice(rec);
+            }
+            data.night_sh[0][3] = picked.len() as f32;
+        }
         gpu.queue
             .write_buffer(&frame.gi.uniform, 0, bytemuck::bytes_of(&data));
 

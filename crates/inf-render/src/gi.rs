@@ -52,8 +52,12 @@ use crate::scene::{RenderTerrain, RenderTerrainLayer};
 /// free constant because it is the dimension every pre-P18.4 caller and golden
 /// rendered with.
 pub const GI_DIM: u32 = 64;
-/// Probe grid dimensions `[x, y, z]` at [`GiQuality::High`] (16×8×16 = 2048
-/// probes). Fewer probes vertically since scenes are wider than tall.
+/// Probe grid dimensions `[x, y, z]` at [`GiQuality::High`] (16×16×16 = 4096
+/// probes). **Sixteen layers since wave PAR0b** (eight before): at 40 m the
+/// vertical pitch was 5.71 m and a 3 m storey usually held no probe at all, so
+/// its interior read the probes above its roof and below its floor; at 2.67 m
+/// every storey holds a layer (with buried-probe relocation for the one that
+/// lands in a slab).
 pub const PROBE_DIMS: [u32; 3] = [16, 16, 16];
 
 /// **`vec4`s per probe record** (wave PAR0b, clause 1): the four L1 SH
@@ -76,6 +80,76 @@ pub const PROBE_RELOCATE_VOXELS: u32 = 2;
 /// `env_lighting.wgsl`.
 pub const PROBE_VIS_NORMAL_BIAS_VOXELS: f32 = 1.0;
 pub const PROBE_VIS_MIN_VARIANCE_VOXELS2: f32 = 0.25;
+
+/// **How many local lights the probe march bounces** (wave PAR0b, clause 2):
+/// the strongest `GI_LOCAL_LIGHTS` point/spot lights whose reach overlaps the
+/// GI volume, ranked by [`gi_local_lights`]. Eight: a room's fixtures, the
+/// lamps of a street block — the bounce of light number nine at the far edge
+/// of a 40 m box is below a code. Mirrors `GI_LOCAL_LIGHTS` in
+/// `gi_probes.wgsl`.
+pub const GI_LOCAL_LIGHTS: usize = 8;
+
+/// **The local lights the probe march injects** (wave PAR0b, clause 2), as
+/// `[pos.xyz + range, colour × intensity + kind, emit dir + outer cos, inner
+/// cos]` records in render-local metres, at most [`GI_LOCAL_LIGHTS`].
+///
+/// A pure function of the scene and the volume: every point/spot light with
+/// positive output whose range sphere reaches the volume's bounding sphere,
+/// ranked by `intensity × peak colour / max(d², 1)` (d = from the volume
+/// centre), ties to the lower scene index — so both hosts and every rerun pick
+/// the same eight. Unlike the frame's light list this is NOT frustum-culled:
+/// the lamp behind the camera lights the wall in front of it by bounce.
+pub fn gi_local_lights(
+    lights: &[crate::scene::RenderLight],
+    origin: glam::DVec3,
+    centre_local: Vec3,
+    extent: f32,
+) -> Vec<[[f32; 4]; 3]> {
+    use crate::scene::LightKind;
+    let reach = volume_reach(extent);
+    let mut ranked: Vec<(f32, usize)> = Vec::new();
+    for (i, l) in lights.iter().enumerate() {
+        if l.kind == LightKind::Directional || l.intensity <= 0.0 || l.range <= 0.0 {
+            continue;
+        }
+        let peak = l.color[0].max(l.color[1]).max(l.color[2]);
+        if peak <= 0.0 {
+            continue;
+        }
+        let p = (l.position - origin).as_vec3();
+        let d = (p - centre_local).length();
+        if d > reach + l.range {
+            continue;
+        }
+        ranked.push((l.intensity * peak / (d * d).max(1.0), i));
+    }
+    ranked.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+    ranked
+        .into_iter()
+        .take(GI_LOCAL_LIGHTS)
+        .map(|(_, i)| {
+            let l = &lights[i];
+            let p = (l.position - origin).as_vec3();
+            let spot = l.kind == LightKind::Spot;
+            let emit = (-l.direction).normalize_or_zero();
+            [
+                [p.x, p.y, p.z, l.range],
+                [
+                    l.color[0] * l.intensity,
+                    l.color[1] * l.intensity,
+                    l.color[2] * l.intensity,
+                    if spot { 2.0 } else { 1.0 },
+                ],
+                [
+                    emit.x,
+                    emit.y,
+                    emit.z,
+                    if spot { l.outer_cos } else { -2.0 },
+                ],
+            ]
+        })
+        .collect()
+}
 
 /// Macro-cell edge in **voxels**: the voxel grid is partitioned into
 /// `(dim/MACRO_DIM)³` cells, and each cell carries the list of primitives whose
@@ -103,7 +177,7 @@ pub const EMISSIVE_MAX: f32 = 16.0;
 /// [`crate::GiSettings`], clamped **down** by
 /// [`RenderTier::apply`](crate::RenderTier::apply), never up.
 ///
-/// [`High`](GiQuality::High) is exactly the pre-P18.4 geometry (64³ / 16×8×16), so
+/// [`High`](GiQuality::High) is the pre-P18.4 voxel geometry (64³) with, since wave PAR0b, sixteen probe layers instead of eight, so
 /// a default-settings GI render is unchanged by the tiering itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum GiQuality {
@@ -111,8 +185,8 @@ pub enum GiQuality {
     Low,
     /// 48³ voxels, 12×6×12 = 864 probes, 2048 primitives/frame.
     Medium,
-    /// 64³ voxels, 16×8×16 = 2048 probes, 4096 primitives/frame — the pre-P18.4
-    /// geometry.
+    /// 64³ voxels, 16×16×16 = 4096 probes (16×8×16 before wave PAR0b),
+    /// 4096 primitives/frame.
     #[default]
     High,
 }
@@ -1043,7 +1117,9 @@ mod tests {
         assert!(p1.abs_diff_eq(Vec3::splat(40.0), 1e-4));
 
         assert_eq!(probe_index(0, 0, 0), 0);
-        assert_eq!(probe_count(), 16 * 8 * 16);
+        // PAR0b: sixteen layers (2.67 m vertical pitch over 40 m) so a 3 m storey
+        // holds a probe layer.
+        assert_eq!(probe_count(), 16 * 16 * 16);
         // x is the fastest axis.
         assert_eq!(probe_index(1, 0, 0), 1);
         assert_eq!(probe_index(0, 1, 0), PROBE_DIMS[0]);

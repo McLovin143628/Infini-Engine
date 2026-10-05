@@ -347,6 +347,12 @@ pub const MAX_RIVER_BODIES: usize = 10;
 /// key over `2^ISLAND_NIGHT_GAIN_STOPS`, so the night can open the exposure at
 /// most that many stops above the day's 1.0.
 pub const ISLAND_EXPOSURE_MIN_LUMINANCE: f32 = 0.18 / 256.0;
+/// **The island's date** (wave PAR0b): June 12, nine days before the solstice
+/// the clock defaulted to — the noon sun is 0.2° lower, which no frame can see —
+/// and the night of a FULL moon (phase 0.52 at 22:00; the solstice default sat
+/// at 0.79, a waning crescent that lights a street at 5 % of a full moon). The
+/// showcase's night is a moonlit one; the date is how a level says so.
+pub const ISLAND_DAY_OF_YEAR: u32 = 163;
 /// How many stops the island's eye may open at night (wave PAR0b).
 pub const ISLAND_NIGHT_GAIN_STOPS: f32 = 8.0;
 /// The brightest scene average the island's eye adapts to: the key itself, so
@@ -943,6 +949,7 @@ pub fn island_scene(design: &inf_island::IslandDesign) -> SceneDoc {
         TimeOfDay {
             seconds: 10.5 * 3600.0,
             rate: ISLAND_CLOCK_RATE,
+            day_of_year: ISLAND_DAY_OF_YEAR,
             ..TimeOfDay::default()
         },
     );

@@ -3887,7 +3887,8 @@ fn the_shipped_island_by_the_hour() {
     // The KERB: the strip centroid lands inside a venue building (the audit's
     // orbit rows are taken there, and kept there for continuity), so the
     // frames a viewer reads are also taken from the street outside the venue
-    // block nearest that centroid, 4 m beyond its +X face.
+    // block nearest that centroid, in the middle of the 20 m street beyond
+    // its +X face.
     let kerb_block = city
         .blocks
         .iter()
@@ -3901,7 +3902,7 @@ fn the_shipped_island_by_the_hour() {
     let mut fx = open_streamed(&pack);
     let ground = fx.sim.terrain_height_at(centre.x, centre.z);
     let at = DVec3::new(centre.x, ground, centre.z);
-    let kx = kerb_block.centre.x + kerb_block.half.x + 4.0;
+    let kx = kerb_block.centre.x + kerb_block.half.x + 10.0;
     let kz = kerb_block.centre.y;
     let kerb = DVec3::new(kx, fx.sim.terrain_height_at(kx, kz), kz);
     let kerb_view = |toward: Vec3| RenderView {

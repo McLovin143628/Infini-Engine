@@ -529,6 +529,12 @@ pub struct GiSettings {
     /// `false` restores the pre-PAR0b blend for an A/B and for the gate's
     /// mutation.
     pub probe_visibility: bool,
+    /// **Local lights in the bounce** (wave PAR0b, clause 2): the probe march
+    /// lights the surfaces its rays hit by the strongest
+    /// [`crate::gi::GI_LOCAL_LIGHTS`] point/spot lights too, shadowed by a
+    /// voxel march, so a lamp's room is lit by bounce and not only directly.
+    /// On by default; render-side only; `false` is the A/B and the mutation.
+    pub local_lights: bool,
 }
 // **SSR left this struct in wave VIS1a.** `ssr` / `ssr_distance` /
 // `ssr_thickness` lived here from P18.4 because all SSR did was move the GI
@@ -549,6 +555,7 @@ impl Default for GiSettings {
             probe_budget: 0,
             specular: true,
             probe_visibility: true,
+            local_lights: true,
         }
     }
 }
@@ -1731,6 +1738,48 @@ pub fn exposure_target_ev(avg: f32, min_luminance: f32, max_luminance: f32) -> f
     (EXPOSURE_KEY / l).log2()
 }
 
+/// **The highlight guard's percentile** (wave PAR0b, clause 3c): the
+/// brightest `EXPOSURE_HIGHLIGHT_FRACTION` of the frame (2 %) is what the eye
+/// must not blow out.
+pub const EXPOSURE_HIGHLIGHT_FRACTION: f32 = 0.02;
+/// The scene luminance × exposure the guarded percentile is allowed to reach:
+/// `4.0` is where the engine's ACES fit reaches ~0.97 of white.
+pub const EXPOSURE_HIGHLIGHT_WHITE: f32 = 4.0;
+
+/// **THE HIGHLIGHT GUARD** (wave PAR0b, clause 3c): the most exposure, in
+/// stops, the frame can take before its brightest
+/// [`EXPOSURE_HIGHLIGHT_FRACTION`] passes [`EXPOSURE_HIGHLIGHT_WHITE`].
+///
+/// A log-average alone is the right meter for a street by day and the wrong
+/// one for a city at night: the dark majority votes, the eye opens its full
+/// range, and every lit window, sign and twilight sea in the frame goes white
+/// (measured on the island at 21:00 before the guard: 5 of 5 emissives
+/// clipping at ×256, the western sea a white band). The eye's target is the
+/// SMALLER of the log-average's and this — so a moonlit street with nothing
+/// bright in it still opens fully, and a street with a lit bar in it opens
+/// only as far as the bar allows, which is what an adapted eye does (glare
+/// keeps the pupil small). The resolve never lets it pull the exposure below
+/// what the author's `max_luminance` allows, so a daylight frame is untouched.
+///
+/// `bins` are the full histogram, black bin included (the percentile is of
+/// the frame, not of its lit part). An empty histogram has nothing to guard:
+/// `f32::MAX`.
+pub fn exposure_highlight_cap_ev(bins: &[u32]) -> f32 {
+    let total: u64 = bins.iter().map(|&b| u64::from(b)).sum();
+    if total == 0 {
+        return f32::MAX;
+    }
+    let want = (total as f32 * EXPOSURE_HIGHLIGHT_FRACTION).max(1.0);
+    let mut acc = 0.0f32;
+    for i in (1..bins.len()).rev() {
+        acc += bins[i] as f32;
+        if acc >= want {
+            return (EXPOSURE_HIGHLIGHT_WHITE / exposure_bin_luminance(i as u32)).log2();
+        }
+    }
+    f32::MAX
+}
+
 /// One adaptation step: move `prev_ev` toward `target_ev` at `speed` **stops per
 /// second** over `dt` seconds.
 ///
@@ -2351,6 +2400,30 @@ mod tests {
             frozen = adapt_exposure_ev(frozen, target, speed, 0.0);
         }
         assert_eq!(frozen, 0.5);
+    }
+
+    /// PAR0b clause 3c: the highlight guard caps the exposure at what keeps
+    /// the brightest 2 % under white, and only bites when something bright is
+    /// in the frame.
+    #[test]
+    fn the_highlight_guard_keeps_the_brightest_two_percent_under_white() {
+        let mut bins = vec![0u32; EXPOSURE_BINS as usize];
+        bins[exposure_bin(1.0e-4) as usize] = 9_700;
+        let dark = exposure_highlight_cap_ev(&bins);
+        // 3 % of the frame is a lit window at luminance 1.0.
+        bins[exposure_bin(1.0) as usize] = 300;
+        let lit = exposure_highlight_cap_ev(&bins);
+        assert!(
+            dark > 14.0,
+            "a dark street with nothing bright is guarded at {dark}"
+        );
+        let want = (EXPOSURE_HIGHLIGHT_WHITE / exposure_bin_luminance(exposure_bin(1.0))).log2();
+        assert_eq!(lit, want);
+        assert!(
+            (lit - 2.0).abs() < 0.2,
+            "a window at 1.0 caps the eye near two stops: {lit}"
+        );
+        assert_eq!(exposure_highlight_cap_ev(&vec![0u32; 256]), f32::MAX);
     }
 
     /// PAR0b clause 3c: the eye adapts to light faster than to dark — the same
