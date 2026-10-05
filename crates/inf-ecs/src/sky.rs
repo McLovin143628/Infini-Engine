@@ -406,6 +406,32 @@ fn warn_orphan_atmosphere(world: &EcsWorld, authority: Option<Entity>) {
     }
 }
 
+/// **How much of an authored DIRECTIONAL light on the sky authority shines
+/// now** (PAR0 audit, (d')): `1.0` for every other light, and for the
+/// authority's own directional a smoothstep on the sun's elevation over the
+/// band [`ResolvedSky::sky_dim`] uses — exactly `1.0` while the sun is more than
+/// ~8.6 deg up, `0.0` once it is as far below.
+///
+/// The island authors its `Sun` entity as a `Light` (directional, 3.2, a fixed
+/// 10:30 bearing) beside the `TimeOfDay` whose clock RUNS, and both projectors
+/// push that light at every hour on top of the sky's key light: at 21:00 a full
+/// daytime sun lit every wall on the strip (measured: the 21:00 strip frame's
+/// mean 15.7 / 255 with it, 4.6 without — and the warm interiors in the PAR0
+/// demo's look-right frame were that sun, not the fixtures). A daylight fill
+/// that ignores the clock is a defect at night; by day it is unchanged here (the
+/// two-sun daytime is carried, not moved, by this audit).
+pub fn authored_sun_level(world: &EcsWorld, guid: Uuid) -> f32 {
+    let Some(sky) = resolve_sky(world) else {
+        return 1.0;
+    };
+    if sky.guid != guid || !sky.atmosphere.enabled {
+        return 1.0;
+    }
+    const BAND: f64 = 0.15; // sin(≈8.6°), `sky_dim`'s band
+    let t = ((sky.sun.y + BAND) / (2.0 * BAND)).clamp(0.0, 1.0);
+    (t * t * (3.0 - 2.0 * t)) as f32
+}
+
 /// Resolve the level's sky, or `None` when no entity carries a [`TimeOfDay`].
 ///
 /// `None` is the pre-P17.1 world: the projectors leave the renderer's default sun
@@ -917,6 +943,32 @@ mod tests {
         assert_eq!(resolve_sky(&w1).unwrap().guid, a);
         assert_eq!(resolve_sky(&w2).unwrap().guid, a);
         assert_eq!(resolve_sky(&w1).unwrap().time_of_day.seconds, 1.0);
+    }
+
+    /// PAR0 audit (d'): the authority's own directional is dark at midnight,
+    /// whole at mid-morning, and every OTHER light is never scaled.
+    #[test]
+    fn the_authoritys_own_sun_fades_at_night_and_nothing_else_does() {
+        let a = uuid(0x31);
+        let midnight = TimeOfDay {
+            seconds: 0.0,
+            ..TimeOfDay::default()
+        };
+        let w = world_with(&[(a, midnight)]);
+        assert!(!resolve_sky(&w).unwrap().is_day());
+        assert_eq!(
+            authored_sun_level(&w, a),
+            0.0,
+            "a fixed sun shines at midnight"
+        );
+        assert_eq!(
+            authored_sun_level(&w, uuid(0x32)),
+            1.0,
+            "another light was scaled"
+        );
+        let w = world_with(&[(a, TimeOfDay::default())]);
+        assert!(resolve_sky(&w).unwrap().sun.y > 0.15);
+        assert_eq!(authored_sun_level(&w, a), 1.0, "the daytime fill moved");
     }
 
     #[test]

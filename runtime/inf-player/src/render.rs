@@ -957,7 +957,16 @@ pub fn project_scene_full(
                 .get::<GlobalTransform>(entity)
                 .map(|g| g.0)
                 .unwrap_or(glam::DAffine3::IDENTITY);
-            scene.lights.push(project_light(light, &affine));
+            // MIRROR-BEGIN authored_sun
+            // PAR0 audit (d'): the sky authority's own directional fades with
+            // the sun (`inf_ecs::sky::authored_sun_level`) — a fixed daylight
+            // fill must not shine at night.
+            let mut projected = project_light(light, &affine);
+            if light.kind == EcsLightKind::Directional {
+                projected.intensity *= inf_ecs::sky::authored_sun_level(world, guid);
+            }
+            // MIRROR-END authored_sun
+            scene.lights.push(projected);
         }
         if let Some(sprite) = w.get::<Sprite>(entity) {
             scene.sprites.push(project_sprite(sprite, translation));

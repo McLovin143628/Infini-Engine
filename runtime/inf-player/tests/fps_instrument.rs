@@ -3631,6 +3631,118 @@ fn the_shipped_island_at_nine_prices_its_shadowed_fixtures() {
         ),
         ("shipped +1670 synthetic, N=0", 1670, true, 0, true),
     ];
+    // THE 21:00 STRIP'S CENSUS (PAR0 audit, (d')): every scatter batch with an
+    // emission or a transmission that has an instance within 40 m of the strip
+    // centre, grouped by (emissive, transmission), with the instance count and
+    // the largest scaled extent — what the bright plates and the blue boxes
+    // ARE — and the frame's directional lights (what lights the night).
+    {
+        let mut scene = RenderScene::default();
+        let voxels = inf_voxel::VoxelVolumes::new();
+        // The terrain's render cut converges over tens of syncs.
+        for _ in 0..64 {
+            fx.sim.sync_render_terrain(at + DVec3::new(0.0, 1.8, 0.0));
+        }
+        project_scene_full(
+            &mut scene,
+            &fx.sim,
+            1.0,
+            &fx.vmeshes,
+            &fx.skinned,
+            &voxels,
+            &mut inf_render::DebrisCache::default(),
+            None,
+            &fx.scatter_meshes,
+            &std::collections::HashMap::new(),
+        );
+        let mut groups: std::collections::BTreeMap<String, (usize, f32, String)> =
+            std::collections::BTreeMap::new();
+        for b in &scene.scatter {
+            if b.emissive.iter().all(|&e| e <= 0.0) && b.transmission <= 0.0 {
+                continue;
+            }
+            for inst in &b.data.instances {
+                let p = b.anchor + Vec3::from(inst.offset).as_dvec3();
+                if (p - at).length() > 40.0 {
+                    continue;
+                }
+                let key = format!(
+                    "emissive [{:.2}, {:.2}, {:.2}] transmission {:.2} mesh {:?} geometry {}",
+                    b.emissive[0],
+                    b.emissive[1],
+                    b.emissive[2],
+                    b.transmission,
+                    b.data.mesh,
+                    b.data.geometry.is_some()
+                );
+                let e = groups.entry(key).or_insert((0, 0.0, String::new()));
+                e.0 += 1;
+                let ext = inst.scale.max(inst.scale_yz[0]).max(inst.scale_yz[1]);
+                if ext > e.1 {
+                    e.1 = ext;
+                    e.2 = format!(
+                        "[{:.2}, {:.2}, {:.2}] colour {:?}",
+                        inst.scale, inst.scale_yz[0], inst.scale_yz[1], inst.color
+                    );
+                }
+            }
+        }
+        for (k, (n, _, big)) in &groups {
+            println!("STRIP CENSUS 21:00: {n} instances, {k}; largest scale {big}");
+        }
+        for l in scene
+            .lights
+            .iter()
+            .filter(|l| l.kind == inf_render::LightKind::Directional)
+        {
+            println!(
+                "STRIP CENSUS 21:00 directional: colour {:?} intensity {} toward {:?} shadows {}",
+                l.color, l.intensity, l.direction, l.cast_shadows
+            );
+        }
+        // With `PAR0_DUMP` naming a directory: the shipped 21:00 strip frame
+        // (street_orbit step 0 and step 60) as raw RGBA, as projected and with
+        // every directional light but the first (the sky's key light) removed.
+        if let Some(dir) = std::env::var_os("PAR0_DUMP").map(PathBuf::from) {
+            let _ = std::fs::create_dir_all(&dir);
+            let target = HeadlessTarget::new(&gpu, 1920, 1080);
+            for (tag, keep_all) in [("as-projected", true), ("key-light-only", false)] {
+                let mut sc = scene.clone();
+                if !keep_all {
+                    let mut seen = false;
+                    sc.lights.retain(|l| {
+                        if l.kind != inf_render::LightKind::Directional {
+                            return true;
+                        }
+                        let first = !seen;
+                        seen = true;
+                        first
+                    });
+                }
+                sc.mark_dirty();
+                for step in [0u64, 60] {
+                    let mut renderer = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+                    renderer.set_settings(shipped);
+                    let view = street_orbit(step, 1920, 1080, at);
+                    for _ in 0..12 {
+                        renderer.render(&gpu, &sc, &view, &target.view, (1920, 1080));
+                        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+                    }
+                    let img = target.read_rgba(&gpu).expect("readback");
+                    let _ = std::fs::write(dir.join(format!("strip2100-{tag}-{step}.rgba")), &img);
+                }
+            }
+        }
+        println!(
+            "STRIP CENSUS 21:00: {} lights in the projected scene ({} local)",
+            scene.lights.len(),
+            scene
+                .lights
+                .iter()
+                .filter(|l| l.kind != inf_render::LightKind::Directional)
+                .count()
+        );
+    }
     let pick = std::env::var("PAR0_ROWS").unwrap_or_default();
     let configs: Vec<_> = all
         .into_iter()

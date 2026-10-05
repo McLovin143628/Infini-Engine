@@ -3444,7 +3444,7 @@ fn both_projectors_apply_the_cameras_near_fade() {
 /// make the two hosts' GPU light lists byte-identical.
 #[test]
 fn the_light_projection_and_its_clock_are_one_body_in_both_projectors() {
-    for tag in ["venue_rig_lights", "fixture_clock"] {
+    for tag in ["venue_rig_lights", "fixture_clock", "authored_sun"] {
         // The editor host owns its scene (`self.scene`), the player is handed
         // one (`scene`); that receiver is the one token allowed to differ.
         let editor =
