@@ -1490,7 +1490,10 @@ fn the_composed_frame_stays_inside_the_frame_budget() {
 /// `audit(VEH3f.2b)` listed them.
 /// Wave PAR0 ADDED `par0_cluster_debug`, `par0_wall_leak` and
 /// `par0_window_night` (71 -> 74, nothing re-blessed).
-const GOLDENS: [&str; 74] = [
+/// Wave PAR0b ADDED `par0b_doorway_daylight`, `par0b_moonlit_street`,
+/// `par0b_sealed_dark` and `par0b_sealed_lit` (74 -> 78) and re-blessed eight
+/// GI / water / local-shadow frames with their causes in the ledger.
+const GOLDENS: [&str; 78] = [
     "2d_lit.png",
     "aerial_fog.png",
     "billboards.png",
@@ -1542,6 +1545,12 @@ const GOLDENS: [&str; 74] = [
     "par0_cluster_debug.png",
     "par0_wall_leak.png",
     "par0_window_night.png",
+    // Wave PAR0b: the sealed room dark and lit, a doorway's daylight, a
+    // moonlit street.
+    "par0b_doorway_daylight.png",
+    "par0b_moonlit_street.png",
+    "par0b_sealed_dark.png",
+    "par0b_sealed_lit.png",
     "pbr_materials.png",
     "primitives.png",
     "scatter.png",

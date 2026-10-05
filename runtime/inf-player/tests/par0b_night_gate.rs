@@ -1045,8 +1045,13 @@ fn a_closed_rooms_outer_corners_stay_dark_by_max() {
             }
         }
     }
-    println!("PAR0b CORNER: exterior max delta {worst} code(s), {over} px over 2 codes, three views");
-    assert!(worst <= 2, "a closed room's corner leaks {worst} codes ({over} px)");
+    println!(
+        "PAR0b CORNER: exterior max delta {worst} code(s), {over} px over 2 codes, three views"
+    );
+    assert!(
+        worst <= 2,
+        "a closed room's corner leaks {worst} codes ({over} px)"
+    );
 }
 
 /// **EIGHT STORAGE BUFFERS** (clause 5): the engine device asks for exactly
@@ -1066,7 +1071,10 @@ fn the_lit_path_fits_eight_storage_buffers_again() {
         inf_render::caps::VGEOM_MIN_STORAGE_BUFFERS_PER_STAGE,
         wgpu::Limits::default().max_storage_buffers_per_shader_stage
     );
-    assert_eq!(asked, wgpu::Limits::default().max_storage_buffers_per_shader_stage);
+    assert_eq!(
+        asked,
+        wgpu::Limits::default().max_storage_buffers_per_shader_stage
+    );
     assert_eq!(
         inf_render::caps::VGEOM_MIN_STORAGE_BUFFERS_PER_STAGE,
         wgpu::Limits::default().max_storage_buffers_per_shader_stage

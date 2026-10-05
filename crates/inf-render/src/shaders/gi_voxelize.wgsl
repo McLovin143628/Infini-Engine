@@ -139,7 +139,13 @@ fn cs_voxelize(@builtin(global_invocation_id) gid: vec3<u32>) {
             length(vec3<f32>(m[0].y, m[1].y, m[2].y)),
             length(vec3<f32>(m[0].z, m[1].z, m[2].z)),
         );
-        let grow = 0.5 * vsize * rows;
+        // An EMITTER is not dilated: its voxels carry its radiance, so half a
+        // voxel of growth on a 0.16 m bulb would multiply the light it injects
+        // by the volume it gained (measured: a venue's festoon and neon lit
+        // its far corner from 4.2 to 24.3). Occlusion wants the fat wall;
+        // energy wants the true emitter.
+        let emits = max(inst.emissive.r, max(inst.emissive.g, inst.emissive.b)) > 0.0;
+        let grow = select(0.5 * vsize * rows, vec3<f32>(0.0), emits);
         var inside = false;
         if (inst.albedo.w > 0.5) {
             // Unit sphere in instance-local space (vgeom meshlet bounds).

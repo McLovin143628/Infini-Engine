@@ -2428,7 +2428,13 @@ fn the_golden_set_is_pinned_and_additive() {
     // frames (the froxel heat view, the closed room seen from outside, a lit
     // room through real glass). 71 -> 74; nothing was re-blessed: the whole
     // golden binary passes under `INF_GOLDEN_STRICT=1` with the 71 unmoved.
-    const GOLDENS: usize = 74;
+    // Wave PAR0b added `par0b_doorway_daylight`, `par0b_moonlit_street`,
+    // `par0b_sealed_dark` and `par0b_sealed_lit` (74 -> 78) and RE-BLESSED
+    // eight, each named with its cause in the ledger before the bless:
+    // `venue_interior`, `gi_emissive`, `gi_scatter_neon`, `gi_specular`,
+    // `gi_bleed`, `gi_terrain` (the GI interior work), `water_lake_dusk` (the
+    // water body lit by the hour) and `vsm_point` (the local-light bias cap).
+    const GOLDENS: usize = 78;
     /// `xxh3_128` over `"{file_name} {hex}\n"` for every golden, name-sorted —
     /// the CONTENT pin (P26.5 audit). Committed PNGs are `-text` in
     /// `.gitattributes`, so these bytes are the same on every checkout.
@@ -2696,7 +2702,8 @@ fn the_golden_set_is_pinned_and_additive() {
     // `10545eeb8d0c55d7c8459488e81f0bbf`); the 71 committed PNGs are byte-identical
     // (`git diff e2577bd0 -- crates/inf-render/tests/goldens` lists three
     // additions and nothing else).
-    const GOLDEN_SET_DIGEST: &str = "aed3e36cb3a6738bbd02c813bef6eef7";
+    // PAR0b: four added, eight re-blessed with their causes (the ledger).
+    const GOLDEN_SET_DIGEST: &str = "cdd25e5377e2b85f1439d4c48ed216a7";
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")

@@ -12966,20 +12966,86 @@ fn par0b_room(door: bool, lamp: bool, sun: bool) -> RenderScene {
         scene.instances.push(m);
     };
     let wall = [0.7, 0.7, 0.7, 1.0];
-    slab(&mut scene, 1, DVec3::new(-200.0, -1.3, -200.0), DVec3::new(200.0, -0.3, 200.0), [0.35, 0.35, 0.35, 1.0]);
+    slab(
+        &mut scene,
+        1,
+        DVec3::new(-200.0, -1.3, -200.0),
+        DVec3::new(200.0, -0.3, 200.0),
+        [0.35, 0.35, 0.35, 1.0],
+    );
     let (h, t, tall) = (3.0, 0.3, 3.0);
-    slab(&mut scene, 2, DVec3::new(-h - t, -t, -h - t), DVec3::new(h + t, 0.0, h + t), wall);
-    slab(&mut scene, 3, DVec3::new(-h - t, tall, -h - t), DVec3::new(h + t, tall + t, h + t), wall);
-    slab(&mut scene, 4, DVec3::new(-h - t, 0.0, -h - t), DVec3::new(-h, tall, h + t), wall);
-    slab(&mut scene, 5, DVec3::new(h, 0.0, -h - t), DVec3::new(h + t, tall, h + t), wall);
-    slab(&mut scene, 6, DVec3::new(-h, 0.0, h), DVec3::new(h, tall, h + t), wall);
-    slab(&mut scene, 7, DVec3::new(-1.2, 0.0, 1.8), DVec3::new(1.2, 1.0, 2.6), [0.85, 0.12, 0.08, 1.0]);
+    slab(
+        &mut scene,
+        2,
+        DVec3::new(-h - t, -t, -h - t),
+        DVec3::new(h + t, 0.0, h + t),
+        wall,
+    );
+    slab(
+        &mut scene,
+        3,
+        DVec3::new(-h - t, tall, -h - t),
+        DVec3::new(h + t, tall + t, h + t),
+        wall,
+    );
+    slab(
+        &mut scene,
+        4,
+        DVec3::new(-h - t, 0.0, -h - t),
+        DVec3::new(-h, tall, h + t),
+        wall,
+    );
+    slab(
+        &mut scene,
+        5,
+        DVec3::new(h, 0.0, -h - t),
+        DVec3::new(h + t, tall, h + t),
+        wall,
+    );
+    slab(
+        &mut scene,
+        6,
+        DVec3::new(-h, 0.0, h),
+        DVec3::new(h, tall, h + t),
+        wall,
+    );
+    slab(
+        &mut scene,
+        7,
+        DVec3::new(-1.2, 0.0, 1.8),
+        DVec3::new(1.2, 1.0, 2.6),
+        [0.85, 0.12, 0.08, 1.0],
+    );
     if door {
-        slab(&mut scene, 8, DVec3::new(-h, 0.0, -h - t), DVec3::new(-0.8, tall, -h), wall);
-        slab(&mut scene, 9, DVec3::new(0.8, 0.0, -h - t), DVec3::new(h, tall, -h), wall);
-        slab(&mut scene, 10, DVec3::new(-0.8, 2.2, -h - t), DVec3::new(0.8, tall, -h), wall);
+        slab(
+            &mut scene,
+            8,
+            DVec3::new(-h, 0.0, -h - t),
+            DVec3::new(-0.8, tall, -h),
+            wall,
+        );
+        slab(
+            &mut scene,
+            9,
+            DVec3::new(0.8, 0.0, -h - t),
+            DVec3::new(h, tall, -h),
+            wall,
+        );
+        slab(
+            &mut scene,
+            10,
+            DVec3::new(-0.8, 2.2, -h - t),
+            DVec3::new(0.8, tall, -h),
+            wall,
+        );
     } else {
-        slab(&mut scene, 8, DVec3::new(-h, 0.0, -h - t), DVec3::new(h, tall, -h), wall);
+        slab(
+            &mut scene,
+            8,
+            DVec3::new(-h, 0.0, -h - t),
+            DVec3::new(h, tall, -h),
+            wall,
+        );
     }
     scene.lights.push(RenderLight {
         kind: LightKind::Directional,
@@ -13021,7 +13087,13 @@ fn par0b_gi_settings(exposure: f32) -> RenderSettings {
 fn golden_par0b_sealed_dark() {
     let Some(gpu) = gpu_or_skip() else { return };
     let view = look_view(DVec3::new(0.0, 1.7, 2.2), DVec3::new(0.0, 0.0, -1.0));
-    let img = check_vsm_golden(&gpu, "par0b_sealed_dark", &par0b_room(false, false, true), &view, par0b_gi_settings(1.0));
+    let img = check_vsm_golden(
+        &gpu,
+        "par0b_sealed_dark",
+        &par0b_room(false, false, true),
+        &view,
+        par0b_gi_settings(1.0),
+    );
     let mean = img.chunks(4).map(|p| f64::from(p[1])).sum::<f64>() / f64::from(W * H);
     assert!(mean < 4.0, "the sealed room reads {mean:.2} / 255");
 }
@@ -13033,9 +13105,18 @@ fn golden_par0b_sealed_dark() {
 fn golden_par0b_sealed_lit() {
     let Some(gpu) = gpu_or_skip() else { return };
     let view = look_view(DVec3::new(0.0, 1.7, 2.2), DVec3::new(0.0, 0.0, -1.0));
-    let img = check_vsm_golden(&gpu, "par0b_sealed_lit", &par0b_room(false, true, true), &view, par0b_gi_settings(1.0));
+    let img = check_vsm_golden(
+        &gpu,
+        "par0b_sealed_lit",
+        &par0b_room(false, true, true),
+        &view,
+        par0b_gi_settings(1.0),
+    );
     let mean = img.chunks(4).map(|p| f64::from(p[1])).sum::<f64>() / f64::from(W * H);
-    assert!(mean > 30.0, "the lamp lights its room to only {mean:.2} / 255");
+    assert!(
+        mean > 30.0,
+        "the lamp lights its room to only {mean:.2} / 255"
+    );
 }
 
 /// **par0b_doorway_daylight** (wave PAR0b, stated purpose: AN OPEN DOORWAY
@@ -13047,7 +13128,13 @@ fn golden_par0b_sealed_lit() {
 fn golden_par0b_doorway_daylight() {
     let Some(gpu) = gpu_or_skip() else { return };
     let view = look_view(DVec3::new(0.0, 1.6, 2.4), DVec3::new(0.0, 0.8, -3.0));
-    check_vsm_golden(&gpu, "par0b_doorway_daylight", &par0b_room(true, false, true), &view, par0b_gi_settings(8.0));
+    check_vsm_golden(
+        &gpu,
+        "par0b_doorway_daylight",
+        &par0b_room(true, false, true),
+        &view,
+        par0b_gi_settings(8.0),
+    );
 }
 
 /// A street at night: asphalt, two kerbs, a parked car and two building
@@ -13083,12 +13170,48 @@ fn par0b_street(moon_up: f32, moon_scale: f32) -> RenderScene {
         m.roughness = rough;
         scene.instances.push(m);
     };
-    add(1, DVec3::new(0.0, -0.5, 0.0), Vec3::new(400.0, 1.0, 400.0), [0.09, 0.09, 0.1, 1.0], 0.9);
-    add(2, DVec3::new(-5.5, 0.075, 0.0), Vec3::new(0.3, 0.15, 80.0), [0.45, 0.45, 0.45, 1.0], 0.8);
-    add(3, DVec3::new(5.5, 0.075, 0.0), Vec3::new(0.3, 0.15, 80.0), [0.45, 0.45, 0.45, 1.0], 0.8);
-    add(4, DVec3::new(-11.0, 6.0, 10.0), Vec3::new(10.0, 12.0, 30.0), [0.55, 0.52, 0.48, 1.0], 0.9);
-    add(5, DVec3::new(11.0, 4.5, 6.0), Vec3::new(10.0, 9.0, 24.0), [0.5, 0.5, 0.55, 1.0], 0.9);
-    add(6, DVec3::new(3.6, 0.75, 8.0), Vec3::new(1.8, 1.3, 4.4), [0.6, 0.08, 0.06, 1.0], 0.35);
+    add(
+        1,
+        DVec3::new(0.0, -0.5, 0.0),
+        Vec3::new(400.0, 1.0, 400.0),
+        [0.09, 0.09, 0.1, 1.0],
+        0.9,
+    );
+    add(
+        2,
+        DVec3::new(-5.5, 0.075, 0.0),
+        Vec3::new(0.3, 0.15, 80.0),
+        [0.45, 0.45, 0.45, 1.0],
+        0.8,
+    );
+    add(
+        3,
+        DVec3::new(5.5, 0.075, 0.0),
+        Vec3::new(0.3, 0.15, 80.0),
+        [0.45, 0.45, 0.45, 1.0],
+        0.8,
+    );
+    add(
+        4,
+        DVec3::new(-11.0, 6.0, 10.0),
+        Vec3::new(10.0, 12.0, 30.0),
+        [0.55, 0.52, 0.48, 1.0],
+        0.9,
+    );
+    add(
+        5,
+        DVec3::new(11.0, 4.5, 6.0),
+        Vec3::new(10.0, 9.0, 24.0),
+        [0.5, 0.5, 0.55, 1.0],
+        0.9,
+    );
+    add(
+        6,
+        DVec3::new(3.6, 0.75, 8.0),
+        Vec3::new(1.8, 1.3, 4.4),
+        [0.6, 0.08, 0.06, 1.0],
+        0.35,
+    );
     scene.lights.push(RenderLight {
         kind: LightKind::Directional,
         color: [0.62, 0.72, 1.0],
@@ -13118,13 +13241,28 @@ fn par0b_night_settings() -> RenderSettings {
 fn golden_par0b_moonlit_street() {
     let Some(gpu) = gpu_or_skip() else { return };
     let view = look_view(DVec3::new(0.0, 1.7, -6.0), DVec3::new(0.0, 0.8, 12.0));
-    let img = check_vsm_golden(&gpu, "par0b_moonlit_street", &par0b_street(0.57, 1.0), &view, par0b_night_settings());
-    let low = render_warm(&gpu, &par0b_street(-0.2, 1.0), &view, par0b_night_settings());
-    let lum = |p: &[u8]| 0.2126 * f64::from(p[0]) + 0.7152 * f64::from(p[1]) + 0.0722 * f64::from(p[2]);
+    let img = check_vsm_golden(
+        &gpu,
+        "par0b_moonlit_street",
+        &par0b_street(0.57, 1.0),
+        &view,
+        par0b_night_settings(),
+    );
+    let low = render_warm(
+        &gpu,
+        &par0b_street(-0.2, 1.0),
+        &view,
+        par0b_night_settings(),
+    );
+    let lum =
+        |p: &[u8]| 0.2126 * f64::from(p[0]) + 0.7152 * f64::from(p[1]) + 0.0722 * f64::from(p[2]);
     let mean = |img: &[u8]| img.chunks(4).map(lum).sum::<f64>() / f64::from(W * H);
     let (up, down) = (mean(&img), mean(&low));
     eprintln!("par0b_moonlit_street: frame mean {up:.2} with the moon up, {down:.2} with it set");
-    assert!(up > down + 3.0, "the moon above the horizon lights nothing ({up:.2} vs {down:.2})");
+    assert!(
+        up > down + 3.0,
+        "the moon above the horizon lights nothing ({up:.2} vs {down:.2})"
+    );
 }
 
 /// **THE TIGHT CLASS REDS A HALVED LIGHT** (wave PAR0b, clause 9) — measured
@@ -13147,9 +13285,27 @@ fn the_tight_class_reds_a_halved_light() {
     let room_in = look_view(DVec3::new(0.0, 1.7, 2.2), DVec3::new(0.0, 0.0, -1.0));
     let street = look_view(DVec3::new(0.0, 1.7, -6.0), DVec3::new(0.0, 0.8, 12.0));
     let cases: Vec<(&str, RenderScene, RenderScene, RenderView, RenderSettings)> = vec![
-        ("par0_window_night", par0_room(true, true), halve(par0_room(true, true), true), window, vsm_settings_on()),
-        ("par0b_sealed_lit", par0b_room(false, true, true), halve(par0b_room(false, true, true), true), room_in, par0b_gi_settings(1.0)),
-        ("par0b_moonlit_street", par0b_street(0.57, 1.0), par0b_street(0.57, 0.5), street, par0b_night_settings()),
+        (
+            "par0_window_night",
+            par0_room(true, true),
+            halve(par0_room(true, true), true),
+            window,
+            vsm_settings_on(),
+        ),
+        (
+            "par0b_sealed_lit",
+            par0b_room(false, true, true),
+            halve(par0b_room(false, true, true), true),
+            room_in,
+            par0b_gi_settings(1.0),
+        ),
+        (
+            "par0b_moonlit_street",
+            par0b_street(0.57, 1.0),
+            par0b_street(0.57, 0.5),
+            street,
+            par0b_night_settings(),
+        ),
     ];
     for (name, full, half, view, set) in cases {
         let a = render_warm(&gpu, &full, &view, set);
@@ -13159,7 +13315,13 @@ fn the_tight_class_reds_a_halved_light() {
         let (hm, hx) = image_diff(&a, &c, W, H);
         eprintln!("{name}: re-render mean {sm:.5} max {sx:.5}; halved light mean {hm:.5} max {hx:.5}; suite tolerance would {} it", if within_tolerance(hm, hx) { "PASS" } else { "red" });
         assert!(TIGHT_LIGHT_GOLDENS.contains(&name));
-        assert!(within_tight(sm, sx), "{name}: a re-render is outside the tight class");
-        assert!(!within_tight(hm, hx), "{name}: a halved light is inside the tight class");
+        assert!(
+            within_tight(sm, sx),
+            "{name}: a re-render is outside the tight class"
+        );
+        assert!(
+            !within_tight(hm, hx),
+            "{name}: a halved light is inside the tight class"
+        );
     }
 }

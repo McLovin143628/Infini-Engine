@@ -210,7 +210,10 @@ fn gi_local_bounce(p: vec3<f32>, nh: vec3<f32>) -> vec3<f32> {
         if (b.w > 1.5) {
             cone = smoothstep(c.w, min(c.w + 0.05, 1.0), dot(-l, c.xyz));
         }
-        let inv_sq = 1.0 / max(dist * dist, 1.0e-4);
+        // The inverse square is floored at one voxel: the march resolves
+        // nothing nearer, and a hit voxel beside a fixture would otherwise
+        // carry the near-field's 1/d² as a blob of light on the ceiling.
+        let inv_sq = 1.0 / max(dist * dist, vsize * vsize);
         let t = clamp(1.0 - pow(dist / a.w, 4.0), 0.0, 1.0);
         var vis = 1.0;
         let steps = i32(dist / vsize);
