@@ -1721,9 +1721,9 @@ pub fn exposure_log_average(bins: &[u32]) -> f32 {
 /// noise, and above the ceiling a white-out stays a white-out.
 pub fn exposure_target_ev(avg: f32, min_luminance: f32, max_luminance: f32) -> f32 {
     let lo = if min_luminance.is_finite() {
-        min_luminance.max(1e-4)
+        min_luminance.max(1e-6)
     } else {
-        1e-4
+        1e-6
     };
     let hi = if max_luminance.is_finite() {
         max_luminance.max(lo)

@@ -1080,3 +1080,402 @@ fn the_lit_path_fits_eight_storage_buffers_again() {
         wgpu::Limits::default().max_storage_buffers_per_shader_stage
     );
 }
+
+// ── the island fixture: the night floor, the eye, the powered emitters ───────
+
+fn fixture_recipe() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../samples/island-fixture/island.toml")
+}
+
+/// Build the fixture island's project and cook it; the pack's sim and the
+/// level's authored render record.
+fn fixture_pack(
+    tmp: &std::path::Path,
+) -> (
+    inf_player::runtime_sim::RuntimeSim,
+    inf_scene::RenderSettingsRecord,
+) {
+    let recipe =
+        inf_island::IslandRecipe::load(&fixture_recipe()).expect("the fixture recipe loads");
+    let build = inf_island::build_island(&recipe, &inf_island::BuildOptions::default())
+        .expect("the fixture island builds");
+    let proj = tmp.join("island");
+    inf_project::ProjectManifest::new(&recipe.name, "blank-3d")
+        .save(&proj)
+        .expect("the project scaffolds");
+    inf_island::write_content(&build, &proj.join("Content")).expect("the island's content writes");
+    let out = tmp.join("out");
+    inf_packager::cook(&proj, &out, &inf_packager::CookOptions::default())
+        .expect("the island cooks");
+    let source = inf_player::level::PackLevelSource::open(&out).expect("the pack opens");
+    let mut built = inf_player::build_world_from_pack(&source).expect("the world builds");
+    let record = built.render;
+    let partition = built.take_partition();
+    let pcg = built.pcg_context();
+    let mut sim = inf_player::sim_from_built(built);
+    inf_player::attach_cell_streaming(&mut sim, &partition, pcg);
+    inf_player::attach_terrain_streaming(
+        &mut sim,
+        &inf_player::TerrainContent::Pack(source.clone()),
+    );
+    (sim, record)
+}
+
+/// The fixture's first venue block: its centre, and a point in the middle of
+/// the street beyond its +X face.
+fn fixture_venue() -> (DVec3, DVec3) {
+    let recipe =
+        inf_island::IslandRecipe::load(&fixture_recipe()).expect("the fixture recipe loads");
+    let design = inf_island::read_design(&recipe).expect("the design reads");
+    let plans = inf_editor_core::settlement::settlements(&design);
+    let v = plans
+        .iter()
+        .flat_map(|p| p.blocks.iter())
+        .find(|b| b.archetype.is_venue())
+        .copied()
+        .expect("the fixture places at least one venue");
+    (
+        DVec3::new(v.centre.x, 0.0, v.centre.y),
+        DVec3::new(v.centre.x + v.half.x + 10.0, 0.0, v.centre.y),
+    )
+}
+
+fn stand_at(sim: &mut inf_player::runtime_sim::RuntimeSim, at: DVec3, hour: f64) {
+    let hero = {
+        let world = sim.world().world();
+        world
+            .iter_entities()
+            .find(|e| {
+                e.get::<inf_ecs::components::CharacterMovement>()
+                    .is_some_and(|m| m.player_controlled)
+            })
+            .map(|e| e.id())
+    };
+    if let Some(e) = hero {
+        if let Some(mut t) = sim
+            .world_mut()
+            .world_mut()
+            .get_mut::<inf_ecs::components::Transform>(e)
+        {
+            t.translation = inf_ecs::math::Vec3d::new(at.x, at.y + 2.0, at.z);
+        }
+    }
+    {
+        let w = sim.world_mut().world_mut();
+        let mut q = w.query::<&mut inf_ecs::components::TimeOfDay>();
+        for mut tod in q.iter_mut(w) {
+            tod.seconds = (hour * 3600.0 - tod.longitude_deg * 240.0).rem_euclid(86_400.0);
+            tod.rate = 0.0;
+        }
+    }
+    sim.world_mut().mark_dirty();
+    for _ in 0..90 {
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+    }
+}
+
+fn project_fixture(sim: &inf_player::runtime_sim::RuntimeSim) -> RenderScene {
+    let mut scene = RenderScene::default();
+    let voxels = inf_voxel::VoxelVolumes::default();
+    let mut meshes = inf_render::ScatterMeshes::new();
+    inf_player::scatter_mesh::add_building_modules(&mut meshes);
+    inf_player::render::project_scene_full(
+        &mut scene,
+        sim,
+        1.0,
+        &inf_player::vmesh::VmeshRegistry::default(),
+        &inf_player::skinned::SkinnedRegistry::new(),
+        &voxels,
+        &mut inf_render::DebrisCache::default(),
+        None,
+        &meshes,
+        &std::collections::HashMap::new(),
+    );
+    scene.grid_enabled = false;
+    scene
+}
+
+/// A frame of the projected fixture at `view` under `settings`, after enough
+/// frames for the eye to settle (the clock is frozen, so it snaps), and the
+/// exposure it settled on.
+fn eye_frame(
+    gpu: &GpuContext,
+    scene: &RenderScene,
+    view: &RenderView,
+    settings: RenderSettings,
+) -> (Vec<u8>, inf_render::ExposureState) {
+    let target = HeadlessTarget::new(gpu, W, H);
+    let mut r = EngineRenderer::new(gpu, HEADLESS_FORMAT);
+    r.set_settings(settings);
+    for _ in 0..12 {
+        r.render(gpu, scene, view, &target.view, (W, H));
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+    let img = target.read_rgba(gpu).expect("readback");
+    let e = r.read_exposure(gpu).expect("exposure");
+    (img, e)
+}
+
+fn mean_luma(img: &[u8]) -> f64 {
+    let n = (img.len() / 4) as f64;
+    img.chunks_exact(4)
+        .map(|p| 0.2126 * f64::from(p[0]) + 0.7152 * f64::from(p[1]) + 0.0722 * f64::from(p[2]))
+        .sum::<f64>()
+        / n
+}
+
+/// **THE NIGHT FLOOR AND THE EYE, ON THE SHIPPED CONFIGURATION** (clause 3):
+/// the fixture island's own authored render block through `shipped_settings`
+/// (auto exposure since PAR0b), a street beside its venue.
+///
+/// * NOON: the eye settles at 1.0 (within 1 %) — the day is the manual frame
+///   every daylight number was taken at.
+/// * 21:00 / 02:00 (the island's date is a full moon): the street frame's mean
+///   is inside the READABLE BAND [4, 60] / 255 — not the flat black of PAR0
+///   (mean 4.4 / 255 at 21:00 with exposure 1 on the strip) and not a lifted
+///   grey noon — and the eye opened at least four stops.
+/// * The moon is in the key light at 02:00 (above the horizon) and its level
+///   follows its elevation and phase (`inf_ecs::sky::ResolvedSky::moon_level`).
+///
+/// Mutation: the island record back to manual exposure — the night frames
+/// fall under the band, RED.
+#[test]
+fn the_shipped_eye_keeps_noon_at_one_and_opens_the_night_into_the_readable_band() {
+    let Some(gpu) = gpu() else { return };
+    let tmp = tempfile::tempdir().expect("a temp dir");
+    let (mut sim, record) = fixture_pack(tmp.path());
+    let (shipped, tier) = inf_player::render::shipped_settings(&gpu, record);
+    let (_, street) = fixture_venue();
+    let mut rows = Vec::new();
+    for hour in [12.0, 21.0, 2.0] {
+        stand_at(&mut sim, street, hour);
+        let ground = sim.terrain_height_at(street.x, street.z);
+        let at = DVec3::new(street.x, ground, street.z);
+        let scene = project_fixture(&sim);
+        let sky = inf_ecs::sky::resolve_sky(sim.world()).expect("a clock");
+        let view = look(
+            at + DVec3::new(0.0, 1.7, 0.0),
+            at + DVec3::new(0.0, 1.2, 30.0),
+        );
+        let (img, e) = eye_frame(&gpu, &scene, &view, shipped);
+        dump(&format!("fixture_street_{:02}", hour as u32), &img);
+        let mean = mean_luma(&img);
+        println!(
+            "PAR0b EYE ({tier:?}) {hour:05.2}: sun.y {:.3} moon.y {:.3} phase {:.3} moon level {:.4}; key {:?}; exposure x{:.4} (scene avg {:.6}); street mean {mean:.2}",
+            sky.sun.y,
+            sky.moon.y,
+            sky.moon_phase,
+            sky.moon_level(),
+            sky.key_light().map(|(_, _, i)| i),
+            e.multiplier,
+            e.avg_luminance
+        );
+        rows.push((hour, mean, e.multiplier, sky));
+    }
+    assert_eq!(
+        shipped.exposure_control.mode,
+        inf_render::ExposureMode::Auto,
+        "the island does not author the eye"
+    );
+    let noon = &rows[0];
+    assert!(
+        (noon.2 - 1.0).abs() < 0.01,
+        "noon's exposure moved to x{:.4}",
+        noon.2
+    );
+    for (hour, mean, mult, sky) in &rows[1..] {
+        assert!(
+            (4.0..=60.0).contains(mean),
+            "{hour:05.2}: the street's mean {mean:.2} is outside the readable band"
+        );
+        assert!(
+            *mult > 16.0,
+            "{hour:05.2}: the eye opened only to x{mult:.3}"
+        );
+        if sky.moon.y > 0.1 {
+            assert!(
+                sky.moon_level() > 0.5,
+                "{hour:05.2}: a full moon well up lights at {}",
+                sky.moon_level()
+            );
+        }
+    }
+}
+
+/// **THE MOON ABOVE THE HORIZON LIGHTS THE ASPHALT** (clause 3a), through the
+/// sky's one door: an ECS clock on the island's own date and latitude, the
+/// key light `inf_ecs::sky::ResolvedSky::key_light` returns at a moon-up night
+/// hour and at a moon-down night hour, each lit onto the same asphalt with the
+/// renderer's night-sky ambient — the asphalt brighter with the moon up.
+#[test]
+fn the_moon_above_the_horizon_raises_the_asphalts_luminance() {
+    let Some(gpu) = gpu() else { return };
+    let resolve = |day: u32, hour: f64| {
+        let mut w = inf_ecs::EcsWorld::new();
+        let e = w.spawn("Sun", None);
+        let base = inf_ecs::components::TimeOfDay::default();
+        let tod = inf_ecs::components::TimeOfDay {
+            seconds: (hour * 3600.0 - base.longitude_deg * 240.0).rem_euclid(86_400.0),
+            day_of_year: day,
+            ..base
+        };
+        let sky = inf_ecs::components::SkyAtmosphere::default();
+        w.world_mut().entity_mut(e).insert((
+            tod,
+            inf_ecs::components::SkyAtmosphere {
+                moon_intensity: sky.sun_intensity * inf_ecs::sky::MOON_SUN_RATIO,
+                ..sky
+            },
+        ));
+        inf_ecs::sky::resolve_sky(&w).expect("a clock")
+    };
+    let day = inf_editor_core::island::ISLAND_DAY_OF_YEAR;
+    let mut up = None;
+    let mut down = None;
+    for k in 0..96 {
+        for d in [day, day + 7, day + 14] {
+            let hour = 18.0 + 0.125 * f64::from(k);
+            let s = resolve(d, hour % 24.0);
+            if s.sun.y < -0.15 {
+                if s.moon.y > 0.25 && up.is_none() {
+                    up = Some(s);
+                }
+                if s.moon.y < -0.15 && down.is_none() {
+                    down = Some(s);
+                }
+            }
+        }
+    }
+    let (up, down) = (
+        up.expect("a moon-up night hour"),
+        down.expect("a moon-down night hour"),
+    );
+    let scene_of = |s: &inf_ecs::sky::ResolvedSky| {
+        let (dir, color, intensity) = s.key_light().expect("a key light");
+        let a = &s.atmosphere;
+        let mut scene = RenderScene {
+            grid_enabled: false,
+            sun: SunParams {
+                direction: s.sun.as_vec3(),
+                color: [a.sun_color.r, a.sun_color.g, a.sun_color.b],
+                intensity: a.sun_intensity,
+                moon_direction: s.moon.as_vec3(),
+                moon_color: [a.moon_color.r, a.moon_color.g, a.moon_color.b],
+                moon_intensity: a.moon_intensity,
+                moon_phase: s.moon_phase as f32,
+            },
+            atmosphere: AtmosphereParams {
+                enabled: true,
+                aerial_perspective: 0.0,
+                ..AtmosphereParams::default()
+            },
+            ..Default::default()
+        };
+        let mut road = MeshInstance::lit(
+            DVec3::new(0.0, -0.5, 0.0),
+            Quat::IDENTITY,
+            Vec3::new(200.0, 1.0, 200.0),
+            [0.09, 0.09, 0.1, 1.0],
+            1,
+        );
+        road.roughness = 0.9;
+        scene.instances.push(road);
+        scene.lights.push(RenderLight {
+            kind: LightKind::Directional,
+            color,
+            intensity,
+            direction: dir.as_vec3(),
+            cast_shadows: intensity > 0.0,
+            ..RenderLight::default()
+        });
+        scene.mark_dirty();
+        (scene, intensity)
+    };
+    let view = look(DVec3::new(0.0, 1.7, 0.0), DVec3::new(0.0, 0.0, 8.0));
+    let set = RenderSettings {
+        exposure: 128.0,
+        ..gi_settings(true)
+    };
+    let (su, iu) = scene_of(&up);
+    let (sd, id) = scene_of(&down);
+    let a = render(&gpu, &su, &view, set);
+    let b = render(&gpu, &sd, &view, set);
+    dump("asphalt_moon_up", &a);
+    let (la, lb) = (
+        patch_at(&a, &view, DVec3::new(0.0, 0.0, 8.0)),
+        patch_at(&b, &view, DVec3::new(0.0, 0.0, 8.0)),
+    );
+    println!(
+        "PAR0b MOON: up (moon.y {:.3}, phase {:.3}, key {iu:.5}) asphalt {la:.2}; down (moon.y {:.3}, key {id:.5}) asphalt {lb:.2}",
+        up.moon.y, up.moon_phase, down.moon.y
+    );
+    assert_eq!(id, 0.0, "a set moon lights the scene");
+    assert!(
+        la > lb + 5.0,
+        "the moon above the horizon lights the asphalt by only {:.2}",
+        la - lb
+    );
+}
+
+/// **A POWERED EMITTER KEEPS ITS ROOM'S HOURS, UNDER CLIPPING AT NIGHT**
+/// (clause 8): the fixture venue's emitting surfaces (its bar's rim light, a
+/// screen, the sign over the door) are OFF at 11:00 — a closed venue's TV is
+/// off — and ON at 21:00, and at 21:00 every one of them, times the exposure
+/// the shipped eye settles on at the venue's street, tonemaps under clipping
+/// (the census the brief names: emissives above clipping at 21:00 = 0).
+#[test]
+fn a_closed_venues_emitters_are_off_and_an_open_ones_sit_under_clipping() {
+    let Some(gpu) = gpu() else { return };
+    let tmp = tempfile::tempdir().expect("a temp dir");
+    let (mut sim, record) = fixture_pack(tmp.path());
+    let (shipped, _) = inf_player::render::shipped_settings(&gpu, record);
+    let (venue, street) = fixture_venue();
+    // Every scatter batch the projection drew around the hero.
+    let near = |scene: &RenderScene| -> Vec<[f32; 3]> {
+        scene.scatter.iter().map(|b| b.emissive).collect()
+    };
+    let _ = venue;
+    stand_at(&mut sim, street, 11.0);
+    let day = near(&project_fixture(&sim));
+    stand_at(&mut sim, street, 21.0);
+    let night_scene = project_fixture(&sim);
+    let night = near(&night_scene);
+    let lit = |v: &[[f32; 3]]| v.iter().filter(|e| e.iter().any(|&c| c > 0.0)).count();
+    let ground = sim.terrain_height_at(street.x, street.z);
+    let at = DVec3::new(street.x, ground, street.z);
+    let view = look(
+        at + DVec3::new(0.0, 1.7, 0.0),
+        venue + DVec3::new(0.0, 2.0, 0.0),
+    );
+    let (img, e) = eye_frame(&gpu, &night_scene, &view, shipped);
+    dump("fixture_venue_21", &img);
+    let aces = |x: f32| (x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14);
+    let clipping: Vec<f32> = night
+        .iter()
+        .map(|em| aces(em.iter().fold(0.0f32, |m, &c| m.max(c)) * e.multiplier))
+        .filter(|&t| t > 0.98)
+        .collect();
+    println!(
+        "PAR0b POWERED: emitting batches near the venue — 11:00 {} lit, 21:00 {} lit; eye at the venue's street x{:.3}; clipping at 21:00: {} ({clipping:?})",
+        lit(&day),
+        lit(&night),
+        e.multiplier,
+        clipping.len()
+    );
+    assert!(
+        lit(&night) > 0,
+        "the venue shows no emitter at 21:00 — the arm is about nothing"
+    );
+    assert!(
+        lit(&day) < lit(&night),
+        "a closed venue's emitters burn at 11:00 ({} lit vs {} at night)",
+        lit(&day),
+        lit(&night)
+    );
+    assert!(
+        clipping.is_empty(),
+        "{} emitters clip at the exposure 21:00 is seen at",
+        clipping.len()
+    );
+}

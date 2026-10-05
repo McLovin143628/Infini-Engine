@@ -163,7 +163,9 @@ fn cs_resolve(@builtin(local_invocation_index) li: u32) {
 
     // The target, in stops. The bounds clamp the SCENE, not the multiplier: below
     // the floor a night frame stays dark instead of being lifted into noise.
-    let lo = max(params.control.x, 1e-4);
+    // PAR0b: the floor is 1e-6, not 1e-4 — at 1e-4 it silently capped the
+    // island's eight-stop night gain at 6.9 (x120 instead of x256).
+    let lo = max(params.control.x, 1e-6);
     let hi = max(params.control.y, lo);
     let l = clamp(avg, lo, hi);
     var target_ev = log2(EXPOSURE_KEY / l);
