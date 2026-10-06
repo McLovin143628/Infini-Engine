@@ -813,17 +813,13 @@ impl GiNode {
                     .map(|r| {
                         let aabb = meshlet_aabb(&s, r);
                         let wide = aabb.is_some_and(|(lo, hi)| {
-                            (hi - lo).max_element() > GI_MESHLET_TRIANGLE_SPAN_M
+                            (hi - lo).max_element() > GI_MESHLET_SKIP_SPAN_M
                         });
                         MeshletProxy {
                             center: Vec3::from(r.center),
                             radius: r.radius,
                             aabb,
-                            tris: if wide {
-                                meshlet_triangles(&s, r)
-                            } else {
-                                Vec::new()
-                            },
+                            wide,
                         }
                     })
                     .collect::<Vec<_>>()
@@ -837,7 +833,7 @@ impl GiNode {
                 center: Vec3::from(c),
                 radius: r,
                 aabb: None,
-                tris: Vec::new(),
+                wide: false,
             }]
         } else {
             spheres
@@ -870,77 +866,20 @@ struct MeshletProxy {
     center: Vec3,
     radius: f32,
     aabb: Option<(Vec3, Vec3)>,
-    /// A meshlet wider than [`GI_MESHLET_TRIANGLE_SPAN_M`]: one thin oriented
-    /// slab per triangle, mesh space (a coarse-LOD road meshlet 100 m across
-    /// is a box 5 m tall over a hill; its triangles are the road).
-    tris: Vec<Mat4>,
+    /// Wider than [`GI_MESHLET_SKIP_SPAN_M`]: not voxelized (see there).
+    wide: bool,
 }
 
-/// A root meshlet wider than this (metres, mesh space) voxelizes as its
-/// triangles rather than its box (audit PAR0b). Eight voxels at the default
-/// 40 m volume: a car's meshlets stay boxes, a road's become its surface.
-const GI_MESHLET_TRIANGLE_SPAN_M: f32 = 5.0;
-
-/// One thin oriented slab covering the triangle `a b c`, or `None` for a
-/// degenerate one (audit PAR0b).
-fn triangle_slab(a: Vec3, b: Vec3, c: Vec3) -> Option<Mat4> {
-    let e1 = b - a;
-    let n = e1.cross(c - a);
-    if e1.length_squared() < 1.0e-12 || n.length_squared() < 1.0e-12 {
-        return None;
-    }
-    let u = e1.normalize();
-    let n = n.normalize();
-    let v = n.cross(u);
-    let (mut u0, mut u1, mut v0, mut v1) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
-    for p in [b, c] {
-        let d = p - a;
-        u0 = u0.min(d.dot(u));
-        u1 = u1.max(d.dot(u));
-        v0 = v0.min(d.dot(v));
-        v1 = v1.max(d.dot(v));
-    }
-    let du = (u1 - u0).max(1.0e-3);
-    let dv = (v1 - v0).max(1.0e-3);
-    let th = (du.max(dv) * 1.0e-3).max(1.0e-3);
-    let centre = a + u * (0.5 * (u0 + u1)) + v * (0.5 * (v0 + v1));
-    Some(Mat4::from_cols(
-        (u * du).extend(0.0),
-        (n * th).extend(0.0),
-        (v * dv).extend(0.0),
-        centre.extend(1.0),
-    ))
-}
-
-/// The triangles of one root meshlet as slabs, mesh space; empty when the
-/// record points outside its page.
-fn meshlet_triangles(s: &inf_vgeom::VgeomPageSections<'_>, r: &inf_vgeom::MeshletRec) -> Vec<Mat4> {
-    let stride = std::mem::size_of::<inf_vgeom::VgeomVertex>();
-    let vert = |local: u8| -> Option<Vec3> {
-        let at = (r.vertex_offset as usize + local as usize) * 4;
-        let idx = u32::from_le_bytes(s.mlverts.get(at..at + 4)?.try_into().ok()?) as usize;
-        let b = s.vertices.get(idx * stride..idx * stride + 12)?;
-        Some(Vec3::new(
-            f32::from_le_bytes(b[0..4].try_into().ok()?),
-            f32::from_le_bytes(b[4..8].try_into().ok()?),
-            f32::from_le_bytes(b[8..12].try_into().ok()?),
-        ))
-    };
-    let mut out = Vec::new();
-    for t in 0..r.triangle_count as usize {
-        let at = r.triangle_offset as usize + t * 3;
-        let Some(ix) = s.mltris.get(at..at + 3) else {
-            return Vec::new();
-        };
-        let (Some(a), Some(b), Some(c)) = (vert(ix[0]), vert(ix[1]), vert(ix[2])) else {
-            return Vec::new();
-        };
-        if let Some(m) = triangle_slab(a, b, c) {
-            out.push(m);
-        }
-    }
-    out
-}
+/// **A root meshlet wider than this (metres, mesh space) is not voxelized**
+/// (audit PAR0b). Measured on the island: its coarse-LOD road and pavement
+/// meshlets are up to 100 m across and follow the terrain, so their BOX is a
+/// slab 5 m tall over a hill (the street filled with solid to the first-floor
+/// windows), and staging their TRIANGLES as thin slabs instead cost 49 ms of
+/// GPU a frame in the voxelizer (4.5 before). They lie on the terrain, whose
+/// heightfield columns the voxelizer already carries, so dropping them loses
+/// nothing a probe can see; a car's meshlets (under 5 m) stay boxes. A wide
+/// vgeom STRUCTURE (a bridge deck) would lose its GI occlusion: carried.
+const GI_MESHLET_SKIP_SPAN_M: f32 = 5.0;
 
 /// **Flat geometry is not a ball** (audit PAR0b). The voxelizer used to stage
 /// every vgeom meshlet and every scattered instance as its bounding SPHERE. A
@@ -1236,12 +1175,7 @@ impl RenderNode for GiNode {
                 // emitter keeps the sphere its calibration was made against.
                 let emits = inst.emissive.iter().any(|c| *c > 0.0);
                 for m in list.iter() {
-                    if !emits && !m.tris.is_empty() {
-                        for t in &m.tris {
-                            if let Some(p) = stage_box(model * *t, albedo, inst.emissive) {
-                                staged.push(p);
-                            }
-                        }
+                    if !emits && m.wide {
                         continue;
                     }
                     let p = match m.aabb {
@@ -2146,26 +2080,12 @@ gi_probes:
         assert!(stage_sphere(Vec3::ZERO, 1.0e-20, [1.0; 3], [0.0; 3]).is_none());
     }
 
-    /// Audit PAR0b: a triangle's slab contains its three corners (they map
-    /// inside the unit box) and is thin along the triangle's normal; a flat
-    /// plane's local box is a slab, not a cube.
+    /// Audit PAR0b: a flat plane's local box is a slab, not a cube, whatever
+    /// its y scale.
     #[test]
-    fn a_triangle_slab_covers_its_triangle_and_a_plane_is_flat() {
-        use super::{local_box, triangle_slab};
+    fn a_plane_voxelizes_flat() {
+        use super::local_box;
         use glam::{Mat4, Vec3};
-        let (a, b, c) = (
-            Vec3::new(0.0, 0.0, 0.0),
-            Vec3::new(30.0, 1.0, 0.0),
-            Vec3::new(5.0, 2.0, 20.0),
-        );
-        let m = triangle_slab(a, b, c).expect("a real triangle");
-        let inv = m.inverse();
-        for p in [a, b, c, (a + b + c) / 3.0] {
-            let l = inv.transform_point3(p);
-            assert!(l.abs().max_element() <= 0.5 + 1.0e-3, "{p:?} -> {l:?}");
-        }
-        assert!(m.y_axis.truncate().length() < 0.05, "the slab is thin");
-        assert!(triangle_slab(a, a, c).is_none());
         let plane = local_box(Vec3::new(-0.5, 0.0, -0.5), Vec3::new(0.5, 0.0, 0.5));
         let tall = Mat4::from_scale(Vec3::new(60.0, 10.0, 60.0)) * plane;
         assert!(
