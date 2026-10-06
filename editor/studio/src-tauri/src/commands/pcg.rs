@@ -930,9 +930,19 @@ pub(super) fn evaluate_volume_into(
         (center, vol.extent, vol.seed)
     };
 
-    // Clone the first non-empty terrain (data + world origin) for the height
+    // BORROW the first non-empty terrain (data + world origin) for the height
     // provider. `None` ⇒ a flat y = 0 plane.
-    let terrain: Option<(inf_ecs::TerrainData, DVec3)> =
+    //
+    // **Borrowed, not cloned** (the PERF1 audit, priority c'). This was
+    // `t.data.clone()`: a deep copy of the whole resident heightfield -- every
+    // tile `page_for_pcg` pages for EVERY volume and spline in the level (203
+    // on the island) -- once per volume evaluated, under the document lock.
+    // It was not what made a block cost 165-178 ms (the island's fill
+    // alternates those with 13-28 ms blocks, so the copy is inside the cheap
+    // number), but it was paid on every one of them for nothing: the
+    // evaluation only READS heights, and the document is not written until
+    // the commit below, so a shared borrow is the same answer with no copy.
+    let terrain: Option<(&inf_ecs::TerrainData, DVec3)> =
         doc.order().iter().copied().find_map(|g| {
             let te = doc.entity_of(g)?;
             let w = doc.world().world();
@@ -944,7 +954,7 @@ pub(super) fn evaluate_volume_into(
                 .get::<GlobalTransform>(te)
                 .map(|gt| gt.translation())
                 .unwrap_or(DVec3::ZERO);
-            Some((t.data.clone(), origin))
+            Some((&t.data, origin))
         });
 
     // Fold the volume seed into every rule so distinct volumes differ. The
@@ -965,7 +975,7 @@ pub(super) fn evaluate_volume_into(
         center.x + extent.x,
         center.z + extent.y,
     );
-    let provider: Box<dyn HeightProvider> = match terrain {
+    let provider: Box<dyn HeightProvider + '_> = match terrain {
         Some((data, o)) => Box::new(FnHeight::new(move |x, z| {
             data.height_at(DVec2::new(x - o.x, z - o.z))
                 .map(|h| h + o.y)
@@ -1003,6 +1013,9 @@ pub(super) fn evaluate_volume_into(
     let (baked, solid, groups, doorways, residents, interior, lights, emitters) =
         population_of(inf_pcg::compose_volume(instances, generated));
     let placed = baked.len() as u32;
+    // The height provider borrows the document; it is done before the commit
+    // takes the document mutably.
+    drop(provider);
 
     {
         let w = doc.world_mut().world_mut();

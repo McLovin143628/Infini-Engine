@@ -105,6 +105,14 @@ impl PcgStreamState {
         }
     }
 
+    /// Yield the editor camera's streaming to a Play session, or take it back
+    /// (the PERF1 audit). See `EditorPcgStreams::set_yielded_to_play`.
+    pub fn yield_to_play(&self, yielded: bool) {
+        if let Ok(mut s) = self.streams.lock() {
+            s.set_yielded_to_play(yielded);
+        }
+    }
+
     /// Forget everything about the level that was just replaced. The document is
     /// the caller's business; this only drops what the streamer remembers about
     /// it, so a new level does not inherit the last one's owned set.
@@ -342,6 +350,21 @@ fn tick(app: &AppHandle, registry: &inf_graph::NodeRegistry) {
         let Ok(mut doc) = scene.doc.lock() else {
             return;
         };
+        // **Where a tick's time goes** (the PERF1 audit, c'): waiting for the
+        // document lock, the whole-world propagate, the paging, the
+        // evaluations. The summary line's one number hid that a 160 ms tick
+        // spent ~10 ms evaluating its block.
+        let lock_ms = started.elapsed().as_secs_f64() * 1000.0;
+        // Whether the ground was already paged for the document as it stands
+        // when this tick takes the lock -- see the stamp at the bottom.
+        let paged_at_start = state
+            .paged_version
+            .lock()
+            .map(|v| *v == Some(doc.version()))
+            .unwrap_or(false);
+        let mut propagate_ms = 0.0;
+        let mut page_ms = 0.0;
+        let mut eval_ms = 0.0;
         if !plan.release.is_empty() {
             for guid in &plan.release {
                 let Some(e) = doc.entity_of(*guid) else {
@@ -372,7 +395,9 @@ fn tick(app: &AppHandle, registry: &inf_graph::NodeRegistry) {
             }
         }
         if !programs.is_empty() {
+            let t = Instant::now();
             doc.world_mut().propagate();
+            propagate_ms = t.elapsed().as_secs_f64() * 1000.0;
             // Once per document version — see `paged_version`. The stamp is
             // written AFTER this tick's own bump, at the bottom, or every tick
             // would invalidate the stamp it had just written.
@@ -385,6 +410,7 @@ fn tick(app: &AppHandle, registry: &inf_graph::NodeRegistry) {
                 paged_now = true;
                 let t = Instant::now();
                 let tiles = page_for_pcg(&mut doc, &paths);
+                page_ms = t.elapsed().as_secs_f64() * 1000.0;
                 if tiles > 0 {
                     tracing::info!(
                         "inf-studio: pcg stream paged {tiles} terrain tile(s) in {:.1} ms",
@@ -410,8 +436,30 @@ fn tick(app: &AppHandle, registry: &inf_graph::NodeRegistry) {
                 ) {
                     break;
                 }
+                let one = Instant::now();
                 match evaluate_volume_into(&mut doc, *guid, lowered) {
-                    Ok(_) => {
+                    Ok(placed) => {
+                        // **Which block, and what it cost** (the PERF1 audit,
+                        // c'): the summary line says "1 vol / 170 ms" and not
+                        // which one, so a dear block could not be found from
+                        // the log. Only past the budget, so a settled fill is
+                        // quiet.
+                        let ms = one.elapsed().as_secs_f64() * 1000.0;
+                        eval_ms += ms;
+                        if ms > budget_ms {
+                            let name = doc
+                                .entity_of(*guid)
+                                .and_then(|e| {
+                                    doc.world()
+                                        .world()
+                                        .get::<inf_ecs::components::Name>(e)
+                                        .map(|n| n.0.clone())
+                                })
+                                .unwrap_or_default();
+                            tracing::info!(
+                                "inf-studio: pcg stream: `{name}` ({guid}) evaluated in {ms:.1} ms, {placed} instances"
+                            );
+                        }
                         evaluated.push(*guid);
                         changed = true;
                     }
@@ -419,16 +467,28 @@ fn tick(app: &AppHandle, registry: &inf_graph::NodeRegistry) {
                 }
             }
         }
+        if lock_ms + propagate_ms + page_ms + eval_ms > budget_ms {
+            tracing::info!(
+                "inf-studio: pcg stream tick: lock wait {lock_ms:.1} ms, propagate {propagate_ms:.1} ms, paging {page_ms:.1} ms, evaluation {eval_ms:.1} ms"
+            );
+        }
         if changed {
             // ONE bump for the whole tick. The viewport's projection is
             // version-gated and rebuilds the entire scene, so bumping per volume
             // would pay for that rebuild once per block.
             doc.bump_version_for_runtime();
         }
-        // Stamped only when this tick actually paged: a tick that did nothing
-        // but RELEASE volumes has paged no ground, and stamping there would let
-        // the next tick that does have work skip the paging it needs.
-        if paged_now {
+        // Stamped when this tick paged, AND when the ground was already paged
+        // at the start of it (the PERF1 audit, c'): the tick's own writes --
+        // populations set or released -- move no volume's box and no spline,
+        // which is all `page_for_pcg` reads, so the ground it paged is still the
+        // ground for the version this tick bumped to. Stamping only `paged_now`
+        // left every evaluating tick's bump unstamped, and the NEXT tick re-ran
+        // the whole-level paging scan: measured on the island fill, 152-158 ms
+        // on every other tick against ~10 ms of evaluation -- the "1 vol /
+        // 165 ms of 8.00" line was the scan, not the block. A tick that did
+        // nothing but release from an UNPAGED start still stamps nothing.
+        if inf_editor_core::pcg_stream::ground_stays_paged(paged_at_start, paged_now) {
             if let Ok(mut v) = state.paged_version.lock() {
                 *v = Some(doc.version());
             }
@@ -710,6 +770,25 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
+    }
+
+    /// **The tick stamps its paged version through the Ring-1 rule** (the
+    /// PERF1 audit, c'): `ground_stays_paged`, read on the paged-at-start
+    /// flag the tick takes under the lock -- the rule's own arm is in
+    /// `inf_editor_core::pcg_stream`.
+    #[test]
+    fn the_tick_stamps_the_ground_through_the_ring_one_rule() {
+        let src = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/commands/pcg_stream.rs"),
+        )
+        .expect("this module is readable")
+        .replace("\r\n", "\n");
+        let src = src.split("#[cfg(test)]").next().expect("the module body");
+        assert!(src.contains(
+            "if inf_editor_core::pcg_stream::ground_stays_paged(paged_at_start, paged_now) {"
+        ));
+        assert!(src.contains("let paged_at_start = state"));
+        assert_eq!(src.matches("*v = Some(doc.version());").count(), 1);
     }
 
     /// **The seed fold must not accumulate**, and this is the arm that says so.

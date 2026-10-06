@@ -1374,7 +1374,10 @@ pub fn evaluate_pcg_volumes_in(
         // load-bearing rather than merely conventional.
         let (scatter, grammar) = match &terrain {
             Some((data, o)) => {
-                let data = data.clone();
+                // BORROWED (the PERF1 audit, c'): this was `data.clone()`, a
+                // deep copy of the whole resident heightfield once per VOLUME,
+                // on top of the one per call above. The provider only reads
+                // heights; the copy bought nothing.
                 let o = *o;
                 let provider = FnHeight::new(move |x, z| {
                     data.height_at(DVec2::new(x - o.x, z - o.z))

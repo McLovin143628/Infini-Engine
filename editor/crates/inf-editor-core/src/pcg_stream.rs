@@ -308,6 +308,20 @@ pub fn start_another(started: usize, spent_ms: f64, budget_ms: f64) -> bool {
     started == 0 || spent_ms < budget_ms
 }
 
+/// **Is the ground still paged after a tick?** (the PERF1 audit, c') -- the
+/// rule the streaming tick stamps its paged-version by.
+///
+/// `paged_at_start` is whether the ground had been paged for the document
+/// version the tick started from, `paged_now` whether the tick paged it
+/// itself. Either way the answer is yes: a tick writes only populations, and
+/// paging reads only volume boxes and splines, so the bump the tick makes does
+/// not unpage anything. The rule that stamped only `paged_now` made every
+/// second tick of the island's fill re-run a 152-158 ms paging scan.
+#[inline]
+pub fn ground_stays_paged(paged_at_start: bool, paged_now: bool) -> bool {
+    paged_at_start || paged_now
+}
+
 /// What the "Streaming" overlay reads (clause 5) and what the throttled
 /// `tracing` line prints.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -367,6 +381,10 @@ pub struct EditorPcgStreams {
     radius_scale: f64,
     budget_ms: f64,
     max_evaluated: usize,
+    /// **Whether a Play session holds the machine** (the PERF1 audit): while it
+    /// does, the editor's own camera streams nothing. See
+    /// [`set_yielded_to_play`](Self::set_yielded_to_play).
+    yielded: bool,
     /// The guids this streamer has evaluated and not released. Kept beside the
     /// document's own `populated` bit rather than instead of it: the document is
     /// the truth (a person can evaluate a volume by hand, or open a new level),
@@ -391,6 +409,7 @@ impl EditorPcgStreams {
             radius_scale: 1.0,
             budget_ms: EDITOR_PCG_STEP_BUDGET_MS,
             max_evaluated: EDITOR_PCG_MAX_EVALUATED,
+            yielded: false,
             owned: BTreeSet::new(),
             stats: PcgStreamStats {
                 budget_ms: EDITOR_PCG_STEP_BUDGET_MS,
@@ -401,6 +420,26 @@ impl EditorPcgStreams {
 
     pub fn is_enabled(&self) -> bool {
         self.enabled
+    }
+
+    /// **Yield to a Play session** (the PERF1 audit, priority b'): while a
+    /// player process runs, the editor's camera starts no evaluation and
+    /// releases nothing, and when the session ends it picks up exactly where it
+    /// stopped -- the owned set and the document are untouched by the yield.
+    ///
+    /// Why: one settlement block costs 165-178 ms to evaluate (measured in the
+    /// editor's own log during Play), under the document lock, four times a
+    /// second while the editor is still filling its radius -- on the same CPU
+    /// the Play window's fixed step needs, for a camera nobody is looking
+    /// through. The player streams its own world from its own payload; nothing
+    /// it draws depends on what the editor has evaluated.
+    pub fn set_yielded_to_play(&mut self, yielded: bool) {
+        self.yielded = yielded;
+    }
+
+    /// Whether a Play session holds the machine.
+    pub fn is_yielded_to_play(&self) -> bool {
+        self.yielded
     }
 
     pub fn set_enabled(&mut self, on: bool) {
@@ -459,6 +498,17 @@ impl EditorPcgStreams {
             return PcgStreamPlan::default();
         }
         let plan = plan(camera, candidates, radii, self.max_evaluated);
+        if self.yielded {
+            // Counted, so the readout still says how far the fill has to go
+            // when Play ends; planned, nothing.
+            self.stats.in_radius = plan.in_radius;
+            self.stats.in_radius_populated = plan.in_radius_populated;
+            return PcgStreamPlan {
+                in_radius: plan.in_radius,
+                in_radius_populated: plan.in_radius_populated,
+                ..PcgStreamPlan::default()
+            };
+        }
         self.stats.in_radius = plan.in_radius;
         self.stats.in_radius_populated = plan.in_radius_populated;
         plan
@@ -725,6 +775,57 @@ mod tests {
             assert!(ticks <= 4, "the work did not finish in four ticks");
         }
         assert_eq!(ticks, 4);
+    }
+
+    /// **THE EDITOR YIELDS TO PLAY, AND PICKS UP WHERE IT STOPPED** (the
+    /// PERF1 audit, priority b'). While a Play session runs the streamer plans
+    /// no evaluation and no release (it still counts the radius); the moment
+    /// the session ends, the same camera over the same document plans exactly
+    /// what it would have planned had Play never run.
+    #[test]
+    fn the_streamer_yields_to_play_and_resumes_the_same_plan_when_play_ends() {
+        let cands = [
+            vol(1, 10.0, 0.0, 5.0, false),
+            vol(2, 30.0, 0.0, 5.0, true),
+            vol(3, 2_000.0, 0.0, 5.0, true),
+        ];
+        let p = PartitionSettings::default();
+        let mut s = EditorPcgStreams::new();
+        let free = s.plan_tick(DVec3::ZERO, &cands, &p);
+        assert_eq!(free.evaluate, vec![guid(1)]);
+        assert_eq!(free.release, vec![guid(3)]);
+        s.set_yielded_to_play(true);
+        assert!(s.is_yielded_to_play());
+        let held = s.plan_tick(DVec3::ZERO, &cands, &p);
+        assert!(
+            held.evaluate.is_empty() && held.release.is_empty() && !held.is_loading(),
+            "a streamer yielded to Play still planned work: {held:?}"
+        );
+        assert_eq!((held.in_radius, held.in_radius_populated), (2, 1));
+        assert_eq!(s.stats().in_radius, 2, "the readout stopped counting");
+        s.set_yielded_to_play(false);
+        assert_eq!(
+            s.plan_tick(DVec3::ZERO, &cands, &p),
+            free,
+            "Play ended and the editor did not pick up where it stopped"
+        );
+    }
+
+    /// **An evaluating tick does not unpage the ground** (the PERF1 audit,
+    /// c'). Before: only a tick that paged stamped the version it bumped to,
+    /// so the tick after every evaluating tick paged the whole level again.
+    #[test]
+    fn a_tick_that_started_paged_leaves_the_ground_paged() {
+        assert!(
+            ground_stays_paged(true, false),
+            "an evaluating tick unpaged the ground"
+        );
+        assert!(ground_stays_paged(false, true));
+        assert!(ground_stays_paged(true, true));
+        assert!(
+            !ground_stays_paged(false, false),
+            "a tick that never paged claimed the ground was paged"
+        );
     }
 
     #[test]
