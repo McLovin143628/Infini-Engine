@@ -2441,7 +2441,7 @@ mod tests {
             4.0 - EXPOSURE_LIGHT_ADAPTATION_RATIO,
             "toward less exposure at the light-adaptation rate"
         );
-        assert!(EXPOSURE_LIGHT_ADAPTATION_RATIO > 1.0);
+        const { assert!(EXPOSURE_LIGHT_ADAPTATION_RATIO > 1.0) };
     }
 
     #[test]

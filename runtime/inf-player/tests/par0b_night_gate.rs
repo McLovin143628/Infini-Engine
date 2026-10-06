@@ -629,7 +629,6 @@ fn downlit_room(bounce: bool) -> (RenderScene, RenderSettings) {
         inner_cos: 50f32.to_radians().cos(),
         outer_cos: 60f32.to_radians().cos(),
         cast_shadows: true,
-        ..RenderLight::default()
     });
     s.mark_dirty();
     let mut set = gi_settings(true);
