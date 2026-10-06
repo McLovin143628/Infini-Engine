@@ -2656,7 +2656,7 @@ fn print_frame_profile(label: &str, m: &Measured, fx: &Fixture) {
         println!("  cpu {name:>16}: {:.3} ms", m.cpu_ms[i]);
     }
     println!("  cpu {:>16}: {cpu_sum:.3} ms", "TOTAL");
-    print_step_clocks(label, &m);
+    print_step_clocks(label, m);
     // **WHAT THE STEP IS PAYING FOR, PER ROW** (the NPC1e audit). The island
     // printed this census once, in the isolated fixed-step block above, at
     // the hero's authored start — and then the wave attributed **+21.0 ms of
@@ -2676,7 +2676,7 @@ fn print_frame_profile(label: &str, m: &Measured, fx: &Fixture) {
             fx.sim.bridge3d().admitted_structures(),
         );
     }
-    print_record_profile(label, &m);
+    print_record_profile(label, m);
     println!("  gpu {:>16}: {:.3} ms", "frame", m.gpu_frame_ms);
     let mut passes = m.passes.clone();
     passes.sort_by(|a, b| b.1.total_cmp(&a.1));

@@ -1471,7 +1471,7 @@ pub fn skinned_lod_for(
     px_per_m: f32,
     pixel_error: f32,
 ) -> usize {
-    if mesh.lods.is_empty() || !(px_per_m > 0.0) || !distance_m.is_finite() {
+    if mesh.lods.is_empty() || px_per_m.is_nan() || px_per_m <= 0.0 || !distance_m.is_finite() {
         return 0;
     }
     let scale = scale.max(0.0);

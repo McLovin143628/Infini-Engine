@@ -157,7 +157,7 @@ fn settings() -> RenderSettings {
 
 struct Frame {
     bytes: Vec<u8>,
-    coupling: Vec<((u128, usize), Vec<(u128, inf_vt::TileCoord)>)>,
+    coupling: Vec<inf_render::ClusterCouplingGroup>,
     report: String,
 }
 

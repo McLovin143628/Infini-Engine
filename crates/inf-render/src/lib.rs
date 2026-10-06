@@ -142,8 +142,8 @@ pub use precip::{
 pub use primitives::{PrimGpu, PrimMesh, PrimRange};
 pub use readback::{ReadbackRing, READBACK_LATENCY_FRAMES};
 pub use renderer::{
-    EngineRenderer, ViewMode, AO_FORMAT, HDR_FORMAT, LDR_FORMAT, MASK_FORMAT, SCENE_FORMAT,
-    SCENE_SAMPLES,
+    ClusterCouplingGroup, EngineRenderer, ViewMode, AO_FORMAT, HDR_FORMAT, LDR_FORMAT, MASK_FORMAT,
+    SCENE_FORMAT, SCENE_SAMPLES,
 };
 pub use scene::{
     apply_near_fade, apply_seam, box_uv, deformed_skinned_mesh, identity_palette,

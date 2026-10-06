@@ -746,6 +746,10 @@ pub struct EngineRenderer {
     vsm_receiver_frames: u64,
 }
 
+/// One cluster-coupling group as [`EngineRenderer::cluster_coupling_groups`]
+/// reports it (wave PERF1): `(asset, page)` and the `(texture, tile)` members.
+pub type ClusterCouplingGroup = ((u128, usize), Vec<(u128, inf_vt::TileCoord)>);
+
 impl EngineRenderer {
     pub fn new(gpu: &GpuContext, out_format: wgpu::TextureFormat) -> Self {
         let view_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -1668,7 +1672,7 @@ impl EngineRenderer {
     /// **The cluster coupling's groups**, `(asset, page) -> tiles`, as the last
     /// frame left them (wave PERF1) -- what the equivalence arm compares between
     /// a cached and an uncached renderer.
-    pub fn cluster_coupling_groups(&self) -> Vec<((u128, usize), Vec<(u128, inf_vt::TileCoord)>)> {
+    pub fn cluster_coupling_groups(&self) -> Vec<ClusterCouplingGroup> {
         self.graph
             .node::<passes::vgeom::VgeomNode>()
             .map(|n| {
