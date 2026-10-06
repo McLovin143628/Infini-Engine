@@ -1086,14 +1086,24 @@ pub const SHIPPING_FRAME_P99_CEILING_MS: f64 = 46.0;
 /// accident"). The island never had one, so the frame that every audit since
 /// VEH3f.2a measured over 38 ms had nothing to hold the line. This is that
 /// line, minted from the PERF1 close (see the ledger's "## Wave PERF1"):
-/// the worst p95 measured there with the spread across five rounds, plus the
-/// headroom the §8 tripwires carry. "Serialized" is the instrument's frame --
+///
+/// | hour | p50 | p95 (min of 5) | the five rounds' p95 | GPU |
+/// |---|---|---|---|---|
+/// | 12:00 | 42.04 | 44.21 | 44.2 - 51.6 | 14.81 |
+/// | 21:00 | 67.56 | **83.05** | 76.2 - 83.1 | 24.05 |
+/// | 08:30 | 54.75 | 68.78 | 68.8 - 86.1 | 18.74 |
+///
+/// (before the wave: 72.83 / 106.96 / 89.33 p95). The same tree's A/B
+/// session read 21:00 at 88.22, so the ceiling is the worst p95 any PERF1 run
+/// recorded plus ~8 %: **95.0**. A regression that matters -- the LOD reader
+/// switched off is +17 ms at 21:00 -- trips it; machine-to-machine drift
+/// does not. "Serialized" is the instrument's frame --
 /// CPU then GPU, waited on -- which is the instrument's headline and the
 /// number every prior island row was taken in; the shipped player overlaps
 /// the two halves and runs faster than this (the instrument's PIPELINED row).
 ///
 /// **RATCHET RULE (§8): this constant may only ever DECREASE.**
-pub const ISLAND_FRAME_CEILING_MS: f64 = 100.0;
+pub const ISLAND_FRAME_CEILING_MS: f64 = 95.0;
 
 /// **How many triangles a world's ROAD MESHES may hold** (wave ROAD1b).
 ///

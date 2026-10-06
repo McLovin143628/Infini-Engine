@@ -240,6 +240,10 @@ pub struct PlayerApp {
     /// in a windowed PIE preview, because a preview that could not open the menu
     /// would be previewing a different game.
     ui: crate::ui::PlayerUi,
+    /// **The on-screen frame counter** (wave PERF1): the last
+    /// [`crate::ui::FRAME_COUNTER_WINDOW`] frame intervals, drawn top-right
+    /// when `INF_FPS_HUD` is set (read once at boot). `None` = off.
+    frame_counter: Option<crate::ui::FrameCounter>,
     /// Cook-derived vmesh DAGs a `MeshRef.asset` resolves to (P13.4); attached to
     /// the render host so asset meshes render real geometry. Empty for
     /// primitive-only / PIE worlds.
@@ -362,6 +366,7 @@ impl PlayerApp {
             height,
             sim,
             ui,
+            frame_counter: crate::ui::FrameCounter::from_env(),
             input_state: InputState::new(map),
             live: None,
             pie: None,
@@ -1567,6 +1572,14 @@ impl PlayerApp {
         // PIE both run this host and do show it.
         if let Some((earned, slots)) = Self::wanted_readout(&self.sim) {
             self.ui.wanted(earned, slots);
+        }
+        // The frame counter (wave PERF1), top-right, when `INF_FPS_HUD` asked
+        // for it: the mean interval over the window and its p95, so a frame
+        // photographed is a frame whose cost is on it.
+        if let Some(fc) = self.frame_counter.as_mut() {
+            fc.push(dt);
+            let text = fc.text();
+            self.ui.frame_counter(&text);
         }
         // …and the reticle, which is the aim's own half. Only while aiming: see
         // `inf_ui::view::reticle` for why a permanent crosshair would be a claim

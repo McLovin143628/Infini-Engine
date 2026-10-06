@@ -441,6 +441,21 @@ impl PlayerUi {
         );
     }
 
+    /// **Draw the frame counter** (wave PERF1) -- the top-right corner, the one
+    /// HUD anchor nothing else uses. See [`FrameCounter`].
+    pub fn frame_counter(&mut self, text: &str) {
+        if self.menu.open || text.is_empty() {
+            return;
+        }
+        let vp = self.list.viewport;
+        inf_ui::view::prompt(
+            &mut self.list,
+            Vec2::new(vp.x - 8.0, 64.0),
+            text,
+            inf_ui::view::palette::TEXT,
+        );
+    }
+
     /// **Draw the wanted rating** (wave EMS3) — the top-left corner, and only
     /// while somebody is looking for the camera's subject.
     ///
@@ -555,6 +570,55 @@ pub fn project_to_screen(view: &inf_render::RenderView, world: glam::DVec3) -> O
     ))
 }
 
+/// Frames the on-screen counter averages over (wave PERF1): one second at
+/// 60 fps.
+pub const FRAME_COUNTER_WINDOW: usize = 60;
+
+/// **The on-screen frame counter** (wave PERF1): a ring of the last
+/// [`FRAME_COUNTER_WINDOW`] wall-clock frame intervals the windowed loop
+/// measured, printed as the mean (and its fps) and the window's p95. Off unless
+/// `INF_FPS_HUD` is set when the player boots -- the demo loop sets it, so the
+/// frames a wave photographs carry what they cost -- and it reads nothing but
+/// the interval the loop already took, so it moves no simulation.
+#[derive(Debug, Clone, Default)]
+pub struct FrameCounter {
+    ring: std::collections::VecDeque<f64>,
+}
+
+impl FrameCounter {
+    /// On when `INF_FPS_HUD` is set.
+    pub fn from_env() -> Option<Self> {
+        std::env::var_os("INF_FPS_HUD").map(|_| Self::default())
+    }
+
+    /// One frame interval, seconds.
+    pub fn push(&mut self, dt: f64) {
+        if !(dt.is_finite() && dt > 0.0) {
+            return;
+        }
+        if self.ring.len() == FRAME_COUNTER_WINDOW {
+            self.ring.pop_front();
+        }
+        self.ring.push_back(dt);
+    }
+
+    /// `"16.4 ms  61 fps  p95 18.0"`, or empty before the first frame.
+    pub fn text(&self) -> String {
+        if self.ring.is_empty() {
+            return String::new();
+        }
+        let n = self.ring.len() as f64;
+        let mean_ms = self.ring.iter().sum::<f64>() / n * 1000.0;
+        let mut sorted: Vec<f64> = self.ring.iter().copied().collect();
+        sorted.sort_by(f64::total_cmp);
+        let p95 = sorted[((0.95 * n).ceil() as usize).clamp(1, sorted.len()) - 1] * 1000.0;
+        format!(
+            "{mean_ms:.1} ms  {:.0} fps  p95 {p95:.1}",
+            1000.0 / mean_ms.max(1.0e-9)
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -583,6 +647,30 @@ mod tests {
     /// The file is written by hand on purpose: it is the case the edit doors
     /// cannot cover — a build that had no guard, a hand edit, a project whose own
     /// `input.toml` simply never bound the menu.
+    /// **The frame counter prints what the loop measured** (wave PERF1): the
+    /// mean of its window and that window's p95, and it forgets the oldest
+    /// interval once the window is full.
+    #[test]
+    fn the_frame_counter_prints_the_mean_and_the_p95_of_its_window() {
+        let mut fc = FrameCounter::default();
+        assert!(fc.text().is_empty());
+        for _ in 0..FRAME_COUNTER_WINDOW {
+            fc.push(0.020);
+        }
+        assert_eq!(fc.text(), "20.0 ms  50 fps  p95 20.0");
+        for _ in 0..FRAME_COUNTER_WINDOW {
+            fc.push(0.010);
+        }
+        assert_eq!(
+            fc.text(),
+            "10.0 ms  100 fps  p95 10.0",
+            "the window forgot nothing"
+        );
+        fc.push(f64::NAN);
+        fc.push(0.0);
+        assert_eq!(fc.text(), "10.0 ms  100 fps  p95 10.0");
+    }
+
     #[test]
     fn a_settings_file_with_no_menu_key_still_boots_a_game_with_a_menu() {
         let dir = tmp();
