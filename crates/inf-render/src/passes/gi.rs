@@ -1589,8 +1589,27 @@ impl RenderNode for GiNode {
         );
         // The night sky's ambient (PAR0b clause 3b) — zero while the sun is up,
         // so every daylight frame keeps the sun-only coefficients bit for bit.
-        let night =
-            crate::passes::sky_lut::night_sky_memo(&frame.scene.atmosphere, r_km, &frame.scene.sun);
+        // + the city's skyglow from its own lit fixtures (audit PAR0b): the
+        // local lights within reach of the camera, through
+        // `atmosphere::city_glow_from_output`. Zero by day (the night fade).
+        let mut atmos = frame.scene.atmosphere;
+        let mut output = [0.0f32; 3];
+        for l in &frame.scene.lights {
+            if l.kind == LightKind::Directional || l.intensity <= 0.0 {
+                continue;
+            }
+            if (l.position - frame.view.eye_world).length() > crate::atmosphere::CITY_GLOW_REACH_M {
+                continue;
+            }
+            for (o, c) in output.iter_mut().zip(l.color) {
+                *o += l.intensity * c.max(0.0);
+            }
+        }
+        let glow = crate::atmosphere::city_glow_from_output(output);
+        for (g, d) in atmos.city_glow.iter_mut().zip(glow) {
+            *g += d;
+        }
+        let night = crate::passes::sky_lut::night_sky_memo(&atmos, r_km, &frame.scene.sun);
         let mut data = GiDataGpu {
             vol_min: [vol_min.x, vol_min.y, vol_min.z, vsize],
             probe_min: [vol_min.x, vol_min.y, vol_min.z, extent],

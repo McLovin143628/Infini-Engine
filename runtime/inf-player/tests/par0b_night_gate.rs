@@ -1359,6 +1359,13 @@ fn eye_frame(
     (img, e)
 }
 
+/// Mean luma of rows 55-100 % (the band below the horizon of a level view).
+fn ground_band_mean(img: &[u8]) -> f64 {
+    let y0 = (H as usize * 55) / 100;
+    let rows = &img[y0 * W as usize * 4..];
+    mean_luma(rows)
+}
+
 fn mean_luma(img: &[u8]) -> f64 {
     let n = (img.len() / 4) as f64;
     img.chunks_exact(4)
@@ -1373,8 +1380,9 @@ fn mean_luma(img: &[u8]) -> f64 {
 ///
 /// * NOON: the eye settles at 1.0 (within 1 %) — the day is the manual frame
 ///   every daylight number was taken at.
-/// * 21:00 / 02:00 (the island's date is a full moon): the street frame's mean
-///   is inside the READABLE BAND [4, 60] / 255 — not the flat black of PAR0
+/// * 21:00 / 02:00 (the island's date is a full moon): the street's GROUND
+///   BAND (rows 55-100 %: road, kerb, cars, the foot of the fronts) is inside
+///   the READABLE BAND [4, 60] / 255 — not the flat black of PAR0
 ///   (mean 4.4 / 255 at 21:00 with exposure 1 on the strip) and not a lifted
 ///   grey noon — and the eye opened at least four stops.
 /// * The moon is in the key light at 02:00 (above the horizon) and its level
@@ -1402,9 +1410,14 @@ fn the_shipped_eye_keeps_noon_at_one_and_opens_the_night_into_the_readable_band(
         );
         let (img, e) = eye_frame(&gpu, &scene, &view, shipped);
         dump(&format!("fixture_street_{:02}", hour as u32), &img);
-        let mean = mean_luma(&img);
+        // The GROUND band (audit PAR0b): rows 55-100 % of the frame, below the
+        // horizon -- road, kerb, car and the foot of the fronts. The whole
+        // frame's mean let a lit twilight sky and the star field carry a black
+        // street into the band.
+        let mean = ground_band_mean(&img);
+        let whole = mean_luma(&img);
         println!(
-            "PAR0b EYE ({tier:?}) {hour:05.2}: sun.y {:.3} moon.y {:.3} phase {:.3} moon level {:.4}; key {:?}; exposure x{:.4} (scene avg {:.6}); street mean {mean:.2}",
+            "PAR0b EYE ({tier:?}) {hour:05.2}: sun.y {:.3} moon.y {:.3} phase {:.3} moon level {:.4}; key {:?}; exposure x{:.4} (scene avg {:.6}); street (ground band) mean {mean:.2}, whole frame {whole:.2}",
             sky.sun.y,
             sky.moon.y,
             sky.moon_phase,

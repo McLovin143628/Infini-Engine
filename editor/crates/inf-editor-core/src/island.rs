@@ -346,7 +346,7 @@ pub const MAX_RIVER_BODIES: usize = 10;
 /// The darkest scene average the island's eye adapts to (wave PAR0b): the
 /// day's key over `2^ISLAND_NIGHT_GAIN_STOPS`, so the night can open the
 /// exposure at most that many stops above the day's 1.0.
-pub const ISLAND_EXPOSURE_MIN_LUMINANCE: f32 = ISLAND_EXPOSURE_MAX_LUMINANCE / 1024.0;
+pub const ISLAND_EXPOSURE_MIN_LUMINANCE: f32 = ISLAND_EXPOSURE_MAX_LUMINANCE / 256.0;
 /// The compensation that puts the meter's key at the island's own noon street
 /// rather than at the 18 % card: `log2(0.012 / 0.18)` = −3.907 stops.
 pub const ISLAND_EXPOSURE_COMPENSATION_EV: f32 = -3.906_891;
@@ -356,12 +356,15 @@ pub const ISLAND_EXPOSURE_COMPENSATION_EV: f32 = -3.906_891;
 /// at 0.79, a waning crescent that lights a street at 5 % of a full moon). The
 /// showcase's night is a moonlit one; the date is how a level says so.
 pub const ISLAND_DAY_OF_YEAR: u32 = 163;
-/// How many stops the island's eye may open at night (wave PAR0b). Ten: eight
-/// were measured first and the editor's Play at 21:00 — a June full moon five
-/// degrees up — read the street black (the headless street frame's mean 7.6 /
-/// 255); the highlight guard, not this ceiling, is what keeps a lit bar or a
-/// pair of headlamps under white.
-pub const ISLAND_NIGHT_GAIN_STOPS: f32 = 10.0;
+/// How many stops the island's eye may open at night (wave PAR0b). EIGHT
+/// (audit PAR0b): the wave raised it to ten because the editor's Play at 21:00
+/// read the street black — but that black was the GI volume, solid with
+/// sphere and cube proxies, subtracting the moonlit sky from every surface
+/// near the camera. With the volume honest the island's 21:00 / 02:00 kerb
+/// frames settle between x48 and x183, inside eight stops, and the ceiling is
+/// what keeps the brightest powered sign (`POWERED_RADIANCE_SCALE`) under
+/// clipping at the most open eye: 3.0 / 512 x 256 = 1.5, ACES 0.877.
+pub const ISLAND_NIGHT_GAIN_STOPS: f32 = 8.0;
 /// The brightest scene average the island's eye adapts to — the island's noon
 /// street (measured 0.013 – 0.018), so a daylight street frame exposes at
 /// 1.0, the manual frame every daylight number was taken at.

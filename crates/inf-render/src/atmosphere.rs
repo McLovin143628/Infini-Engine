@@ -193,11 +193,10 @@ pub struct AtmosphereParams {
     /// **THE CITY'S OWN SKYGLOW — PAR1's hook** (wave PAR0b, clause 3b): the
     /// radiance, linear RGB, that a lit city scatters back down out of the
     /// night sky, applied as a uniform upper-hemisphere term of
-    /// [`night_sky_sh`]. ZERO here and in both projectors: no fixture's light
-    /// is counted into it yet. PAR1b (street lamps) derives it from the lit
-    /// fixtures it places — a function of how much light the city emits, not
-    /// an authored constant — and writes it on this field; nothing else needs
-    /// to change for the ambient, the probe march and the eye to see it.
+    /// [`night_sky_sh`]. ZERO here and in both projectors: this field is an
+    /// AUTHORED addition. Since the PAR0b audit the GI pass adds the glow its
+    /// frame's own lit fixtures derive ([`city_glow_from_output`]) on top, so
+    /// the lamps PAR1b places raise the skyglow with no further wiring.
     pub city_glow: [f32; 3],
 }
 
@@ -858,6 +857,42 @@ pub fn sky_irradiance_sh(
 /// floor at all.
 pub const NIGHT_FLOOR_OF_FULL_MOON: f32 = 0.01;
 
+/// **How far a city's fixtures count toward its skyglow**, metres (audit
+/// PAR0b, priority b'): the local lights within this reach of the camera.
+pub const CITY_GLOW_REACH_M: f64 = 300.0;
+/// The share of a fixture's light that leaves upward (direct up-light plus
+/// what the ground and the walls reflect up): half (audit PAR0b).
+pub const CITY_GLOW_UPWARD_FRACTION: f32 = 0.5;
+/// The share of the upward flux the night atmosphere scatters back down over
+/// the lit area (audit PAR0b). Five percent puts a dense lit block's skyglow at
+/// ~0.1 lx against a full moon's ~0.25 lx, the order measured under city
+/// centres (urban zenith brightness 10-100x the natural sky, whose floor is
+/// [`NIGHT_FLOOR_OF_FULL_MOON`] of the full moon).
+pub const CITY_GLOW_RETURNED_FRACTION: f32 = 0.05;
+
+/// **THE CITY'S SKYGLOW, DERIVED FROM ITS FIXTURES** (audit PAR0b, priority
+/// b'). `output` is the summed `intensity x colour` (linear RGB) of every lit
+/// point/spot light within [`CITY_GLOW_REACH_M`] of the camera. Each emits
+/// `4 pi I`; [`CITY_GLOW_UPWARD_FRACTION`] of it goes up and
+/// [`CITY_GLOW_RETURNED_FRACTION`] of that comes back down spread over the
+/// disc of the reach, as an upper-hemisphere radiance `G` with downward
+/// irradiance `pi G`:
+///
+/// ```text
+///     pi G = eps * up * 4 pi * sum(I) / (pi R^2)   =>   G = eps * up * 4 sum(I) / (pi R^2)
+/// ```
+///
+/// Measured on the island's Harbour City strip at 21:00: 99 lights, output
+/// 4 746 — `pi G` 0.0053, 45 % of the full moon's 0.0117. Zero with no lit
+/// fixture, so a wild coast keeps the natural night. Added to
+/// [`AtmosphereParams::city_glow`] by the GI pass (one door for both hosts).
+pub fn city_glow_from_output(output: [f32; 3]) -> [f32; 3] {
+    let r = CITY_GLOW_REACH_M as f32;
+    let k = CITY_GLOW_RETURNED_FRACTION * CITY_GLOW_UPWARD_FRACTION * 4.0
+        / (std::f32::consts::PI * r * r);
+    output.map(|o| o.max(0.0) * k)
+}
+
 /// How much of the night sky an overcast deck lets through, from the cloud
 /// coverage `[0, 1]` (wave PAR0b): `1.0` clear, `0.1` under a full deck. An
 /// overcast night is nearly black away from the city's lights — the moon and
@@ -1409,6 +1444,18 @@ mod tests {
     }
 
     // ── the sky irradiance SH (wave FIX3) ───────────────────────────────────
+
+    /// Audit PAR0b: the skyglow is zero without fixtures, linear in their
+    /// output, and the strip's measured output gives ~45 % of a full moon.
+    #[test]
+    fn the_citys_skyglow_follows_its_fixtures() {
+        assert_eq!(city_glow_from_output([0.0; 3]), [0.0; 3]);
+        let g = city_glow_from_output([4746.0; 3]);
+        let e = std::f32::consts::PI * g[0];
+        assert!((e / 0.011_718_75 - 0.45).abs() < 0.01, "pi G = {e}");
+        let h = city_glow_from_output([2373.0; 3]);
+        assert!((h[0] * 2.0 - g[0]).abs() < 1.0e-9);
+    }
 
     /// **THE FURNACE, WITHOUT A GPU.** A uniform sky of radiance `L` must
     /// project to a set whose folded cosine convolution is exactly `L` in every

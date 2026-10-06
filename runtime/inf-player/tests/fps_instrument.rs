@@ -4000,6 +4000,24 @@ fn the_shipped_island_by_the_hour() {
         ] {
             let (img, e, scene) = shipped_frame(&gpu, &mut fx, shipped, &view, 40);
             let (mean, p95) = luma_stats(&img);
+            if tag == "kerb-north" {
+                let near: Vec<&inf_render::RenderLight> = scene
+                    .lights
+                    .iter()
+                    .filter(|l| l.kind != inf_render::LightKind::Directional)
+                    .filter(|l| (l.position - kerb).length() < 300.0)
+                    .collect();
+                let sum: f32 = near
+                    .iter()
+                    .map(|l| l.intensity * l.color[0].max(l.color[1]).max(l.color[2]))
+                    .sum();
+                println!(
+                    "HOUR {hour:05.2} LOCAL LIGHTS within 300 m: {} (output sum {sum:.2}); moon {:?} x {}",
+                    near.len(),
+                    scene.sun.moon_color,
+                    scene.sun.moon_intensity
+                );
+            }
             println!(
                 "HOUR {hour:05.2} {tag}: luma mean {mean:.2} p95 {p95}; exposure x{:.3} (ev {:.3}, scene avg luminance {:.6}); {} lights ({} directional)",
                 e.multiplier,
@@ -4012,7 +4030,7 @@ fn the_shipped_island_by_the_hour() {
                     .filter(|l| l.kind == inf_render::LightKind::Directional)
                     .count()
             );
-            if tag == "street0" {
+            if tag == "street0" || tag == "kerb-north" || tag == "kerb-venue" {
                 // The emissive census against the exposure the frame is seen
                 // at: each emissive scatter batch within 40 m, its radiance
                 // times the eye's multiplier, and the tonemapped peak channel
