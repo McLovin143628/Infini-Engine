@@ -42088,3 +42088,100 @@ ignored`; clippy clean after two test-only lints (`8a90a62f`); rustdoc 398 (base
 `inf-player` ok. Schema v28 / payload 14 / EXPECTED_LEVELS 24, `Cargo.lock` untouched.
 Goldens 78. Editor frames at 21:00, 02:00 and noon from Play in New Window
 (`PAR0b-FINAL\demo-21`, `demo-2`, `demo-12`).
+
+## Wave PAR0b — adversarial audit (auditor, 2026-10-06)
+
+Tree audited: `14b0c9bd` (16 commits over `7a0d9070`). Audit commits `d21b043e`, `a583d49c`,
+`2feefbeb`, `ae1cba3e`, `32bccafc` (+ this docs commit). MEASURED unless marked *inferred*.
+Frames, probes, logs: session scratchpad `AUDIT-PAR0b-FINAL\`.
+
+### THE FINDING: the GI volume was solid
+
+The black facades at noon (and the black 21:00 Play frame) were not "honestly unlit rooms".
+A readback of the GI volume at Harbour City's strip kerb, noon, on the wave's tree: **262 144 of
+262 144 voxels solid**, 2 744 of 4 096 probes buried, every probe's field subtracting the whole
+sky -- so `max(sky + probe, 0)` was 0 on every shaded surface within 20 m of the camera. The
+"no probe sees this surface -> zero" fallback was NOT the cause (probe visibility off: 185 122
+zero pixels vs 207 854 on). Three proxies, each fattened by the wave's half-voxel dilation:
+vgeom root meshlets staged as bounding SPHERES (coarse road/pavement clusters: 15.5 m balls on
+the road, 480 a frame), scattered instances as spheres of their widest axis (a 6 x 3 x 0.3 m
+wall panel = a 3.4 m ball), rigid PLANES as unit cubes (the island's pavements, scale.y ~10,
+stood 5 m tall). Now: scattered occluders are their oriented boxes with per-axis scale, vgeom
+meshlets their mesh-space boxes, planes flat slabs, a vgeom meshlet wider than 5 m (the road
+clusters, which lie on the voxelized terrain) skipped, boxes/spheres thinner than 1 um refused;
+emitters keep their calibrated sphere. Volume 100.0 % -> 49.2 % solid; valid probes 1 352 ->
+2 897. (A triangle-slab path was tried first: 49.3 ms of GPU -- caught by the re-timed frame,
+replaced in `32bccafc`.)
+
+| noon, kerb-south shaded facade (luma / 255, % pixels < 1) | value |
+|---|---|
+| base `7a0d9070` (two suns) | 7.45, 46.6 % black |
+| the wave `14b0c9bd` | 5.95, 48.2 % black |
+| final | **23.10, 1.0 % black** |
+
+Noon street band (rows 55-100 %) base / wave / final: north 37.40 / 22.86 / 28.73, south
+64.52 / 34.98 / 39.06 (the base's second, authored sun lit faces one sun does not -- removing it
+is the wave's clause 4 and correct). New arm `a_face_in_shade_at_noon_sees_the_sky_through_the_
+islands_geometry`: shaded face 0.267 of the sunlit in linear light (band 0.05-0.4), a box in
+shade 98.8 / 255 (>= 12), a pane over a dark panel 22.1 vs 3.8; mutations planes-as-cubes and
+scatter-as-spheres each RED (0.00).
+
+### The night (b') and the emitters (c')
+
+Moon at 21:00 on day 163 at the island: moon.y 0.085 (4.9 deg), phase 0.515, level 0.82; at
+02:00 0.209 (12.1 deg). With the volume honest the street reads without the wave's ten-stop eye:
+`ISLAND_NIGHT_GAIN_STOPS` 10 -> 8 (levels return to their pre-`b1e9e343` bytes, the only field
+that commit moved), and the city's skyglow is DERIVED from its fixtures
+(`atmosphere::city_glow_from_output`, added in the GI pass: 5 % of the upward half of every lit
+point/spot within 300 m -- 45 % of a full moon on the strip, 99 lights, zero on a dark coast).
+`POWERED_RADIANCE_SCALE` 1/1024 -> 1/512 (a TV 1/270 of a sunlit white; the brightest sign at
+the most open eye x256 = 1.5, ACES 0.877 < 0.9). Emissive census on every kerb row and the
+fixture venue street: 0. The eye arm now reads the GROUND band of the shipped fixture street.
+
+| street band, mean / 255 (rows 55-100 %) | wave | final |
+|---|---|---|
+| 21:00 kerb north / south / venue | 2.04 / 1.86 / 1.82 | **14.83 / 15.01 / 7.25** |
+| 02:00 kerb north / south / venue | 2.10 / 2.03 / 1.72 | **11.11 / 14.23 / 8.18** |
+| editor Play 21:00 `07-pie-street` / `12-look-right` | 2.04 / 1.78 | **21.11 / 18.12** |
+
+### Other fixes
+
+- `2feefbeb`: the wave's 0.1 m cap on a local light's slope bias striped every grazing ground
+  (its re-blessed `vsm_point` shows the acne); the normal offset now grows with the slope for a
+  local light (shader + `vsm_receiver_site` mirror). `vsm_point` vs the BASE frame mean 0.0050;
+  `par0_window_night` mean 0.0009; corner arm still max 0.
+- `ae1cba3e`: the sun-cast cloud shadow map applies by day only (the moon was veiled twice).
+
+### Goldens
+
+Audit re-blesses (none added, 78): `venue_interior` (the pole a box, the ceiling gets the
+neon's bounce -- better), `vsm_point` (stripes gone -- better than the wave's, ~= base),
+`par0_window_night` (mean 0.0009). phase26/27/28 digests -> `22d7395b...`. The wave's
+"six terrain/water goldens differed on base" reproduced as sub-tolerance residues on this
+adapter (terrain 0.0005, terrain_splat 0.0037, water_river 0.0056 ...), green in strict mode:
+not a flake. `gi_terrain`'s red bounce: visible in the pair (pink -> grey wall), CARRIED.
+
+### Mutations (all arms, `AUDIT-PAR0b-FINAL\mutations.txt`)
+
+Every arm reds under a mutation except `the_open_air_does_not_darken_under_probe_visibility`
+(no mutation found that reds it: vacuous). Also vacuous for the gate: the "no probe sees ->
+zero" fallback (M2 plain blend: 17/17 green) and Chebyshev sharpening (M16: green) -- the
+sealed room is dark from conservative voxels alone.
+
+### Carried (cause, price)
+
+- doors: 13 of 14 archetype palettes author 0.85-1.2 m doors, under two 0.625 m voxels after
+  dilation -- closed to the probe march (one at 1.3 m intermittently): a finer interior
+  cascade, ~2 d (PERF1 / PAR1a trade).
+- `gi_terrain` terrain bounce lost (dilated wall self-occlusion): normal-aware hit, ~1.5 d.
+- glass/water order: a post-water glass node, ~0.5 d (no island frame shows glass over water).
+- asphalt glints of the moon read as a star field at x150-200 (moon specular on the VT normal
+  map): specular anti-aliasing, ~1 d. Stars over a June 21:00 twilight; the 21:00 wide frame's
+  roofs are twilight-purple.
+- a wide vgeom STRUCTURE (> 5 m meshlets, e.g. a bridge) has no GI occlusion now.
+- the editor viewport (not Play) at night: not photographed this audit.
+
+The close (auditor): battery on `32bccafc` `AGGREGATE over 407 binaries: 7899 passed, 0 failed,
+34 ignored`; clippy `--workspace --all-targets -D warnings` exit 0; rustdoc 398; wasm32
+`inf-player` ok; fmt clean; CRLF 0; schema v28 / payload 14 / EXPECTED_LEVELS 24,
+`Cargo.lock` untouched; goldens 78. Report: `campaign-briefs/par0b-audit-report.md`.
