@@ -40,8 +40,6 @@
 //! one `inf_ecs::deform` uses per contact. Sampled once per chunk: a settlement
 //! pad is smooth and a 32 m chunk of it is flat to a few centimetres.
 
-use std::collections::BTreeSet;
-
 use glam::{DVec2, DVec3};
 use uuid::Uuid;
 
@@ -338,7 +336,7 @@ pub(crate) fn gather_kerbs(
     stamp_cache: &mut Option<(u64, u64)>,
     admitted_cache: &mut Vec<Uuid>,
     snaps: &mut Vec<EntitySync3D>,
-    retained: &mut BTreeSet<Uuid>,
+    retained: &mut Vec<Uuid>,
     labels: &mut std::collections::BTreeMap<Uuid, super::label::ColliderLabel>,
 ) -> KerbColliderAudit {
     let Some(res) = inf_ecs::traffic::carriageway_of(world) else {

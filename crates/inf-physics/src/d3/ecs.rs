@@ -510,6 +510,24 @@ pub struct PhysicsBridge3D {
     /// only on the way in, so a shorter level cannot read a longer one's tail.
     live_scratch: Vec<usize>,
     seen_scratch: Vec<Uuid>,
+    /// **The tracked set's signature** (wave PERF1b): the count of
+    /// [`entities`](Self::entities) is its `len`; this is the wrapping sum of
+    /// [`guid_sig`] over its keys, kept at the map's only two mutation sites in
+    /// `sync_retaining`. It lets the despawn sweep prove "nothing is gone" from
+    /// a sum over this step's live and retained lists instead of a probe per
+    /// tracked collider -- see the sweep for why that is exact.
+    tracked_sig: (u64, u64),
+    /// The retained list, sorted and deduplicated, for the steps the sweep
+    /// does run -- a buffer kept so it is allocated once per world.
+    retained_scratch: Vec<Uuid>,
+    /// Retained guids gathered this step, appended by every derived-collider
+    /// gather (wave PERF1b: a `Vec` the gathers push into, where a `BTreeSet`
+    /// built and probed 18 000-30 000 entries a step on the island).
+    retained_buf: Vec<Uuid>,
+    /// `(skipped, run)`: how many despawn sweeps the signature proved empty,
+    /// and how many ran (wave PERF1b) -- the engagement count the sweep's arm
+    /// reads, and a diagnostic a host can print.
+    sweep_counts: (u64, u64),
     /// **The parked vehicles held BEYOND the collider band** (the VEH3h
     /// audit) -- chassis whose rapier body `d3::vehicle`'s parking hold has
     /// made kinematic because the ground they were parked on is not resident.
@@ -557,6 +575,10 @@ impl PhysicsBridge3D {
             snaps_scratch: Vec::new(),
             live_scratch: Vec::new(),
             seen_scratch: Vec::new(),
+            tracked_sig: (0, 0),
+            retained_scratch: Vec::new(),
+            retained_buf: Vec::new(),
+            sweep_counts: (0, 0),
             parked_beyond_band: BTreeSet::new(),
         }
     }
@@ -1416,7 +1438,9 @@ impl PhysicsBridge3D {
         // `StreamingSource` entities and nothing else, so it is sim state by
         // construction and there is no camera in scope to pass by accident.
         let band = self.sim_band(world);
-        let mut retained = self.gather_structures(world, &band, &mut snaps);
+        let mut retained: Vec<Uuid> = std::mem::take(&mut self.retained_buf);
+        retained.clear();
+        self.gather_structures(world, &band, &mut snaps, &mut retained);
         // P21.4: the sim's voxel chunks, on the same rule one level finer.
         self.gather_voxels(volumes, &mut snaps, &mut retained);
         // P22.3: the sim's terrain tiles, on the same rule again. Before this the
@@ -1455,6 +1479,8 @@ impl PhysicsBridge3D {
         );
         // `sync` sorts by Guid internally, so the gather order here is irrelevant.
         self.sync_retaining(&snaps, &retained);
+        retained.clear();
+        self.retained_buf = retained;
         snaps.clear();
         self.snaps_scratch = snaps;
     }
@@ -1665,24 +1691,31 @@ impl PhysicsBridge3D {
         world: &EcsWorld,
         band: &SimBand,
         snaps: &mut Vec<EntitySync3D>,
-    ) -> BTreeSet<Uuid> {
-        let mut retained: BTreeSet<Uuid> = BTreeSet::new();
+        retained: &mut Vec<Uuid>,
+    ) {
         // A level with no `PcgVolume` at all — every hand-authored one — used to
         // walk every entity in the world per fixed step to establish that
         // (lens 3 P12). The stamp-map clause is what keeps the *last* volume's
         // disappearance reaching the prune below; `gather_voxels`' guard is the
         // same shape.
         if self.structure_stamps.is_empty() && !world.has_component::<PcgVolume>() {
-            return retained;
+            return;
         }
         let mut live_volumes: BTreeSet<Uuid> = BTreeSet::new();
-        for entity in world.world().iter_entities() {
-            let Some(guid) = entity.get::<inf_ecs::Guid>().map(|g| g.0) else {
-                continue;
-            };
-            let Some(vol) = entity.get::<PcgVolume>() else {
-                continue;
-            };
+        // **An archetype query, not a walk of the world** (wave PERF1b): the
+        // volumes are a handful of entities in an island of tens of thousands,
+        // and this ran every fixed step. Visiting order is irrelevant -- every
+        // write below is keyed by the volume's guid, and `sync` sorts.
+        let w = world.world();
+        let Some(mut q) = w.try_query::<(&inf_ecs::Guid, &PcgVolume)>() else {
+            // No volume archetype at all: the prune below still runs, so the
+            // last volume's disappearance reaches it.
+            self.structure_stamps.clear();
+            self.structure_admitted.clear();
+            return;
+        };
+        for (guid, vol) in q.iter(w) {
+            let guid = guid.0;
             live_volumes.insert(guid);
             // **The band's stamp rides in the volume's stamp** (IB-2a). The
             // membership of the active set is as much a part of "what is
@@ -1710,7 +1743,6 @@ impl PhysicsBridge3D {
             .retain(|g, _| live_volumes.contains(g));
         self.structure_admitted
             .retain(|g, _| live_volumes.contains(g));
-        retained
     }
 
     /// The band's radii, in metres: full parts inside the first, a shell inside
@@ -1735,6 +1767,13 @@ impl PhysicsBridge3D {
         if near_m.is_finite() && far_m.is_finite() && near_m >= 0.0 && far_m >= near_m {
             self.band_radii = (near_m, far_m);
         }
+    }
+
+    /// `(skipped, run)` despawn sweeps since this bridge was built (wave
+    /// PERF1b): a sweep is skipped only when the tracked set's signature proves
+    /// nothing is gone -- see `sync_retaining`.
+    pub fn despawn_sweeps(&self) -> (u64, u64) {
+        self.sweep_counts
     }
 
     /// What the last structural gather admitted, per volume — the active set,
@@ -1767,7 +1806,7 @@ impl PhysicsBridge3D {
         &mut self,
         volumes: &BTreeMap<Uuid, inf_voxel::VoxelData>,
         snaps: &mut Vec<EntitySync3D>,
-        retained: &mut BTreeSet<Uuid>,
+        retained: &mut Vec<Uuid>,
     ) {
         // The fast path a level with no voxels takes: no walk, no allocation, and
         // the stale-stamp prune below is a no-op on an empty map.
@@ -1809,7 +1848,7 @@ impl PhysicsBridge3D {
                 live.insert((entity, key));
                 let version = inf_voxel::source_key(data, key);
                 if self.voxel_stamps.get(&(entity, key)) == Some(&version) {
-                    retained.insert(voxel_chunk_guid(entity, key));
+                    retained.push(voxel_chunk_guid(entity, key));
                     continue;
                 }
                 self.voxel_stamps.insert((entity, key), version);
@@ -1920,7 +1959,7 @@ impl PhysicsBridge3D {
         &mut self,
         world: &EcsWorld,
         snaps: &mut Vec<EntitySync3D>,
-        retained: &mut BTreeSet<Uuid>,
+        retained: &mut Vec<Uuid>,
     ) {
         // An interior level, or any level with no `Terrain` component, walked
         // every entity per fixed step to find out (lens 3 P12). The audit is
@@ -1986,7 +2025,7 @@ impl PhysicsBridge3D {
                 live.insert((guid, coord));
                 let stamp = (data.tile_version(TileKey::lod0(coord)), origin_bits);
                 if self.terrain_stamps.get(&(guid, coord)) == Some(&stamp) {
-                    retained.insert(terrain_tile_guid(guid, coord));
+                    retained.push(terrain_tile_guid(guid, coord));
                     continue;
                 }
                 self.terrain_stamps.insert((guid, coord), stamp);
@@ -2119,7 +2158,7 @@ impl PhysicsBridge3D {
         &mut self,
         fractures: &BTreeMap<Uuid, super::fracture::FractureState>,
         snaps: &mut Vec<EntitySync3D>,
-        retained: &mut BTreeSet<Uuid>,
+        retained: &mut Vec<Uuid>,
     ) {
         if fractures.is_empty() && self.fracture_stamps.is_empty() {
             return;
@@ -2140,7 +2179,7 @@ impl PhysicsBridge3D {
                 }
                 let guid = super::fracture::fracture_chunk_guid(entity, i as u32);
                 if retain {
-                    retained.insert(guid);
+                    retained.push(guid);
                     continue;
                 }
                 let Some(collider) = state.chunk_collider(i, debris_layers()) else {
@@ -2230,13 +2269,13 @@ impl PhysicsBridge3D {
     /// disappeared. Runs in `Guid` order regardless of the input order, so the
     /// result is independent of how the caller gathered the snapshot.
     pub fn sync(&mut self, entities: &[EntitySync3D]) {
-        self.sync_retaining(entities, &BTreeSet::new());
+        self.sync_retaining(entities, &[]);
     }
 
     /// [`sync`](Self::sync), plus a set of guids that are still alive but were
     /// deliberately **not** re-described this pass (P19.5's unchanged
     /// `PcgVolume` solids). They survive the despawn sweep untouched.
-    fn sync_retaining(&mut self, entities: &[EntitySync3D], retained: &BTreeSet<Uuid>) {
+    fn sync_retaining(&mut self, entities: &[EntitySync3D], retained: &[Uuid]) {
         // 1. Sort the snapshot into deterministic Guid order (and drop entities
         //    with neither a body nor a collider — nothing to simulate).
         //
@@ -2354,6 +2393,7 @@ impl PhysicsBridge3D {
                     joint_desires.push((snap.guid, snap.joint));
                 }
                 // New entity → create its body, apply props, attach a collider.
+                self.tracked_sig = sig_add(self.tracked_sig, guid_sig(snap.guid));
                 let body = self.world.add_body(kind, pos, rot);
                 if let Some(rb) = snap.body.as_ref() {
                     apply_rb_props(&mut self.world, body, rb);
@@ -2388,20 +2428,58 @@ impl PhysicsBridge3D {
         //    `contains` per tracked entity answered with a random descent
         //    through a 13 000-entry tree, sixty times a second, to conclude that
         //    nothing had despawned.
+        //    **And skipped when it can be proven empty** (wave PERF1b). After
+        //    pass 2 the tracked set `T` holds every guid in `seen`, and every
+        //    retained guid was attached when it was last described and has been
+        //    protected from this sweep ever since, so `seen ∪ retained ⊆ T`.
+        //    When the two lists are also disjoint and duplicate-free, `T` equals
+        //    their union exactly when `|T| = |seen| + |retained|` -- nothing is
+        //    gone. The 128-bit signature is the guard on the premise: a
+        //    duplicate or an overlap makes the count larger, and for that excess
+        //    to hide a real despawn the sums would have to collide as well. Any
+        //    disagreement at all runs the sweep below, which is the exact old
+        //    pass; so, short of a 128-bit collision on top of a broken premise,
+        //    the skip is taken only on a step whose sweep would have found
+        //    nothing. On the island the sweep was a `BTreeSet` probe
+        //    per tracked collider -- 18 000 to 30 000 a step -- to conclude that
+        //    nothing had despawned.
+        let union_sig = seen
+            .iter()
+            .chain(retained.iter())
+            .fold((0u64, 0u64), |acc, g| sig_add(acc, guid_sig(*g)));
+        let provably_none_gone =
+            seen.len() + retained.len() == self.entities.len() && union_sig == self.tracked_sig;
         let mut gone: Vec<Uuid> = Vec::new();
-        let mut cursor = 0usize;
-        for guid in self.entities.keys() {
-            while cursor < seen.len() && seen[cursor] < *guid {
-                cursor += 1;
+        if provably_none_gone {
+            self.sweep_counts.0 += 1;
+        } else {
+            self.sweep_counts.1 += 1;
+            let mut kept = std::mem::take(&mut self.retained_scratch);
+            kept.clear();
+            kept.extend_from_slice(retained);
+            kept.sort_unstable();
+            kept.dedup();
+            let mut cursor = 0usize;
+            let mut kcursor = 0usize;
+            for guid in self.entities.keys() {
+                while cursor < seen.len() && seen[cursor] < *guid {
+                    cursor += 1;
+                }
+                while kcursor < kept.len() && kept[kcursor] < *guid {
+                    kcursor += 1;
+                }
+                if seen.get(cursor) == Some(guid) || kept.get(kcursor) == Some(guid) {
+                    continue;
+                }
+                gone.push(*guid);
             }
-            if seen.get(cursor) == Some(guid) || retained.contains(guid) {
-                continue;
-            }
-            gone.push(*guid);
+            kept.clear();
+            self.retained_scratch = kept;
         }
         for guid in gone {
             self.collider_map_dirty = true;
             if let Some(rec) = self.entities.remove(&guid) {
+                self.tracked_sig = sig_sub(self.tracked_sig, guid_sig(guid));
                 self.world.remove_body(rec.body);
             }
             // Round-2 finding R2-3: the warn set is keyed by the same guid and
@@ -3070,6 +3148,33 @@ pub fn pcg_shell_guid(volume: Uuid, group: usize) -> Uuid {
 /// collide in the bridge's one entity map.
 const VOXEL_CHUNK_SALT: u128 = 0x2104_0400_564f_5845_4c43_484e_4b21_0021;
 
+/// One guid's contribution to [`PhysicsBridge3D`]'s tracked-set signature
+/// (wave PERF1b): two independent 64-bit mixes of its 128 bits, summed
+/// wrapping, so the signature of a set is order-independent and a removal
+/// subtracts exactly what the insertion added. `splitmix64`'s finaliser --
+/// integer arithmetic only, so it is the same on every target.
+fn guid_sig(g: Uuid) -> (u64, u64) {
+    fn mix(mut z: u64) -> u64 {
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+    let v = g.as_u128();
+    let (hi, lo) = ((v >> 64) as u64, v as u64);
+    (
+        mix(lo ^ mix(hi)),
+        mix(hi ^ 0x9e37_79b9_7f4a_7c15 ^ mix(lo.rotate_left(17))),
+    )
+}
+
+fn sig_add(a: (u64, u64), b: (u64, u64)) -> (u64, u64) {
+    (a.0.wrapping_add(b.0), a.1.wrapping_add(b.1))
+}
+
+fn sig_sub(a: (u64, u64), b: (u64, u64)) -> (u64, u64) {
+    (a.0.wrapping_sub(b.0), a.1.wrapping_sub(b.1))
+}
+
 /// The synthetic identity of chunk `key` inside the volume on entity `volume`.
 ///
 /// The [`pcg_structure_guid`] rule, with the chunk's three signed coordinates
@@ -3469,4 +3574,117 @@ fn joint_sync(j: Joint3D) -> Option<JointSync3D> {
         .local_anchor1(j.local_anchor.to_dvec3())
         .local_anchor2(j.other_anchor.to_dvec3());
     Some(JointSync3D { other, desc })
+}
+
+#[cfg(test)]
+mod perf1b_sweep_tests {
+    use super::*;
+
+    fn uuid(i: u32) -> Uuid {
+        Uuid::from_u128(0x5eed_0000_0000_0000_0000_0000_0000_0000 | u128::from(i) * 0x9e37_79b9)
+    }
+
+    fn static_box(g: Uuid, i: u32) -> EntitySync3D {
+        EntitySync3D {
+            guid: g,
+            body: None,
+            collider: Some(ColliderDesc3D::new(ColliderShape3D::Box {
+                half_extents: DVec3::splat(0.5),
+            })),
+            translation: DVec3::new(f64::from(i) * 3.0, 0.0, 0.0),
+            rotation: DQuat::IDENTITY,
+            joint: None,
+        }
+    }
+
+    /// **The skipped sweep is the sweep** (wave PERF1b). Four hundred steps
+    /// of a scripted churn over two hundred guids -- the live list and the
+    /// retained list change, things despawn, a retained list repeats a guid,
+    /// overlaps the live list, or names a guid nothing ever attached -- and
+    /// after every step the bridge's tracked set is exactly the oracle's
+    /// `live ∪ (retained ∩ tracked)`. The sweep must have been SKIPPED on
+    /// most steps (the steady state is the point) and RUN on every step that
+    /// had something to remove; a skip taken on a step with a despawn is the
+    /// mutation this arm exists to catch.
+    #[test]
+    fn a_skipped_despawn_sweep_leaves_exactly_what_the_full_sweep_leaves() {
+        let mut bridge = PhysicsBridge3D::new(DVec3::new(0.0, -9.81, 0.0));
+        let mut tracked: BTreeSet<Uuid> = BTreeSet::new();
+        let mut rng: u64 = 0x1234_5678;
+        let mut next = || {
+            rng = rng
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (rng >> 33) as u32
+        };
+        let mut live: BTreeSet<u32> = (0..40).collect();
+        let mut steps_with_a_despawn = 0u32;
+        for step in 0..400u32 {
+            // A churn every eighth step; steady otherwise.
+            if step % 8 == 0 {
+                for _ in 0..6 {
+                    let i = next() % 200;
+                    if !live.remove(&i) {
+                        live.insert(i);
+                    }
+                }
+            }
+            // The retained half: everything tracked that is not live, except
+            // on churn steps where a few are dropped (a band that moved).
+            let live_ids: BTreeSet<Uuid> = live.iter().map(|&i| uuid(i)).collect();
+            let mut retained: Vec<Uuid> = tracked.difference(&live_ids).copied().collect();
+            if step % 8 == 0 && !retained.is_empty() {
+                let drop = (next() as usize) % retained.len();
+                retained.remove(drop);
+            }
+            // The premise-breakers: a duplicate, an overlap with the live list,
+            // and a guid that was never attached.
+            match step % 37 {
+                5 if !retained.is_empty() => retained.push(retained[0]),
+                11 => retained.extend(live_ids.iter().next().copied()),
+                17 => retained.push(uuid(10_000 + step)),
+                _ => {}
+            }
+            let snaps: Vec<EntitySync3D> = live.iter().map(|&i| static_box(uuid(i), i)).collect();
+            let expected: BTreeSet<Uuid> = live_ids
+                .iter()
+                .copied()
+                .chain(retained.iter().copied().filter(|g| tracked.contains(g)))
+                .collect();
+            if tracked.iter().any(|g| !expected.contains(g)) {
+                steps_with_a_despawn += 1;
+            }
+            let before = bridge.despawn_sweeps();
+            bridge.sync_retaining(&snaps, &retained);
+            let now: BTreeSet<Uuid> = bridge.entities.keys().copied().collect();
+            assert_eq!(
+                now, expected,
+                "step {step}: the tracked set is not live ∪ retained"
+            );
+            if tracked.iter().any(|g| !expected.contains(g)) {
+                assert_eq!(
+                    bridge.despawn_sweeps().1,
+                    before.1 + 1,
+                    "step {step} had something to remove and the sweep did not run"
+                );
+            }
+            tracked = now;
+        }
+        let (skipped, run) = bridge.despawn_sweeps();
+        println!(
+            "despawn sweeps: {skipped} skipped, {run} run over 400 steps; {steps_with_a_despawn} steps removed something"
+        );
+        assert!(
+            steps_with_a_despawn >= 20,
+            "the script must despawn things: {steps_with_a_despawn}"
+        );
+        assert!(
+            skipped >= 200,
+            "the steady state must skip the sweep: {skipped} of 400"
+        );
+        assert!(
+            run >= u64::from(steps_with_a_despawn),
+            "every despawn step ran the sweep"
+        );
+    }
 }

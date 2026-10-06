@@ -77,6 +77,16 @@ struct ModState {
     world: Option<WorldPtr>,
 }
 
+// SAFETY (wave PERF1b): the only non-`Send` field is `world`, a raw pointer that
+// is `Some` exclusively for the duration of one synchronous guest call inside
+// `call_with_world` -- set, used by host imports on the calling thread, and
+// cleared before that function returns (the trap path included). Outside a call
+// it is `None`, so moving the store to another thread between calls moves no
+// live pointer. The player's fixed step runs on a worker thread while the main
+// thread records the frame (the windowed loop's pipelining), and the mod session
+// rides inside the sim it ticks.
+unsafe impl Send for ModState {}
+
 /// Execution + memory limits applied to every mod in a session.
 #[derive(Debug, Clone, Copy)]
 pub struct ExecLimits {

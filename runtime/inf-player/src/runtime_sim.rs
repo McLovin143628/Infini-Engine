@@ -192,7 +192,7 @@ impl RuntimeInput {
 /// (P14.5). The WASM mod loader implements it (`crate::mods::PlayerMods`); the
 /// trait names no `wasmtime`/`inf-wasm-host` types so the sim stays buildable for
 /// `wasm32` (the browser player, which loads no native mods).
-pub trait ModHook {
+pub trait ModHook: Send {
     /// Advance mods one fixed step. `entities` is the live blueprint `i64 →
     /// Guid` map (mutable so a spawning mod can register new entities).
     fn tick(
@@ -512,6 +512,12 @@ pub struct RuntimeSim {
     /// The last profiled step's breakdown. All zeroes until
     /// [`set_step_profiling`](Self::set_step_profiling) is armed.
     step_profile: crate::step_profile::StepProfile,
+    /// Every profiled step's breakdown since the last
+    /// [`take_step_profile_sum`](Self::take_step_profile_sum), summed, and how
+    /// many steps that is (wave PERF1b, clause 0): the windowed loop runs one or
+    /// two steps a frame, and the per-phase cost of the step AS THE WINDOW RUNS
+    /// IT is the question nobody could answer from the last step alone.
+    step_profile_sum: (crate::step_profile::StepProfile, u32),
 }
 
 /// The **committed camera fold**: the centroid of a set of world positions,
@@ -668,6 +674,7 @@ impl RuntimeSim {
             voxels: BTreeMap::new(),
             profiling: false,
             step_profile: crate::step_profile::StepProfile::default(),
+            step_profile_sum: (crate::step_profile::StepProfile::default(), 0),
         };
 
         sim.bridge.sync_from_world(&sim.world);
@@ -2318,7 +2325,24 @@ impl RuntimeSim {
         clk.mark(phase::POSITION_CAPTURE);
         if let Some(p) = clk.finish() {
             self.step_profile = p;
+            self.step_profile_sum.0.accumulate(&p);
+            self.step_profile_sum.1 += 1;
         }
+    }
+
+    /// **Seconds of owed simulation the windowed loop has dropped** since the
+    /// sim was built (wave PERF1b): the catch-up cap's discarded backlog,
+    /// `0.0` while every frame runs what it owes -- the number that says
+    /// whether the world ran at real time. A clock read, never a sim input.
+    pub fn dropped_backlog_s(&self) -> f64 {
+        self.stepper.dropped_s()
+    }
+
+    /// The profiled steps since the previous call, summed, and how many there
+    /// were -- then reset (wave PERF1b). All zeroes and `0` while profiling is
+    /// off. A stopwatch read, never a sim input.
+    pub fn take_step_profile_sum(&mut self) -> (crate::step_profile::StepProfile, u32) {
+        std::mem::take(&mut self.step_profile_sum)
     }
 
     /// Arm (or disarm) the fixed step's per-phase clock (island wave I4b).

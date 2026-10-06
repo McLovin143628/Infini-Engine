@@ -244,6 +244,9 @@ pub struct PlayerApp {
     /// [`crate::ui::FRAME_COUNTER_WINDOW`] frame intervals, drawn top-right
     /// when `INF_FPS_HUD` is set (read once at boot). `None` = off.
     frame_counter: Option<crate::ui::FrameCounter>,
+    /// **The step as the window runs it** (wave PERF1b, clause 0): armed by
+    /// `INF_STEP_LOG`, which also arms the fixed step's per-phase clock.
+    step_log: Option<crate::ui::StepLog>,
     /// Cook-derived vmesh DAGs a `MeshRef.asset` resolves to (P13.4); attached to
     /// the render host so asset meshes render real geometry. Empty for
     /// primitive-only / PIE worlds.
@@ -360,6 +363,10 @@ impl PlayerApp {
             tracing::warn!("inf-player: {e}");
         }
         ui.apply_to_sim(&mut sim);
+        let step_log = crate::ui::StepLog::from_env();
+        if step_log.is_some() {
+            sim.set_step_profiling(true);
+        }
         let mut app = Self {
             title,
             width,
@@ -367,6 +374,7 @@ impl PlayerApp {
             sim,
             ui,
             frame_counter: crate::ui::FrameCounter::from_env(),
+            step_log,
             input_state: InputState::new(map),
             live: None,
             pie: None,
@@ -1252,6 +1260,22 @@ impl PlayerApp {
         }
     }
 
+    /// **The windowed loop's one door into the simulation** (wave PERF1b):
+    /// this frame's owed fixed steps, through `run_frame`, and the wall time
+    /// they took in milliseconds. One function so the frame has exactly one
+    /// `run_frame` call site whichever thread runs it -- the worker beside the
+    /// record, or this thread on a frame with no window yet.
+    fn run_owed_steps(
+        sim: &mut RuntimeSim,
+        owed: bool,
+        dt: f64,
+        held: crate::runtime_sim::RuntimeInput,
+    ) -> (u32, f64) {
+        let stepping = Instant::now();
+        let ran = if owed { sim.run_frame(dt, held) } else { 0 };
+        (ran, stepping.elapsed().as_secs_f64() * 1000.0)
+    }
+
     fn frame(&mut self, event_loop: &ActiveEventLoop) {
         // **The window-handle re-attempt** (round-2 finding B7). `resumed`
         // runs its body once per process, so a failed report there had nothing
@@ -1435,17 +1459,29 @@ impl PlayerApp {
         // PIE pause freezes the sim but keeps rendering the last frame; so does
         // a preview's hold on a boarding beat (`INF_PIE_BOARD_HOLD`).
         let audio_held = self.pie.is_some() && self.audio_hold.holding();
-        let stepping = std::time::Instant::now();
-        let mut ran = 0u32;
-        if !self.paused && !(self.pie.is_some() && self.board_hold.holding()) && !audio_held {
-            let sim_dt = if self.pie.is_some() {
-                dt * self.time_scale
-            } else {
-                dt
-            };
-            ran = self.sim.run_frame(sim_dt, held);
-        }
-        let step_ms = stepping.elapsed().as_secs_f64() * 1000.0;
+        // **THE STEPS RUN BESIDE THE RECORD, NOT BEFORE IT** (wave PERF1b).
+        //
+        // What this frame's fixed steps need is decided here (the held set, the
+        // owed time); they run on a worker thread while this thread records and
+        // submits the frame projected from the state the PREVIOUS frame's steps
+        // left -- see the join at the end of this function. The frame used to
+        // be steps + projection + record end to end, and on the island that sum
+        // was ~2 x 14 ms + ~28 ms: a frame slower than the step period, which
+        // owes two steps, which makes it slower again. Overlapped, a frame costs
+        // the projection plus the larger of the two halves.
+        //
+        // The price is one frame of display latency: the image a frame presents
+        // is the world as of the end of the previous frame's steps. The
+        // simulation itself is untouched -- the same `run_frame`, the same held
+        // set, the same accumulator, and every replay and PIE == shipping gate
+        // steps the sim through `step_once` exactly as before.
+        let step_owed =
+            !self.paused && !(self.pie.is_some() && self.board_hold.holding()) && !audio_held;
+        let sim_dt = if self.pie.is_some() {
+            dt * self.time_scale
+        } else {
+            dt
+        };
 
         let alpha = self.sim.alpha();
         let view = self.view();
@@ -1461,6 +1497,7 @@ impl PlayerApp {
         self.log_stream_stats(dt);
         let steps = self.sim.steps();
         let Some(live) = self.live.as_mut() else {
+            Self::run_owed_steps(&mut self.sim, step_owed, sim_dt, held);
             return;
         };
         // **The predictor's committed sample** (P28.4), at the same sync point
@@ -1502,7 +1539,9 @@ impl PlayerApp {
         // volumes) is measured from — the SAME point `sync_render_terrain` above
         // took, so a frame with no view (occluded/minimized) pages neither.
         let eye = view.as_ref().map(|v| v.eye_world).unwrap_or(DVec3::ZERO);
+        let projecting = std::time::Instant::now();
         live.host.project(&self.sim, alpha, eye);
+        let proj_ms = projecting.elapsed().as_secs_f64() * 1000.0;
         if self.debug_cells {
             live.host.draw_cell_overlay(&self.sim);
         }
@@ -1581,13 +1620,10 @@ impl PlayerApp {
         }
         // The frame counter (wave PERF1), top-right, when `INF_FPS_HUD` asked
         // for it: the mean interval over the window and its p95, so a frame
-        // photographed is a frame whose cost is on it.
-        if let Some(fc) = self.frame_counter.as_mut() {
-            fc.push_frame(crate::ui::FrameSample {
-                dt,
-                steps: ran,
-                step_ms,
-            });
+        // photographed is a frame whose cost is on it. The text is built
+        // before this frame's steps run (they overlap the record below), so it
+        // reads the frames up to the previous one.
+        if let Some(fc) = self.frame_counter.as_ref() {
             let text = fc.text();
             self.ui.frame_counter(&text);
         }
@@ -1606,8 +1642,37 @@ impl PlayerApp {
             self.ui.lock(progress, complete);
         }
         live.host.set_ui(self.ui.list());
-        if let Some(view) = view {
-            live.host.render(&view);
+        let rendering = std::time::Instant::now();
+        let dropped_before = self.sim.dropped_backlog_s();
+        let sim = &mut self.sim;
+        let (ran, step_ms, render_ms) = std::thread::scope(|scope| {
+            let stepper = scope.spawn(move || Self::run_owed_steps(sim, step_owed, sim_dt, held));
+            if let Some(view) = view {
+                live.host.render(&view);
+            }
+            let render_ms = rendering.elapsed().as_secs_f64() * 1000.0;
+            // A panic in the step is the step's panic: re-raised on this
+            // thread so the crash handler sees it exactly as before.
+            let (ran, step_ms) = stepper
+                .join()
+                .unwrap_or_else(|p| std::panic::resume_unwind(p));
+            (ran, step_ms, render_ms)
+        });
+        if let Some(fc) = self.frame_counter.as_mut() {
+            let dropped_ms = (self.sim.dropped_backlog_s() - dropped_before) * 1000.0;
+            fc.push_frame(crate::ui::FrameSample {
+                dt,
+                steps: ran,
+                step_ms,
+                dropped_ms,
+            });
+        }
+        if let Some(sl) = self.step_log.as_mut() {
+            // Armed every frame rather than once at host build, so a host
+            // rebuilt after a device loss is measured the same way.
+            live.host.set_record_profiling(true);
+            let steps = self.sim.take_step_profile_sum();
+            sl.push(steps, proj_ms, render_ms, &live.host.record_profile());
         }
         live.window.request_redraw();
     }

@@ -19,6 +19,10 @@ pub struct FixedStep {
     fixed_dt: f64,
     accumulator: f64,
     max_steps: u32,
+    /// Seconds of owed simulation the spiral guard has discarded since
+    /// construction (wave PERF1b): the honest half of a capped frame, so a
+    /// host can say how far behind real time its world fell.
+    dropped_s: f64,
 }
 
 impl FixedStep {
@@ -57,6 +61,7 @@ impl FixedStep {
             fixed_dt,
             accumulator: 0.0,
             max_steps,
+            dropped_s: 0.0,
         }
     }
 
@@ -83,6 +88,7 @@ impl FixedStep {
             self.accumulator = 0.0;
         }
         if full > self.max_steps as f64 {
+            self.dropped_s += (full - self.max_steps as f64) * self.fixed_dt;
             full = self.max_steps as f64;
         }
         full as u32
@@ -93,6 +99,12 @@ impl FixedStep {
     /// this fraction so on-screen motion is smooth between fixed updates.
     pub fn alpha(&self) -> f64 {
         (self.accumulator / self.fixed_dt).clamp(0.0, 1.0)
+    }
+
+    /// Seconds of owed simulation the spiral guard has discarded since
+    /// construction (wave PERF1b) -- zero while every frame runs what it owes.
+    pub fn dropped_s(&self) -> f64 {
+        self.dropped_s
     }
 
     /// Unconsumed time still in the accumulator (< `fixed_dt` after a normal
@@ -127,6 +139,24 @@ mod tests {
         let mut s = FixedStep::with_max_steps(0.1, 4);
         assert_eq!(s.accumulate(10.0), 4);
         assert_eq!(s.accumulate(0.1), 1);
+    }
+
+    /// **What the cap drops is counted** (wave PERF1b): a 10 s frame at a
+    /// 0.1 s step with a cap of 4 runs 4 and drops 96 steps' worth, and a frame
+    /// that runs what it owes drops nothing more.
+    #[test]
+    fn the_dropped_backlog_is_counted() {
+        let mut s = FixedStep::with_max_steps(0.1, 4);
+        assert_eq!(s.accumulate(0.25), 2);
+        assert_eq!(s.dropped_s(), 0.0, "a frame inside the cap drops nothing");
+        assert_eq!(s.accumulate(10.0), 4);
+        assert!(
+            (s.dropped_s() - 9.6).abs() < 1e-9,
+            "dropped {}",
+            s.dropped_s()
+        );
+        assert_eq!(s.accumulate(0.1), 1);
+        assert!((s.dropped_s() - 9.6).abs() < 1e-9);
     }
 
     #[test]

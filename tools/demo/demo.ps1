@@ -134,6 +134,10 @@ param(
     # shipped player is launched on this pack directly (`--pack`), with the same
     # preview doors and the same legs; no editor, no Play button.
     [string]$StandalonePack = "",
+    # **THE PLAYER WINDOW'S SIZE** (wave PERF1b), `WxH`: Play in New Window
+    # through `INF_PIE_WINDOW_SIZE`, the standalone player through
+    # `--width/--height`. The frame counter's headline is the 1080p number.
+    [string]$Resolution = "1280x720",
     # **THE WEAPON FRAMES ON THEIR OWN** (the VEH3f.2a audit). One frame of every
     # `-ArmHero` id in a LIVING hero's hand, straight after the player is up and
     # before anything is fired -- the wave's full session lost them because the
@@ -587,6 +591,12 @@ else { Remove-Item env:INF_PIE_HOUR -ErrorAction Ignore }
 $env:INF_FPS_HUD = "1"
 # …and every frame of the session to a log the PERF1 audit reads p50 / p95 from.
 $env:INF_FPS_LOG = (Join-Path $OutDir "fps.log")
+# Wave PERF1b: the step as the window runs it, phase by phase, beside the frame
+# log (the fixed step's own clock + the record path's; a stopwatch, no sim input).
+if ($PerfOnly) { $env:INF_STEP_LOG = (Join-Path $OutDir "step.log") }
+else { Remove-Item env:INF_STEP_LOG -ErrorAction Ignore }
+$env:INF_PIE_WINDOW_SIZE = $Resolution
+$resParts = $Resolution.Split("x")
 # WPN2a: the WHOLE list goes to the player, which puts every one of them in the
 # hero's bag and equips the first. The loop cycles the rest in with the SCROLL
 # WHEEL -- the shipped `weapon_switch` verb -- so one session photographs one
@@ -787,7 +797,7 @@ if (-not $player) {
     # pack, the same environment doors, the same legs. `$proc` is the player.
     Say "STANDALONE: the shipped player on $StandalonePack -- no editor"
     $proc = Start-Process -FilePath $playerExe -WorkingDirectory $release -PassThru `
-        -ArgumentList @("--pack", $StandalonePack) `
+        -ArgumentList @("--pack", $StandalonePack, "--width", $resParts[0], "--height", $resParts[1]) `
         -RedirectStandardOutput (Join-Path $OutDir "player-stdout.log") `
         -RedirectStandardError (Join-Path $OutDir "player-stderr.log")
     $player = $proc
@@ -1737,6 +1747,14 @@ function Invoke-PerfLeg {
     Restore-PlayerFocus "before the perf leg"
     Stand-Up "before the perf leg" | Out-Null
     & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "200-perf-start.png") | ForEach-Object { Say $_ }
+    # Wave PERF1b: twenty seconds STANDING first -- the hero still, the camera
+    # still -- so the step's cost with nobody moving is measured in the same
+    # window as the walk (the instrument's step is a still hero).
+    Say "PERF: the stand -- 20 s, no input"
+    $a = & $now
+    Start-Sleep -Seconds 20
+    $b = & $now
+    Add-Content -Path $legs -Value ("stand {0:F2} {1:F2}" -f $a, $b)
     Say "PERF: the walk -- 60 s, W held, the look swept left and right"
     $a = & $now
     [InfInput]::Down(0x11)

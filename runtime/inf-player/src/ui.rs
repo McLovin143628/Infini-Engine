@@ -611,6 +611,9 @@ pub struct FrameSample {
     pub steps: u32,
     /// Wall time those steps took, milliseconds.
     pub step_ms: f64,
+    /// Owed simulation the catch-up cap dropped this frame, milliseconds
+    /// (wave PERF1b) -- zero on every frame that ran what it owed.
+    pub dropped_ms: f64,
 }
 
 impl FrameCounter {
@@ -668,10 +671,11 @@ impl FrameCounter {
             self.ring.iter().map(f).collect::<Vec<_>>().join(",")
         };
         Some(format!(
-            "t={t:.2} dt={} steps={} step={}\n",
+            "t={t:.2} dt={} steps={} step={} drop={}\n",
             join(&|s| format!("{:.0}", s.dt * 10_000.0)),
             join(&|s| s.steps.to_string()),
             join(&|s| format!("{:.0}", s.step_ms * 10.0)),
+            join(&|s| format!("{:.0}", s.dropped_ms * 10.0)),
         ))
     }
 
@@ -698,6 +702,101 @@ impl FrameCounter {
                 f64::from(steps) / n
             ));
         }
+        out
+    }
+}
+
+/// **The step as the window runs it, phase by phase** (wave PERF1b, clause 0).
+///
+/// `INF_STEP_LOG` (a path, read once at boot) arms the fixed step's own
+/// per-phase clock in the windowed player and appends one line per
+/// [`FRAME_COUNTER_WINDOW`] frames: the seconds since boot, how many steps the
+/// window ran, the mean per FRAME of the projection, the render call and its
+/// record path, and the mean per STEP of every step phase. It is the same
+/// clock the fps instrument reads (`RuntimeSim::set_step_profiling`), so the
+/// two tables are one table taken in two places -- which is the only way to
+/// name why the window's step costs twice the instrument's.
+///
+/// A stopwatch and nothing else: the profile is never a sim input (the I4b
+/// arm `the_profile_does_not_move_the_simulation`).
+#[derive(Debug, Default)]
+pub struct StepLog {
+    log: Option<std::fs::File>,
+    born: Option<std::time::Instant>,
+    frames: usize,
+    steps: u32,
+    step: crate::step_profile::StepProfile,
+    proj_ms: f64,
+    render_ms: f64,
+    record: inf_render::RecordProfile,
+}
+
+impl StepLog {
+    /// On when `INF_STEP_LOG` names a file it could create.
+    pub fn from_env() -> Option<Self> {
+        let log = std::env::var_os("INF_STEP_LOG")
+            .filter(|p| !p.is_empty())
+            .and_then(|p| std::fs::File::create(p).ok())?;
+        Some(Self {
+            log: Some(log),
+            born: Some(std::time::Instant::now()),
+            ..Self::default()
+        })
+    }
+
+    /// One frame: the steps it ran (summed profile + count), the projection's
+    /// and the render call's wall milliseconds, and the record path's phases.
+    pub fn push(
+        &mut self,
+        steps: (crate::step_profile::StepProfile, u32),
+        proj_ms: f64,
+        render_ms: f64,
+        record: &inf_render::RecordProfile,
+    ) {
+        self.frames += 1;
+        self.step.accumulate(&steps.0);
+        self.steps += steps.1;
+        self.proj_ms += proj_ms;
+        self.render_ms += render_ms;
+        self.record.accumulate(record);
+        if self.frames >= FRAME_COUNTER_WINDOW {
+            let line = self.line();
+            if let Some(f) = self.log.as_mut() {
+                use std::io::Write as _;
+                let _ = f.write_all(line.as_bytes());
+                let _ = f.flush();
+            }
+            let (log, born) = (self.log.take(), self.born);
+            *self = Self {
+                log,
+                born,
+                ..Self::default()
+            };
+        }
+    }
+
+    /// The window's line: `t= frames= steps= proj= render= | step phases
+    /// (mean per step) | record phases (mean per frame)`, milliseconds.
+    pub fn line(&self) -> String {
+        let t = self.born.map_or(0.0, |b| b.elapsed().as_secs_f64());
+        let f = self.frames.max(1) as f64;
+        let s = f64::from(self.steps.max(1));
+        let mut out = format!(
+            "t={t:.2} frames={} steps={} proj={:.2} render={:.2} step={:.2} |",
+            self.frames,
+            self.steps,
+            self.proj_ms / f,
+            self.render_ms / f,
+            self.step.total_ms() / s
+        );
+        for (name, ms) in self.step.rows() {
+            out.push_str(&format!(" {}={:.3}", name.replace(' ', "_"), ms / s));
+        }
+        out.push_str(" |");
+        for (name, ms) in self.record.rows() {
+            out.push_str(&format!(" {}={:.3}", name.replace(' ', "_"), ms / f));
+        }
+        out.push('\n');
         out
     }
 }
@@ -752,6 +851,7 @@ mod tests {
                 dt: 0.050,
                 steps: if i % 2 == 0 { 3 } else { 2 },
                 step_ms: 30.0,
+                dropped_ms: if i == 0 { 16.7 } else { 0.0 },
             });
         }
         assert_eq!(
@@ -764,10 +864,12 @@ mod tests {
             "{line}"
         );
         assert!(
-            line.contains(" step=300,300,") && line.ends_with('\n'),
+            line.contains(" step=300,300,")
+                && line.contains(" drop=167,0,0,")
+                && line.ends_with('\n'),
             "{line}"
         );
-        assert_eq!(line.matches(',').count(), 3 * (FRAME_COUNTER_WINDOW - 1));
+        assert_eq!(line.matches(',').count(), 4 * (FRAME_COUNTER_WINDOW - 1));
     }
 
     /// **A SETTINGS FILE THAT UNBINDS THE MENU DOES NOT SHIP A GAME WITH NO

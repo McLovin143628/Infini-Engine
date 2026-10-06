@@ -943,7 +943,7 @@ pub fn gather_doors(
     band: &SimBand,
     stamps: &mut std::collections::BTreeMap<Uuid, u64>,
     snaps: &mut Vec<EntitySync3D>,
-    retained: &mut BTreeSet<Uuid>,
+    retained: &mut Vec<Uuid>,
     labels: &mut std::collections::BTreeMap<Uuid, super::label::ColliderLabel>,
 ) {
     // The off path: no authored door, no volume that could carry a doorway, and
@@ -977,7 +977,7 @@ pub fn gather_doors(
         // exception rather than the rule.
         let stamp = pose_stamp(centre, yaw, half);
         if stamps.get(&leaf) == Some(&stamp) {
-            retained.insert(leaf);
+            retained.push(leaf);
             continue;
         }
         stamps.insert(leaf, stamp);

@@ -638,6 +638,10 @@ pub struct EngineRenderer {
     /// whole of [`EngineRenderer::render`], including everything before the
     /// frame's first command and everything after its last.
     record_profile: crate::timing::RecordProfile,
+    /// The record clock armed WITHOUT the GPU timer (wave PERF1b, clause 0): a
+    /// windowed host's step log reads the record path's phases and must not
+    /// put timestamp queries and their readback into the frame it measures.
+    record_profiling: bool,
     /// Shared atmosphere LUTs + uniform (P17.2). Unlike `shadow`/`gi` these are
     /// **recreated** when [`crate::atmosphere::AtmosphereQuality`] changes, which
     /// is why they carry a generation the env bind-group cache keys on.
@@ -980,6 +984,7 @@ impl EngineRenderer {
             scatter_audit: passes::scatter::ScatterAuditResources::new(gpu),
             frame_timer: None,
             record_profile: crate::timing::RecordProfile::default(),
+            record_profiling: false,
             atmosphere,
             next_atmosphere_generation: 2,
             wetness: WetnessResources::new(gpu),
@@ -1603,6 +1608,12 @@ impl EngineRenderer {
         self.frame_timer.is_some()
     }
 
+    /// Arm the record path's CPU clock without the GPU timer (wave PERF1b): one
+    /// `Instant::now()` per record phase, no queries, no readback.
+    pub fn set_record_profiling(&mut self, on: bool) {
+        self.record_profiling = on;
+    }
+
     /// The **last submitted** frame's per-pass GPU timings, blocking on a buffer
     /// map — the sibling of [`vgeom_audit`](EngineRenderer::vgeom_audit) and read
     /// the same way.
@@ -2078,7 +2089,8 @@ impl EngineRenderer {
         // timer and off in every shipped frame; see `crate::timing::RecordClock`
         // for why the record stage needed phases of its own when the per-pass
         // record column already existed.
-        let mut rec = crate::timing::RecordClock::start(self.frame_timer.is_some());
+        let mut rec =
+            crate::timing::RecordClock::start(self.frame_timer.is_some() || self.record_profiling);
         let scene_size = (view.width.max(1), view.height.max(1));
         let resized = self.targets.as_ref().is_none_or(|t| t.size != scene_size);
         if resized {

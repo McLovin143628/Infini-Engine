@@ -538,10 +538,22 @@ fn run_pie_window(
     {
         return ExitCode::SUCCESS;
     }
+    // **THE PREVIEW WINDOW'S SIZE** (wave PERF1b): `INF_PIE_WINDOW_SIZE` =
+    // `WxH`, a preview door like `INF_PIE_HOUR` -- the frame counter's headline
+    // is the 1080p number and Play in New Window opened at 1280x720 with no way
+    // to ask for anything else. Unset or unparsable is the old 1280x720.
+    let (pie_w, pie_h) = std::env::var("INF_PIE_WINDOW_SIZE")
+        .ok()
+        .and_then(|v| {
+            let (w, h) = v.split_once('x')?;
+            Some((w.trim().parse::<u32>().ok()?, h.trim().parse::<u32>().ok()?))
+        })
+        .filter(|&(w, h)| (64..=7680).contains(&w) && (64..=4320).contains(&h))
+        .unwrap_or((1280, 720));
     match inf_player::window::run_pie(
         title,
-        1280,
-        720,
+        pie_w,
+        pie_h,
         sim,
         inf_player::input::default_map(),
         rx,

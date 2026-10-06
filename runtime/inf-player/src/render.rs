@@ -602,6 +602,19 @@ impl PlayerRenderHost {
         self.gpu.queue.present(frame);
     }
 
+    /// The last [`render`](Self::render)'s record path, phase by phase (wave
+    /// PERF1b clause 0: the window's own non-step time, attributed). A
+    /// stopwatch read; it moves nothing.
+    pub fn record_profile(&self) -> inf_render::RecordProfile {
+        self.renderer.record_profile()
+    }
+
+    /// Arm the record path's CPU clock (no GPU queries); see
+    /// [`record_profile`](Self::record_profile).
+    pub fn set_record_profiling(&mut self, on: bool) {
+        self.renderer.set_record_profiling(on);
+    }
+
     /// Whether the GPU device was lost (the caller rebuilds the stack).
     pub fn is_lost(&self) -> bool {
         self.gpu.is_lost()
