@@ -42333,3 +42333,8 @@ of projection/record/UI. The top row is the step as the window runs it (twice th
 instrument's), then the night VSM re-cast (7.7 CPU + 6.5 GPU), submit 6.8, projection 6.5,
 animation 4.7, physics sync + solver 3.8. Until the step is under ~8 ms a frame slower than
 30 fps dilates the simulation.
+
+**THE CLOSE**: battery at `-j 2` on `52169069` — `AGGREGATE over 409 binaries: 7917 passed,
+0 failed, 34 ignored`; clippy `-D warnings` clean; rustdoc 398; wasm check clean. Final
+frames on the final build, Play in New Window: noon `62.7 ms 16 fps p95 67.0 steps 2.0`,
+21:00 `63.3 ms 16 fps p95 66.5 steps 2.0` (walk p50 56.5 / 60.6 ms over the logged frames).
