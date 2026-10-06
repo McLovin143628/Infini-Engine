@@ -567,8 +567,12 @@ fn both_projectors_build_sections_through_the_ring_zero_door() {
         "the skinned pass no longer draws a run's RANGE — a sectioned body draws \
          every section over the whole buffer"
     );
+    // Wave PERF1: a run now names its rung, and `range: None` is the whole of
+    // the buffer the run draws -- which for rung 0 (every golden: no mesh under
+    // 8 192 triangles gets a rung) is the full index buffer, exactly as before.
     assert!(
-        pass.contains("None => (0, gpu_mesh.index_count),"),
+        pass.contains("None => (0, buf_count),")
+            && pass.contains("0 => (&gpu_mesh.indices, gpu_mesh.index_count),"),
         "the pass no longer treats `range: None` as the whole buffer — that is \
          the case every committed skinned golden was blessed against"
     );

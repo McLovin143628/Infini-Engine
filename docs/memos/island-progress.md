@@ -42185,3 +42185,102 @@ The close (auditor): battery on `32bccafc` `AGGREGATE over 407 binaries: 7899 pa
 34 ignored`; clippy `--workspace --all-targets -D warnings` exit 0; rustdoc 398; wasm32
 `inf-player` ok; fmt clean; CRLF 0; schema v28 / payload 14 / EXPECTED_LEVELS 24,
 `Cargo.lock` untouched; goldens 78. Report: `campaign-briefs/par0b-audit-report.md`.
+
+## Wave PERF1 — THE ISLAND AT FRAME RATE (implementer, 2026-10-06)
+
+Base `709f11f3`. Brief `campaign-briefs/wave-perf1-brief.md` (+ the 2026-10-06 launch
+addendum); report `campaign-briefs/perf1-implementer-report.md`. Every number below is
+release, off CI, RTX 4070 Ti, 1080p, the island's own render record through
+`shipped_settings` (VSM + 8 shadowed fixtures, GI, the society at its population, traffic
+with its art), `fps_instrument::the_shipped_island_by_the_hour`, **minimum of five rounds of
+120 frames** after a discarded pass, on a fresh cook of the committed level (`cook-h/perf1`).
+
+### Clause 0 — the profile (the table IS the plan)
+
+The hour arm now prints the whole frame table (`print_frame_profile`: CPU stages, the
+fixed step by system, the record path by phase, every GPU pass with its recording, the VSM
+counters), the skinned census and a measured PIPELINED row. Top rows BEFORE:
+
+| row | owner | 12:00 | 21:00 | kind |
+|---|---|---|---|---|
+| GPU skinned pass | `passes::skinned` | 10.04 | 12.53 | content x algorithm: 84-99 M crowd triangles, the LOD ladder had no reader |
+| GPU depth prepass | skinned + terrain | 6.23 | 7.50 | the same triangles a second time |
+| CPU step `audio` | `runtime_sim::audio_step` | 6.51 | 6.53 | algorithmic: every doorway in town (a `String` each) rebuilt per step |
+| CPU record `cluster wants` | `VgeomNode::cluster_tile_wants` | 5.12 | 4.96 | algorithmic: 320 page directories re-parsed per frame |
+| CPU record `vgeom` | `VgeomNode::run` | 6.23 | 5.97 | algorithmic: ~1 300 `create_bind_group` per frame |
+| CPU record `submit` | wgpu `finish` + `submit` | 5.00 | 6.37 | encoding volume (passes x draws) |
+| CPU record + GPU `vsm-raster` | `vsm_raster` | 1.69 + 1.06 | **7.49 + 6.24** | the night row: crowd casters re-cast every page of the 8 fixtures (170 pages / ~412 M indices a frame) |
+| CPU step `animation` | pose evaluation | 1.05 | **4.67** | content: 91 posed characters at the strip at night |
+| CPU projection | `project_scene_full` | 3.36 | 6.32 | per-entity walk; skinned palettes at night |
+| CPU step `character move` | `step_character_movement` | 0.21 | 2.39 | per-character `sim_band` over every entity |
+| CPU step `physics3d sync` + `solver` | rapier bridge | 2.12 + 1.45 | 2.60 + 1.55 | content (8 005 admitted structure colliders) |
+
+**Why the night costs ~30 ms more:** the society. At noon the strip's crowd is 0 Full /
+0 Near; at 21:00 it is 20 Full / 71 Near (the revellers): +3.6 ms animation, +2.2 character
+move, +3.0 projection, +2.5 skinned GPU, and their shadows re-cast every page of the eight
+shadowed fixtures every frame (+5.8 record, +5.2 GPU in `vsm-raster`). Nothing per-light on
+the CPU, not the eye, not the emitters' schedule.
+
+### The rows taken (each with its arm, mutation-verified — `PERF1-FINAL\mutations.txt`)
+
+| row | fix | ms bought (measured) | arm | mutation |
+|---|---|---|---|---|
+| step `audio` | `d3::door::placements_within` + `audio::portal_doors_near`: the rule's own reach predicate before the placement is built; both hosts' `doorway_occlusion` fences | 6.85 -> 0.25 (21:00) | `audio::tests::the_near_door_list_picks_the_portal_the_whole_list_picks` | reach x0.5 RED |
+| record `cluster wants` | per-page coupling cached on (source, `VtTextures::registration_epoch`) | 5.54 -> 0.09 (12:00) | `perf1_cluster_cache::the_cached_pairing_is_the_uncached_pairing_frame_for_frame` | epoch ignored RED; cached pages not re-coupled RED |
+| GPU skinned + depth prepass | **the LOD reader**: both hosts' `skinned_mesh_data` build two normal-aware rungs (`inf_mesh::optimize::index_lods`, 25 % / 8 %); `plan_skinned_batches_at` picks per instance the coarsest rung under 0.5 px | A/B in one session: GPU 27.56 -> 15.24 (12:00), 37.59 -> 24.41 (21:00); skinned 10.0 -> 1.5, depth 6.2 -> 0.7 | `perf1_budget_gate::a_body_draws_coarser_rungs_with_distance_and_never_past_its_pop_bound`, `::a_rung_switch_at_its_distance_moves_almost_nothing_at_1080p` | selector ignores the bound RED; planner never takes a rung RED |
+| record `vgeom` | per-asset cull / raster bind groups kept, keyed on buffer identity + HZB generation, two slots for the ping-pong | 6.4 -> 3.2 | `perf1_cluster_cache::the_meshlet_node_reuses_its_bind_groups_across_frames` | one slot RED |
+| step `character move` | `band::streaming_sources` as an archetype query | 2.39 -> 1.93 (21:00) | `band::tests::the_source_query_is_the_whole_world_walk` | fallback dropped RED (the first fixture was vacuous — every entity had a global transform — fixed) |
+
+**The pop bound** (clause 3), measured at 1080p on a 36 864-triangle body: rung 1 at 2.25 m
+and rung 2 at 3.75 m move **0 interior pixels** by more than 8/255 and 163 / 177 pixels on a
+1 322 / 788-pixel outline (under a pixel of silhouette shift). A third rung at 2.5 % was
+built and measured: 19 of 918 interior pixels moved at its switch (a shading pop the
+geometric bound cannot see) — **not built**. On the island, the same frames with the reader
+on and off (`PERF1-FINAL\lodon` / `lodoff`, same sim state): at most **70 pixels of 2 073 600
+(0.0034 %)** differ by more than 8/255 in any of twelve frames (`lod_pairs.txt`). Below
+8 192 triangles no rung is built, so no golden moved (strict class green).
+
+### The frame — before / after (min of 5 x 120, ms)
+
+| hour | p50 | p95 | GPU | CPU sim | CPU projection | CPU record | PIPELINED (measured, 1 frame in flight) p50 / p95 |
+|---|---|---|---|---|---|---|---|
+| 12:00 before | 69.71 | 72.83 | 27.64 | 14.69 | 3.36 | 22.82 | not measured (estimate 41.0) |
+| 12:00 after | **42.04** | **44.21** | **14.81** | 7.89 | 3.51 | 15.32 | **27.93 / 32.83** |
+| 21:00 before | 100.02 | 106.96 | 38.19 | 22.32 | 6.32 | 31.12 | not measured (estimate 59.9) |
+| 21:00 after | **67.56** | **83.05** | **24.05** | 13.80 | 6.33 | 24.31 | **44.13 / 46.15** |
+| 08:30 before | 82.07 | 89.33 | 29.66 | 20.07 | 4.52 | 28.29 | not measured (estimate 53.0) |
+| 08:30 after | **54.75** | **68.78** | **18.74** | 12.57 | 4.61 | 21.40 | **36.52 / 37.76** |
+
+The serialized headline (CPU then GPU, waited on — the instrument's frame and the number
+every prior island row was taken in) is NOT the shipped player's: the player never polls
+(`the_shipped_players_frame_path_does_not_wait_for_the_gpu`), so it pays max(CPU, GPU). The
+PIPELINED row measures that cadence (`measure_pipelined`: wait for frame N-1 after submitting
+N). **The SPLIT RULE floor (<= 33 ms p95 at both hours) is met at noon on the pipelined
+frame (32.83) and at no hour on the serialized frame; it is not met at 21:00 (46.15
+pipelined).** The frame is now CPU-bound at every hour by 12-20 ms over its GPU.
+
+### Clause 8 — the ceiling
+
+`ISLAND_FRAME_CEILING_MS` = **95.0** (new; the island never had one — the city's
+`SHIPPING_FRAME_CEILING_MS` 38 is unmoved and still not asserted over the island): worst
+serialized p95 83.05 (21:00, rounds 76.2-83.1), the A/B session's 88.22, +8 %. Asserted by
+the hour arm in release, off CI, representative adapter, five rounds.
+
+### The remaining table (PERF1b), priced
+
+| row (21:00 after) | ms | owner | price |
+|---|---|---|---|
+| VSM local pages re-cast by moving crowd casters | 7.49 CPU + 7.28 GPU | `vsm_raster` | static/dynamic page split (cache the static depth per page, re-raster only dynamic casters over it) ~3 d; or per-meshlet caster culling against the page/range ball (the perspective pages draw whole city-spanning meshlet assets at the coarsest classic level: ~146 k indices a draw) ~2 d |
+| `submit` (wgpu encode) | 5.3 / 6.9 | renderer | fewer passes/draws: one GPU-driven cull + one indirect draw for all meshlet assets (persistent instance buffer) ~3-4 d |
+| step `animation` (91 posed) | 4.64 | pose evaluation | animation sim-LOD: Near tier at half rate with interpolation, a pure fn of the streaming source ~2 d |
+| projection | 3.5 / 6.3 | `project_scene_full` | persistent scene (dirty-gated entity walk; pcg scatter carry 2.2 ms) ~2-3 d |
+| record `vgeom` writes | ~1.9 | `VgeomNode` | ~2 000 `write_buffer` a frame: one params / args buffer per frame with per-asset offsets ~1 d |
+| record `gi` | 2.7-3.4 | `passes::gi` staging | cache staged primitives by volume region ~1.5 d |
+| step physics3d sync + solver | ~3.7 | rapier bridge | content (8 005 admitted colliders): sleep / band tightening ~2 d |
+| step `character move` residue | 1.93 | mover | profile the remaining per-character queries ~1 d |
+| GPU terrain / scatter / vgeom / gi | 3.4 / 3.4 / 2.7 / 2.7 | passes | at 24 ms GPU these follow the CPU work above |
+
+Not attempted, carried with cause: per-asset load / cull distance (clause 4, ~3 d, needs an
+asset-format window for an authored override), HLOD (clause 5, ~5 d, cook-time block
+proxies), the 288 ms two-cell activation step (clause 6, ~1-2 d), vehicle LOD, the
+parked-car clock x1.058 (under 1 ms — the brief's rule: waits), the lit 64-car row.
