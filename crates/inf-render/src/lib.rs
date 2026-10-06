@@ -131,7 +131,8 @@ pub use passes::voxel::{
 // `plan_tile_cache` is — an instrument that wants this frame's skinned draw count
 // or its palette bytes calls the function the pass calls, not a re-derivation.
 pub use passes::skinned::{
-    plan_skinned_batches, SkinnedBatches, SkinnedRun, SKINNED_PALETTE_MATRICES,
+    plan_skinned_batches, plan_skinned_batches_at, SkinnedBatches, SkinnedLodView, SkinnedRun,
+    SKINNED_PALETTE_MATRICES,
 };
 pub use pick::Picker;
 pub use precip::{
@@ -146,14 +147,14 @@ pub use renderer::{
 };
 pub use scene::{
     apply_near_fade, apply_seam, box_uv, deformed_skinned_mesh, identity_palette,
-    near_fade_surface, skinned_sections, RenderFractureChunk, RenderFractureVertex, RenderTilemap,
-    RenderVoxelChunk, RenderVoxelVertex, RenderVoxelVolume, ScatterBatch, ScatterClock,
-    ScatterData, ScatterGeometry, ScatterInstance, ScatterInstanceRaw, ScatterMemo, ScatterMeshes,
-    ScatterSource, SkinnedInstance, SkinnedMeshData, SkinnedSection, SkinnedShadow, SkinnedVertex,
-    SkyParams, SpriteInstance, SpriteTextureUpload, SunParams, TerrainTileKey, TextureHandle,
-    TilemapParams, VgeomAsset, VgeomInstance, VgeomMesh, VoxelChunkKey, BLEND_NEAR_FADE,
-    CLOTH_TINT, DEFAULT_SUN_DIR, HAIR_TINT, ID_GIZMO_BASE, ID_NONE, INTERIOR_LOD_M,
-    MAX_SCATTER_MESH_TRIANGLES, STRUCTURE_LOD_M,
+    near_fade_surface, skinned_lod_for, skinned_sections, RenderFractureChunk,
+    RenderFractureVertex, RenderTilemap, RenderVoxelChunk, RenderVoxelVertex, RenderVoxelVolume,
+    ScatterBatch, ScatterClock, ScatterData, ScatterGeometry, ScatterInstance, ScatterInstanceRaw,
+    ScatterMemo, ScatterMeshes, ScatterSource, SkinnedInstance, SkinnedLod, SkinnedMeshData,
+    SkinnedSection, SkinnedShadow, SkinnedVertex, SkyParams, SpriteInstance, SpriteTextureUpload,
+    SunParams, TerrainTileKey, TextureHandle, TilemapParams, VgeomAsset, VgeomInstance, VgeomMesh,
+    VoxelChunkKey, BLEND_NEAR_FADE, CLOTH_TINT, DEFAULT_SUN_DIR, HAIR_TINT, ID_GIZMO_BASE, ID_NONE,
+    INTERIOR_LOD_M, MAX_SCATTER_MESH_TRIANGLES, SKINNED_LOD_PIXEL_ERROR, STRUCTURE_LOD_M,
 };
 pub use scene::{
     detail_scale_q8, glow_emissive, night_glow_step, powered_gain, powered_step, pulse_emissive,

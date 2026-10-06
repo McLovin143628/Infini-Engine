@@ -1416,10 +1416,76 @@ pub struct SkinnedVertex {
 
 /// Bind-space geometry for a skinned mesh: an interleaved [`SkinnedVertex`]
 /// buffer + a 32-bit index buffer. Referenced by [`SkinnedInstance::mesh`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct SkinnedMeshData {
     pub vertices: Vec<SkinnedVertex>,
     pub indices: Vec<u32>,
+    /// **Coarser rungs of [`Self::indices`] over the same vertices** (wave
+    /// PERF1, clause 3), finest first -- empty for a mesh under
+    /// `inf_mesh::optimize::INDEX_LOD_MIN_TRIANGLES` and on wasm32, which then
+    /// draws its full buffer at every distance exactly as before. Built by the
+    /// hosts' `skinned_mesh_data` at load; selected per instance by the skinned
+    /// pass under [`SKINNED_LOD_PIXEL_ERROR`] (see [`skinned_lod_for`]).
+    pub lods: Vec<SkinnedLod>,
+    /// The bind-space radius about the origin the rungs' errors are projected
+    /// from: an instance's NEAREST point is at least its centre distance minus
+    /// this (times its scale), which is the distance a rung is judged at.
+    pub lod_radius_m: f32,
+}
+
+/// One coarser rung of a [`SkinnedMeshData`]'s index buffer (wave PERF1) --
+/// `inf_mesh::optimize::IndexLod`, in the renderer's own type so the renderer
+/// names no import crate.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SkinnedLod {
+    /// The rung's triangles over the mesh's unchanged vertex buffer.
+    pub indices: Vec<u32>,
+    /// Per submesh of the full buffer, in order: `(first index, index count)`
+    /// within [`Self::indices`]. A section that drew `(f, c)` of the full
+    /// buffer draws the range whose submesh starts at `f`.
+    pub ranges: Vec<(u32, u32)>,
+    /// The full buffer's submesh starts, parallel to [`Self::ranges`] -- how a
+    /// section's full-buffer range finds its rung range.
+    pub full_starts: Vec<u32>,
+    /// The simplifier's geometric error, metres in bind space.
+    pub error_m: f32,
+}
+
+/// **The pop bound** (wave PERF1): a skinned rung is drawn only where its
+/// error, projected at the instance's nearest distance, is under this many
+/// pixels of the frame. `inf_mesh::optimize::INDEX_LOD_PIXEL_ERROR`'s value,
+/// restated here (the renderer names no import crate) and pinned equal by the
+/// player's `perf1_budget_gate`.
+pub const SKINNED_LOD_PIXEL_ERROR: f32 = 0.5;
+
+/// **Which rung of `mesh` an instance draws** (wave PERF1): the coarsest whose
+/// error, at the instance's nearest distance `distance_m - lod_radius_m *
+/// scale`, projects under `pixel_error` pixels, where `px_per_m` is the
+/// frame's pixels per metre at one metre (`height / (2 tan(fov_y / 2))`).
+/// `0` is the full buffer. A pure function of the mesh, the distance and the
+/// projection -- nothing remembered between frames.
+pub fn skinned_lod_for(
+    mesh: &SkinnedMeshData,
+    distance_m: f64,
+    scale: f32,
+    px_per_m: f32,
+    pixel_error: f32,
+) -> usize {
+    if mesh.lods.is_empty() || !(px_per_m > 0.0) || !distance_m.is_finite() {
+        return 0;
+    }
+    let scale = scale.max(0.0);
+    let near = (distance_m as f32 - mesh.lod_radius_m * scale).max(1.0e-3);
+    let mut pick = 0usize;
+    for (k, lod) in mesh.lods.iter().enumerate() {
+        let px = lod.error_m * scale / near * px_per_m;
+        if px <= pixel_error {
+            pick = k + 1;
+        } else {
+            break;
+        }
+    }
+    pick
 }
 
 /// The tint a simulated garment or hair ribbon draws in (linear rgba).
@@ -1558,6 +1624,7 @@ pub fn deformed_skinned_mesh(positions: &[[f32; 3]], indices: &[u32]) -> Skinned
     SkinnedMeshData {
         vertices,
         indices: kept,
+        ..Default::default()
     }
 }
 

@@ -317,6 +317,7 @@ fn skinned_mesh() -> Arc<SkinnedMeshData> {
     Arc::new(SkinnedMeshData {
         vertices: vec![v(-0.5, 0.0), v(0.5, 0.0), v(0.0, 1.0)],
         indices: vec![0, 1, 2],
+        ..Default::default()
     })
 }
 

@@ -1027,6 +1027,7 @@ fn one_triangle_skin() -> inf_render::SkinnedMeshData {
     SkinnedMeshData {
         vertices: vec![v(0.0), v(1.0), v(0.5)],
         indices: vec![0, 1, 2],
+        ..Default::default()
     }
 }
 

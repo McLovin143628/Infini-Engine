@@ -1680,6 +1680,23 @@ impl EngineRenderer {
             .unwrap_or_default()
     }
 
+    /// The skinned LOD reader's switch (wave PERF1) -- see
+    /// `passes::skinned::SkinnedMeshNode::set_lod_enabled`. On by default.
+    #[doc(hidden)]
+    pub fn set_skinned_lod(&mut self, on: bool) {
+        if let Some(n) = self.graph.node_mut::<passes::skinned::SkinnedMeshNode>() {
+            n.set_lod_enabled(on);
+        }
+    }
+
+    /// The meshlet node's bind-group cache counts (wave PERF1) -- see
+    /// `passes::vgeom::VgeomNode::bind_group_counts`.
+    pub fn vgeom_bind_group_counts(&self) -> (u64, u64) {
+        self.graph
+            .node::<passes::vgeom::VgeomNode>()
+            .map_or((0, 0), passes::vgeom::VgeomNode::bind_group_counts)
+    }
+
     /// The equivalence arm's switch (wave PERF1) -- see
     /// `passes::vgeom::VgeomNode::set_cluster_tile_cache`.
     #[doc(hidden)]

@@ -1194,8 +1194,10 @@ pub fn skinned_mesh_data(mesh: &MeshAsset) -> Option<SkinnedMeshData> {
     }
     let mut vertices: Vec<SkinnedVertex> = Vec::with_capacity(mesh.vertex_count());
     let mut indices: Vec<u32> = Vec::new();
+    let mut ranges: Vec<(u32, u32)> = Vec::with_capacity(mesh.submeshes.len());
     for sm in &mesh.submeshes {
         let base = vertices.len() as u32;
+        ranges.push((indices.len() as u32, sm.indices.len() as u32));
         for (i, v) in sm.vertices.iter().enumerate() {
             let skin = sm.skin.get(i).copied().unwrap_or_default().normalized();
             vertices.push(SkinnedVertex {
@@ -1211,7 +1213,35 @@ pub fn skinned_mesh_data(mesh: &MeshAsset) -> Option<SkinnedMeshData> {
     if vertices.is_empty() || indices.len() < 3 {
         return None;
     }
-    Some(SkinnedMeshData { vertices, indices })
+    // **THE RUNGS** (wave PERF1, clause 3): coarser index buffers over these
+    // same vertices, one simplified range per submesh, built once here at load
+    // and selected per instance by the skinned pass under the half-pixel pop
+    // bound. Render-only -- never persisted, never compared, never simulated --
+    // which is what makes `meshopt` legal on this side of the import law
+    // (`inf_mesh::optimize::IndexLod`). A mesh under the triangle floor gets
+    // none and draws its full buffer at every distance, as before.
+    let positions: Vec<[f32; 3]> = vertices.iter().map(|v| v.pos).collect();
+    let normals: Vec<[f32; 3]> = vertices.iter().map(|v| v.normal).collect();
+    let lods: Vec<inf_render::SkinnedLod> =
+        inf_mesh::optimize::index_lods(&positions, &normals, &indices, &ranges)
+            .into_iter()
+            .map(|l| inf_render::SkinnedLod {
+                indices: l.indices,
+                ranges: l.ranges,
+                full_starts: ranges.iter().map(|r| r.0).collect(),
+                error_m: l.error_m,
+            })
+            .collect();
+    let lod_radius_m = positions
+        .iter()
+        .map(|p| glam::Vec3::from(*p).length())
+        .fold(0.0f32, f32::max);
+    Some(SkinnedMeshData {
+        vertices,
+        indices,
+        lods,
+        lod_radius_m,
+    })
 }
 
 /// Index every loose render asset under `dir` by its GUID, read from the sibling

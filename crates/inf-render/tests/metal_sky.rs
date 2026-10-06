@@ -164,6 +164,7 @@ fn skinned_sphere() -> SkinnedMeshData {
             })
             .collect(),
         indices: idx.iter().map(|i| u32::from(*i)).collect(),
+        ..Default::default()
     }
 }
 

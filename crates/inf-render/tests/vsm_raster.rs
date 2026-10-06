@@ -927,6 +927,7 @@ fn a_skinned_caster_casts_through_its_own_palette() {
     let mesh = std::sync::Arc::new(inf_render::SkinnedMeshData {
         vertices: vec![v(-1.0, -1.0), v(1.0, -1.0), v(1.0, 1.0), v(-1.0, 1.0)],
         indices: vec![0, 1, 2, 0, 2, 3],
+        ..Default::default()
     });
 
     let build = |palette: glam::Mat4| {
@@ -1481,6 +1482,7 @@ fn a_skinned_casters_cull_sphere_contains_a_pose_that_left_the_bind_pose() {
     let mesh = std::sync::Arc::new(inf_render::SkinnedMeshData {
         vertices: verts.to_vec(),
         indices: vec![0, 1, 2, 0, 2, 3],
+        ..Default::default()
     });
     // 0.6 m along x: the far corner ends up 1.89 m from the bind centre, which is
     // outside the bind sphere (1.41 m) and inside the margined one (2.12 m).
@@ -2194,6 +2196,7 @@ fn the_group_ceiling_counts_the_groups_it_refuses() {
     let mesh = std::sync::Arc::new(inf_render::SkinnedMeshData {
         vertices: vec![v(-0.1, -0.1), v(0.1, -0.1), v(0.1, 0.1), v(-0.1, 0.1)],
         indices: vec![0, 1, 2, 0, 2, 3],
+        ..Default::default()
     });
     // Enough instances that the rigid groups plus the skinned ones overrun the
     // ceiling by a countable margin.
@@ -2293,6 +2296,7 @@ fn a_crowd_past_the_shadow_lod_casts_nothing_and_dirties_fewer_pages() {
     let mesh = std::sync::Arc::new(inf_render::SkinnedMeshData {
         vertices: vec![v(-0.1, -0.1), v(0.1, -0.1), v(0.1, 0.1), v(-0.1, 0.1)],
         indices: vec![0, 1, 2, 0, 2, 3],
+        ..Default::default()
     });
     const CROWD: u32 = 240;
     let build = |shadow: inf_render::SkinnedShadow| {
@@ -2437,6 +2441,7 @@ fn a_crowd_of_proxies_is_one_group_and_refuses_nothing() {
     let mesh = std::sync::Arc::new(inf_render::SkinnedMeshData {
         vertices: vec![v(-0.1, -0.1), v(0.1, -0.1), v(0.1, 0.1), v(-0.1, 0.1)],
         indices: vec![0, 1, 2, 0, 2, 3],
+        ..Default::default()
     });
     const OVER: u32 = 11;
     let want = inf_render::VSM_MAX_GROUPS + OVER - inf_render::VSM_RIGID_GROUPS;
@@ -2529,6 +2534,7 @@ fn the_posed_bound_is_tighter_than_the_margin_and_still_contains_the_pose() {
     let mesh = std::sync::Arc::new(inf_render::SkinnedMeshData {
         vertices: vec![v(-1.0, -1.0), v(1.0, -1.0), v(1.0, 1.0), v(-1.0, 1.0)],
         indices: vec![0, 1, 2, 0, 2, 3],
+        ..Default::default()
     });
     let palette = std::sync::Arc::new(vec![glam::Mat4::from_translation(glam::Vec3::new(
         0.6, 0.0, 0.0,
@@ -3600,6 +3606,7 @@ fn an_animating_character_invalidates_its_pages_and_a_still_one_does_not() {
             vert(-0.5, 0.5),
         ],
         indices: vec![0, 1, 2, 0, 2, 3],
+        ..Default::default()
     });
     let posed = |palette: glam::Mat4| {
         let mut s = RenderScene {
@@ -3721,6 +3728,7 @@ fn the_skinned_caster_cache_holds_the_arc_its_pointer_key_names() {
             vert(-0.5, 0.5),
         ],
         indices: vec![0, 1, 2, 0, 2, 3],
+        ..Default::default()
     });
     let mut s = RenderScene {
         grid_enabled: false,

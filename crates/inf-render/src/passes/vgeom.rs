@@ -1090,6 +1090,76 @@ struct TemporalKey {
     residency_generation: u64,
 }
 
+/// **One asset's cull and raster bind groups, kept across frames** (wave
+/// PERF1, clause 1).
+///
+/// The meshlet node built FOUR bind groups per resident asset per frame -- the
+/// early and late cull groups and their raster groups -- from buffers that, on
+/// a settled frame, are the same objects they were last frame. On the shipped
+/// island (320 resident assets) that was ~1 300 `create_bind_group` calls a
+/// frame on the CPU record path. Each group is now keyed on the IDENTITY of
+/// everything it binds (`wgpu::Buffer` compares by handle) plus the HZB
+/// pyramid's generation, and rebuilt only when one of them is a different
+/// object: a grown instance buffer, a rebuilt remap, a reallocated pool, a
+/// resized pyramid. The early/late visibility ping-pong swaps two buffers every
+/// frame, so each cull group keeps TWO keyed slots and a settled asset
+/// alternates between them without building anything.
+#[derive(Default)]
+struct AssetBindGroups {
+    cull_early: TwoSlot<CullBgKey, wgpu::BindGroup>,
+    cull_late: TwoSlot<CullBgKey, wgpu::BindGroup>,
+    raster_early: super::GenCache<RasterBgKey, wgpu::BindGroup>,
+    raster_late: super::GenCache<RasterBgKey, wgpu::BindGroup>,
+}
+
+/// What a cull bind group binds, by identity (wave PERF1).
+#[derive(Clone, PartialEq, Eq)]
+struct CullBgKey {
+    buffers: [wgpu::Buffer; 9],
+    /// `0` for the dummy pyramid, else the HZB chain's generation plus one.
+    hzb: u64,
+}
+
+/// What a raster bind group binds, by identity (wave PERF1).
+#[derive(Clone, PartialEq, Eq)]
+struct RasterBgKey {
+    buffers: [wgpu::Buffer; 8],
+}
+
+/// [`super::GenCache`] with two keyed slots (wave PERF1): a value alternating
+/// between two keys -- the visibility ping-pong -- hits every frame instead of
+/// rebuilding every frame.
+struct TwoSlot<K, T> {
+    slots: [Option<(K, T)>; 2],
+    next: usize,
+}
+
+impl<K, T> Default for TwoSlot<K, T> {
+    fn default() -> Self {
+        Self {
+            slots: [None, None],
+            next: 0,
+        }
+    }
+}
+
+impl<K: PartialEq, T> TwoSlot<K, T> {
+    /// The value for `key`, and whether it had to be built.
+    fn get_or_build(&mut self, key: K, build: impl FnOnce() -> T) -> (&T, bool) {
+        if let Some(i) = self
+            .slots
+            .iter()
+            .position(|s| s.as_ref().is_some_and(|(k, _)| *k == key))
+        {
+            return (&self.slots[i].as_ref().expect("found").1, false);
+        }
+        let i = self.next;
+        self.next = 1 - self.next;
+        self.slots[i] = Some((key, build()));
+        (&self.slots[i].as_ref().expect("just built").1, true)
+    }
+}
+
 struct AssetDraw {
     instances: wgpu::Buffer,
     instance_cap: u32,
@@ -1493,6 +1563,13 @@ pub struct VgeomNode {
     /// Off only for the equivalence arm: every frame re-walks every page, the
     /// arrangement before wave PERF1.
     tile_cache_enabled: bool,
+    /// Per asset, the bind groups kept across frames (wave PERF1) -- see
+    /// [`AssetBindGroups`]. An asset that leaves the draw set leaves the map.
+    bind_groups: BTreeMap<u128, AssetBindGroups>,
+    /// Bind groups the asset loops built / re-used, cumulative (wave PERF1) --
+    /// the cache's engagement pair.
+    bind_groups_built: u64,
+    bind_groups_reused: u64,
 }
 
 /// **One asset's cluster pairing, page by page, carried across frames** (wave
@@ -1702,7 +1779,18 @@ impl VgeomNode {
             tile_pages_parsed: 0,
             tile_pages_cached: 0,
             tile_cache_enabled: true,
+            bind_groups: BTreeMap::new(),
+            bind_groups_built: 0,
+            bind_groups_reused: 0,
         }
+    }
+
+    /// `(built, reused)`: per-asset cull and raster bind groups the meshlet
+    /// node created and served from its cross-frame cache, cumulative (wave
+    /// PERF1).
+    #[inline]
+    pub fn bind_group_counts(&self) -> (u64, u64) {
+        (self.bind_groups_built, self.bind_groups_reused)
     }
 
     /// The equivalence arm's switch (wave PERF1): `false` re-walks every
@@ -2265,6 +2353,9 @@ impl RenderNode for VgeomNode {
             tile_pages_parsed: _,
             tile_pages_cached: _,
             tile_cache_enabled: _,
+            bind_groups,
+            bind_groups_built,
+            bind_groups_reused,
             view_bgl: _,
             vis,
             vis_bases,
@@ -2330,6 +2421,26 @@ impl RenderNode for VgeomNode {
         // through the same pipeline, so the image is the same; what goes is the
         // pass boundaries between them (a dispatch in one compute pass still sees
         // the previous dispatch's writes -- each dispatch is its own usage scope).
+        // What a raster group binds, by identity -- the bindings `raster_bg_of`
+        // names, in its order (wave PERF1).
+        fn raster_key(
+            pools: &VgeomPoolBuffers,
+            draw: &AssetDraw,
+            visible: &wgpu::Buffer,
+        ) -> RasterBgKey {
+            RasterBgKey {
+                buffers: [
+                    pools.vertices.clone(),
+                    pools.meshlets.clone(),
+                    pools.mlverts.clone(),
+                    pools.mltris.clone(),
+                    draw.instances.clone(),
+                    visible.clone(),
+                    draw.debug_flags.clone(),
+                    draw.remap.clone(),
+                ],
+            }
+        }
         let raster_bg_of = |pools: &VgeomPoolBuffers, draw: &AssetDraw, visible: &wgpu::Buffer| {
             gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("vgeom-raster"),
@@ -2437,6 +2548,7 @@ impl RenderNode for VgeomNode {
         // result and pass 2 adds nothing (see the module docs).
         // Per asset: (id, conservative, meshlet_count, floor_lod, residency generation).
         let mut planned: Vec<(u128, bool, u32, u32, u64)> = Vec::new();
+        bind_groups.retain(|asset, _| by_asset.contains_key(asset));
         // The visibility buffer and its depth are cleared by the FIRST draw of
         // the frame and loaded by every one after — the same shape the forward
         // path's `LoadOp::Load` into the shared scene targets has, one level down.
@@ -2570,19 +2682,46 @@ impl RenderNode for VgeomNode {
             } else {
                 &*dummy_hzb
             };
-            let cull_bg = cull.bind_group(
-                gpu,
-                &draw.params,
-                pools,
-                &draw.remap,
-                &draw.instances,
-                &draw.visible,
-                &draw.draw_args,
-                hzb_view,
-                &draw.vis_prev,
-                &draw.vis_cur,
-                &frame.vgeom_audit.stats,
+            let hzb_key = if occlusion && !two_pass && hzb_chain.full_view().is_some() {
+                hzb_chain.generation() + 1
+            } else {
+                0
+            };
+            let bgs = bind_groups.entry(*asset_id).or_default();
+            let (cull_bg, built) = bgs.cull_early.get_or_build(
+                CullBgKey {
+                    buffers: [
+                        draw.params.clone(),
+                        pools.meshlets.clone(),
+                        draw.remap.clone(),
+                        draw.instances.clone(),
+                        draw.visible.clone(),
+                        draw.draw_args.clone(),
+                        draw.vis_prev.clone(),
+                        draw.vis_cur.clone(),
+                        frame.vgeom_audit.stats.clone(),
+                    ],
+                    hzb: hzb_key,
+                },
+                || {
+                    cull.bind_group(
+                        gpu,
+                        &draw.params,
+                        pools,
+                        &draw.remap,
+                        &draw.instances,
+                        &draw.visible,
+                        &draw.draw_args,
+                        hzb_view,
+                        &draw.vis_prev,
+                        &draw.vis_cur,
+                        &frame.vgeom_audit.stats,
+                    )
+                },
             );
+            let cull_bg = cull_bg.clone();
+            *bind_groups_built += u64::from(built);
+            *bind_groups_reused += u64::from(!built);
             let total = visible_slots(instance_count, meshlet_count);
             match (vis_slot, vis.as_ref()) {
                 (Some(slot), Some(v)) => {
@@ -2611,7 +2750,17 @@ impl RenderNode for VgeomNode {
                     vis_cleared = true;
                 }
                 _ => {
-                    let raster_bg = raster_bg_of(pools, draw, &draw.visible);
+                    let bgs = bind_groups.entry(*asset_id).or_default();
+                    let mut built = false;
+                    let raster_bg = bgs
+                        .raster_early
+                        .get_or_build(raster_key(pools, draw, &draw.visible), || {
+                            built = true;
+                            raster_bg_of(pools, draw, &draw.visible)
+                        })
+                        .clone();
+                    *bind_groups_built += u64::from(built);
+                    *bind_groups_reused += u64::from(!built);
                     early.push((*asset_id, cull_bg, total.div_ceil(64).max(1), raster_bg));
                 }
             }
@@ -2682,19 +2831,46 @@ impl RenderNode for VgeomNode {
             );
             gpu.queue
                 .write_buffer(&draw.params_late, 0, bytemuck::bytes_of(&params));
-            let cull_bg = cull.bind_group(
-                gpu,
-                &draw.params_late,
-                pools,
-                &draw.remap,
-                &draw.instances,
-                &draw.visible_late,
-                &draw.draw_args_late,
-                hzb_view,
-                &draw.vis_prev,
-                &draw.vis_cur,
-                &frame.vgeom_audit.stats,
+            let hzb_key = if hzb_chain.full_view().is_some() {
+                hzb_chain.generation() + 1
+            } else {
+                0
+            };
+            let bgs = bind_groups.entry(asset_id).or_default();
+            let (cull_bg, built) = bgs.cull_late.get_or_build(
+                CullBgKey {
+                    buffers: [
+                        draw.params_late.clone(),
+                        pools.meshlets.clone(),
+                        draw.remap.clone(),
+                        draw.instances.clone(),
+                        draw.visible_late.clone(),
+                        draw.draw_args_late.clone(),
+                        draw.vis_prev.clone(),
+                        draw.vis_cur.clone(),
+                        frame.vgeom_audit.stats.clone(),
+                    ],
+                    hzb: hzb_key,
+                },
+                || {
+                    cull.bind_group(
+                        gpu,
+                        &draw.params_late,
+                        pools,
+                        &draw.remap,
+                        &draw.instances,
+                        &draw.visible_late,
+                        &draw.draw_args_late,
+                        hzb_view,
+                        &draw.vis_prev,
+                        &draw.vis_cur,
+                        &frame.vgeom_audit.stats,
+                    )
+                },
             );
+            let cull_bg = cull_bg.clone();
+            *bind_groups_built += u64::from(built);
+            *bind_groups_reused += u64::from(!built);
             let total = visible_slots(instance_count, meshlet_count);
             // Issued unconditionally: on a conservative frame the shader appends
             // nothing, so this is a zero-instance indirect draw. Deliberately NOT
@@ -2729,7 +2905,17 @@ impl RenderNode for VgeomNode {
                     vis_cleared = true;
                 }
                 _ => {
-                    let raster_bg = raster_bg_of(pools, draw, &draw.visible_late);
+                    let bgs = bind_groups.entry(asset_id).or_default();
+                    let mut built = false;
+                    let raster_bg = bgs
+                        .raster_late
+                        .get_or_build(raster_key(pools, draw, &draw.visible_late), || {
+                            built = true;
+                            raster_bg_of(pools, draw, &draw.visible_late)
+                        })
+                        .clone();
+                    *bind_groups_built += u64::from(built);
+                    *bind_groups_reused += u64::from(!built);
                     late.push((asset_id, cull_bg, total.div_ceil(64).max(1), raster_bg));
                 }
             }

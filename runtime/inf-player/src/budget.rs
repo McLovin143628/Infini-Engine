@@ -1074,6 +1074,27 @@ pub const SHIPPING_FRAME_CEILING_MS: f64 = 38.0;
 /// **RATCHET RULE (§8): this constant may only ever DECREASE.**
 pub const SHIPPING_FRAME_P99_CEILING_MS: f64 = 46.0;
 
+/// **The shipped island's own frame ceiling** (wave PERF1, clause 8) -- the
+/// worst serialized p95 over the hours `fps_instrument::the_shipped_island_by_the_hour`
+/// measures (noon and 21:00 at Harbour City's strip, the society at its
+/// population, the shadowed fixtures on, traffic with its art), at 1080p on
+/// the RTX 4070 Ti, release, off CI, minimum of five rounds of 120 frames.
+///
+/// [`SHIPPING_FRAME_CEILING_MS`] is the composed CITY's ratchet and its own
+/// paragraph says why it is never asserted over the island ("it is a city's
+/// ratchet, asserting it over a different world would re-pin it by
+/// accident"). The island never had one, so the frame that every audit since
+/// VEH3f.2a measured over 38 ms had nothing to hold the line. This is that
+/// line, minted from the PERF1 close (see the ledger's "## Wave PERF1"):
+/// the worst p95 measured there with the spread across five rounds, plus the
+/// headroom the §8 tripwires carry. "Serialized" is the instrument's frame --
+/// CPU then GPU, waited on -- which is the instrument's headline and the
+/// number every prior island row was taken in; the shipped player overlaps
+/// the two halves and runs faster than this (the instrument's PIPELINED row).
+///
+/// **RATCHET RULE (§8): this constant may only ever DECREASE.**
+pub const ISLAND_FRAME_CEILING_MS: f64 = 100.0;
+
 /// **How many triangles a world's ROAD MESHES may hold** (wave ROAD1b).
 ///
 /// # Why this exists

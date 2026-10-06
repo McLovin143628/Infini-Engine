@@ -248,3 +248,66 @@ fn the_cached_pairing_is_the_uncached_pairing_frame_for_frame() {
         "a new texture registry did not invalidate the cache"
     );
 }
+
+/// **THE MESHLET NODE KEEPS ITS BIND GROUPS** (wave PERF1, clause 1). The node
+/// built four bind groups per resident asset per frame; on a settled scene it
+/// now builds them on the first frames (two slots for the visibility
+/// ping-pong) and re-uses them after, and a resize -- which reallocates the
+/// HZB pyramid the late cull binds -- builds again. The equivalence half is the
+/// arm above: its frames are drawn through these cached groups and match the
+/// forced re-walk pixel for pixel.
+#[test]
+fn the_meshlet_node_reuses_its_bind_groups_across_frames() {
+    let Ok(gpu) = GpuContext::headless() else {
+        eprintln!("SKIP perf1 bind groups: no GPU adapter");
+        return;
+    };
+    let bytes = container();
+    let lib = library(&bytes);
+    let src = paired(&lib);
+    let pools = inf_render::vt::VtPools::new(&gpu.device, &gpu.queue, lib.residency(), false);
+    let mut r = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+    let mut s = settings();
+    s.vgeom.occlusion = true;
+    s.vgeom.two_pass = true;
+    r.set_settings(s);
+    r.set_vt_level(Some((lib, pools)));
+    let v = view();
+    let target = HeadlessTarget::new(&gpu, W, H);
+    const FRAMES: usize = 20;
+    for step in 0..FRAMES {
+        let sc = scene(&src, r.vt_textures(), step.min(1));
+        r.render(&gpu, &sc, &v, &target.view, (W, H));
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+    let (built, reused) = r.vgeom_bind_group_counts();
+    // A resize reallocates the pyramid: the late cull group must be rebuilt.
+    let big = HeadlessTarget::new(&gpu, W * 2, H * 2);
+    let mut v2 = v;
+    v2.width = W * 2;
+    v2.height = H * 2;
+    let sc = scene(&src, r.vt_textures(), 1);
+    r.render(&gpu, &sc, &v2, &big.view, (W * 2, H * 2));
+    let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    let (built2, _) = r.vgeom_bind_group_counts();
+    println!(
+        "PERF1 vgeom bind groups over {FRAMES} frames: {built} built, {reused} re-used; a resize built {} more",
+        built2 - built
+    );
+    assert!(
+        built > 0,
+        "the node built no bind group -- the fixture drew no meshlet asset"
+    );
+    assert!(
+        built <= 8,
+        "{built} bind groups built for one asset over {FRAMES} frames -- the cache is not holding"
+    );
+    assert!(
+        reused >= 3 * (FRAMES as u64 - 3),
+        "only {reused} re-used over {FRAMES} frames"
+    );
+    assert!(
+        built2 > built,
+        "a resized pyramid did not rebuild the late cull group"
+    );
+}

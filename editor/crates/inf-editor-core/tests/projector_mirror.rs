@@ -1416,6 +1416,11 @@ fn the_bind_space_rebuild_is_identical_in_both_stores() {
         "let base = vertices.len() as u32;",
         "sm.skin.get(i).copied().unwrap_or_default().normalized()",
         "indices.extend(sm.indices.iter().map(|&i| i + base));",
+        // Wave PERF1: the skinned LOD rungs are built in the same body on both
+        // sides, over the same submesh ranges -- or one host would draw a
+        // coarser crowd than the other from the same asset.
+        "inf_mesh::optimize::index_lods(&positions, &normals, &indices, &ranges)",
+        "ranges.push((indices.len() as u32, sm.indices.len() as u32));",
     ] {
         assert!(
             body.contains(fragment),

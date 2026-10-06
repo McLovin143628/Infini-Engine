@@ -274,6 +274,16 @@ fn open(pack: &Path) -> Fixture {
     }
 }
 
+/// **The wave PERF1 A/B doors** (the `PAR0B_NO_GI` precedent): with
+/// `PERF1_SKINNED_LOD_OFF` set every renderer this file builds draws its skinned
+/// instances at their full buffer -- the frame before the LOD reader, for the
+/// before / after rows and the side-by-side frames.
+fn perf1_switches(renderer: &mut EngineRenderer) {
+    if std::env::var_os("PERF1_SKINNED_LOD_OFF").is_some() {
+        renderer.set_skinned_lod(false);
+    }
+}
+
 /// Register the level's virtual textures on `renderer` — `PlayerRenderHost::rebuild_vt`'s
 /// body, through the same `inf_render::build_vt_level` door both hosts call, so
 /// the instrument's frame samples textures the way a shipped frame does.
@@ -493,6 +503,7 @@ fn measure_rounds(
     let target = HeadlessTarget::new(gpu, w, h);
     let mut renderer = EngineRenderer::new(gpu, HEADLESS_FORMAT);
     renderer.set_settings(settings);
+    perf1_switches(&mut renderer);
     let vt_textures = bind_virtual_textures(gpu, &mut renderer, fx);
     let timed = renderer.set_gpu_timing(gpu, true);
     let mut scene = RenderScene {
@@ -661,6 +672,98 @@ fn measure_rounds(
         step_phases_ms: best_phases,
         step_profile: best_step,
     }
+}
+
+/// **The frame at the shipped player's cadence** (wave PERF1): the same frame
+/// as [`measure_rounds`] -- fixed step, terrain and voxel sync, the production
+/// projection, the record -- with the device allowed ONE frame in flight
+/// instead of none. After frame `N` is submitted the harness waits for frame
+/// `N - 1`'s work to finish, which is what a two-deep swap chain does to a
+/// presenter that never polls (`the_shipped_players_frame_path_does_not_wait_for_the_gpu`),
+/// so a frame costs `max(CPU, GPU)` plus whatever the two fail to overlap,
+/// rather than `CPU + GPU`.
+///
+/// The serialized rounds stay the instrument's headline and its baseline; this
+/// is a second, MEASURED column beside the PIPELINED ESTIMATE the instrument
+/// has always printed as arithmetic. No GPU timestamps are read (a readback
+/// would put the wait back).
+fn measure_pipelined(
+    gpu: &GpuContext,
+    fx: &mut Fixture,
+    w: u32,
+    h: u32,
+    settings: inf_render::RenderSettings,
+    path: &dyn Fn(u64, u32, u32) -> RenderView,
+    rounds: usize,
+) -> Vec<Round> {
+    let target = HeadlessTarget::new(gpu, w, h);
+    let mut renderer = EngineRenderer::new(gpu, HEADLESS_FORMAT);
+    renderer.set_settings(settings);
+    perf1_switches(&mut renderer);
+    let _ = bind_virtual_textures(gpu, &mut renderer, fx);
+    let mut scene = RenderScene {
+        grid_enabled: false,
+        ..Default::default()
+    };
+    let mut voxels = inf_voxel::VoxelVolumes::new();
+    let mut debris = inf_render::DebrisCache::default();
+    let mut in_flight: Option<wgpu::SubmissionIndex> = None;
+    let mut frame = |step: u64,
+                     scene: &mut RenderScene,
+                     renderer: &mut EngineRenderer,
+                     fx: &mut Fixture,
+                     in_flight: &mut Option<wgpu::SubmissionIndex>| {
+        let view = path(step, w, h);
+        if let Some(hook) = fx.before_step.as_mut() {
+            hook(&mut fx.sim);
+        }
+        fx.sim
+            .step_once(inf_player::runtime_sim::RuntimeInput::default());
+        fx.sim.sync_render_terrain(view.eye_world);
+        sync_voxel_store(&mut voxels, &fx.voxel_assets, &fx.sim, view.eye_world);
+        project_scene_full(
+            scene,
+            &fx.sim,
+            1.0,
+            &fx.vmeshes,
+            &fx.skinned,
+            &voxels,
+            &mut debris,
+            renderer.vt_textures(),
+            &fx.scatter_meshes,
+            &std::collections::HashMap::new(),
+        );
+        scene.lights.extend(fx.extra_lights.iter().copied());
+        renderer.render(gpu, scene, &view, &target.view, (w, h));
+        // An empty submission completes after everything submitted before it,
+        // so its index is "this frame's work". Wait for the PREVIOUS one.
+        let mine = gpu.queue.submit(std::iter::empty());
+        if let Some(prev) = in_flight.replace(mine) {
+            let _ = gpu.device.poll(wgpu::PollType::Wait {
+                submission_index: Some(prev),
+                timeout: None,
+            });
+        }
+    };
+    let mut step = 0u64;
+    for _ in 0..FRAMES {
+        frame(step, &mut scene, &mut renderer, fx, &mut in_flight);
+        step += 1;
+    }
+    let mut out = Vec::with_capacity(rounds.max(1));
+    for _ in 0..rounds.max(1) {
+        let mut ms = Vec::with_capacity(FRAMES);
+        step = 0;
+        for _ in 0..FRAMES {
+            let t0 = std::time::Instant::now();
+            frame(step, &mut scene, &mut renderer, fx, &mut in_flight);
+            ms.push(t0.elapsed().as_secs_f64() * 1000.0);
+            step += 1;
+        }
+        out.push(round_of(ms));
+    }
+    let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    out
 }
 
 /// Print the record stage's phases, dearest first, and **assert they tile it**.
@@ -2710,8 +2813,27 @@ fn print_skinned_census(label: &str, fx: &Fixture, at: DVec3) {
         e.1[band] += 1;
         total += scene.skinned_meshes[i.mesh].indices.len() / 3;
     }
+    // What the LOD reader actually submits from the orbit's first view (wave
+    // PERF1): the same planner the skinned pass runs, the same pop bound.
+    let view = street_orbit(0, 1920, 1080, at);
+    let plan = inf_render::plan_skinned_batches_at(&scene, inf_render::SkinnedLodView::of(&view));
+    let mut planned = 0usize;
+    let mut by_rung = [0usize; 4];
+    for run in &plan.runs {
+        let mesh = &scene.skinned_meshes[run.mesh];
+        let buf = match run.lod {
+            0 => mesh.indices.len(),
+            k => mesh
+                .lods
+                .get(usize::from(k) - 1)
+                .map_or(mesh.indices.len(), |l| l.indices.len()),
+        };
+        let per = run.range.map_or(buf, |(_, c)| c as usize) / 3;
+        planned += per * run.count as usize;
+        by_rung[usize::from(run.lod).min(3)] += run.count as usize;
+    }
     println!(
-        "  {label} SKINNED CENSUS: {} instances, {} meshes, {total} triangles submitted",
+        "  {label} SKINNED CENSUS: {} instances, {} meshes, {total} triangles at full detail, {planned} submitted under the LOD reader (instances by rung {by_rung:?})",
         scene.skinned.len(),
         by_mesh.len()
     );
@@ -2803,6 +2925,7 @@ fn meshlet_census(
     let target = HeadlessTarget::new(gpu, w, h);
     let mut renderer = EngineRenderer::new(gpu, HEADLESS_FORMAT);
     renderer.set_settings(settings);
+    perf1_switches(&mut renderer);
     bind_virtual_textures(gpu, &mut renderer, fx);
     renderer.set_vgeom_audit(true);
     let mut scene = RenderScene {
@@ -3896,6 +4019,7 @@ fn shipped_frame(
     let target = HeadlessTarget::new(gpu, w, h);
     let mut renderer = EngineRenderer::new(gpu, HEADLESS_FORMAT);
     renderer.set_settings(settings);
+    perf1_switches(&mut renderer);
     bind_virtual_textures(gpu, &mut renderer, fx);
     let mut scene = RenderScene {
         grid_enabled: false,
@@ -4050,6 +4174,10 @@ fn the_shipped_island_by_the_hour() {
         .collect();
     let timing = std::env::var_os("PAR0B_NO_TIMING").is_none();
     let dump = std::env::var_os("PAR0_DUMP").map(PathBuf::from);
+    // THE ISLAND'S OWN CEILING (wave PERF1): the worst serialized p95 over the
+    // hours measured, against `ISLAND_FRAME_CEILING_MS` at the end.
+    let mut worst_p95 = 0.0f64;
+    let mut measured_hours = 0usize;
     for hour in hours {
         {
             let w = fx.sim.world_mut().world_mut();
@@ -4169,6 +4297,8 @@ fn the_shipped_island_by_the_hour() {
             let path = move |step: u64, w: u32, h: u32| street_orbit(step, w, h, at);
             let m = measure_rounds(&gpu, &mut fx, 1920, 1080, shipped, &path, island_rounds());
             let r = m.round();
+            worst_p95 = worst_p95.max(r.p95);
+            measured_hours += 1;
             let mut dear: Vec<(&str, f64, f64)> = m.passes.clone();
             dear.sort_by(|a, b| b.1.total_cmp(&a.1));
             println!(
@@ -4188,6 +4318,48 @@ fn the_shipped_island_by_the_hour() {
             );
             print_frame_profile(&format!("SHIPPED {hour:05.2}"), &m, &fx);
             print_skinned_census(&format!("SHIPPED {hour:05.2}"), &fx, at);
+            let piped =
+                measure_pipelined(&gpu, &mut fx, 1920, 1080, shipped, &path, island_rounds());
+            let best = piped
+                .iter()
+                .min_by(|a, b| a.p50.total_cmp(&b.p50))
+                .copied()
+                .expect("rounds");
+            println!(
+                "SHIPPED ISLAND {hour:05.2} PIPELINED (one frame in flight): p50 {:.2} p95 {:.2} p99 {:.2}; rounds {:?}",
+                best.p50,
+                best.p95,
+                best.p99,
+                piped.iter().map(|r| (r.p50, r.p95)).collect::<Vec<_>>()
+            );
         }
+    }
+    // **THE ISLAND'S CEILING** (wave PERF1, clause 8). Printed everywhere;
+    // asserted only in release, off CI, on a representative adapter, over the
+    // minimum of FIVE rounds at every hour this run measured -- the house law
+    // for a clock (`island_gate`'s tail). A ratchet: it only comes DOWN.
+    if measured_hours > 0 {
+        println!(
+            "THE ISLAND'S CEILING: worst serialized p95 {worst_p95:.2} ms over {measured_hours} hour(s), against ISLAND_FRAME_CEILING_MS {} ms",
+            inf_player::budget::ISLAND_FRAME_CEILING_MS
+        );
+        if cfg!(debug_assertions) {
+            println!("dev build: the island's frame is reported, not asserted");
+            return;
+        }
+        if std::env::var_os("CI").is_some() {
+            println!("CI: the island's frame is reported, not asserted (shared runner)");
+            return;
+        }
+        if !representative(&gpu.adapter.get_info()) || island_rounds() < ISLAND_ROUNDS {
+            println!("not a representative adapter: reported, not asserted");
+            return;
+        }
+        assert!(
+            worst_p95 <= inf_player::budget::ISLAND_FRAME_CEILING_MS,
+            "the shipped island's worst p95 is {worst_p95:.2} ms against a {} ms ceiling {}",
+            inf_player::budget::ISLAND_FRAME_CEILING_MS,
+            RATCHET_NOTE
+        );
     }
 }

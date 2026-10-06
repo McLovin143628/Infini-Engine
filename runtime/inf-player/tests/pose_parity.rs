@@ -491,6 +491,7 @@ fn triangle() -> SkinnedMeshData {
     SkinnedMeshData {
         vertices: vec![v(0.0, 0.0, 0), v(1.0, 0.0, 1), v(0.0, 2.0, 2)],
         indices: vec![0, 1, 2],
+        ..Default::default()
     }
 }
 // ── P24.1 repair 3: the socket attachment, in both hosts ────────────────────

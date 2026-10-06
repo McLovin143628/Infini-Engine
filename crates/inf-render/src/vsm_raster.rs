@@ -4062,6 +4062,7 @@ mod tests {
             // every vertex at weight ZERO and must stay empty.
             vertices: vec![v(-2.0, 0, 1.0), v(-1.0, 0, 1.0), v(4.0, 1, 1.0)],
             indices: vec![0, 1, 2],
+            ..Default::default()
         };
         let spheres = joint_bind_spheres(&mesh);
         assert_eq!(
@@ -4077,6 +4078,7 @@ mod tests {
         assert!(joint_bind_spheres(&crate::scene::SkinnedMeshData {
             vertices: Vec::new(),
             indices: Vec::new(),
+            ..Default::default()
         })
         .is_empty());
     }

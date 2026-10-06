@@ -2011,7 +2011,15 @@ fn skinned_cylinder() -> (inf_anim::Skeleton, inf_anim::AnimClip, SkinnedMeshDat
             indices.extend_from_slice(&[a, c, b, b, c, d]);
         }
     }
-    (skeleton, clip, SkinnedMeshData { vertices, indices })
+    (
+        skeleton,
+        clip,
+        SkinnedMeshData {
+            vertices,
+            indices,
+            ..Default::default()
+        },
+    )
 }
 
 /// The skinning palette (`global · inverse_bind` per joint) for a clip at time `t`.
@@ -2343,7 +2351,11 @@ fn two_cards() -> SkinnedMeshData {
         indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
         let _ = side;
     }
-    SkinnedMeshData { vertices, indices }
+    SkinnedMeshData {
+        vertices,
+        indices,
+        ..Default::default()
+    }
 }
 
 /// ONE upright card, as a skinned mesh bound to the cylinder rig's joint 0 —
@@ -2370,6 +2382,7 @@ fn one_card() -> SkinnedMeshData {
     SkinnedMeshData {
         vertices,
         indices: vec![0, 1, 2, 0, 2, 3],
+        ..Default::default()
     }
 }
 

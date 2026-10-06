@@ -271,6 +271,38 @@ pub struct SkinnedRun {
     /// have to know the mesh's index count to say "all of it". The two committed
     /// skinned goldens are sha256-identical across the change because of it.
     pub range: Option<(u32, u32)>,
+    /// **The rung this run draws** (wave PERF1): `0` is the mesh's full index
+    /// buffer, `k` its `lods[k - 1]`, and [`Self::range`] then addresses that
+    /// rung's buffer. Always `0` from [`plan_skinned_batches`], which plans with
+    /// no view.
+    pub lod: u8,
+}
+
+/// **The view a skinned LOD is chosen against** (wave PERF1, clause 3): the
+/// eye, the frame's pixels per metre at one metre (`height / (2 tan(fov_y /
+/// 2))`), and the pop bound in pixels ([`crate::scene::SKINNED_LOD_PIXEL_ERROR`]
+/// in the shipped renderer).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SkinnedLodView {
+    pub eye: glam::DVec3,
+    pub px_per_m: f32,
+    pub pixel_error: f32,
+}
+
+impl SkinnedLodView {
+    /// The view a frame is drawn from, under the shipped pop bound -- `None`
+    /// for an orthographic view, whose projected size does not fall with
+    /// distance (every instance draws its full buffer there).
+    pub fn of(view: &crate::camera::RenderView) -> Option<Self> {
+        if view.ortho.is_some() || view.height == 0 {
+            return None;
+        }
+        Some(Self {
+            eye: view.eye_world,
+            px_per_m: view.height as f32 / (2.0 * (view.fov_y * 0.5).tan()),
+            pixel_error: crate::scene::SKINNED_LOD_PIXEL_ERROR,
+        })
+    }
 }
 
 /// **What one frame's skinned draws are, derived from the scene alone.**
@@ -329,6 +361,25 @@ pub struct SkinnedBatches {
 /// arm that keeps the invariant true, and it is stated here rather than only at
 /// the loop that uses it because it is a property of *this* function.
 pub fn plan_skinned_batches(scene: &crate::scene::RenderScene) -> SkinnedBatches {
+    plan_skinned_batches_at(scene, None)
+}
+
+/// [`plan_skinned_batches`] **with the LOD reader** (wave PERF1, clause 3):
+/// every instance draws the coarsest rung of its mesh whose error projects
+/// under `lod.pixel_error` pixels at its nearest distance
+/// ([`crate::scene::skinned_lod_for`]); a sectioned instance draws each
+/// section's range of that rung, or its full buffer if any section has no
+/// counterpart in the rung. `None` is the full buffer everywhere -- exactly
+/// the plan this function made before rungs existed.
+///
+/// The character LOD ladder had a writer and no reader since CHAR1b.1: the
+/// island's crowd body is 95 330 triangles and the PERF1 clause-0 census drew
+/// 876 of them at noon (792 beyond 200 m) -- 84 M triangles a frame and the
+/// frame's single dearest GPU pass.
+pub fn plan_skinned_batches_at(
+    scene: &crate::scene::RenderScene,
+    lod: Option<SkinnedLodView>,
+) -> SkinnedBatches {
     // **(instance, section)** since wave CHAR1a.3, and the sort key carries the
     // section so that all of one mesh's slot-0 ranges are contiguous, then all of
     // its slot-1 ranges — one draw per (mesh, section) over every instance
@@ -349,7 +400,19 @@ pub fn plan_skinned_batches(scene: &crate::scene::RenderScene) -> SkinnedBatches
             }
         }
     }
-    order.sort_by_key(|(i, s)| (scene.skinned[*i as usize].mesh, s.unwrap_or(0)));
+    // The rung each instance draws, once per instance (its sections share it).
+    let rung: Vec<u8> = scene
+        .skinned
+        .iter()
+        .map(|inst| instance_rung(scene, inst, lod))
+        .collect();
+    order.sort_by_key(|(i, s)| {
+        (
+            scene.skinned[*i as usize].mesh,
+            rung[*i as usize],
+            s.unwrap_or(0),
+        )
+    });
 
     // Palette blocks, keyed on the `Arc`'s address. Sound for the same reason
     // `skinned_meshes`' upload cache is: the scene holds the `Arc` for the whole
@@ -395,16 +458,24 @@ pub fn plan_skinned_batches(scene: &crate::scene::RenderScene) -> SkinnedBatches
     let mut runs: Vec<SkinnedRun> = Vec::new();
     for (slot, (i, section)) in kept.iter().zip(&kept_section).enumerate() {
         let inst = &scene.skinned[*i as usize];
+        let lod = rung[*i as usize];
         let range = section
             .and_then(|s| inst.sections.get(s as usize))
-            .map(|s| (s.first_index, s.index_count));
+            .map(|s| (s.first_index, s.index_count))
+            .map(|r| match lod {
+                0 => r,
+                k => rung_range(scene, inst.mesh, k, r.0).unwrap_or(r),
+            });
         match runs.last_mut() {
-            Some(run) if run.mesh == inst.mesh && run.range == range => run.count += 1,
+            Some(run) if run.mesh == inst.mesh && run.lod == lod && run.range == range => {
+                run.count += 1
+            }
             _ => runs.push(SkinnedRun {
                 mesh: inst.mesh,
                 first_instance: slot as u32,
                 count: 1,
                 range,
+                lod,
             }),
         }
     }
@@ -418,6 +489,60 @@ pub fn plan_skinned_batches(scene: &crate::scene::RenderScene) -> SkinnedBatches
         matrices,
         dropped,
     }
+}
+
+/// The rung one instance draws under `lod` (wave PERF1) -- `0` without a view,
+/// for a mesh with no rungs, and for a sectioned instance any of whose sections
+/// has no counterpart range in the chosen rung.
+fn instance_rung(
+    scene: &crate::scene::RenderScene,
+    inst: &SkinnedInstance,
+    lod: Option<SkinnedLodView>,
+) -> u8 {
+    let Some(view) = lod else {
+        return 0;
+    };
+    let Some(mesh) = scene.skinned_meshes.get(inst.mesh) else {
+        return 0;
+    };
+    let scale = inst.scale.abs().max_element();
+    let k = crate::scene::skinned_lod_for(
+        mesh,
+        (inst.translation - view.eye).length(),
+        scale,
+        view.px_per_m,
+        view.pixel_error,
+    );
+    if k == 0 {
+        return 0;
+    }
+    let mapped = inst
+        .sections
+        .iter()
+        .all(|s| rung_range(scene, inst.mesh, k as u8, s.first_index).is_some());
+    if mapped {
+        k.min(u8::MAX as usize) as u8
+    } else {
+        0
+    }
+}
+
+/// The range of rung `lod` (`>= 1`) that corresponds to the full-buffer range
+/// starting at `full_first` (wave PERF1) -- `None` if the rung has no submesh
+/// starting there.
+fn rung_range(
+    scene: &crate::scene::RenderScene,
+    mesh: usize,
+    lod: u8,
+    full_first: u32,
+) -> Option<(u32, u32)> {
+    let rung = scene
+        .skinned_meshes
+        .get(mesh)?
+        .lods
+        .get(usize::from(lod).checked_sub(1)?)?;
+    let at = rung.full_starts.iter().position(|&f| f == full_first)?;
+    rung.ranges.get(at).copied()
 }
 
 /// **Fill the atlas staging buffer from a plan — once per BLOCK.** Returns the
@@ -565,6 +690,9 @@ struct GpuSkinnedMesh {
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
     index_count: u32,
+    /// The rungs' index buffers and counts, `lods[k - 1]` for rung `k` (wave
+    /// PERF1) -- over the SAME vertex buffer above.
+    lods: Vec<(wgpu::Buffer, u32)>,
 }
 
 pub struct SkinnedMeshNode {
@@ -604,7 +732,10 @@ pub struct SkinnedMeshNode {
     runs: Vec<SkinnedRun>,
     /// One [`InstanceRaw`] per *drawn* instance, in `runs` order.
     instance_buf: Option<wgpu::Buffer>,
-    uploaded_version: Option<(u64, glam::DVec3)>,
+    uploaded_version: Option<(u64, glam::DVec3, Option<[i64; 3]>)>,
+    /// The LOD reader's switch (wave PERF1): `false` plans every instance at
+    /// its full buffer -- the A/B the instrument and the pop frames take.
+    lod_enabled: bool,
     active: bool,
 }
 
@@ -771,6 +902,7 @@ impl SkinnedMeshNode {
             runs: Vec::new(),
             instance_buf: None,
             uploaded_version: None,
+            lod_enabled: true,
             active: false,
         }
     }
@@ -778,7 +910,13 @@ impl SkinnedMeshNode {
     /// Re-upload geometry, instance data, and palettes when the scene changed or
     /// the floating origin rebased.
     fn sync(&mut self, gpu: &GpuContext, frame: &FrameData) {
-        let key = (frame.scene.version, frame.view.origin.origin());
+        // The LOD view is part of the key (wave PERF1): a rung is a function of
+        // where the eye is, so a camera that moved over an unchanged scene must
+        // re-plan. Quantized to a decimetre, the scale at which a rung's
+        // half-pixel switch distance is measured at all.
+        let lod_view = SkinnedLodView::of(frame.view).filter(|_| self.lod_enabled);
+        let eye_q = lod_view.map(|v| (v.eye * 10.0).round().as_i64vec3().to_array());
+        let key = (frame.scene.version, frame.view.origin.origin(), eye_q);
         if self.uploaded_version == Some(key) {
             return;
         }
@@ -813,7 +951,7 @@ impl SkinnedMeshNode {
         // here, which releases its GPU buffers.
 
         // ── the plan, then the atlas, then the instances (wave NPC1b) ──────
-        let plan = plan_skinned_batches(frame.scene);
+        let plan = plan_skinned_batches_at(frame.scene, lod_view);
         if plan.dropped > 0 {
             tracing::warn!(
                 "inf-render: {} skinned instances past the {}-matrix joint-palette \
@@ -896,6 +1034,15 @@ impl SkinnedMeshNode {
         });
     }
 
+    /// The LOD reader's switch (wave PERF1): `false` draws every instance at
+    /// its full buffer, the plan before rungs existed. The instrument's A/B
+    /// and the pop frames use it; nothing shipped turns it off.
+    #[doc(hidden)]
+    pub fn set_lod_enabled(&mut self, on: bool) {
+        self.lod_enabled = on;
+        self.uploaded_version = None;
+    }
+
     /// Bind the atlas, the geometry of one run, and issue its draw.
     ///
     /// Shared by the colour pass and the depth prepass because the two differ in
@@ -916,7 +1063,17 @@ impl SkinnedMeshNode {
             else {
                 continue;
             };
-            if gpu_mesh.index_count == 0 {
+            // The rung's buffer when the run draws one (wave PERF1), the full
+            // buffer otherwise -- and a rung the upload does not have falls back
+            // to the full buffer rather than drawing nothing.
+            let (index_buf, buf_count) = match usize::from(run.lod) {
+                0 => (&gpu_mesh.indices, gpu_mesh.index_count),
+                k => match gpu_mesh.lods.get(k - 1) {
+                    Some((b, n)) => (b, *n),
+                    None => (&gpu_mesh.indices, gpu_mesh.index_count),
+                },
+            };
+            if buf_count == 0 {
                 continue;
             }
             // The RANGE, clamped to the buffer that is actually uploaded. A
@@ -927,17 +1084,17 @@ impl SkinnedMeshNode {
             // from the `.inf_mesh` while the geometry is uploaded from the
             // store's cached copy of it.
             let (first_index, index_count) = match run.range {
-                None => (0, gpu_mesh.index_count),
+                None => (0, buf_count),
                 Some((f, c)) => {
-                    let f = f.min(gpu_mesh.index_count);
-                    (f, c.min(gpu_mesh.index_count - f))
+                    let f = f.min(buf_count);
+                    (f, c.min(buf_count - f))
                 }
             };
             if index_count == 0 {
                 continue;
             }
             pass.set_vertex_buffer(0, gpu_mesh.vertices.slice(..));
-            pass.set_index_buffer(gpu_mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+            pass.set_index_buffer(index_buf.slice(..), wgpu::IndexFormat::Uint32);
             let first = run.first_instance;
             pass.draw_indexed(
                 first_index..first_index + index_count,
@@ -965,10 +1122,26 @@ fn upload_mesh(gpu: &GpuContext, mesh: &SkinnedMeshData) -> GpuSkinnedMesh {
     });
     gpu.queue
         .write_buffer(&indices, 0, bytemuck::cast_slice(&mesh.indices));
+    let lods = mesh
+        .lods
+        .iter()
+        .map(|l| {
+            let buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("skinned-lod-indices"),
+                size: std::mem::size_of_val(l.indices.as_slice()).max(4) as u64,
+                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            gpu.queue
+                .write_buffer(&buf, 0, bytemuck::cast_slice(&l.indices));
+            (buf, l.indices.len() as u32)
+        })
+        .collect();
     GpuSkinnedMesh {
         vertices,
         indices,
         index_count: mesh.indices.len() as u32,
+        lods,
     }
 }
 
@@ -1104,6 +1277,7 @@ mod tests {
                     Arc::new(SkinnedMeshData {
                         vertices: Vec::new(),
                         indices: Vec::new(),
+                        ..Default::default()
                     })
                 })
                 .collect(),
@@ -1133,6 +1307,7 @@ mod tests {
                 first_instance: 0,
                 count: 1000,
                 range: None,
+                lod: 0,
             }
         );
         assert_eq!(
@@ -1194,12 +1369,14 @@ mod tests {
                     first_instance: 0,
                     count: 2,
                     range: None,
+                    lod: 0,
                 },
                 SkinnedRun {
                     mesh: 1,
                     first_instance: 2,
                     count: 2,
                     range: None,
+                    lod: 0,
                 },
             ]
         );
@@ -1238,6 +1415,7 @@ mod tests {
                 first_instance: 0,
                 count: SKINNED_PALETTE_MATRICES as u32,
                 range: None,
+                lod: 0,
             }]
         );
         // Every surviving block is inside the atlas — the aliasing check.

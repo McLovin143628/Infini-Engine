@@ -286,19 +286,36 @@ fn unlattice(c: i64) -> f64 {
 ///
 /// Sorted by `Guid` so the result is a function of the world's *contents*, not
 /// of bevy's archetype iteration order.
+///
+/// # `O(sources)`, not `O(entities)` (wave PERF1)
+///
+/// This used to walk every entity in the world and ask each for a
+/// `StreamingSource` -- and it is asked once per character per fixed step
+/// (`PhysicsBridge3D::sim_band` at every mover's door breach, every vehicle,
+/// every interaction query). On the shipped island at 21:00 that was ~100
+/// posed characters times every entity of a resident city, measured as most
+/// of the `character move` phase's 2.4 ms. The query below visits only the
+/// archetypes that HAVE a `StreamingSource` (the `door::doors_in_world`
+/// door), reads the same three components in the same precedence, and sorts
+/// by the same key, so the list is the one the walk produced.
 pub fn streaming_sources(world: &EcsWorld) -> Vec<(DVec3, f64)> {
     let w = world.world();
-    let mut out: Vec<(uuid::Uuid, DVec3, f64)> = w
-        .iter_entities()
-        .filter_map(|e| {
-            let guid = e.get::<Guid>()?.0;
-            let src = e.get::<StreamingSource>()?;
-            let p = e
-                .get::<GlobalTransform>()
+    let Some(mut q) = w.try_query_filtered::<(
+        &Guid,
+        &StreamingSource,
+        Option<&GlobalTransform>,
+        Option<&Transform>,
+    ), bevy_ecs::prelude::With<StreamingSource>>() else {
+        return Vec::new();
+    };
+    let mut out: Vec<(uuid::Uuid, DVec3, f64)> = q
+        .iter(w)
+        .map(|(guid, src, global, local)| {
+            let p = global
                 .map(|g| g.translation())
-                .or_else(|| e.get::<Transform>().map(|t| t.translation.into()))
+                .or_else(|| local.map(|t| t.translation.into()))
                 .unwrap_or(DVec3::ZERO);
-            Some((guid, p, src.radius_m))
+            (guid.0, p, src.radius_m)
         })
         .collect();
     out.sort_by_key(|(g, _, _)| *g);
@@ -315,6 +332,95 @@ mod tests {
             DVec3::new(5.0, 8.0, 5.0),
             DQuat::IDENTITY,
         )
+    }
+
+    /// **The source query is the walk it replaced** (wave PERF1). Two thousand
+    /// entities, a few dozen of them sources -- some with a computed global
+    /// transform, some with only a local one, one with neither, one with no
+    /// `Guid` -- and the archetype query answers exactly the list the old
+    /// whole-world walk (kept here as the oracle) answers, in the same order.
+    #[test]
+    fn the_source_query_is_the_whole_world_walk() {
+        use crate::components::{GlobalTransform, Guid, StreamingSource, Transform};
+        let oracle = |world: &EcsWorld| -> Vec<(DVec3, f64)> {
+            let w = world.world();
+            let mut out: Vec<(uuid::Uuid, DVec3, f64)> = w
+                .iter_entities()
+                .filter_map(|e| {
+                    let guid = e.get::<Guid>()?.0;
+                    let src = e.get::<StreamingSource>()?;
+                    let p = e
+                        .get::<GlobalTransform>()
+                        .map(|g| g.translation())
+                        .or_else(|| e.get::<Transform>().map(|t| t.translation.into()))
+                        .unwrap_or(DVec3::ZERO);
+                    Some((guid, p, src.radius_m))
+                })
+                .collect();
+            out.sort_by_key(|(g, _, _)| *g);
+            out.into_iter().map(|(_, p, r)| (p, r)).collect()
+        };
+        let mut world = EcsWorld::new();
+        assert!(
+            streaming_sources(&world).is_empty(),
+            "an empty world has no source"
+        );
+        let mut sources = 0usize;
+        for i in 0..2000u128 {
+            // Guids in a scrambled order so the sort is exercised.
+            let g = uuid::Uuid::from_u128((i * 7919) % 2003 + 1);
+            world.spawn_with_guid(g, "e", None);
+            let e = world.entity_of(g).expect("spawned");
+            let x = i as f64 * 3.0;
+            let mut ent = world.world_mut().entity_mut(e);
+            match i % 50 {
+                0 => {
+                    ent.insert((
+                        StreamingSource {
+                            radius_m: 100.0 + i as f64,
+                        },
+                        GlobalTransform(glam::DAffine3::from_translation(DVec3::new(x, 1.0, -x))),
+                    ));
+                    sources += 1;
+                }
+                1 => {
+                    // Only a LOCAL transform: the fallback the walk took.
+                    ent.remove::<GlobalTransform>();
+                    ent.insert((
+                        StreamingSource { radius_m: 50.0 },
+                        Transform {
+                            translation: crate::math::Vec3d::from_dvec3(DVec3::new(-x, 2.0, x)),
+                            ..Transform::IDENTITY
+                        },
+                    ));
+                    sources += 1;
+                }
+                2 => {
+                    // Neither transform: the origin, as the walk had it.
+                    ent.remove::<(GlobalTransform, Transform)>();
+                    ent.insert(StreamingSource { radius_m: 10.0 });
+                    sources += 1;
+                }
+                _ => {
+                    ent.insert(Transform::IDENTITY);
+                }
+            }
+        }
+        // A source with no Guid is not a source the band can sort.
+        world
+            .world_mut()
+            .spawn((StreamingSource { radius_m: 1.0 }, Transform::IDENTITY));
+        let got = streaming_sources(&world);
+        assert_eq!(
+            got.len(),
+            sources,
+            "the query found {} of {sources} sources",
+            got.len()
+        );
+        assert_eq!(got, oracle(&world), "the query and the walk disagree");
+        println!(
+            "PERF1 streaming sources: {sources} sources among 2001 entities, identical to the walk"
+        );
     }
 
     /// **It fails open.** No sources means no banding, which is what keeps every
