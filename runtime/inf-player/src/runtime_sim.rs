@@ -66,6 +66,23 @@ use inf_physics::{
 use inf_runtime::FixedStep;
 use inf_voxel::VoxelData;
 
+/// **How many fixed steps one windowed frame may run to catch up** (the PERF1
+/// audit) -- the cap on [`RuntimeSim::run_frame`], the one frame door every
+/// windowed host reaches (the shipped window, Play in New Window, embedded
+/// Play: all through `PlayerApp::frame`).
+///
+/// It was `FixedStep::DEFAULT_MAX_STEPS` (eight), and on the island that was a
+/// spiral: a fixed step costs ~13-17 ms there, so a slow frame owed more steps
+/// and the steps made it slower. Measured in the shipped window at noon on the
+/// cooked island (`INF_FPS_LOG`): 7.8 steps a frame over a 60 s run, 88 % of
+/// frames at the cap, p50 147 ms; at two, 2.0 steps a frame and p50 64 ms. The
+/// backlog past the cap is DROPPED by the accumulator, so an overloaded frame
+/// runs the simulation slower than the wall clock (0.52x on that run) instead
+/// of dying. Two keeps real time down to 30 fps. Determinism is untouched: how
+/// many steps a frame runs was always a function of the wall clock, and every
+/// replay and PIE == shipping gate steps the sim through `step_once`.
+pub const WINDOWED_MAX_CATCH_UP_STEPS: u32 = 2;
+
 // ── Wave 3 (MIRROR of inf_editor_core::simulate) ─────────────────────────────
 // The event-dispatch cap + the sensor-overlap seam are duplicated field-for-field
 // with the editor `SimSession` so the shipped player and the editor Simulate drain
@@ -598,7 +615,7 @@ impl RuntimeSim {
             hair_detail: inf_anim::HairDetail::GUIDES,
             camera: inf_ecs::camera::LocomotionCamera::default(),
             camera_subject: None,
-            stepper: FixedStep::from_hz(hz),
+            stepper: FixedStep::with_max_steps(1.0 / hz, WINDOWED_MAX_CATCH_UP_STEPS),
             actors: states,
             entities,
             despawned: Vec::new(),

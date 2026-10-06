@@ -580,42 +580,125 @@ pub const FRAME_COUNTER_WINDOW: usize = 60;
 /// `INF_FPS_HUD` is set when the player boots -- the demo loop sets it, so the
 /// frames a wave photographs carry what they cost -- and it reads nothing but
 /// the interval the loop already took, so it moves no simulation.
-#[derive(Debug, Clone, Default)]
+///
+/// **The fixed steps the frame ran** (the PERF1 audit). A windowed frame runs
+/// as many fixed steps as its wall time owes, up to
+/// [`crate::runtime_sim::WINDOWED_MAX_CATCH_UP_STEPS`], so the counter also
+/// prints the window's mean steps per frame and the mean wall time those steps
+/// took: a frame that is slow because it is stepping three times is a
+/// different defect from one that is slow to draw, and only this line, in the
+/// player's own window, can tell them apart.
+///
+/// `INF_FPS_LOG` (a path, read once at boot) additionally appends one line per
+/// full window -- the seconds since boot and every frame's interval, steps and
+/// step time -- so a session's p50 / p95 over any span is computed from the
+/// frames themselves, not from a photograph of the counter.
+#[derive(Debug, Default)]
 pub struct FrameCounter {
-    ring: std::collections::VecDeque<f64>,
+    ring: std::collections::VecDeque<FrameSample>,
+    /// Frames pushed since the last log line.
+    unlogged: usize,
+    log: Option<std::fs::File>,
+    born: Option<std::time::Instant>,
+}
+
+/// One windowed frame as the counter keeps it.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct FrameSample {
+    /// The wall-clock interval since the previous frame, seconds.
+    pub dt: f64,
+    /// Fixed steps the frame ran.
+    pub steps: u32,
+    /// Wall time those steps took, milliseconds.
+    pub step_ms: f64,
 }
 
 impl FrameCounter {
-    /// On when `INF_FPS_HUD` is set.
+    /// On when `INF_FPS_HUD` is set; logging too when `INF_FPS_LOG` names a file.
     pub fn from_env() -> Option<Self> {
-        std::env::var_os("INF_FPS_HUD").map(|_| Self::default())
+        std::env::var_os("INF_FPS_HUD")?;
+        let log = std::env::var_os("INF_FPS_LOG")
+            .filter(|p| !p.is_empty())
+            .and_then(|p| std::fs::File::create(p).ok());
+        Some(Self {
+            log,
+            born: Some(std::time::Instant::now()),
+            ..Self::default()
+        })
     }
 
-    /// One frame interval, seconds.
+    /// One frame interval, seconds, with no step record.
     pub fn push(&mut self, dt: f64) {
-        if !(dt.is_finite() && dt > 0.0) {
+        self.push_frame(FrameSample {
+            dt,
+            ..FrameSample::default()
+        });
+    }
+
+    /// One frame: its interval, the fixed steps it ran and their wall time.
+    pub fn push_frame(&mut self, s: FrameSample) {
+        if !(s.dt.is_finite() && s.dt > 0.0) {
             return;
         }
         if self.ring.len() == FRAME_COUNTER_WINDOW {
             self.ring.pop_front();
         }
-        self.ring.push_back(dt);
+        self.ring.push_back(s);
+        self.unlogged += 1;
+        if self.unlogged >= FRAME_COUNTER_WINDOW {
+            self.unlogged = 0;
+            if let Some(line) = self.log_line() {
+                if let Some(f) = self.log.as_mut() {
+                    use std::io::Write as _;
+                    let _ = f.write_all(line.as_bytes());
+                    let _ = f.flush();
+                }
+            }
+        }
     }
 
-    /// `"16.4 ms  61 fps  p95 18.0"`, or empty before the first frame.
+    /// The log line for the current window: `t=<s> dt=<0.1 ms,...>
+    /// steps=<n,...> step=<0.1 ms,...>` and a newline, or `None` when empty.
+    pub fn log_line(&self) -> Option<String> {
+        if self.ring.is_empty() {
+            return None;
+        }
+        let t = self.born.map_or(0.0, |b| b.elapsed().as_secs_f64());
+        let join = |f: &dyn Fn(&FrameSample) -> String| {
+            self.ring.iter().map(f).collect::<Vec<_>>().join(",")
+        };
+        Some(format!(
+            "t={t:.2} dt={} steps={} step={}\n",
+            join(&|s| format!("{:.0}", s.dt * 10_000.0)),
+            join(&|s| s.steps.to_string()),
+            join(&|s| format!("{:.0}", s.step_ms * 10.0)),
+        ))
+    }
+
+    /// `"16.4 ms  61 fps  p95 18.0"`, then `"  steps 1.0  sim 4.2 ms"` once a
+    /// frame has run a step; empty before the first frame.
     pub fn text(&self) -> String {
         if self.ring.is_empty() {
             return String::new();
         }
         let n = self.ring.len() as f64;
-        let mean_ms = self.ring.iter().sum::<f64>() / n * 1000.0;
-        let mut sorted: Vec<f64> = self.ring.iter().copied().collect();
+        let mean_ms = self.ring.iter().map(|s| s.dt).sum::<f64>() / n * 1000.0;
+        let mut sorted: Vec<f64> = self.ring.iter().map(|s| s.dt).collect();
         sorted.sort_by(f64::total_cmp);
         let p95 = sorted[((0.95 * n).ceil() as usize).clamp(1, sorted.len()) - 1] * 1000.0;
-        format!(
+        let mut out = format!(
             "{mean_ms:.1} ms  {:.0} fps  p95 {p95:.1}",
             1000.0 / mean_ms.max(1.0e-9)
-        )
+        );
+        let steps: u32 = self.ring.iter().map(|s| s.steps).sum();
+        if steps > 0 {
+            let step_ms = self.ring.iter().map(|s| s.step_ms).sum::<f64>() / n;
+            out.push_str(&format!(
+                "  steps {:.1}  sim {step_ms:.1} ms",
+                f64::from(steps) / n
+            ));
+        }
+        out
     }
 }
 
@@ -634,19 +717,6 @@ mod tests {
         d
     }
 
-    /// **A SETTINGS FILE THAT UNBINDS THE MENU DOES NOT SHIP A GAME WITH NO
-    /// SETTINGS** (I5 audit, A1) — measured at the boot door rather than at the
-    /// rule.
-    ///
-    /// `inf_ui::bindings` refuses to *make* this state and has its own arms for
-    /// that; the thing this one holds is the **wiring**, which is the I1 law: a
-    /// gate that calls the rule measures the rule, and only a gate that goes
-    /// through the boot path measures the fix. Stubbing the call in
-    /// [`PlayerUi::tuned_map`] leaves every other arm in this tree green.
-    ///
-    /// The file is written by hand on purpose: it is the case the edit doors
-    /// cannot cover — a build that had no guard, a hand edit, a project whose own
-    /// `input.toml` simply never bound the menu.
     /// **The frame counter prints what the loop measured** (wave PERF1): the
     /// mean of its window and that window's p95, and it forgets the oldest
     /// interval once the window is full.
@@ -671,6 +741,48 @@ mod tests {
         assert_eq!(fc.text(), "10.0 ms  100 fps  p95 10.0");
     }
 
+    /// **The counter says how many fixed steps the frame ran, and what they
+    /// cost** (the PERF1 audit): the catch-up a slow frame owes is visible in
+    /// the window itself, and the log line carries every frame of the window.
+    #[test]
+    fn the_frame_counter_prints_the_steps_and_their_cost() {
+        let mut fc = FrameCounter::default();
+        for i in 0..FRAME_COUNTER_WINDOW {
+            fc.push_frame(FrameSample {
+                dt: 0.050,
+                steps: if i % 2 == 0 { 3 } else { 2 },
+                step_ms: 30.0,
+            });
+        }
+        assert_eq!(
+            fc.text(),
+            "50.0 ms  20 fps  p95 50.0  steps 2.5  sim 30.0 ms"
+        );
+        let line = fc.log_line().expect("a full window logs");
+        assert!(
+            line.contains(" dt=500,500,") && line.contains(" steps=3,2,3,"),
+            "{line}"
+        );
+        assert!(
+            line.contains(" step=300,300,") && line.ends_with('\n'),
+            "{line}"
+        );
+        assert_eq!(line.matches(',').count(), 3 * (FRAME_COUNTER_WINDOW - 1));
+    }
+
+    /// **A SETTINGS FILE THAT UNBINDS THE MENU DOES NOT SHIP A GAME WITH NO
+    /// SETTINGS** (I5 audit, A1) — measured at the boot door rather than at the
+    /// rule.
+    ///
+    /// `inf_ui::bindings` refuses to *make* this state and has its own arms for
+    /// that; the thing this one holds is the **wiring**, which is the I1 law: a
+    /// gate that calls the rule measures the rule, and only a gate that goes
+    /// through the boot path measures the fix. Stubbing the call in
+    /// [`PlayerUi::tuned_map`] leaves every other arm in this tree green.
+    ///
+    /// The file is written by hand on purpose: it is the case the edit doors
+    /// cannot cover — a build that had no guard, a hand edit, a project whose own
+    /// `input.toml` simply never bound the menu.
     #[test]
     fn a_settings_file_with_no_menu_key_still_boots_a_game_with_a_menu() {
         let dir = tmp();

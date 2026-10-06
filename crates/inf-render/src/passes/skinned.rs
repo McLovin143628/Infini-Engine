@@ -401,11 +401,12 @@ pub fn plan_skinned_batches_at(
         }
     }
     // The rung each instance draws, once per instance (its sections share it).
-    let rung: Vec<u8> = scene
+    let mut rung: Vec<u8> = scene
         .skinned
         .iter()
         .map(|inst| instance_rung(scene, inst, lod))
         .collect();
+    wearers_agree_on_their_rung(scene, &mut rung);
     order.sort_by_key(|(i, s)| {
         (
             scene.skinned[*i as usize].mesh,
@@ -488,6 +489,63 @@ pub fn plan_skinned_batches_at(
         blocks: blocks.len(),
         matrices,
         dropped,
+    }
+}
+
+/// **A wearer and what it wears draw one rung** (the PERF1 audit, priority e').
+///
+/// A garment or a head of hair is its own `SkinnedInstance` (wave OUTFIT1)
+/// standing on the wearer's transform and sharing the wearer's palette `Arc`,
+/// and each picked its rung from its OWN mesh's error -- so in one frame a body
+/// could drop to its 8 % rung under a jacket still drawn whole, and the coarse
+/// body pokes through the cloth that was fitted to the fine one.
+///
+/// The group is the instances sharing BOTH the palette pointer and the
+/// translation (palette alone is not enough: crowd agents in the same pose share
+/// a palette block and stand metres apart). Within a group, every member that
+/// HAS rungs draws the finest rung any such member chose; a member with no rungs
+/// (a small garment, under the 8 192-triangle floor) draws its whole buffer as
+/// before -- it has nothing coarser to agree on. A sectioned member whose
+/// sections have no counterpart in the agreed rung falls back to the full
+/// buffer, `instance_rung`'s own rule.
+fn wearers_agree_on_their_rung(scene: &crate::scene::RenderScene, rung: &mut [u8]) {
+    let capable = |inst: &SkinnedInstance| {
+        !inst.palette.is_empty()
+            && scene
+                .skinned_meshes
+                .get(inst.mesh)
+                .is_some_and(|m| !m.lods.is_empty())
+    };
+    let key = |inst: &SkinnedInstance| {
+        (
+            std::sync::Arc::as_ptr(&inst.palette) as usize,
+            inst.translation.x.to_bits(),
+            inst.translation.y.to_bits(),
+            inst.translation.z.to_bits(),
+        )
+    };
+    let mut finest: std::collections::HashMap<(usize, u64, u64, u64), u8> =
+        std::collections::HashMap::new();
+    for (i, inst) in scene.skinned.iter().enumerate() {
+        if capable(inst) {
+            let e = finest.entry(key(inst)).or_insert(u8::MAX);
+            *e = (*e).min(rung[i]);
+        }
+    }
+    for (i, inst) in scene.skinned.iter().enumerate() {
+        if !capable(inst) {
+            continue;
+        }
+        let agreed = finest.get(&key(inst)).copied().unwrap_or(rung[i]);
+        if agreed == rung[i] {
+            continue;
+        }
+        let mapped = agreed == 0
+            || inst
+                .sections
+                .iter()
+                .all(|s| rung_range(scene, inst.mesh, agreed, s.first_index).is_some());
+        rung[i] = if mapped { agreed } else { 0 };
     }
 }
 

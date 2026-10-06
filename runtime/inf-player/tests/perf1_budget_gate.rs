@@ -386,3 +386,140 @@ fn a_rung_switch_at_its_distance_moves_almost_nothing_at_1080p() {
     }
     assert!(measured >= 2, "only {measured} rung switches were measured");
 }
+
+/// **THE CATCH-UP SPIRAL IS CAPPED** (the PERF1 audit, priority a').
+///
+/// A windowed frame runs as many fixed steps as its wall time owes. On the
+/// island a step costs ~13-17 ms, so a slow frame owed more steps, the extra
+/// steps made it slower still, and the loop sat at `FixedStep`'s default cap
+/// of eight: measured in the shipped player's own window at noon, 7.8 steps a
+/// frame over the run and an interval of 147 ms (p50). The cap is now
+/// [`WINDOWED_MAX_CATCH_UP_STEPS`] -- two -- and the backlog past it is
+/// DROPPED, so under overload the simulation runs slower than the wall clock
+/// instead of the frame dying (measured: 63.9 ms p50 on the same run).
+///
+/// The arms: the constant is at most three; a half-second frame runs exactly
+/// the cap; the frame after it, of one step's length, runs ONE step (the
+/// surplus was dropped, not banked). And the source: the one windowed loop
+/// calls `run_frame` once, and the sim's stepper is built from the constant.
+#[test]
+fn a_slow_windowed_frame_runs_at_most_the_catch_up_cap_and_drops_the_rest() {
+    use inf_player::runtime_sim::{RuntimeInput, RuntimeSim, WINDOWED_MAX_CATCH_UP_STEPS};
+    assert!(
+        (1..=3).contains(&WINDOWED_MAX_CATCH_UP_STEPS),
+        "the catch-up cap is {WINDOWED_MAX_CATCH_UP_STEPS}: above three the island's step cost spirals the window again"
+    );
+    let mut sim = RuntimeSim::new(
+        inf_ecs::EcsWorld::new(),
+        Vec::new(),
+        glam::DVec2::new(0.0, -9.81),
+        60.0,
+    );
+    let before = sim.steps();
+    let ran = sim.run_frame(0.5, RuntimeInput::default());
+    assert_eq!(
+        ran, WINDOWED_MAX_CATCH_UP_STEPS,
+        "a half-second frame owes thirty steps and must run the cap"
+    );
+    assert_eq!(sim.steps() - before, u64::from(ran));
+    let next = sim.run_frame(1.0 / 60.0, RuntimeInput::default());
+    assert_eq!(
+        next, 1,
+        "the backlog past the cap was banked, not dropped: the next frame ran {next} steps"
+    );
+    let window = include_str!("../src/window.rs");
+    assert_eq!(
+        window.matches(".run_frame(").count(),
+        1,
+        "the windowed loop must reach the sim through ONE run_frame call"
+    );
+    let rs = include_str!("../src/runtime_sim.rs");
+    assert!(
+        rs.contains("FixedStep::with_max_steps(1.0 / hz, WINDOWED_MAX_CATCH_UP_STEPS)"),
+        "the sim's stepper is not built from WINDOWED_MAX_CATCH_UP_STEPS"
+    );
+    println!(
+        "PERF1 audit (a'): cap {WINDOWED_MAX_CATCH_UP_STEPS}; a 0.5 s frame ran {ran}, the next 1/60 s frame ran {next}"
+    );
+}
+
+/// **A WEARER AND WHAT IT WEARS DRAW ONE RUNG** (the PERF1 audit, e').
+///
+/// A garment is its own `SkinnedInstance` on the wearer's transform and the
+/// wearer's palette `Arc` (wave OUTFIT1). Each used to pick its rung from its
+/// own mesh's error, so a body could take its coarse rung under a jacket still
+/// drawn whole. Two bodies of different density stand in for a body and a
+/// garment: at a distance where, planned ALONE, they choose different rungs,
+/// planned TOGETHER (one palette, one translation) they choose the same one --
+/// the finer. The control: the same two with separate palettes keep their own
+/// rungs (crowd agents in one pose share a palette and stand metres apart, so
+/// the grouping must not reach past the wearer).
+#[test]
+fn a_wearer_and_its_wearables_draw_the_same_rung_in_the_same_frame() {
+    let a = Arc::new(inf_player::skinned::skinned_mesh_data(&body(96)).expect("skinned"));
+    let b = Arc::new(inf_player::skinned::skinned_mesh_data(&body(48)).expect("skinned"));
+    assert!(
+        !a.lods.is_empty() && !b.lods.is_empty(),
+        "both stand-ins need rungs"
+    );
+    let view = SkinnedLodView::of(&view_1080p()).expect("a perspective view");
+    let alone = |mesh: &Arc<SkinnedMeshData>, at: DVec3| {
+        let scene = RenderScene {
+            skinned_meshes: vec![mesh.clone()],
+            skinned: vec![instance(at)],
+            ..Default::default()
+        };
+        inf_render::plan_skinned_batches_at(&scene, Some(view)).runs[0].lod
+    };
+    let together = |at: DVec3, shared: bool| {
+        let body = instance(at);
+        let mut worn = instance(at);
+        worn.mesh = 1;
+        if shared {
+            worn.palette = body.palette.clone();
+        }
+        let scene = RenderScene {
+            skinned_meshes: vec![a.clone(), b.clone()],
+            skinned: vec![body, worn],
+            ..Default::default()
+        };
+        let plan = inf_render::plan_skinned_batches_at(&scene, Some(view));
+        let of = |mesh: usize| {
+            plan.runs
+                .iter()
+                .find(|r| r.mesh == mesh)
+                .expect("a run")
+                .lod
+        };
+        (of(0), of(1))
+    };
+    let mut differing = 0usize;
+    for step in 0..1600 {
+        let at = DVec3::new(0.0, 0.0, -(1.0 + f64::from(step) * 0.375));
+        let (ra, rb) = (alone(&a, at), alone(&b, at));
+        let (ta, tb) = together(at, true);
+        assert_eq!(
+            ta, tb,
+            "at {:.1} m the wearer drew rung {ta} and its wearable rung {tb}",
+            -at.z
+        );
+        assert_eq!(
+            ta,
+            ra.min(rb),
+            "the agreed rung is not the finer of the two"
+        );
+        if ra != rb {
+            differing += 1;
+            assert_eq!(
+                together(at, false),
+                (ra, rb),
+                "two instances that do NOT share a wearer were made to agree"
+            );
+        }
+    }
+    println!("PERF1 audit (e'): {differing} of 1600 distances where the two would have drawn different rungs; all agreed");
+    assert!(
+        differing > 10,
+        "the stand-ins never chose different rungs alone ({differing}) -- the arm is vacuous"
+    );
+}

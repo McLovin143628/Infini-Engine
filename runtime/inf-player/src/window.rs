@@ -1394,8 +1394,11 @@ impl PlayerApp {
         }
         self.set_pointer_capture(self.wanted_pointer_capture());
         // …and the demo loop's own instrument, which is inert in every session
-        // that did not ask for it.
-        if self.pie.is_some() {
+        // that did not ask for it. A standalone player the loop launched with
+        // its hero log asked for it too (the PERF1 audit): the shipped window
+        // is the third host the frame counter is read in, and it has to walk
+        // the same walk at the same hour as the two Play windows.
+        if self.pie.is_some() || self.hero_log.enabled() {
             let frame = self.sim.steps();
             self.hero_log.tick(&self.sim, frame, dt);
             // …and the loop's one-shot placement, whose whole job is to let a
@@ -1432,14 +1435,17 @@ impl PlayerApp {
         // PIE pause freezes the sim but keeps rendering the last frame; so does
         // a preview's hold on a boarding beat (`INF_PIE_BOARD_HOLD`).
         let audio_held = self.pie.is_some() && self.audio_hold.holding();
+        let stepping = std::time::Instant::now();
+        let mut ran = 0u32;
         if !self.paused && !(self.pie.is_some() && self.board_hold.holding()) && !audio_held {
             let sim_dt = if self.pie.is_some() {
                 dt * self.time_scale
             } else {
                 dt
             };
-            self.sim.run_frame(sim_dt, held);
+            ran = self.sim.run_frame(sim_dt, held);
         }
+        let step_ms = stepping.elapsed().as_secs_f64() * 1000.0;
 
         let alpha = self.sim.alpha();
         let view = self.view();
@@ -1577,7 +1583,11 @@ impl PlayerApp {
         // for it: the mean interval over the window and its p95, so a frame
         // photographed is a frame whose cost is on it.
         if let Some(fc) = self.frame_counter.as_mut() {
-            fc.push(dt);
+            fc.push_frame(crate::ui::FrameSample {
+                dt,
+                steps: ran,
+                step_ms,
+            });
             let text = fc.text();
             self.ui.frame_counter(&text);
         }

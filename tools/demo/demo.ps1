@@ -124,6 +124,16 @@ param(
     # board, a burnout, a drive with the HUD up, a kerb and a crash, every frame
     # triggered on a hero.csv column. `-AudioOnly`'s shape.
     [switch]$CertOnly,
+    # **THE FRAME-RATE LEG ON ITS OWN** (the PERF1 audit). Runs `Invoke-PerfLeg`:
+    # a scripted 60 s walk and a 60 s drive (or a 60 s run when no car is
+    # boarded), the player's frame counter logging every frame to `fps.log`
+    # (`INF_FPS_LOG`) and the leg's spans, in seconds since the player booted,
+    # to `perf-legs.txt`. `-AudioOnly`'s shape.
+    [switch]$PerfOnly,
+    # **A COOKED PACK TO RUN WITHOUT THE EDITOR** (the PERF1 audit): the
+    # shipped player is launched on this pack directly (`--pack`), with the same
+    # preview doors and the same legs; no editor, no Play button.
+    [string]$StandalonePack = "",
     # **THE WEAPON FRAMES ON THEIR OWN** (the VEH3f.2a audit). One frame of every
     # `-ArmHero` id in a LIVING hero's hand, straight after the player is up and
     # before anything is fired -- the wave's full session lost them because the
@@ -575,6 +585,8 @@ else { Remove-Item env:INF_PIE_HOUR -ErrorAction Ignore }
 # Wave PERF1: every frame the loop photographs carries its cost -- the player's
 # on-screen frame counter (top-right: mean ms, fps, p95 over the last second).
 $env:INF_FPS_HUD = "1"
+# …and every frame of the session to a log the PERF1 audit reads p50 / p95 from.
+$env:INF_FPS_LOG = (Join-Path $OutDir "fps.log")
 # WPN2a: the WHOLE list goes to the player, which puts every one of them in the
 # hero's bag and equips the first. The loop cycles the rest in with the SCROLL
 # WHEEL -- the shipped `weapon_switch` verb -- so one session photographs one
@@ -622,7 +634,13 @@ if ($TimeScale -lt 1.0) { $env:INF_PIE_TIME_SCALE = "$TimeScale"; Say "time scal
 else { Remove-Item env:INF_PIE_TIME_SCALE -ErrorAction Ignore }
 # The boarding leg's stretch: its timeouts and its key presses, by 1/scale.
 $ts = [math]::Max(1.0, 1.0 / [math]::Max(0.05, $TimeScale))
-$proc = Start-Process -FilePath $exe -WorkingDirectory $release -PassThru
+if ($StandalonePack -eq "") {
+# Wave PERF1 audit: the editor's stdout carries its `tracing` lines (the PCG
+# stream's per-tick cost among them), and a release editor has no console to
+# print them to -- so the loop keeps them beside the frames.
+$proc = Start-Process -FilePath $exe -WorkingDirectory $release -PassThru `
+    -RedirectStandardOutput (Join-Path $OutDir "studio-stdout.log") `
+    -RedirectStandardError (Join-Path $OutDir "studio-stderr.log")
 Say "launched pid $($proc.Id); waiting up to $BootWaitS s for the shell"
 
 $booted = $false
@@ -763,6 +781,19 @@ if (-not $player) {
     & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "02-no-player.png") | ForEach-Object { Say $_ }
     if (-not $KeepOpen) { Stop-Process -Id $proc.Id -Force -ErrorAction Ignore }
     exit 5
+}
+} else {
+    # **THE SHIPPED PLAYER ON ITS OWN** (the PERF1 audit): no editor, the cooked
+    # pack, the same environment doors, the same legs. `$proc` is the player.
+    Say "STANDALONE: the shipped player on $StandalonePack -- no editor"
+    $proc = Start-Process -FilePath $playerExe -WorkingDirectory $release -PassThru `
+        -ArgumentList @("--pack", $StandalonePack) `
+        -RedirectStandardOutput (Join-Path $OutDir "player-stdout.log") `
+        -RedirectStandardError (Join-Path $OutDir "player-stderr.log")
+    $player = $proc
+    Start-Sleep -Seconds 5
+    if ($proc.HasExited) { Say "PLAYER EXITED with $($proc.ExitCode)"; exit 4 }
+    Say "player pid $($player.Id)"
 }
 
 # A console window is the defect this wave closed; look for one belonging to
@@ -1695,7 +1726,73 @@ if ($AudioOnly) {
     Say "AUDIO ONLY (-AudioOnly): the audio leg, and nothing else"
     Invoke-Veh3eLeg
 }
-if (-not $BoardingOnly -and -not $AudioOnly -and -not $RosterOnly -and -not $GalleryOnly -and -not $AirOnly -and -not $WeaponsOnly -and -not $CertOnly) {
+# **THE FRAME-RATE LEG** (the PERF1 audit). The same keys every run, so a
+# before and an after are the same walk and the same drive. The spans are in
+# the player's own clock (seconds since its process started), which is the
+# clock `fps.log`'s `t=` is written in.
+function Invoke-PerfLeg {
+    $legs = Join-Path $OutDir "perf-legs.txt"
+    $born = $player.StartTime
+    $now = { ((Get-Date) - $born).TotalSeconds }
+    Restore-PlayerFocus "before the perf leg"
+    Stand-Up "before the perf leg" | Out-Null
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "200-perf-start.png") | ForEach-Object { Say $_ }
+    Say "PERF: the walk -- 60 s, W held, the look swept left and right"
+    $a = & $now
+    [InfInput]::Down(0x11)
+    for ($i = 0; $i -lt 30; $i++) {
+        $dx = if ((($i / 5) % 2) -lt 1) { 40 } else { -40 }
+        for ($j = 0; $j -lt 10; $j++) { [InfInput]::Look($dx, 0); Start-Sleep -Milliseconds 200 }
+        if ($i -eq 15) {
+            & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "201-perf-walk.png") | ForEach-Object { Say $_ }
+        }
+    }
+    [InfInput]::Up(0x11)
+    $b = & $now
+    Add-Content -Path $legs -Value ("walk {0:F2} {1:F2}" -f $a, $b)
+    Restore-PlayerFocus "before the drive"
+    $isRow = { param($c) $c.Count -gt 71 }
+    $began = $false
+    for ($k = 0; $k -lt 20 -and -not $began; $k++) {
+        [InfInput]::Down(0x12); Start-Sleep -Milliseconds 70; [InfInput]::Up(0x12)   # E
+        $began = @(Wait-ForHero -Csv $heroCsv -What "the boarding begins" -TimeoutS 1.0 `
+            -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^(locked|unlocking|opening)") })[-1]
+        if (-not $began -and $k -ge 3) {
+            if (($k % 3) -eq 0) {
+                for ($i = 0; $i -lt 14; $i++) { [InfInput]::Look(15, 0); Start-Sleep -Milliseconds 16 }
+            }
+            [InfInput]::Down(0x11); Start-Sleep -Milliseconds 300; [InfInput]::Up(0x11)   # W
+        }
+    }
+    $driving = $false
+    if ($began) {
+        $driving = @(Wait-ForHero -Csv $heroCsv -What "at the wheel" -TimeoutS 30.0 `
+            -Predicate { param($c) (& $isRow $c) -and ($c[54] -match "^driving") })[-1]
+    }
+    $kind = if ($driving) { "drive" } else { "run" }
+    Say "PERF: the $kind -- 60 s"
+    $a = & $now
+    [InfInput]::Down(0x11)
+    if (-not $driving) { [InfInput]::Down(0x2A) }   # Shift: a run when no car was boarded
+    for ($i = 0; $i -lt 30; $i++) {
+        $steer = if ((($i / 4) % 2) -lt 1) { 0x1E } else { 0x20 }   # A, D
+        if ($driving) { [InfInput]::Down($steer); Start-Sleep -Milliseconds 250; [InfInput]::Up($steer); Start-Sleep -Milliseconds 1750 }
+        else { for ($j = 0; $j -lt 10; $j++) { [InfInput]::Look(30, 0); Start-Sleep -Milliseconds 200 } }
+        if ($i -eq 15) {
+            & powershell -NoProfile -ExecutionPolicy Bypass -File $shot -Out (Join-Path $OutDir "202-perf-$kind.png") | ForEach-Object { Say $_ }
+        }
+    }
+    if (-not $driving) { [InfInput]::Up(0x2A) }
+    [InfInput]::Up(0x11)
+    $b = & $now
+    Add-Content -Path $legs -Value ("{0} {1:F2} {2:F2}" -f $kind, $a, $b)
+    Say "PERF: legs written to $legs"
+}
+if ($PerfOnly) {
+    Say "PERF ONLY (-PerfOnly): the frame-rate leg, and nothing else"
+    Invoke-PerfLeg
+}
+if (-not $BoardingOnly -and -not $AudioOnly -and -not $RosterOnly -and -not $GalleryOnly -and -not $AirOnly -and -not $WeaponsOnly -and -not $CertOnly -and -not $PerfOnly) {
 
 # ── 5a. THE ISLAND'S OWN SIDEARM, with no environment variable ───────────────
 #
@@ -3406,7 +3503,7 @@ if (Test-Path $heroCsv) {
 Say ("windows now: " + ((Get-Process | Where-Object { $_.MainWindowTitle -ne "" -and ($_.ProcessName -like "inf*") } |
     ForEach-Object { "$($_.ProcessName)[$($_.Id)] '$($_.MainWindowTitle)'" }) -join " | "))
 
-if (-not $BoardingOnly -and -not $AudioOnly -and -not $RosterOnly -and -not $GalleryOnly -and -not $AirOnly -and -not $WeaponsOnly -and -not $CertOnly) {
+if (-not $BoardingOnly -and -not $AudioOnly -and -not $RosterOnly -and -not $GalleryOnly -and -not $AirOnly -and -not $WeaponsOnly -and -not $CertOnly -and -not $PerfOnly) {
 # ── 6z. WAVE VEH3a — THE TYRES, AND WHAT THE GROUND UNDER THEM IS ────────────
 #
 # Four frames, every one TRIGGERED on `hero.csv`'s eight new columns rather than

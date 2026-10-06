@@ -1099,8 +1099,17 @@ pub const SHIPPING_FRAME_P99_CEILING_MS: f64 = 46.0;
 /// switched off is +17 ms at 21:00 -- trips it; machine-to-machine drift
 /// does not. "Serialized" is the instrument's frame --
 /// CPU then GPU, waited on -- which is the instrument's headline and the
-/// number every prior island row was taken in; the shipped player overlaps
-/// the two halves and runs faster than this (the instrument's PIPELINED row).
+/// number every prior island row was taken in.
+///
+/// **It is not the frame the player sees** (the PERF1 audit). The instrument
+/// runs ONE fixed step per frame; the shipped window runs as many as the wall
+/// clock owes (up to `runtime_sim::WINDOWED_MAX_CATCH_UP_STEPS`), and an
+/// island step costs ~13-17 ms in the window, so a window slower than 60 fps
+/// pays two steps a frame. Measured on the window's own counter at noon after
+/// the audit's catch-up cap: walk p50 ~55 ms, run ~64 ms, against this
+/// instrument's 42. The instrument's PIPELINED row (one step, one frame in
+/// flight) is therefore a PROJECTION of a window that steps once a frame, not
+/// a measurement of the shipped one.
 ///
 /// **RATCHET RULE (§8): this constant may only ever DECREASE.**
 pub const ISLAND_FRAME_CEILING_MS: f64 = 95.0;
