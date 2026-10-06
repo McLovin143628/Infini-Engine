@@ -353,7 +353,18 @@ fn vsm_shadow(world_pos: vec3<f32>, n: vec3<f32>, slot: u32) -> f32 {
         return 1.0;
     }
     let level0 = vsm_justified_level(texel0, pixel_world, levels);
-    let offset_m = VSM_NORMAL_BIAS_TEXELS * texel0 * exp2(f32(level0));
+    // A LOCAL light's normal offset grows with the receiver's slope (audit
+    // PAR0b): its slope bias is capped at `VSM_LOCAL_MAX_BIAS_M` so it can
+    // never outgrow a wall, and a grazing receiver past the cap would acne
+    // (the stripes `golden_vsm_point` re-blessed); the offset lifts it along
+    // its OWN normal instead, which carries a pavement up, not through the
+    // wall beside it. MIRROR: `vsm_receiver::vsm_receiver_site`.
+    var offset_scale = 1.0;
+    if (!ortho) {
+        let ndl0 = clamp(dot(n, to_light), 0.0, 1.0);
+        offset_scale = 1.0 + min(sqrt(max(1.0 - ndl0 * ndl0, 0.0)) / max(ndl0, 0.05), VSM_MAX_SLOPE);
+    }
+    let offset_m = VSM_NORMAL_BIAS_TEXELS * texel0 * exp2(f32(level0)) * offset_scale;
     let clip = p.view_proj * vec4<f32>(world_pos + n * offset_m, 1.0);
     if (clip.w <= 0.0) {
         return 1.0;

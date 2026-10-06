@@ -2174,7 +2174,11 @@ fn the_golden_set_is_pinned_and_additive_after_phase_28() {
     // (`git diff e2577bd0 -- crates/inf-render/tests/goldens` lists three
     // additions and nothing else).
     // PAR0b: four added, eight re-blessed with their causes (the ledger).
-    const GOLDEN_SET_DIGEST: &str = "cdd25e5377e2b85f1439d4c48ed216a7";
+    // Audit PAR0b: three re-blessed, none added (78 stays) -- `venue_interior`
+    // (the GI proxies: the pole a box, not a ball), `vsm_point` (the local
+    // light's slope-scaled normal offset retires the wave's acne stripes) and
+    // `par0_window_night` (the same offset, mean 0.0009); pairs in the ledger.
+    const GOLDEN_SET_DIGEST: &str = "22d7395bfbb846452d233f6a2dd2ab48";
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")

@@ -695,7 +695,15 @@ pub fn vsm_receiver_site(
         return None;
     }
     let level0 = vsm_justified_level(texel0, pixel_world, levels);
-    let offset_m = VSM_NORMAL_BIAS_TEXELS * texel0 * (1u64 << level0.min(62)) as f32;
+    // A local light's offset grows with the slope (audit PAR0b): MIRROR of
+    // `offset_scale` in `vsm_receive.wgsl`.
+    let offset_scale = if ortho {
+        1.0
+    } else {
+        let ndl0 = normal.dot(to_light).clamp(0.0, 1.0);
+        1.0 + ((1.0 - ndl0 * ndl0).max(0.0).sqrt() / ndl0.max(0.05)).min(VSM_MAX_SLOPE)
+    };
+    let offset_m = VSM_NORMAL_BIAS_TEXELS * texel0 * (1u64 << level0.min(62)) as f32 * offset_scale;
     let offset_pos = world + normal * offset_m;
     let clip = vp * offset_pos.extend(1.0);
     if clip.w <= 0.0 {
