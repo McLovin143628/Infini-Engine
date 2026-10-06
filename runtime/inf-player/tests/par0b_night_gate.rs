@@ -13,6 +13,7 @@
 //! | `a_glazed_room_reads_within_ten_percent_of_the_unglazed` | floor p50 behind a glazed vs an open window | (passed for the wrong reason: both read the sky) |
 //! | `a_porch_that_sees_sky_is_not_zeroed_by_a_buried_probe` | porch floor vs open ground ambient | — |
 //! | `the_open_air_does_not_darken_under_probe_visibility` | an open courtyard's walls, visibility on vs off | n/a |
+//! | `a_face_in_shade_at_noon_sees_the_sky_through_the_islands_geometry` (audit) | a shaded wall vs its sunlit face, a box in shade, a pane over a dark panel, on the island's plane + scattered-cube street | no — 0 / 255 (the sphere/cube proxies filled the volume) |
 
 use glam::{DVec3, Quat, Vec3};
 use inf_math::FloatingOrigin;
@@ -612,6 +613,148 @@ fn the_open_air_does_not_darken_under_probe_visibility() {
             "the open air darkened at {p:?}: {a:.2} with visibility vs {b:.2} without"
         );
     }
+}
+
+/// A noon street as the island builds one (audit PAR0b, priority a'): the
+/// pavement a rigid PLANE whose y scale is 10 (the island's pavements and
+/// roads are planes scaled that way), a 24 x 9 m building face of 0.3 m wall
+/// panels as a scattered CUBE batch with per-axis scale, a person-sized box in
+/// the wall's shadow, and optionally a dark panel with a glass pane in front
+/// of it. The sun (from +Z) lights the wall's +Z face; its -Z face is in shade.
+fn noon_street(pane: bool) -> RenderScene {
+    let mut s = sky_scene(true);
+    let mut pave = MeshInstance::lit(
+        DVec3::new(0.0, -0.29, 0.0),
+        Quat::IDENTITY,
+        Vec3::new(60.0, 10.0, 60.0),
+        [0.55, 0.55, 0.53, 1.0],
+        70,
+    );
+    pave.mesh = inf_render::PrimMesh::Plane;
+    pave.roughness = 1.0;
+    s.instances.push(pave);
+    let anchor = DVec3::new(0.0, 0.0, 0.0);
+    let panels: Vec<inf_render::ScatterInstance> = (0..4)
+        .map(|k| inf_render::ScatterInstance {
+            position: DVec3::new(-9.0 + 6.0 * f64::from(k), 4.5, 0.0),
+            rotation: Quat::IDENTITY,
+            scale: Vec3::new(6.0, 9.0, 0.3),
+            color: [0.7, 0.7, 0.7, 1.0],
+        })
+        .collect();
+    let mut wall = inf_render::ScatterBatch::lit(
+        std::sync::Arc::new(inf_render::ScatterData::build(
+            inf_render::PrimMesh::Cube,
+            anchor,
+            panels,
+        )),
+        anchor,
+        0.0,
+        71,
+    );
+    wall.roughness = 1.0;
+    s.scatter.push(wall);
+    // A person-sized box in the wall's shadow.
+    slab(
+        &mut s,
+        72,
+        DVec3::new(2.75, -0.3, -2.15),
+        DVec3::new(3.25, 1.5, -1.85),
+    );
+    // A dark panel (an unlit room's back wall, albedo 0.02) ...
+    let mut back = MeshInstance::lit(
+        DVec3::new(-4.0, 1.2, -1.0),
+        Quat::IDENTITY,
+        Vec3::new(2.0, 2.0, 0.2),
+        [0.02, 0.02, 0.02, 1.0],
+        73,
+    );
+    back.roughness = 1.0;
+    s.instances.push(back);
+    // ... behind a glass pane, seen from the shaded street.
+    if pane {
+        let at = DVec3::new(-4.0, 1.2, -1.6);
+        let leaf = inf_render::ScatterInstance {
+            position: at,
+            rotation: Quat::IDENTITY,
+            scale: Vec3::new(2.4, 2.4, 0.03),
+            color: [0.9, 0.9, 0.9, 1.0],
+        };
+        let mut b = inf_render::ScatterBatch::lit(
+            std::sync::Arc::new(inf_render::ScatterData::build(
+                inf_render::PrimMesh::Cube,
+                at,
+                vec![leaf],
+            )),
+            at,
+            0.05,
+            74,
+        );
+        b.transmission = 0.85;
+        b.casts_shadows = false;
+        s.scatter.push(b);
+    }
+    s.mark_dirty();
+    s
+}
+
+/// **A FACE IN SHADE AT NOON SEES THE SKY** (audit PAR0b, priority a').
+///
+/// The shipped island at noon drew every shaded facade, car and pedestrian
+/// within 20 m of the camera BLACK: the GI voxelizer staged scattered wall
+/// panels and vgeom meshlets as bounding SPHERES and planes as 10 m-tall
+/// CUBES, the conservative half-voxel dilation joined them, and the measured
+/// volume at the strip kerb was 262 144 of 262 144 voxels solid — every probe
+/// enclosed, the probe field subtracting the whole sky. Here, on that street:
+///
+/// * the wall's shaded face reads between **5 % and 40 %** of its sunlit face
+///   in LINEAR light (a clear sky delivers roughly a tenth to a fifth of the
+///   direct sun on a vertical face; the floor is half of that, the ceiling
+///   admits the sunlit pavement's bounce; measured 0.267) — and never under
+///   12 / 255;
+/// * the person-sized box in the wall's shadow reads above **12 / 255**;
+/// * the glass pane in front of the dark panel reads BRIGHTER than the panel
+///   seen without it — it reflects the sky by fresnel.
+///
+/// Mutations (audit PAR0b): planes staged as unit cubes again, or scattered
+/// cubes as their bounding spheres — the shaded face and the box fall to 0,
+/// RED.
+#[test]
+fn a_face_in_shade_at_noon_sees_the_sky_through_the_islands_geometry() {
+    let Some(gpu) = gpu() else { return };
+    let shade = look(DVec3::new(0.0, 1.7, -12.0), DVec3::new(0.0, 2.5, 0.0));
+    let sunny = look(DVec3::new(0.0, 1.7, 12.0), DVec3::new(0.0, 2.5, 0.0));
+    let s = noon_street(false);
+    let a = render(&gpu, &s, &shade, gi_settings(true));
+    let b = render(&gpu, &s, &sunny, gi_settings(true));
+    let glazed = render(&gpu, &noon_street(true), &shade, gi_settings(true));
+    dump("noon_street_shade", &a);
+    dump("noon_street_sunny", &b);
+    dump("noon_street_glazed", &glazed);
+    let shaded = patch_at(&a, &shade, DVec3::new(6.0, 4.0, -0.15));
+    let lit = patch_at(&b, &sunny, DVec3::new(6.0, 4.0, 0.15));
+    let person = patch_at(&a, &shade, DVec3::new(3.0, 0.9, -2.15));
+    let panel = patch_at(&a, &shade, DVec3::new(-4.0, 1.2, -1.1));
+    let pane = patch_at(&glazed, &shade, DVec3::new(-4.0, 1.2, -1.1));
+    // In LINEAR light: the frame is sRGB-encoded (2.2 is close enough here).
+    let lin = |c: f64| (c / 255.0).powf(2.2);
+    let ratio = lin(shaded) / lin(lit.max(1.0));
+    println!(
+        "PAR0b NOON STREET: shaded face {shaded:.2}, sunlit face {lit:.2} (linear ratio {ratio:.3}); person in shade {person:.2}; dark panel {panel:.2}, behind glass {pane:.2}"
+    );
+    assert!(lit > 60.0, "the sunlit face reads only {lit:.2}");
+    assert!(
+        (0.05..=0.4).contains(&ratio) && shaded >= 12.0,
+        "the shaded face reads {shaded:.2} against the sunlit {lit:.2} (ratio {ratio:.3}): outside the sky's band"
+    );
+    assert!(
+        person >= 12.0,
+        "a person in shade at noon reads {person:.2}"
+    );
+    assert!(
+        pane > panel + 0.5,
+        "the pane at noon reads {pane:.2}, not brighter than the dark panel behind it ({panel:.2})"
+    );
 }
 
 /// The same sealed room at night (no sun), lit by one downlight: a spot at

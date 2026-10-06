@@ -3831,6 +3831,20 @@ fn shipped_frame(
         let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
     }
     let img = target.read_rgba(gpu).expect("readback");
+    // `PAR0B_GI_DUMP=<dir>` writes the GI volume and probe records of every frame
+    // (audit PAR0b: the census that found the volume 100 % solid).
+    if let Some(dir) = std::env::var_os("PAR0B_GI_DUMP").map(PathBuf::from) {
+        let _ = std::fs::create_dir_all(&dir);
+        let r = renderer.gi_resources();
+        let e = view.eye_world;
+        let tag = format!(
+            "{:.0}_{:.0}_{:.0}_{:.2}",
+            e.x, e.z, view.forward.z, view.forward.x
+        );
+        let _ = std::fs::write(dir.join(format!("vox-{tag}.bin")), r.read_voxels(gpu));
+        let _ = std::fs::write(dir.join(format!("sh-{tag}.bin")), r.read_sh(gpu));
+        println!("GI AUDIT {tag}: {:?}", renderer.gi_audit());
+    }
     let exposure = renderer.read_exposure(gpu).expect("exposure readback");
     (img, exposure, scene)
 }
@@ -3926,6 +3940,10 @@ fn the_shipped_island_by_the_hour() {
     // renders the same frames with it off.
     if std::env::var_os("PAR0B_NO_VISIBILITY").is_some() {
         shipped.gi.probe_visibility = false;
+    }
+    // ... and `PAR0B_NO_GI` with the GI off (audit PAR0b: the black-facade A/B).
+    if std::env::var_os("PAR0B_NO_GI").is_some() {
+        shipped.gi.enabled = false;
     }
     println!(
         "=== THE SHIPPED ISLAND BY THE HOUR on {} (tier {tier:?}): exposure {:?}, vsm {}, gi {} ===",

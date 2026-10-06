@@ -73,7 +73,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use glam::{Mat4, Quat, Vec3};
+use glam::{DVec3, Mat4, Quat, Vec3};
 
 use crate::gi::{
     bin_macro_cells, intersects_volume, priority_order, sample_terrain_column_in, sun_bucket,
@@ -517,7 +517,7 @@ pub struct GiNode {
     /// **content-addressed**, so re-importing a mesh mints a new key and the
     /// superseded entry would accumulate for the life of the session — verbatim
     /// the reasoning P18.3 used to give `ClassicVgeomNode` its `retain_live`.
-    meshlet_spheres: HashMap<u128, Arc<Vec<(Vec3, f32)>>>,
+    meshlet_spheres: HashMap<u128, Arc<Vec<MeshletProxy>>>,
     /// The deterministic amortization cursor + the key that resets it.
     schedule: ProbeSchedule,
     sweep_key: Option<GiSweepKey>,
@@ -794,7 +794,7 @@ impl GiNode {
     /// so this is both cheaper and reproducible. What it costs is fidelity: a
     /// character-sized prop voxelizes as its coarse cluster spheres, which at the
     /// GI volume's 0.6 m voxels is at or below the grid's own resolution anyway.
-    fn meshlet_spheres_for(&mut self, asset: &crate::scene::VgeomAsset) -> Arc<Vec<(Vec3, f32)>> {
+    fn meshlet_spheres_for(&mut self, asset: &crate::scene::VgeomAsset) -> Arc<Vec<MeshletProxy>> {
         if let Some(cached) = self.meshlet_spheres.get(&asset.id) {
             return cached.clone();
         }
@@ -810,7 +810,22 @@ impl GiNode {
                 let coarsest = recs.iter().map(|r| r.lod_level).max().unwrap_or(0);
                 recs.iter()
                     .filter(|r| r.lod_level == coarsest)
-                    .map(|r| (Vec3::from(r.center), r.radius))
+                    .map(|r| {
+                        let aabb = meshlet_aabb(&s, r);
+                        let wide = aabb.is_some_and(|(lo, hi)| {
+                            (hi - lo).max_element() > GI_MESHLET_TRIANGLE_SPAN_M
+                        });
+                        MeshletProxy {
+                            center: Vec3::from(r.center),
+                            radius: r.radius,
+                            aabb,
+                            tris: if wide {
+                                meshlet_triangles(&s, r)
+                            } else {
+                                Vec::new()
+                            },
+                        }
+                    })
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
@@ -818,7 +833,12 @@ impl GiNode {
         // to the whole-mesh bounding sphere from the header, which needs no page.
         let spheres = if spheres.is_empty() {
             let (c, r) = asset.bounds();
-            vec![(Vec3::from(c), r)]
+            vec![MeshletProxy {
+                center: Vec3::from(c),
+                radius: r,
+                aabb: None,
+                tris: Vec::new(),
+            }]
         } else {
             spheres
         };
@@ -843,10 +863,181 @@ fn box_radius(m: &Mat4) -> f32 {
         + m.z_axis.truncate().length())
 }
 
+/// A vgeom root meshlet's GI proxy (audit PAR0b): its bounding sphere and,
+/// when its vertices could be read, its mesh-space box.
+#[derive(Debug, Clone)]
+struct MeshletProxy {
+    center: Vec3,
+    radius: f32,
+    aabb: Option<(Vec3, Vec3)>,
+    /// A meshlet wider than [`GI_MESHLET_TRIANGLE_SPAN_M`]: one thin oriented
+    /// slab per triangle, mesh space (a coarse-LOD road meshlet 100 m across
+    /// is a box 5 m tall over a hill; its triangles are the road).
+    tris: Vec<Mat4>,
+}
+
+/// A root meshlet wider than this (metres, mesh space) voxelizes as its
+/// triangles rather than its box (audit PAR0b). Eight voxels at the default
+/// 40 m volume: a car's meshlets stay boxes, a road's become its surface.
+const GI_MESHLET_TRIANGLE_SPAN_M: f32 = 5.0;
+
+/// One thin oriented slab covering the triangle `a b c`, or `None` for a
+/// degenerate one (audit PAR0b).
+fn triangle_slab(a: Vec3, b: Vec3, c: Vec3) -> Option<Mat4> {
+    let e1 = b - a;
+    let n = e1.cross(c - a);
+    if e1.length_squared() < 1.0e-12 || n.length_squared() < 1.0e-12 {
+        return None;
+    }
+    let u = e1.normalize();
+    let n = n.normalize();
+    let v = n.cross(u);
+    let (mut u0, mut u1, mut v0, mut v1) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+    for p in [b, c] {
+        let d = p - a;
+        u0 = u0.min(d.dot(u));
+        u1 = u1.max(d.dot(u));
+        v0 = v0.min(d.dot(v));
+        v1 = v1.max(d.dot(v));
+    }
+    let du = (u1 - u0).max(1.0e-3);
+    let dv = (v1 - v0).max(1.0e-3);
+    let th = (du.max(dv) * 1.0e-3).max(1.0e-3);
+    let centre = a + u * (0.5 * (u0 + u1)) + v * (0.5 * (v0 + v1));
+    Some(Mat4::from_cols(
+        (u * du).extend(0.0),
+        (n * th).extend(0.0),
+        (v * dv).extend(0.0),
+        centre.extend(1.0),
+    ))
+}
+
+/// The triangles of one root meshlet as slabs, mesh space; empty when the
+/// record points outside its page.
+fn meshlet_triangles(s: &inf_vgeom::VgeomPageSections<'_>, r: &inf_vgeom::MeshletRec) -> Vec<Mat4> {
+    let stride = std::mem::size_of::<inf_vgeom::VgeomVertex>();
+    let vert = |local: u8| -> Option<Vec3> {
+        let at = (r.vertex_offset as usize + local as usize) * 4;
+        let idx = u32::from_le_bytes(s.mlverts.get(at..at + 4)?.try_into().ok()?) as usize;
+        let b = s.vertices.get(idx * stride..idx * stride + 12)?;
+        Some(Vec3::new(
+            f32::from_le_bytes(b[0..4].try_into().ok()?),
+            f32::from_le_bytes(b[4..8].try_into().ok()?),
+            f32::from_le_bytes(b[8..12].try_into().ok()?),
+        ))
+    };
+    let mut out = Vec::new();
+    for t in 0..r.triangle_count as usize {
+        let at = r.triangle_offset as usize + t * 3;
+        let Some(ix) = s.mltris.get(at..at + 3) else {
+            return Vec::new();
+        };
+        let (Some(a), Some(b), Some(c)) = (vert(ix[0]), vert(ix[1]), vert(ix[2])) else {
+            return Vec::new();
+        };
+        if let Some(m) = triangle_slab(a, b, c) {
+            out.push(m);
+        }
+    }
+    out
+}
+
+/// **Flat geometry is not a ball** (audit PAR0b). The voxelizer used to stage
+/// every vgeom meshlet and every scattered instance as its bounding SPHERE. A
+/// coarse-LOD road or pavement meshlet 31 m long is a sphere 15.5 m in radius
+/// centred on the road surface, and a 6 x 3 x 0.3 m wall panel a sphere 3.4 m
+/// in radius: on the shipped island at noon (Harbour City's strip kerb) the
+/// spheres claimed **262 144 of 262 144** voxels, every probe gathered the
+/// inside of a solid and the probe field subtracted the whole sky from every
+/// shaded surface within 20 m of the camera -- the black facades. A box is the
+/// tightest proxy the voxelizer already understands; its thinness is floored
+/// so a perfectly flat meshlet is still a (half-voxel-dilated) slab.
+fn local_box(lo: Vec3, hi: Vec3) -> Mat4 {
+    let floor = ((hi - lo).max_element() * 1.0e-3).max(1.0e-3);
+    let size = (hi - lo).max(Vec3::splat(floor));
+    Mat4::from_scale_rotation_translation(size, Quat::IDENTITY, (lo + hi) * 0.5)
+}
+
+/// The mesh-space bounds of one root meshlet from its own vertices, or `None`
+/// when a record points outside its page (a malformed source keeps its sphere).
+fn meshlet_aabb(
+    s: &inf_vgeom::VgeomPageSections<'_>,
+    r: &inf_vgeom::MeshletRec,
+) -> Option<(Vec3, Vec3)> {
+    let stride = std::mem::size_of::<inf_vgeom::VgeomVertex>();
+    let mut lo = Vec3::splat(f32::INFINITY);
+    let mut hi = Vec3::splat(f32::NEG_INFINITY);
+    for k in 0..r.vertex_count as usize {
+        let at = (r.vertex_offset as usize + k) * 4;
+        let idx = u32::from_le_bytes(s.mlverts.get(at..at + 4)?.try_into().ok()?) as usize;
+        let b = s.vertices.get(idx * stride..idx * stride + 12)?;
+        let p = Vec3::new(
+            f32::from_le_bytes(b[0..4].try_into().ok()?),
+            f32::from_le_bytes(b[4..8].try_into().ok()?),
+            f32::from_le_bytes(b[8..12].try_into().ok()?),
+        );
+        lo = lo.min(p);
+        hi = hi.max(p);
+    }
+    (lo.is_finite() && hi.is_finite()).then_some((lo, hi))
+}
+
+/// A scatter batch's mesh-space box at unit scale (audit PAR0b): the authored
+/// mesh's vertex bounds, or the built-in primitive's unit cube (`Plane` is the
+/// unit square, floored thin by [`local_box`]). `None` for the built-in sphere,
+/// whose proxy is already exact.
+fn scatter_local_box(data: &crate::scene::ScatterData) -> Option<(Vec3, Vec3)> {
+    use crate::primitives::PrimMesh;
+    if let Some(g) = data.geometry.as_ref() {
+        let stride = crate::primitives::SCATTER_PULL_STRIDE;
+        let mut lo = Vec3::splat(f32::INFINITY);
+        let mut hi = Vec3::splat(f32::NEG_INFINITY);
+        for v in g.vertices.chunks_exact(stride) {
+            let p = Vec3::new(v[0], v[1], v[2]);
+            lo = lo.min(p);
+            hi = hi.max(p);
+        }
+        return (lo.is_finite() && hi.is_finite()).then_some((lo, hi));
+    }
+    match data.mesh {
+        PrimMesh::Sphere => None,
+        PrimMesh::Plane => Some((Vec3::new(-0.5, 0.0, -0.5), Vec3::new(0.5, 0.0, 0.5))),
+        PrimMesh::Cube | PrimMesh::Cylinder | PrimMesh::Cone => {
+            Some((Vec3::splat(-0.5), Vec3::splat(0.5)))
+        }
+    }
+}
+
+/// The thinnest box the voxelizer accepts, metres (audit PAR0b): anything
+/// thinner in any direction voxelizes as nothing, like a zero-scale one.
+pub(crate) const GI_MIN_BOX_THICKNESS_M: f32 = 1.0e-6;
+
+/// **Can `gi_voxelize.wgsl` dilate this box?** (audit PAR0b.) The conservative
+/// occupancy grows a box by half a voxel along each of its own axes, reading
+/// the half-voxel in instance-local units as `0.5 · vsize · |row i|` of the
+/// inverse model. A box a hair thinner than `1/f32::MAX^½` on one axis — a
+/// collapsed joint box, a part scaled to nothing to hide it — has a finite
+/// inverse whose row length SQUARED overflows to infinity in the shader, so
+/// its growth is infinite and it claims EVERY voxel of the volume. Measured
+/// on the shipped island at noon before this guard: 262 144 of 262 144 voxels
+/// solid, every probe enclosed, every shaded surface within 20 m of the
+/// camera black. A box thinner than [`GI_MIN_BOX_THICKNESS_M`] in any direction
+/// (an inverse row longer than its reciprocal) is refused here.
+fn box_is_voxelizable(inv: &Mat4) -> bool {
+    let limit = 1.0 / GI_MIN_BOX_THICKNESS_M;
+    (0..3).all(|i| {
+        let r = inv.row(i).truncate().length();
+        r.is_finite() && r <= limit
+    })
+}
+
 fn stage_box(model: Mat4, albedo: [f32; 3], emissive: [f32; 3]) -> Option<Staged> {
     let inv = model.inverse();
     if !inv.is_finite() {
         return None; // a degenerate (zero-scale) transform voxelizes as nothing
+    }
+    if !box_is_voxelizable(&inv) {
+        return None;
     }
     Some(Staged {
         bounds: GiBounds {
@@ -863,6 +1054,9 @@ fn stage_box(model: Mat4, albedo: [f32; 3], emissive: [f32; 3]) -> Option<Staged
 
 fn stage_sphere(center: Vec3, radius: f32, albedo: [f32; 3], emissive: [f32; 3]) -> Option<Staged> {
     if !(radius.is_finite() && radius > 0.0) || !center.is_finite() {
+        return None;
+    }
+    if radius * 2.0 < GI_MIN_BOX_THICKNESS_M {
         return None;
     }
     // The shader's sphere test is `|local| <= 0.5`, so the model scales the unit
@@ -939,8 +1133,17 @@ impl RenderNode for GiNode {
         let mut staged: Vec<Staged> = Vec::new();
 
         // Rigid mesh instances (v1's only source), as oriented boxes.
+        // A PLANE is staged as the flat slab it draws (audit PAR0b): its unit
+        // mesh lies at y = 0 whatever its y scale, and as a unit CUBE the
+        // island's pavement and road planes (scale.y ~10) stood 5 m tall and
+        // filled the street with solid to above the ground floor's windows.
         for inst in &frame.scene.instances {
             let model = origin.model_matrix(inst.translation, inst.rotation, inst.scale);
+            let model = if inst.mesh == crate::primitives::PrimMesh::Plane {
+                model * local_box(Vec3::new(-0.5, 0.0, -0.5), Vec3::new(0.5, 0.0, 0.5))
+            } else {
+                model
+            };
             if let Some(p) = stage_box(
                 model,
                 [inst.color[0], inst.color[1], inst.color[2]],
@@ -1016,7 +1219,7 @@ impl RenderNode for GiNode {
 
         // vgeom instances, as the root page's meshlet spheres.
         if !frame.scene.vgeom_instances.is_empty() {
-            let spheres: HashMap<u128, Arc<Vec<(Vec3, f32)>>> = frame
+            let spheres: HashMap<u128, Arc<Vec<MeshletProxy>>> = frame
                 .scene
                 .vgeom_assets
                 .iter()
@@ -1028,13 +1231,31 @@ impl RenderNode for GiNode {
                 };
                 let model = origin.model_matrix(inst.translation, inst.rotation, inst.scale);
                 let scale = inst.scale.abs().max_element();
-                for (c, r) in list.iter() {
-                    if let Some(p) = stage_sphere(
-                        model.transform_point3(*c),
-                        r * scale,
-                        [inst.color[0], inst.color[1], inst.color[2]],
-                        inst.emissive,
-                    ) {
+                let albedo = [inst.color[0], inst.color[1], inst.color[2]];
+                // An occluder voxelizes as its meshlet's BOX (audit PAR0b); an
+                // emitter keeps the sphere its calibration was made against.
+                let emits = inst.emissive.iter().any(|c| *c > 0.0);
+                for m in list.iter() {
+                    if !emits && !m.tris.is_empty() {
+                        for t in &m.tris {
+                            if let Some(p) = stage_box(model * *t, albedo, inst.emissive) {
+                                staged.push(p);
+                            }
+                        }
+                        continue;
+                    }
+                    let p = match m.aabb {
+                        Some((lo, hi)) if !emits => {
+                            stage_box(model * local_box(lo, hi), albedo, inst.emissive)
+                        }
+                        _ => stage_sphere(
+                            model.transform_point3(m.center),
+                            m.radius * scale,
+                            albedo,
+                            inst.emissive,
+                        ),
+                    };
+                    if let Some(p) = p {
                         staged.push(p);
                     }
                 }
@@ -1097,6 +1318,9 @@ impl RenderNode for GiNode {
             }
             let emissive = batch.emissive;
             let unit_radius = data.bounding_radius();
+            // The batch's mesh-space box (audit PAR0b): an occluder voxelizes
+            // as its oriented box, an emitter keeps its calibrated sphere.
+            let unit_box = if emits { None } else { scatter_local_box(data) };
             let stride = data.len().div_ceil(SCATTER_WALK_CEILING).max(1);
             if stride > 1 {
                 scatter_decimated += 1;
@@ -1135,7 +1359,24 @@ impl RenderNode for GiNode {
                 // raster binds as a uniform; the projectors bucket on the
                 // emission for exactly that reason.
                 let albedo = [inst.color[0], inst.color[1], inst.color[2]];
-                if let Some(p) = stage_sphere(center, radius, albedo, emissive) {
+                let p = match unit_box {
+                    Some((lo, hi)) => {
+                        let world = batch.anchor
+                            + DVec3::new(
+                                f64::from(inst.offset[0]),
+                                f64::from(inst.offset[1]),
+                                f64::from(inst.offset[2]),
+                            );
+                        let full = origin.model_matrix(
+                            world,
+                            Quat::from_array(inst.rotation),
+                            Vec3::new(inst.scale, inst.scale_yz[0], inst.scale_yz[1]),
+                        );
+                        stage_box(full * local_box(lo, hi), albedo, emissive)
+                    }
+                    None => stage_sphere(center, radius, albedo, emissive),
+                };
+                if let Some(p) = p {
                     staged.push(p);
                 }
             }
@@ -1870,6 +2111,50 @@ gi_probes:
     /// The probe march must not gather the sky on a miss any more — that is the
     /// whole no-double-count ruling, and it is one line that a future edit could
     /// put back without any test noticing.
+    /// Audit PAR0b: a box whose inverse row length would overflow in the
+    /// voxelizer's dilation (infinite growth, every voxel claimed) is refused;
+    /// an island wall is not.
+    #[test]
+    fn a_box_too_thin_to_dilate_is_refused_and_a_wall_is_not() {
+        use super::{box_is_voxelizable, stage_box, stage_sphere};
+        use glam::{Mat4, Vec3};
+        let wall = Mat4::from_scale(Vec3::new(6.0, 3.0, 0.3));
+        assert!(box_is_voxelizable(&wall.inverse()));
+        let hair = Mat4::from_scale(Vec3::new(1.0, 1.0e-21, 1.0));
+        assert!(hair.inverse().is_finite(), "the hazard is a FINITE inverse");
+        assert!(!box_is_voxelizable(&hair.inverse()));
+        assert!(stage_box(hair, [1.0; 3], [0.0; 3]).is_none());
+        assert!(stage_sphere(Vec3::ZERO, 1.0e-20, [1.0; 3], [0.0; 3]).is_none());
+    }
+
+    /// Audit PAR0b: a triangle's slab contains its three corners (they map
+    /// inside the unit box) and is thin along the triangle's normal; a flat
+    /// plane's local box is a slab, not a cube.
+    #[test]
+    fn a_triangle_slab_covers_its_triangle_and_a_plane_is_flat() {
+        use super::{local_box, triangle_slab};
+        use glam::{Mat4, Vec3};
+        let (a, b, c) = (
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(30.0, 1.0, 0.0),
+            Vec3::new(5.0, 2.0, 20.0),
+        );
+        let m = triangle_slab(a, b, c).expect("a real triangle");
+        let inv = m.inverse();
+        for p in [a, b, c, (a + b + c) / 3.0] {
+            let l = inv.transform_point3(p);
+            assert!(l.abs().max_element() <= 0.5 + 1.0e-3, "{p:?} -> {l:?}");
+        }
+        assert!(m.y_axis.truncate().length() < 0.05, "the slab is thin");
+        assert!(triangle_slab(a, a, c).is_none());
+        let plane = local_box(Vec3::new(-0.5, 0.0, -0.5), Vec3::new(0.5, 0.0, 0.5));
+        let tall = Mat4::from_scale(Vec3::new(60.0, 10.0, 60.0)) * plane;
+        assert!(
+            tall.y_axis.truncate().length() < 0.05,
+            "a plane scaled y x10 stays flat"
+        );
+    }
+
     #[test]
     fn the_probe_miss_term_is_zero() {
         const PROBES: &str = include_str!("../shaders/gi_probes.wgsl");
