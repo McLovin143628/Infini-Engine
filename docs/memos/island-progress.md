@@ -42284,3 +42284,52 @@ Not attempted, carried with cause: per-asset load / cull distance (clause 4, ~3 
 asset-format window for an authored override), HLOD (clause 5, ~5 d, cook-time block
 proxies), the 288 ms two-cell activation step (clause 6, ~1-2 d), vehicle LOD, the
 parked-car clock x1.058 (under 1 ms — the brief's rule: waits), the lit 64-car row.
+
+## Wave PERF1 — adversarial audit (auditor, 2026-10-06)
+
+**The frame that counts is the one in the player's window.** The audit gave the on-screen
+counter a steps-per-frame field and a per-frame log (`INF_FPS_LOG`), and the demo loop a
+`-PerfOnly` leg (60 s walk, 60 s drive or run) and a `-StandalonePack` host (the shipped
+player on the cooked island, no editor). 1280x720 windows, release, off CI, the cooked
+island `cook-h/perf1`. p50 / p95 of the walk leg, ms (steps a frame):
+
+| host | 12:00 before | 12:00 after | 21:00 before | 21:00 after |
+|---|---|---|---|---|
+| standalone player | 100.3 / 135.4 (6.2) | 55.4 / 65.0 (2.0) | 133.0 / 163.4 (7.2) | 61.1 / 67.0 (2.0) |
+| Play in New Window | 130.6 / 149.7 (7.3) | 55.6 / 62.9 (2.0) | 136.7 / 166.4 (7.6) | 60.2 / 64.5 (2.0) |
+| embedded Play | 112.5 / 137.5 (6.5) | 55.5 / 62.1 (2.0) | 125.5 / 161.2 (7.1) | 59.8 / 63.3 (2.0) |
+
+Second leg (run; the noon window boarded a car and drove): before 145-203 / 159-223 ms at
+8.0 steps a frame, 64-100 % of frames at the cap; after 59.8-64.8 / 62.9-81.8 ms.
+
+- **(a') THE SPIRAL, measured**: an island fixed step costs 12-17 ms in the window, so a
+  slow frame owed more steps and the loop sat at `FixedStep`'s cap of eight.
+  `WINDOWED_MAX_CATCH_UP_STEPS` = 2 in `RuntimeSim::run_frame`, the one door every
+  windowed host reaches; the backlog past it is dropped, so under overload the sim runs at
+  0.49-0.59x the wall clock instead of the frame dying. Replay / PIE == shipping gates step
+  through `step_once` and are untouched (battery).
+- **(b') THE EDITOR'S LOAD**: the player's non-step time is the same in the window as
+  standalone (27.6 vs 28.1 ms at noon after; 29.4 vs 29.6 before); the editor showed as
+  ~10 % dearer steps. While Play runs the editor viewport draws every 250 ms and the PCG
+  stream yields; both come back when Play ends (three arms).
+- **(c') THE PCG TICK**: the "1 vol / 165 ms of 8.00" ticks were the whole-level paging
+  scan re-run on every other tick (152-158 ms against ~10 ms of evaluation): only a tick
+  that paged stamped the version it bumped to. After: ticks 3.6-17.6 ms, the 52-volume
+  fill in ~10 s instead of ~21 s. The per-volume deep copy of the resident heightfield is
+  gone too (editor and player).
+- **(d')** the instrument's PIPELINED row steps once a frame; the window must step ~twice
+  below 60 fps, and its step costs about twice the instrument's (14-17 vs 7.7 ms at noon —
+  the hero moving through the island versus a fixed camera). The row is a projection.
+- **(e')** a body and its OUTFIT1 garments / hair now draw one rung
+  (`wearers_agree_on_their_rung`). No hysteresis band exists: the rung is a pure function
+  of distance (carried).
+- **(h')** three sessions x five rounds: worst serialized p95 85.50 / 83.64 / 84.24 at
+  21:00 (rounds 81.3-88.8); one session's 02:00 read 101.95 with every GPU pass x1.8-2.0
+  and CPU unchanged (a whole-session GPU downclock; identical frames) and tripped the
+  ceiling. `ISLAND_FRAME_CEILING_MS` stays 95.
+
+**WHAT PERF1b INHERITS**: the window's frame at 55-65 ms is 2 steps x 14-17 ms + ~28-32 ms
+of projection/record/UI. The top row is the step as the window runs it (twice the
+instrument's), then the night VSM re-cast (7.7 CPU + 6.5 GPU), submit 6.8, projection 6.5,
+animation 4.7, physics sync + solver 3.8. Until the step is under ~8 ms a frame slower than
+30 fps dilates the simulation.
