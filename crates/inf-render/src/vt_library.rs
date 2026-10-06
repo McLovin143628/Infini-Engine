@@ -1228,6 +1228,59 @@ mod tests {
         assert!(!guids(&a).is_empty(), "the floor wanted nothing");
     }
 
+    /// **The cluster pairing cache's key moves with every event that can move
+    /// the pairing, and only those** (the PERF1 audit, priority f').
+    ///
+    /// `registration_epoch` is what `VgeomNode::cluster_tile_wants` keys a
+    /// page's cached coupling on. Registering a texture mid-session into the
+    /// SAME registry must change it (a page that referenced an unregistered
+    /// texture now couples to it); a new registry must change it; re-registering
+    /// a GUID it already has, a refusal, and binding a material to textures it
+    /// already holds must NOT (the pairing reads tile references and the
+    /// registry's handles and descriptors, never the material table -- a stamp
+    /// that moved there would only throw the cache away).
+    #[test]
+    fn the_registration_epoch_moves_exactly_when_what_the_registry_addresses_moves() {
+        let (mut lib, _) = VtTextures::new(cfg());
+        let e0 = lib.registration_epoch();
+        let a: Arc<dyn VtTileSource> = Arc::new(tiled(64, 64, true));
+        lib.register(50, a.clone()).expect("registers");
+        let e1 = lib.registration_epoch();
+        assert_ne!(
+            e0, e1,
+            "a texture registered mid-session left the stamp alone"
+        );
+        lib.register(50, a).expect("idempotent");
+        assert_eq!(
+            lib.registration_epoch(),
+            e1,
+            "re-registering a known GUID moved the stamp"
+        );
+        assert!(lib
+            .register_or_record(51, Arc::new(vec![0u8; 16]))
+            .is_none());
+        assert_eq!(lib.registration_epoch(), e1, "a refusal moved the stamp");
+        let mut m = BTreeMap::new();
+        m.insert(9u128, maps(Some(50), None, None));
+        let n = lib.register_materials(&m, |_| None);
+        assert_eq!(n, 1);
+        assert_eq!(
+            lib.registration_epoch(),
+            e1,
+            "binding a material to a texture the registry already holds moved the stamp"
+        );
+        lib.register(52, Arc::new(tiled(32, 32, false)))
+            .expect("registers");
+        assert_ne!(lib.registration_epoch(), e1);
+        let (other, _) = VtTextures::new(cfg());
+        assert_ne!(other.registration_epoch(), lib.registration_epoch());
+        assert_ne!(
+            other.registration_epoch(),
+            e0,
+            "a fresh registry repeated an old stamp"
+        );
+    }
+
     /// A real v2 container of `w × h`, built by the one writer.
     fn tiled(w: u32, h: u32, srgb: bool) -> Vec<u8> {
         inf_material::build_tiled_texture(
