@@ -1480,6 +1480,58 @@ pub struct VgeomNode {
     /// the tree can see it, because a stale address is indistinguishable from an
     /// unseated one at `is_resident`.
     stale_tiles: u64,
+    /// **Each resident page's coupled tiles, kept across frames** (wave PERF1)
+    /// -- see [`PageTileCache`]. Keyed by asset id; an entry whose source or
+    /// whose texture registry changed is rebuilt, and an asset that left the
+    /// streamer leaves the map.
+    tile_cache: BTreeMap<u128, PageTileCache>,
+    /// Pages `cluster_tile_wants` walked from the payload / served from
+    /// [`Self::tile_cache`], cumulative (wave PERF1) -- the cache's engagement
+    /// counters, read by `cluster_pages.rs`.
+    tile_pages_parsed: u64,
+    tile_pages_cached: u64,
+    /// Off only for the equivalence arm: every frame re-walks every page, the
+    /// arrangement before wave PERF1.
+    tile_cache_enabled: bool,
+}
+
+/// **One asset's cluster pairing, page by page, carried across frames** (wave
+/// PERF1).
+///
+/// `cluster_tile_wants` asked the same question of every resident page of
+/// every resident asset on every frame -- parse the payload's page directory,
+/// walk each page's tile references, look each texture up in the registry --
+/// and the answer for a page is a function of three things only: the page's
+/// own cooked sections (immutable for a given source), and the registry's
+/// `handle` / `can_address` / `desc` answers (a function of what is
+/// REGISTERED, never of what is paged in). Measured on the shipped island at
+/// clause 0: **5.3 ms a frame** for 320 assets and ~157 000 resident pages,
+/// re-deriving answers that had not changed since the page arrived.
+///
+/// So a page's coupled tiles, its stale count and the textures whose grid it
+/// rejected are kept here and re-used while the source pointer and the
+/// registry's [`crate::VtTextures::registration_epoch`] both hold. Resident
+/// pages are always the prefix `0..resident_pages()`, so the cache is a
+/// prefix too: pages a frame newly seats are walked (once) and appended;
+/// a shrunken prefix truncates. The counters are re-added from the cached
+/// values every frame, so `stale_tiles` and `mismatched_textures` advance
+/// exactly as they did when every page was re-walked.
+struct PageTileCache {
+    /// The source the pages were walked from (its address -- the identity a
+    /// rebuilt `.inf_vmesh` changes) and the registry stamp they were coupled
+    /// against.
+    source: usize,
+    epoch: u64,
+    /// Per page: the coupled tiles, the stale references and the textures
+    /// whose grid claim the page rejected.
+    pages: Vec<CachedPage>,
+}
+
+#[derive(Clone, Default)]
+struct CachedPage {
+    here: Vec<(u128, inf_vt::TileCoord)>,
+    stale: u64,
+    mismatched: Vec<u128>,
 }
 
 impl VgeomNode {
@@ -1646,7 +1698,27 @@ impl VgeomNode {
             dropped_groups: 0,
             mismatched_textures: 0,
             stale_tiles: 0,
+            tile_cache: BTreeMap::new(),
+            tile_pages_parsed: 0,
+            tile_pages_cached: 0,
+            tile_cache_enabled: true,
         }
+    }
+
+    /// The equivalence arm's switch (wave PERF1): `false` re-walks every
+    /// resident page every frame, as `cluster_tile_wants` did before the cache.
+    #[doc(hidden)]
+    pub fn set_cluster_tile_cache(&mut self, on: bool) {
+        self.tile_cache_enabled = on;
+        self.tile_cache.clear();
+    }
+
+    /// `(walked, cached)`: resident pages [`Self::cluster_tile_wants`] derived
+    /// from the payload, and pages it served from the cross-frame cache,
+    /// cumulative (wave PERF1) -- the engagement pair behind the cache.
+    #[inline]
+    pub fn cluster_tile_cache_counts(&self) -> (u64, u64) {
+        (self.tile_pages_parsed, self.tile_pages_cached)
     }
 
     /// The per-asset bases the last visibility frame assigned into the flat
@@ -1749,6 +1821,11 @@ impl VgeomNode {
     pub fn cluster_tile_wants(
         &mut self,
         scene: &crate::scene::RenderScene,
+        // **The registry stamp the two closures answer against** (wave PERF1):
+        // `VtTextures::registration_epoch`, or 0 with no registry. A page's
+        // coupling is re-derived when it moves and served from the cache
+        // while it holds -- see `PageTileCache`.
+        registry_epoch: u64,
         addressable: impl Fn(u128, inf_vt::TileCoord) -> bool,
         grid_matches: impl Fn(u128, &inf_vgeom::ClusterTileRef) -> bool,
     ) -> Vec<(u128, inf_vt::TileCoord)> {
@@ -1764,78 +1841,93 @@ impl VgeomNode {
             .iter()
             .map(|a| (a.id, a.source.as_ref()))
             .collect();
+        // Assets that left the streamer leave the cache (their pages are no
+        // longer anybody's to couple).
+        let live: std::collections::BTreeSet<u128> =
+            self.streamer.assets().map(|(asset, _)| asset).collect();
+        self.tile_cache.retain(|asset, _| live.contains(asset));
+        if !self.tile_cache_enabled {
+            self.tile_cache.clear();
+        }
         for (asset, res) in self.streamer.assets() {
             let Some(src) = source_of.get(&asset) else {
                 continue;
             };
-            // **ONE parse for the whole resident set** (island wave I7b).
-            // `with_page_sections` parses the payload — header, bounds checks and
-            // the whole page directory — on every call, so asking it page by page
-            // is `O(pages²)` a frame. Measured on the shipped island: **10.051 ms
-            // of an 11.151 ms `render (record)` stage**, on a world holding one
-            // virtualized mesh. `for_each_page_sections` parses once and walks.
-            //
-            // **Every resident page is coupled, whether or not its sections
-            // parse** (the I7b audit). The per-page loop this replaced declared
-            // the group *outside* the `with_page_sections` call, so a page whose
-            // sections did not come back — an unavailable payload, a directory
-            // that will not parse — was still declared with an EMPTY member list,
-            // which is a legal state that streams as it did before P28.2. A page
-            // with no group at all is a different fact: `commit_cluster_pages`
-            // refuses it (`has_group` exists precisely because "one `&[]` cannot
-            // say both"), and refusing every page of an asset retracts it for
-            // ever. So the groups are seeded here and the walk fills them in.
-            let mut coupled: Vec<Vec<(u128, inf_vt::TileCoord)>> =
-                vec![Vec::new(); res.resident_pages()];
-            let mut stale = 0u64;
-            let mut newly_mismatched: Vec<u128> = Vec::new();
-            src.for_each_page_sections(0..res.resident_pages(), |page, s| {
-                let mut here: Vec<(u128, inf_vt::TileCoord)> = Vec::new();
-                {
+            let source_key = std::ptr::from_ref::<inf_vgeom::VgeomSource>(src) as usize;
+            let entry = self
+                .tile_cache
+                .entry(asset)
+                .or_insert_with(|| PageTileCache {
+                    source: source_key,
+                    epoch: registry_epoch,
+                    pages: Vec::new(),
+                });
+            if entry.source != source_key || entry.epoch != registry_epoch {
+                entry.source = source_key;
+                entry.epoch = registry_epoch;
+                entry.pages.clear();
+            }
+            let resident = res.resident_pages();
+            let mut unparsed: Option<usize> = None;
+            entry.pages.truncate(resident);
+            let have = entry.pages.len();
+            if have < resident {
+                // **ONE parse for the pages this frame newly seats** (island
+                // wave I7b's `for_each_page_sections`, now over the new suffix
+                // only). Every new page gets a slot whether or not its sections
+                // parse -- an unparsed page is coupled with an EMPTY member list,
+                // which is the I7b audit's "every resident page is coupled"
+                // rule, unchanged.
+                entry.pages.resize(resident, CachedPage::default());
+                self.tile_pages_parsed += (resident - have) as u64;
+                let pages = &mut entry.pages;
+                let parsed = src.for_each_page_sections(have..resident, |page, s| {
+                    let mut cached = CachedPage::default();
                     for t in s.tile_refs() {
                         let guid = t.texture().uuid().as_u128();
                         // **A texture this level does not bind is not part of the
-                        // pairing.** The cook pairs against the materials the
-                        // AUTHORED level binds; a runtime that draws the mesh with
-                        // a different material has nothing to keep in step for the
-                        // cook's texture, and demanding it would retract every page
-                        // of the asset for ever — the mesh would collapse to its
-                        // root page and never recover. So the coupling protects
-                        // what is actually in play and says nothing about the rest.
-                        //
-                        // The same sentence, for the same reason, covers an
-                        // address the registered image does not have: the pairing
-                        // was baked against a `.inf_tex` that is not the one in
-                        // front of us, and no budget will ever seat a tile that
-                        // does not exist.
-                        // The grid claim first: a wrong IMAGE is a stronger
-                        // fact than a missing address, and it is the one that
-                        // explains every missing address that follows.
+                        // pairing**, and neither is an address the registered
+                        // image does not have; the grid claim first, because a
+                        // wrong IMAGE explains every missing address after it
+                        // (P28.2 / P28.3 -- the rules this loop has always
+                        // applied, now applied once per page).
                         if !grid_matches(guid, t) {
-                            newly_mismatched.push(guid);
-                            stale += 1;
+                            cached.mismatched.push(guid);
+                            cached.stale += 1;
                         } else if addressable(guid, t.coord()) {
-                            here.push((guid, t.coord()));
+                            cached.here.push((guid, t.coord()));
                         } else {
-                            stale += 1;
+                            cached.stale += 1;
                         }
                     }
-                }
-                if let Some(slot) = coupled.get_mut(page) {
-                    *slot = here;
-                }
-            });
-            // Applied out here rather than inside the walk, because the walk holds
-            // a borrow of `src` and these are `self`'s. The counters are the same
-            // additions in the same order.
-            for guid in newly_mismatched {
-                if mismatched.insert(guid) {
-                    self.mismatched_textures += 1;
+                    if let Some(slot) = pages.get_mut(page) {
+                        *slot = cached;
+                    }
+                });
+                if !parsed {
+                    // An unavailable payload: the new pages are coupled EMPTY
+                    // this frame (the rule above) and NOT remembered, so the next
+                    // frame asks the payload again exactly as the uncached walk
+                    // did.
+                    unparsed = Some(have);
                 }
             }
-            self.stale_tiles += stale;
-            for (page, here) in coupled.into_iter().enumerate() {
-                self.coupling.couple((asset, page), here);
+            self.tile_pages_cached += have.min(resident) as u64;
+            // The counters advance from the cached values, so a frame adds
+            // exactly what re-walking every page used to add.
+            for page in &entry.pages {
+                for guid in &page.mismatched {
+                    if mismatched.insert(*guid) {
+                        self.mismatched_textures += 1;
+                    }
+                }
+                self.stale_tiles += page.stale;
+            }
+            for (page, cached) in entry.pages.iter().enumerate() {
+                self.coupling.couple((asset, page), cached.here.clone());
+            }
+            if let Some(keep) = unparsed {
+                entry.pages.truncate(keep);
             }
         }
         // The want list is the COUPLING's, deduplicated and in address order —
@@ -2169,6 +2261,10 @@ impl RenderNode for VgeomNode {
             dropped_groups: _,
             mismatched_textures: _,
             stale_tiles: _,
+            tile_cache: _,
+            tile_pages_parsed: _,
+            tile_pages_cached: _,
+            tile_cache_enabled: _,
             view_bgl: _,
             vis,
             vis_bases,

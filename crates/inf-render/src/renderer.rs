@@ -1655,6 +1655,40 @@ impl EngineRenderer {
         self.scatter_audit.read(gpu)
     }
 
+    /// **The cluster pairing's cross-frame cache, as counts** (wave PERF1):
+    /// `(walked, cached)` resident pages, cumulative -- see
+    /// `passes::vgeom::VgeomNode::cluster_tile_cache_counts`. `(0, 0)` with no
+    /// meshlet node.
+    pub fn cluster_tile_cache_counts(&self) -> (u64, u64) {
+        self.graph
+            .node::<passes::vgeom::VgeomNode>()
+            .map_or((0, 0), passes::vgeom::VgeomNode::cluster_tile_cache_counts)
+    }
+
+    /// **The cluster coupling's groups**, `(asset, page) -> tiles`, as the last
+    /// frame left them (wave PERF1) -- what the equivalence arm compares between
+    /// a cached and an uncached renderer.
+    pub fn cluster_coupling_groups(&self) -> Vec<((u128, usize), Vec<(u128, inf_vt::TileCoord)>)> {
+        self.graph
+            .node::<passes::vgeom::VgeomNode>()
+            .map(|n| {
+                n.cluster_coupling()
+                    .groups()
+                    .map(|(g, m)| (*g, m.to_vec()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The equivalence arm's switch (wave PERF1) -- see
+    /// `passes::vgeom::VgeomNode::set_cluster_tile_cache`.
+    #[doc(hidden)]
+    pub fn set_cluster_tile_cache(&mut self, on: bool) {
+        if let Some(n) = self.graph.node_mut::<passes::vgeom::VgeomNode>() {
+            n.set_cluster_tile_cache(on);
+        }
+    }
+
     /// What the P18.2 meshlet streamer did on the **last rendered frame**:
     /// residency, backlog, budget clamping, and the per-asset residency floor.
     ///
@@ -2214,6 +2248,7 @@ impl EngineRenderer {
                     // the mesh vanished). `can_address` separates the two.
                     n.cluster_tile_wants(
                         scene,
+                        lib.map_or(0, crate::VtTextures::registration_epoch),
                         |g, tile| {
                             lib.is_some_and(|l| {
                                 l.handle(g)

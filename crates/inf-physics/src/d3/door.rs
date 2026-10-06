@@ -177,6 +177,46 @@ pub fn placements_near(world: &EcsWorld, band: &SimBand) -> Vec<DoorPlacement> {
     out
 }
 
+/// **Every door whose hinge lies within `reach_m` of `centre`**, in `Guid`
+/// order (wave PERF1).
+///
+/// The question the audio portal rule actually asks: `audio::portal_of_in`
+/// rejects every opening whose hinge is farther than
+/// `audio::PORTAL_LISTENER_REACH_M` from the listener *before* it ranks
+/// anything, so handing it [`placements`] -- every authored door and every
+/// grammar doorway in the resident world, a `String` label allocated per door
+/// -- was a list it threw away almost whole. On the shipped island that list
+/// is the town's ~20 000 doorways, rebuilt every fixed step, and it was
+/// **6.3 ms of a 22.3 ms step** (the PERF1 clause-0 profile, `audio`).
+///
+/// The distance is checked on the slot's own hinge BEFORE the placement is
+/// built, the [`placements_near`] arrangement, so a rejected doorway costs one
+/// subtraction and no allocation. The filter is the rule's own predicate --
+/// the same hinge, the same Euclidean length, the same closed bound -- so the
+/// opening the rule picks out of this list is the one it picked out of the
+/// whole one, by construction; the audio module's
+/// `the_near_door_list_picks_the_portal_the_whole_list_picks` holds it to that.
+pub fn placements_within(world: &EcsWorld, centre: DVec3, reach_m: f64) -> Vec<DoorPlacement> {
+    let within = |h: DVec3| h.is_finite() && (h - centre).length() <= reach_m;
+    let mut out = door::doors_in_world(world);
+    out.retain(|p| within(p.hinge));
+    door::for_each_volume_doorway(world, |volume, i, slot| {
+        if !within(slot.hinge) {
+            return;
+        }
+        if let Some(spec) = derived_spec(slot) {
+            out.push(DoorPlacement {
+                guid: pcg_doorway_guid(volume, i),
+                hinge: slot.hinge,
+                spec,
+                label: GRAMMAR_DOOR_LABEL.to_string(),
+            });
+        }
+    });
+    out.sort_by_key(|p| p.guid);
+    out
+}
+
 /// **The spec a derived doorway gets**, from the grammar's own slot.
 ///
 /// One function, so the banded walk and the unbanded one cannot disagree about

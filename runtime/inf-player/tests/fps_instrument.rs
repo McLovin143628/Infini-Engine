@@ -134,6 +134,18 @@ const FRAMES: usize = 120;
 /// right and is kept; the figure was retired.
 const ROUNDS: usize = 3;
 
+/// Rounds for the SHIPPED-ISLAND rows (wave PERF1): the house law's minimum
+/// of five, overridable upward with `PERF1_ROUNDS`.
+const ISLAND_ROUNDS: usize = 5;
+
+fn island_rounds() -> usize {
+    std::env::var("PERF1_ROUNDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(ISLAND_ROUNDS)
+        .max(ISLAND_ROUNDS)
+}
+
 /// Steps discarded before the fixed step's own breakdown is measured (island
 /// wave I4b) — the `FRAMES`-long discarded pass, one processor over: the band
 /// seats, the terrain tiles mesh, and every `structure_stamps` miss there is
@@ -457,12 +469,26 @@ fn measure(
     w: u32,
     h: u32,
     settings: inf_render::RenderSettings,
+    path: &dyn Fn(u64, u32, u32) -> RenderView,
+) -> Measured {
+    measure_rounds(gpu, fx, w, h, settings, path, ROUNDS)
+}
+
+/// [`measure`] over `rounds` rounds rather than [`ROUNDS`] (wave PERF1): the
+/// shipped-island rows are taken at the house law's FIVE ([`ISLAND_ROUNDS`]).
+fn measure_rounds(
+    gpu: &GpuContext,
+    fx: &mut Fixture,
+    w: u32,
+    h: u32,
+    settings: inf_render::RenderSettings,
     // I7: the camera path is a PARAMETER, because the instrument now measures
     // two worlds — the composed city and the island — and a scripted flight over
     // one is not a flight over the other. Passing it rather than branching on a
     // flag inside `fly` keeps the frame loop identical for both, which is what
     // makes the two sets of numbers comparable at all.
     path: &dyn Fn(u64, u32, u32) -> RenderView,
+    rounds: usize,
 ) -> Measured {
     let target = HeadlessTarget::new(gpu, w, h);
     let mut renderer = EngineRenderer::new(gpu, HEADLESS_FORMAT);
@@ -556,7 +582,8 @@ fn measure(
         step += 1;
     }
 
-    let mut rounds: Vec<Round> = Vec::with_capacity(ROUNDS);
+    let n_rounds = rounds.max(1);
+    let mut rounds: Vec<Round> = Vec::with_capacity(n_rounds);
     let mut best_passes: Vec<(&'static str, f64, f64)> = Vec::new();
     let mut best_gpu = 0.0;
     let mut best_cpu = [0.0f64; CPU_STAGES];
@@ -564,7 +591,7 @@ fn measure(
     let mut best_phases = 0.0f64;
     let mut best_step = inf_player::step_profile::StepProfile::default();
     let mut best = 0usize;
-    for r in 0..ROUNDS {
+    for r in 0..n_rounds {
         let mut ms = Vec::with_capacity(FRAMES);
         let mut sums: Vec<(&'static str, f64, f64)> = Vec::new();
         let mut gpu_total = 0.0;
@@ -2402,146 +2429,7 @@ fn the_island_at_shipping_resolution() {
             );
         }
         let m = measure(&gpu, &mut fx, 1920, 1080, settings, &path);
-        let r = m.round();
-        let cpu_sum: f64 = m.cpu_ms.iter().sum();
-        println!(
-            "ISLAND 1080p {label}: p50 {:.3} p95 {:.3} p99 {:.3} worst {:.3} ms ({:.1} fps at p50)",
-            r.p50,
-            r.p95,
-            r.p99,
-            r.worst,
-            1000.0 / r.p50.max(1.0e-9)
-        );
-        println!(
-            "  content    {} instances, {} scatter batches / {} scattered instances, {} vgeom, {} skinned, {} terrain tiles, {} virtual textures",
-            m.instances,
-            m.scatter_batches,
-            m.scatter_instances,
-            m.vgeom_instances,
-            m.skinned,
-            m.terrain_tiles,
-            m.vt_textures
-        );
-        for (i, name) in CPU_STAGE_NAMES.iter().enumerate() {
-            println!("  cpu {name:>16}: {:.3} ms", m.cpu_ms[i]);
-        }
-        println!("  cpu {:>16}: {cpu_sum:.3} ms", "TOTAL");
-        print_step_clocks(label, &m);
-        // **WHAT THE STEP IS PAYING FOR, PER ROW** (the NPC1e audit). The island
-        // printed this census once, in the isolated fixed-step block above, at
-        // the hero's authored start — and then the wave attributed **+21.0 ms of
-        // p50** to *"the town's own admitted structure colliders"* on a row taken
-        // 189 m away, where nothing had counted them. `physics3d sync` and
-        // `solver` climbing is a measurement; *which bodies* did it is a claim,
-        // and this is the counter that carries it. It is printed for every row so
-        // the collider band's share is a subtraction between two of them rather
-        // than an inference from one.
-        {
-            let (tracked, touching) = fx.sim.bridge3d().world().contact_pair_counts();
-            println!(
-                "  physics {:>14}: {} bodies, {} ADMITTED structure colliders, \
-                 {tracked} contact pairs ({touching} touching)",
-                "world",
-                fx.sim.bridge3d().body_count(),
-                fx.sim.bridge3d().admitted_structures(),
-            );
-        }
-        print_record_profile(label, &m);
-        println!("  gpu {:>16}: {:.3} ms", "frame", m.gpu_frame_ms);
-        let mut passes = m.passes.clone();
-        passes.sort_by(|a, b| b.1.total_cmp(&a.1));
-        // **Every pass, not the dearest eight** (wave VIS1a). A `take(8)` cannot
-        // report a pass that is cheap *now* and is the subject of the wave —
-        // `depth-prepass` and `ssao` were both below the cut on the island, which
-        // is precisely the information a before/after table needs. The city's lit
-        // table already prints on this rule; the island's did not.
-        for (name, ms, rec) in passes
-            .iter()
-            .filter(|(_, ms, rec)| *ms >= 0.0005 || *rec >= 0.0005)
-        {
-            println!("  gpu {name:>16}: {ms:.3} ms   (record {rec:.3} ms)");
-        }
-        // **What the shadow pass actually DID** (island wave I7b). `vsm-raster`
-        // was 95.1 % of wave I7's lit GPU frame on a world whose casters are a
-        // heightfield and one road mesh, and a millisecond count with no page,
-        // draw or caster beside it cannot say whether the cost is the drawing or
-        // the asking. One line, and it is the pass's own counters.
-        if let Some(v) = m.vsm.as_ref() {
-            println!("  {label} {}", v.summary());
-            if v.frames > 0 {
-                println!(
-                    "  {label} per rastering frame: {:.1} pages, {:.0} draws, \
-                     {:.0} casters, {:.0} invalidation touches, {:.1} cached \
-                     pages, {:.1} deferred",
-                    v.pages as f64 / v.frames as f64,
-                    v.draws as f64 / v.frames as f64,
-                    v.casters as f64 / v.frames as f64,
-                    v.invalidation_touches as f64 / v.frames as f64,
-                    v.cached_pages as f64 / v.frames as f64,
-                    v.deferred_pages as f64 / v.frames as f64,
-                );
-                // **WHY they were dirty** (island wave I7b). "The cache is
-                // thrashing" is not a diagnosis; these three sum to
-                // `dirty_pages` and say whether the pages moved under the world
-                // or the world moved under the pages.
-                //
-                // Island wave VSM2 is read off the middle column: it was **532.0
-                // a frame** and it is **2.2**, because a page's slot now belongs
-                // to its world cell and a clipmap scroll re-labels rather than
-                // re-draws. What is left in `re-slotted` is the row and column
-                // the window newly exposes, which have never been drawn.
-                // The middle column's legend is **not** "the page's own matrix"
-                // any more (the VSM2 audit): for a clipmap the geometric stamp is
-                // the world cell folded with `ClipmapLayout::content_key`, so a
-                // level re-centring and an origin rebase — the two the old legend
-                // named — are exactly the two that no longer land here.
-                println!(
-                    "  {label} dirty per rastering frame: {:.1} re-slotted, \
-                     {:.1} moved (the box it draws: the sun's quantum, the \
-                     along-light snap), {:.1} re-cast (something under it)",
-                    v.dirty_slot as f64 / v.frames as f64,
-                    v.dirty_geometry as f64 / v.frames as f64,
-                    v.dirty_casters as f64 / v.frames as f64,
-                );
-                // **WHAT THE PASS HANDS OVER** (island wave I8c). `vsm-raster`
-                // was 6.087 ms of an 18.0 ms lit GPU frame with 0.657 ms of
-                // recording behind it, so the cost is on the device — and pages,
-                // draws and casters are three counts of *asks*. A draw's price is
-                // its index count, and a geometry group is one per resident
-                // TERRAIN TILE at `6 × VSM_TERRAIN_CASTER_CELLS²` indices against
-                // a cube's 36. This is the line that says which of the two the
-                // frame is made of, and the level histogram beside it says how
-                // much world each of those rectangles covers.
-                println!(
-                    "  {label} submitted per rastering frame: {:.0} indices \
-                     ({:.0} terrain, {:.1} %; {:.0} meshlet-asset, {:.1} %) over \
-                     {:.0} draws ({:.0} terrain, {:.0} meshlet at mean classic \
-                     level {:.2}); pages by level {}",
-                    v.indices_drawn as f64 / v.frames as f64,
-                    v.indices_terrain as f64 / v.frames as f64,
-                    v.indices_terrain as f64 / (v.indices_drawn.max(1)) as f64 * 100.0,
-                    v.indices_vgeom as f64 / v.frames as f64,
-                    v.indices_vgeom as f64 / (v.indices_drawn.max(1)) as f64 * 100.0,
-                    v.draws as f64 / v.frames as f64,
-                    v.draws_terrain as f64 / v.frames as f64,
-                    v.draws_vgeom as f64 / v.frames as f64,
-                    v.vgeom_level_sum as f64 / v.vgeom_casters.max(1) as f64,
-                    v.levels_summary(),
-                );
-            }
-        }
-        let submitted = cpu_sum - m.cpu_ms[4] - m.cpu_ms[5];
-        let pipelined = submitted.max(m.gpu_frame_ms);
-        println!(
-            "  PIPELINED ESTIMATE {pipelined:.3} ms ({:.1} fps) = max(CPU without the wait or the stopwatch {submitted:.3}, GPU frame {:.3})",
-            1000.0 / pipelined.max(1.0e-9),
-            m.gpu_frame_ms
-        );
-        println!(
-            "  DISTANCE FROM 60 fps: p50 {:+.3} ms, p95 {:+.3} ms against a {SHIPPING_FRAME_BUDGET_MS} ms frame",
-            r.p50 - SHIPPING_FRAME_BUDGET_MS,
-            r.p95 - SHIPPING_FRAME_BUDGET_MS
-        );
+        print_frame_profile(label, &m, &fx);
         // Anti-vacuity: the frame drew the island, not an empty world.
         assert!(
             m.terrain_tiles > 0,
@@ -2633,6 +2521,209 @@ fn the_island_at_shipping_resolution() {
     println!(
         "Reported, never asserted: the ceilings in `inf_player::budget` are set from the composed city, and asserting them over a different world would re-pin a ratchet by accident."
     );
+}
+
+/// **THE FRAME TABLE** (wave PERF1, clause 0): the headline, the content, the
+/// CPU stages, the fixed step by system, the record path by phase, every GPU
+/// pass with its recording, the shadow raster's counters and the pipelined
+/// estimate -- one printer, so the island arm and the hour arm print the same
+/// table and a before / after is a diff of two logs.
+fn print_frame_profile(label: &str, m: &Measured, fx: &Fixture) {
+    let r = m.round();
+    let cpu_sum: f64 = m.cpu_ms.iter().sum();
+    println!(
+        "ISLAND 1080p {label}: p50 {:.3} p95 {:.3} p99 {:.3} worst {:.3} ms ({:.1} fps at p50)",
+        r.p50,
+        r.p95,
+        r.p99,
+        r.worst,
+        1000.0 / r.p50.max(1.0e-9)
+    );
+    println!(
+        "  content    {} instances, {} scatter batches / {} scattered instances, {} vgeom, {} skinned, {} terrain tiles, {} virtual textures",
+        m.instances,
+        m.scatter_batches,
+        m.scatter_instances,
+        m.vgeom_instances,
+        m.skinned,
+        m.terrain_tiles,
+        m.vt_textures
+    );
+    for (i, name) in CPU_STAGE_NAMES.iter().enumerate() {
+        println!("  cpu {name:>16}: {:.3} ms", m.cpu_ms[i]);
+    }
+    println!("  cpu {:>16}: {cpu_sum:.3} ms", "TOTAL");
+    print_step_clocks(label, &m);
+    // **WHAT THE STEP IS PAYING FOR, PER ROW** (the NPC1e audit). The island
+    // printed this census once, in the isolated fixed-step block above, at
+    // the hero's authored start — and then the wave attributed **+21.0 ms of
+    // p50** to *"the town's own admitted structure colliders"* on a row taken
+    // 189 m away, where nothing had counted them. `physics3d sync` and
+    // `solver` climbing is a measurement; *which bodies* did it is a claim,
+    // and this is the counter that carries it. It is printed for every row so
+    // the collider band's share is a subtraction between two of them rather
+    // than an inference from one.
+    {
+        let (tracked, touching) = fx.sim.bridge3d().world().contact_pair_counts();
+        println!(
+            "  physics {:>14}: {} bodies, {} ADMITTED structure colliders, \
+             {tracked} contact pairs ({touching} touching)",
+            "world",
+            fx.sim.bridge3d().body_count(),
+            fx.sim.bridge3d().admitted_structures(),
+        );
+    }
+    print_record_profile(label, &m);
+    println!("  gpu {:>16}: {:.3} ms", "frame", m.gpu_frame_ms);
+    let mut passes = m.passes.clone();
+    passes.sort_by(|a, b| b.1.total_cmp(&a.1));
+    // **Every pass, not the dearest eight** (wave VIS1a). A `take(8)` cannot
+    // report a pass that is cheap *now* and is the subject of the wave —
+    // `depth-prepass` and `ssao` were both below the cut on the island, which
+    // is precisely the information a before/after table needs. The city's lit
+    // table already prints on this rule; the island's did not.
+    for (name, ms, rec) in passes
+        .iter()
+        .filter(|(_, ms, rec)| *ms >= 0.0005 || *rec >= 0.0005)
+    {
+        println!("  gpu {name:>16}: {ms:.3} ms   (record {rec:.3} ms)");
+    }
+    // **What the shadow pass actually DID** (island wave I7b). `vsm-raster`
+    // was 95.1 % of wave I7's lit GPU frame on a world whose casters are a
+    // heightfield and one road mesh, and a millisecond count with no page,
+    // draw or caster beside it cannot say whether the cost is the drawing or
+    // the asking. One line, and it is the pass's own counters.
+    if let Some(v) = m.vsm.as_ref() {
+        println!("  {label} {}", v.summary());
+        if v.frames > 0 {
+            println!(
+                "  {label} per rastering frame: {:.1} pages, {:.0} draws, \
+                 {:.0} casters, {:.0} invalidation touches, {:.1} cached \
+                 pages, {:.1} deferred",
+                v.pages as f64 / v.frames as f64,
+                v.draws as f64 / v.frames as f64,
+                v.casters as f64 / v.frames as f64,
+                v.invalidation_touches as f64 / v.frames as f64,
+                v.cached_pages as f64 / v.frames as f64,
+                v.deferred_pages as f64 / v.frames as f64,
+            );
+            // **WHY they were dirty** (island wave I7b). "The cache is
+            // thrashing" is not a diagnosis; these three sum to
+            // `dirty_pages` and say whether the pages moved under the world
+            // or the world moved under the pages.
+            //
+            // Island wave VSM2 is read off the middle column: it was **532.0
+            // a frame** and it is **2.2**, because a page's slot now belongs
+            // to its world cell and a clipmap scroll re-labels rather than
+            // re-draws. What is left in `re-slotted` is the row and column
+            // the window newly exposes, which have never been drawn.
+            // The middle column's legend is **not** "the page's own matrix"
+            // any more (the VSM2 audit): for a clipmap the geometric stamp is
+            // the world cell folded with `ClipmapLayout::content_key`, so a
+            // level re-centring and an origin rebase — the two the old legend
+            // named — are exactly the two that no longer land here.
+            println!(
+                "  {label} dirty per rastering frame: {:.1} re-slotted, \
+                 {:.1} moved (the box it draws: the sun's quantum, the \
+                 along-light snap), {:.1} re-cast (something under it)",
+                v.dirty_slot as f64 / v.frames as f64,
+                v.dirty_geometry as f64 / v.frames as f64,
+                v.dirty_casters as f64 / v.frames as f64,
+            );
+            // **WHAT THE PASS HANDS OVER** (island wave I8c). `vsm-raster`
+            // was 6.087 ms of an 18.0 ms lit GPU frame with 0.657 ms of
+            // recording behind it, so the cost is on the device — and pages,
+            // draws and casters are three counts of *asks*. A draw's price is
+            // its index count, and a geometry group is one per resident
+            // TERRAIN TILE at `6 × VSM_TERRAIN_CASTER_CELLS²` indices against
+            // a cube's 36. This is the line that says which of the two the
+            // frame is made of, and the level histogram beside it says how
+            // much world each of those rectangles covers.
+            println!(
+                "  {label} submitted per rastering frame: {:.0} indices \
+                 ({:.0} terrain, {:.1} %; {:.0} meshlet-asset, {:.1} %) over \
+                 {:.0} draws ({:.0} terrain, {:.0} meshlet at mean classic \
+                 level {:.2}); pages by level {}",
+                v.indices_drawn as f64 / v.frames as f64,
+                v.indices_terrain as f64 / v.frames as f64,
+                v.indices_terrain as f64 / (v.indices_drawn.max(1)) as f64 * 100.0,
+                v.indices_vgeom as f64 / v.frames as f64,
+                v.indices_vgeom as f64 / (v.indices_drawn.max(1)) as f64 * 100.0,
+                v.draws as f64 / v.frames as f64,
+                v.draws_terrain as f64 / v.frames as f64,
+                v.draws_vgeom as f64 / v.frames as f64,
+                v.vgeom_level_sum as f64 / v.vgeom_casters.max(1) as f64,
+                v.levels_summary(),
+            );
+        }
+    }
+    let submitted = cpu_sum - m.cpu_ms[4] - m.cpu_ms[5];
+    let pipelined = submitted.max(m.gpu_frame_ms);
+    println!(
+        "  PIPELINED ESTIMATE {pipelined:.3} ms ({:.1} fps) = max(CPU without the wait or the stopwatch {submitted:.3}, GPU frame {:.3})",
+        1000.0 / pipelined.max(1.0e-9),
+        m.gpu_frame_ms
+    );
+    println!(
+        "  DISTANCE FROM 60 fps: p50 {:+.3} ms, p95 {:+.3} ms against a {SHIPPING_FRAME_BUDGET_MS} ms frame",
+        r.p50 - SHIPPING_FRAME_BUDGET_MS,
+        r.p95 - SHIPPING_FRAME_BUDGET_MS
+    );
+}
+
+/// **THE SKINNED CENSUS** (wave PERF1, clause 0): the skinned instances one
+/// projection of the sim hands the renderer, grouped by mesh -- instance count,
+/// triangles per instance and in total, and the distance band they stand in
+/// from `at` -- so the skinned pass's GPU row is a triangle count with a
+/// distance beside it rather than a millisecond with nothing.
+fn print_skinned_census(label: &str, fx: &Fixture, at: DVec3) {
+    let mut scene = RenderScene::default();
+    let voxels = inf_voxel::VoxelVolumes::new();
+    project_scene_full(
+        &mut scene,
+        &fx.sim,
+        1.0,
+        &fx.vmeshes,
+        &fx.skinned,
+        &voxels,
+        &mut inf_render::DebrisCache::default(),
+        None,
+        &fx.scatter_meshes,
+        &std::collections::HashMap::new(),
+    );
+    let mut by_mesh: std::collections::BTreeMap<usize, (usize, [usize; 4])> =
+        std::collections::BTreeMap::new();
+    let mut total = 0usize;
+    for i in &scene.skinned {
+        let d = (i.translation - at).length();
+        let band = if d < 30.0 {
+            0
+        } else if d < 80.0 {
+            1
+        } else if d < 200.0 {
+            2
+        } else {
+            3
+        };
+        let e = by_mesh.entry(i.mesh).or_insert((0, [0; 4]));
+        e.0 += 1;
+        e.1[band] += 1;
+        total += scene.skinned_meshes[i.mesh].indices.len() / 3;
+    }
+    println!(
+        "  {label} SKINNED CENSUS: {} instances, {} meshes, {total} triangles submitted",
+        scene.skinned.len(),
+        by_mesh.len()
+    );
+    let mut rows: Vec<_> = by_mesh.into_iter().collect();
+    rows.sort_by_key(|(m, (n, _))| std::cmp::Reverse(*n * scene.skinned_meshes[*m].indices.len()));
+    for (m, (n, bands)) in rows.iter().take(12) {
+        let tris = scene.skinned_meshes[*m].indices.len() / 3;
+        println!(
+            "  {label}   mesh {m:>4}: {n:>5} instances x {tris:>6} tris = {:>9}; by distance <30 / <80 / <200 / beyond: {bands:?}",
+            n * tris
+        );
+    }
 }
 
 // ── THE ISLAND IN IMPORTED TRAFFIC (the VEH3f.2a audit) ─────────────────────
@@ -4076,7 +4167,7 @@ fn the_shipped_island_by_the_hour() {
         }
         if timing {
             let path = move |step: u64, w: u32, h: u32| street_orbit(step, w, h, at);
-            let m = measure(&gpu, &mut fx, 1920, 1080, shipped, &path);
+            let m = measure_rounds(&gpu, &mut fx, 1920, 1080, shipped, &path, island_rounds());
             let r = m.round();
             let mut dear: Vec<(&str, f64, f64)> = m.passes.clone();
             dear.sort_by(|a, b| b.1.total_cmp(&a.1));
@@ -4088,6 +4179,15 @@ fn the_shipped_island_by_the_hour() {
                 m.rounds.iter().map(|r| (r.p50, r.p95)).collect::<Vec<_>>(),
                 &dear[..dear.len().min(8)]
             );
+            // THE FRAME TABLE (wave PERF1, clause 0): the same frame split into
+            // CPU sim by system, CPU record by phase, GPU by pass.
+            let st = fx.sim.crowd_stats();
+            println!(
+                "SHIPPED ISLAND {hour:05.2} population: crowd tiers full/near/far/dormant {:?}",
+                st.per_tier
+            );
+            print_frame_profile(&format!("SHIPPED {hour:05.2}"), &m, &fx);
+            print_skinned_census(&format!("SHIPPED {hour:05.2}"), &fx, at);
         }
     }
 }

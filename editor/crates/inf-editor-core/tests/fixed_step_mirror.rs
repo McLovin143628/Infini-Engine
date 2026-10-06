@@ -599,13 +599,15 @@ fn both_audio_steps_hear_the_same_doorway() {
              -12 dB constant beside each)",
         ),
         (
-            "inf_physics::d3::audio::portal_doors(world)",
+            "inf_physics::d3::audio::portal_doors_near(world,listener_pos)",
             "the door list is built ONCE for the step and not once per source \
-             (VEN1b audit). `d3::door::placements` allocates a label per door \
-             over every doorway in the resident world, and the audio phase \
-             measured 0.55 ms a step at the club rebuilding it five times over \
-             — a host that dropped the hoist would put the cost back without \
-             changing a single verdict",
+             (VEN1b audit), and only over the doors in the LISTENER's reach \
+             (wave PERF1). `d3::door::placements` allocates a label per door \
+             over every doorway in the resident world -- 0.55 ms a step at the \
+             club rebuilt five times over, and 6.3 ms a step on the shipped \
+             island built once -- and the rule ranks nothing beyond \
+             `PORTAL_LISTENER_REACH_M`, so a host that went back to the whole \
+             list would put the cost back without changing a single verdict",
         ),
         (
             "src.occlusion&&src.spatial&&src.looping",

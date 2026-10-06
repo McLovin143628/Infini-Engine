@@ -224,9 +224,34 @@ pub struct VtTextures {
     /// A `BTreeMap` because [`registration_order`] walks it and the walk order is
     /// the residency.
     materials: BTreeMap<u128, VtMaterialMaps>,
+    /// **What this registry can address, as a stamp** (wave PERF1) -- see
+    /// [`VtTextures::registration_epoch`].
+    epoch: u64,
+}
+
+/// The process-wide source of [`VtTextures::registration_epoch`] values, so two
+/// registries never share one and a fresh registry never repeats an old one.
+static VT_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_vt_epoch() -> u64 {
+    VT_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl VtTextures {
+    /// **A stamp for "what can this registry address, and against which
+    /// images"** (wave PERF1): fresh for every registry and bumped by every
+    /// registration that adds a texture, so two equal stamps mean the same
+    /// handles over the same descriptors. Every answer `handle`,
+    /// `VtResidency::can_address` and `VtResidency::desc` give is a function of
+    /// that set alone -- residency (what is paged in) does not move it -- which
+    /// is what lets the meshlet node's cluster pairing cache a page's coupled
+    /// tiles across frames (`passes::vgeom::VgeomNode::cluster_tile_wants`).
+    /// The only legal operation on it is `==`.
+    #[inline]
+    pub fn registration_epoch(&self) -> u64 {
+        self.epoch
+    }
+
     /// A registry over a pool planned from `cfg`.
     ///
     /// `cfg.format` is the **pool's** format, which a caller derives from the
@@ -253,6 +278,7 @@ impl VtTextures {
                 arm_formats: arms.iter().map(|c| c.format).collect(),
                 refusals: Vec::new(),
                 materials: BTreeMap::new(),
+                epoch: next_vt_epoch(),
             },
             advisories,
         )
@@ -323,6 +349,7 @@ impl VtTextures {
         debug_assert_eq!(handle.index(), self.readers.len());
         self.readers.push(reader);
         self.by_guid.insert(guid, handle);
+        self.epoch = next_vt_epoch();
         Ok(handle)
     }
 

@@ -2940,7 +2940,7 @@ impl SimSession {
         let doors = if portals.is_empty() {
             Vec::new()
         } else {
-            inf_physics::d3::audio::portal_doors(world)
+            inf_physics::d3::audio::portal_doors_near(world, listener_pos)
         };
         for (source, pos) in portals {
             let p = inf_physics::d3::audio::portal_gain_in(

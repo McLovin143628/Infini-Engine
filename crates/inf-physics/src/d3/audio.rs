@@ -209,7 +209,13 @@ pub fn portal_gain(
     listener: DVec3,
     emitter: DVec3,
 ) -> PortalGain {
-    portal_gain_in(world, phys, &portal_doors(world), listener, emitter)
+    portal_gain_in(
+        world,
+        phys,
+        &portal_doors_near(world, listener),
+        listener,
+        emitter,
+    )
 }
 
 /// **The doors the rule reads**, built once — see [`portal_gain_in`].
@@ -220,6 +226,17 @@ pub fn portal_gain(
 /// break the same on two hosts.
 pub fn portal_doors(world: &EcsWorld) -> Vec<inf_ecs::door::DoorPlacement> {
     super::door::placements(world)
+}
+
+/// **The doors the rule can pick for a listener at `listener`** (wave PERF1):
+/// [`portal_doors`] narrowed to the openings within
+/// [`PORTAL_LISTENER_REACH_M`] of the listener -- the only ones
+/// [`portal_of_in`] ever ranks -- so a step with an occluded loop pays for
+/// the doors in earshot rather than for every doorway in town. Same `Guid`
+/// order, same verdict (see `d3::door::placements_within`); the list the
+/// per-step loop in both hosts builds once.
+pub fn portal_doors_near(world: &EcsWorld, listener: DVec3) -> Vec<inf_ecs::door::DoorPlacement> {
+    super::door::placements_within(world, listener, PORTAL_LISTENER_REACH_M)
 }
 
 /// [`portal_gain`] over a door list the caller already holds (VEN1b audit) —
@@ -299,7 +316,13 @@ pub fn portal_of(
     emitter: DVec3,
     direct_m: f64,
 ) -> Option<PortalGain> {
-    portal_of_in(world, &portal_doors(world), listener, emitter, direct_m)
+    portal_of_in(
+        world,
+        &portal_doors_near(world, listener),
+        listener,
+        emitter,
+        direct_m,
+    )
 }
 
 /// [`portal_of`] over a door list the caller already holds — see
@@ -698,6 +721,101 @@ mod tests {
         assert!(
             (DOOR_SHUT_CUT_LINEAR - 10f64.powf(-24.0 / 20.0)).abs() < 1e-12,
             "the shut-door cut is no longer -24 dB"
+        );
+    }
+
+    /// **THE NEAR LIST PICKS THE PORTAL THE WHOLE LIST PICKS** (wave PERF1).
+    ///
+    /// A street of doorways every 3 m along 120 m, half of them open, and a
+    /// grid of listener / emitter pairs -- inside the reach, at its edge,
+    /// beyond it. For every pair the rule over [`portal_doors_near`] answers
+    /// exactly what it answers over the whole [`portal_doors`] list, and the
+    /// near list is a strict subset of the whole one most of the time (the
+    /// engagement count: a filter that kept everything would pass the first
+    /// half and buy nothing).
+    #[test]
+    fn the_near_door_list_picks_the_portal_the_whole_list_picks() {
+        let mut w = EcsWorld::new();
+        let v = Uuid::from_u128(0xD0_05);
+        w.spawn_with_guid(v, "street", None);
+        let e = w.entity_of(v).expect("the street");
+        let slots: Vec<DoorwaySlot> = (0..40)
+            .map(|i| DoorwaySlot {
+                hinge: DVec3::new(f64::from(i) * 3.0, 1.05, 0.0),
+                closed_yaw_deg: 0.0,
+                width_m: 0.9,
+                height_m: 2.1,
+                thickness_m: 0.2,
+                inside_yaw_deg: 180.0,
+                exterior: true,
+                floor: 0,
+            })
+            .collect();
+        let mut vol = PcgVolume::default();
+        vol.set_population(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            slots,
+            Vec::new(),
+            Default::default(),
+            Vec::new(),
+            Vec::new(),
+        );
+        w.world_mut().entity_mut(e).insert((
+            Transform::IDENTITY,
+            GlobalTransform(glam::DAffine3::IDENTITY),
+            vol,
+        ));
+        w.mark_dirty();
+        w.propagate();
+        let all = portal_doors(&w);
+        assert_eq!(all.len(), 40, "the fixture street has forty doorways");
+        for (k, p) in all.iter().enumerate() {
+            if k % 2 == 0 {
+                let f = inf_ecs::door::door_field_mut(&mut w);
+                f.entry(p.guid, &p.spec).open_deg = p.spec.open_limit_deg;
+            }
+        }
+        let mut pairs = 0usize;
+        let mut narrowed = 0usize;
+        let mut portals = 0usize;
+        let mut open = 0usize;
+        for lx in (-10..=130).step_by(7) {
+            for lz in [-13.0, -6.0, -1.0, 4.0, 12.0] {
+                let listener = DVec3::new(f64::from(lx), 1.7, lz);
+                let near = portal_doors_near(&w, listener);
+                assert!(near.len() <= all.len());
+                narrowed += usize::from(near.len() < all.len());
+                for (ex, ez) in [(2.0, 5.0), (40.0, 6.0), (90.0, 3.0), (-5.0, -4.0)] {
+                    let emitter = DVec3::new(ex, 2.5, ez);
+                    let direct = (emitter - listener).length();
+                    let whole = portal_of_in(&w, &all, listener, emitter, direct);
+                    let fast = portal_of_in(&w, &near, listener, emitter, direct);
+                    assert_eq!(
+                        whole, fast,
+                        "listener {listener:?} emitter {emitter:?}: the near list picked a different portal than the whole list"
+                    );
+                    pairs += 1;
+                    portals += usize::from(whole.is_some());
+                    open += usize::from(whole.is_some_and(|p| p.verdict == PortalVerdict::Doorway));
+                }
+            }
+        }
+        println!(
+            "PERF1 near doors: {pairs} pairs, {portals} with a portal ({open} through an open leaf), the list narrowed for {narrowed} listeners"
+        );
+        assert!(
+            portals > 20,
+            "only {portals} pairs found a portal -- the comparison is vacuous"
+        );
+        assert!(
+            open > 5,
+            "only {open} pairs heard an open doorway -- the comparison never ranks"
+        );
+        assert!(
+            narrowed > 50,
+            "the near list narrowed for only {narrowed} listeners"
         );
     }
 
