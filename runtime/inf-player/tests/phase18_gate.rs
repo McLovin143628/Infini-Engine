@@ -264,10 +264,10 @@ fn composed_settings(stream_budget: u64) -> RenderSettings {
         },
         gi: GiSettings {
             enabled: true,
-            // A deliberately amortized sweep (an eighth of the High probe grid per
+            // A deliberately amortized sweep (an eighth of the High probe grid -- 4 096 since PAR0b -- per
             // frame), so the P18.4 round-robin cursor is part of what the
             // determinism gate compares rather than a code path nothing exercises.
-            probe_budget: 256,
+            probe_budget: 512,
             ..GiSettings::default()
         },
         ..RenderSettings::default()
@@ -548,15 +548,15 @@ fn the_composed_frame_trace_is_deterministic_across_runs() {
         a.iter().any(|f| f.gi.candidates > 0 && f.gi.voxelized > 0),
         "GI voxelized no primitive on any frame — only the terrain reached it"
     );
-    // The probe update is **sliced** — 256 of the High tier's 2048 per frame. That
+    // The probe update is **sliced** — 512 of the High tier's 4096 per frame. That
     // is all this asserts, and the wording matters: it does NOT claim the sweep
     // *advances*, because in this arm it does not — the clock crosses the sun
     // bucket every frame and legitimately restarts it (see the cursor note below).
     // The advancing-cursor claim lives in the sun-still arm that follows.
     assert!(
-        a.iter().all(|f| f.gi.probes_updated == 256),
-        "the GI probe update is not sliced: a full High-tier update is 2048 probes, \
-         so a 256-probe slice is what proves `probe_budget` reached the pass"
+        a.iter().all(|f| f.gi.probes_updated == 512),
+        "the GI probe update is not sliced: a full High-tier update is 4096 probes, \
+         so a 512-probe slice is what proves `probe_budget` reached the pass"
     );
     assert!(
         a.iter()
@@ -571,7 +571,7 @@ fn the_composed_frame_trace_is_deterministic_across_runs() {
     // held `scene.version`, and the player's `project_scene` calls
     // `RenderScene::mark_dirty()` unconditionally at the end of every projection —
     // so the version moved every frame whether or not any content did, `GiNode`
-    // restarted the sweep, and every probe past the first 256-probe slice was never
+    // restarted the sweep, and every probe past the first 512-probe slice was never
     // re-integrated. The version has left the key; the sweep's own wrap-around
     // bounds staleness after a content change instead.
     //
@@ -601,7 +601,7 @@ fn the_composed_frame_trace_is_deterministic_across_runs() {
 /// `RenderScene::mark_dirty()`, so a shipped build's `scene.version` moves every
 /// frame whether or not one triangle did. While that version sat in `GiSweepKey`,
 /// `GiNode` restarted the probe sweep every frame and every probe past the first
-/// 256-probe slice was never re-integrated — amortization paying a full update's
+/// 512-probe slice was never re-integrated — amortization paying a full update's
 /// price for one slice of freshness, in the *shipped* build only. The editor hid
 /// it, because `sync_from_doc` is document-version-gated and a static document
 /// holds its version still: a PIE-vs-shipping divergence in everything but name.
@@ -687,26 +687,26 @@ fn the_amortized_sweep_advances_when_only_the_scene_version_churns() {
          than the version could be what drives the cursor here ({suns:?})"
     );
 
-    // ── the claim: 256 → 512 → … → 1792 → wrap, under pure version churn ──
+    // ── the claim: 512 → 512 → … → 3584 → wrap, under pure version churn ──
     assert_eq!(
-        cursors[0], 256,
-        "the first frame did not take one 256-probe slice ({cursors:?})"
+        cursors[0], 512,
+        "the first frame did not take one 512-probe slice ({cursors:?})"
     );
     assert!(
-        cursors.iter().any(|&c| c > 256),
+        cursors.iter().any(|&c| c > 512),
         "the cursor never advanced past its first slice — the shipped player's \
          per-frame `scene.version` bump is restarting the sweep ({cursors:?})"
     );
     assert_eq!(
         cursors[7], 0,
-        "the 2048-probe sweep did not wrap on the 8th 256-probe frame ({cursors:?})"
+        "the 4096-probe sweep did not wrap on the 8th 512-probe frame ({cursors:?})"
     );
     for (i, w) in cursors[..8].windows(2).enumerate() {
         if w[1] != 0 {
             assert_eq!(
                 w[1],
-                w[0] + 256,
-                "slice {i} did not advance by the 256-probe budget ({cursors:?})"
+                w[0] + 512,
+                "slice {i} did not advance by the 512-probe budget ({cursors:?})"
             );
         }
     }

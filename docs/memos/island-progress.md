@@ -42061,7 +42061,7 @@ before/after pair in the session scratchpad (`PAR0b-FINAL\goldens-moved\`).
    arm reads max over three views: 0 codes (mutation 100 m: 10 codes, 9 px).
 8. **Emissives — BUILT.** A powered emitter (TV, bar rim, sign, festoon) takes its room's
    shift (`PcgSurface::schedule` / `ScatteredSurface::schedule`, the `powered_clock`
-   fence) and draws at `POWERED_RADIANCE_SCALE` = 1/256 of its authored value (the night
+   fence) and draws at `POWERED_RADIANCE_SCALE` = 1/1024 of its authored value (the night
    eye's gain). Strip census at 21:00, ACES > 0.9: before 2 of 5 (sign 0.954, TV 0.895
    near) at x1; after 0 of 5 (max 0.279) at x15.9.
 9. **Tight golden class — BUILT.** Mean <= 0.006, region max <= 0.06 for the light

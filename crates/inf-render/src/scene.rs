@@ -1308,12 +1308,13 @@ pub fn powered_step(level: f32) -> u8 {
 /// radiance — at night, under an eye that opens eight stops, 5 of 5 emitters on
 /// the strip clipped to white plates (measured, PAR0b). A powered thing is a
 /// light seen at NIGHT, so its authored value is now read as its brightness
-/// at the night eye: radiance = authored / 256 (the island's
-/// `ISLAND_NIGHT_GAIN_STOPS` = 8), which puts the brightest sign (3.6) at 3.6
+/// at the night eye: radiance = authored / 1024 (the island's
+/// `ISLAND_NIGHT_GAIN_STOPS` = 10), which puts the brightest sign (3.6) at 3.6
 /// on screen under the full night gain — under ACES's clip (≈ 4.5) — and a TV
-/// at 1.7. By day (exposure 1) they are the faint things a screen and a sign
+/// at 1.7 (1/256 was set against an eight-stop eye; at ten, the fixture
+/// island's venue street opened to x416 and 5 of its 6 emitters clipped). By day (exposure 1) they are the faint things a screen and a sign
 /// are under the sun. Unpowered emitters (code 0) are untouched.
-pub const POWERED_RADIANCE_SCALE: f32 = 1.0 / 256.0;
+pub const POWERED_RADIANCE_SCALE: f32 = 1.0 / 1024.0;
 
 /// The gain a powered surface with schedule `code` is drawn at under `clock`:
 /// `1.0` for code `0` (not powered), else its schedule's quantized level times

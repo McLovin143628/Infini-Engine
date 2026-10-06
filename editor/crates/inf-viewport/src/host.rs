@@ -9167,7 +9167,14 @@ mod sky_projection_tests {
         project_sky(&mut scene, &w);
         assert!(scene.sun.direction.y < 0.0, "the sun has set");
         assert_eq!(scene.lights.len(), 1);
-        assert_eq!(scene.lights[0].intensity, 0.15);
+        // PAR0b: the moon lights by its elevation and phase (0.15 is the FULL
+        // moon at altitude), and a set moon casts no shadow.
+        let sky = inf_ecs::sky::resolve_sky(&w).expect("a clock");
+        assert_eq!(scene.lights[0].intensity, 0.15 * sky.moon_level());
+        assert_eq!(
+            scene.lights[0].cast_shadows,
+            scene.lights[0].intensity > 0.0
+        );
         assert_eq!(scene.lights[0].direction, scene.sun.moon_direction);
         assert!(
             scene.sky.zenith[2] < SkyParams::default().zenith[2],
