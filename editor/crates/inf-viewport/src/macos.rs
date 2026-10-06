@@ -81,6 +81,10 @@ enum Cmd {
     /// with it — the honest state of this platform rather than a missing command
     /// that would fail to compile.
     SetSimRunning(bool),
+    /// Whether a Play session is live (the PERF1 audit) -- the throttle
+    /// `inf_editor_core::pie::editor_viewport_draws` states, on this platform
+    /// too.
+    SetPieRunning(bool),
     SetBiomePalette(uuid::Uuid, Vec<[f32; 4]>),
     /// Per-terrain water-level hints by biome id (P20.4).
     SetWaterHints(uuid::Uuid, Vec<Option<f64>>),
@@ -210,6 +214,12 @@ impl ViewportHandle {
     /// missing method that would not compile on the platform.
     pub fn set_sim_running(&self, running: bool) {
         let _ = self.tx.send(Cmd::SetSimRunning(running));
+    }
+
+    /// Tell the viewport whether a Play session is live (the PERF1 audit): it
+    /// throttles its own drawing while one is.
+    pub fn set_pie_running(&self, running: bool) {
+        let _ = self.tx.send(Cmd::SetPieRunning(running));
     }
 
     /// Push a terrain's resolved biome overlay palette (P19.2).
@@ -432,6 +442,10 @@ fn thread_main(
     // A default 2D camera; macOS input isn't wired yet, so 2D mode renders a
     // static top-down view (pan/zoom arrive with the macOS hardware pass).
     let camera_2d = Camera2D::default();
+    // Whether a Play session is live, and when this viewport last drew (the
+    // PERF1 audit's throttle).
+    let mut pie_running = false;
+    let mut last_draw: Option<std::time::Instant> = None;
 
     'outer: loop {
         let mut latest_rect: Option<ViewportRect> = None;
@@ -464,6 +478,7 @@ fn thread_main(
                 // because Ring 2 calls the setter unconditionally and the pump
                 // mirror gate holds the two platforms level.
                 Ok(Cmd::SetSimRunning(_running)) => {}
+                Ok(Cmd::SetPieRunning(running)) => pie_running = running,
                 Ok(Cmd::SetBiomePalette(e, p)) => host.set_biome_palette(e, p),
                 Ok(Cmd::SetWaterHints(e, h)) => host.set_water_hints(e, h),
                 Ok(Cmd::SetGizmo(m)) => host.set_gizmo_mode(m),
@@ -532,6 +547,17 @@ fn thread_main(
         } else {
             host.view_for(&camera)
         };
+        // The PERF1 audit's throttle while a Play session runs; a frame that
+        // does not draw sleeps instead of spinning (there is no vsync to wait
+        // on without a present).
+        if !inf_editor_core::pie::editor_viewport_draws(
+            pie_running,
+            last_draw.map(|t: std::time::Instant| t.elapsed()),
+        ) {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            continue;
+        }
+        last_draw = Some(std::time::Instant::now());
         if let Err(e) = host.render_frame(&view) {
             tracing::error!("inf-viewport: unrecoverable render failure: {e}");
             break;

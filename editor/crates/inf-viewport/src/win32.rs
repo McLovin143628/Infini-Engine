@@ -170,6 +170,12 @@ enum Cmd {
     /// of picking, and the deltas are forwarded rather than steering the editor
     /// camera. Pushed by `sim_start`/`sim_stop`, backend to backend.
     SetSimRunning(bool),
+    /// Whether a Play session (either mode) is live (the PERF1 audit). While it
+    /// is, this viewport draws at most once per
+    /// `inf_editor_core::pie::PIE_EDITOR_VIEWPORT_INTERVAL` -- the Play window
+    /// is a second renderer on the same GPU and CPU, and the editor's camera is
+    /// not the one anybody is looking through.
+    SetPieRunning(bool),
     /// Push a terrain entity's resolved biome overlay palette (P19.2) — Ring 2
     /// owns the asset lookup, the viewport only draws it.
     SetBiomePalette(uuid::Uuid, Vec<[f32; 4]>),
@@ -319,6 +325,12 @@ impl ViewportHandle {
     /// Tell the viewport whether an in-editor Simulate session is live (P29.6).
     pub fn set_sim_running(&self, running: bool) {
         let _ = self.tx.send(Cmd::SetSimRunning(running));
+    }
+
+    /// Tell the viewport whether a Play session is live (the PERF1 audit): it
+    /// throttles its own drawing while one is.
+    pub fn set_pie_running(&self, running: bool) {
+        let _ = self.tx.send(Cmd::SetPieRunning(running));
     }
 
     /// Replace the water-tool configuration (kind / river dimensions / level
@@ -1357,6 +1369,11 @@ fn thread_main(
     // up (Cmd::SetVisible(false)) or while a PIE window is embedded; when it isn't
     // presenting, the loop sleeps instead of busy-spinning on a dead surface (M3).
     let mut visible = true;
+    // **Whether a Play session is live, and when this viewport last drew**
+    // (the PERF1 audit): the throttle `inf_editor_core::pie::editor_viewport_draws`
+    // decides from these two.
+    let mut pie_running = false;
+    let mut last_draw: Option<std::time::Instant> = None;
 
     // Last published terrain tool-state, so the status event only fires on a
     // change (see the drain below).
@@ -1437,6 +1454,7 @@ fn thread_main(
                         end_capture(Capture::SimLook);
                     }
                 }
+                Ok(Cmd::SetPieRunning(running)) => pie_running = running,
                 Ok(Cmd::SetBiomePalette(e, p)) => host.set_biome_palette(e, p),
                 Ok(Cmd::SetWaterHints(e, h)) => host.set_water_hints(e, h),
                 Ok(Cmd::SetGizmo(m)) => {
@@ -2232,9 +2250,20 @@ fn thread_main(
         //    commands and stays responsive without pinning a CPU core (M3). The
         //    quantum is short enough that a SetVisible(true)/SetRect wakes within
         //    one sleep.
-        let should_render = visible && embedded.is_none();
+        //
+        //    …and while a Play window runs, at most once per
+        //    `PIE_EDITOR_VIEWPORT_INTERVAL` (the PERF1 audit): the rest of the
+        //    loop (commands, input, the version-gated scene sync) keeps its
+        //    pace, only the draw waits.
+        let should_render = visible
+            && embedded.is_none()
+            && inf_editor_core::pie::editor_viewport_draws(
+                pie_running,
+                last_draw.map(|t| t.elapsed()),
+            );
         let mut presented = false;
         if should_render {
+            last_draw = Some(std::time::Instant::now());
             let eye = if two_d { camera_2d.eye() } else { camera.pos };
             // **The camera as a streaming source** (wave EDIT1, clause 1). Ring
             // 2's PCG tick needs to know where the author is looking, and this is

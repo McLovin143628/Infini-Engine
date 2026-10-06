@@ -203,6 +203,14 @@ impl ViewportState {
         self.with(Target::All, |h| h.set_sim_running(running));
     }
 
+    /// Tell every viewport whether a Play session is live (the PERF1 audit):
+    /// each throttles its own drawing to
+    /// `inf_editor_core::pie::PIE_EDITOR_VIEWPORT_INTERVAL` while one is.
+    /// `Target::All` for `set_sim_running`'s reason.
+    pub fn set_pie_running(&self, running: bool) {
+        self.with(Target::All, |h| h.set_pie_running(running));
+    }
+
     /// Rebuild the loose `.inf_terrain` index in place, keeping live streams —
     /// pushed when a terrain import finishes (P16.4a).
     pub fn refresh_asset_index(&self, target: Target) {

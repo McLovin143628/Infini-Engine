@@ -1717,6 +1717,32 @@ pub fn derive_fracture(
         .then_some(asset)
 }
 
+/// **How often the editor's own viewport draws while a Play window runs** (the
+/// PERF1 audit, priority b').
+///
+/// Play in New Window is a second process on the same GPU and CPU, and the
+/// editor's viewport behind it kept drawing the island at its own vsync rate
+/// for a camera nobody was looking through. Four frames a second keeps the
+/// editor visibly alive behind the game (a moved window still repaints) and
+/// gives the Play window the machine. Embedded Play already draws nothing of
+/// the editor's own: its child is hidden behind the player's window.
+pub const PIE_EDITOR_VIEWPORT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// **Should the editor viewport draw this iteration?** -- the throttle
+/// [`PIE_EDITOR_VIEWPORT_INTERVAL`] states, as a rule the viewport loop calls.
+///
+/// `play_running` is whether a Play session (either mode) is live,
+/// `since_last_draw` the time since the viewport last drew (`None` before its
+/// first frame). With no Play session the answer is always yes -- the editor is
+/// exactly what it was before Play started -- and with one it is yes once per
+/// interval.
+pub fn editor_viewport_draws(
+    play_running: bool,
+    since_last_draw: Option<std::time::Duration>,
+) -> bool {
+    !play_running || since_last_draw.is_none_or(|d| d >= PIE_EDITOR_VIEWPORT_INTERVAL)
+}
+
 /// Locate the `inf-player` binary next to the running editor executable (dev
 /// and shipped both place it in the same directory). Honours the
 /// `INF_PLAYER_BIN` environment override. Returns the first existing candidate,
@@ -1808,6 +1834,45 @@ mod tests {
     use super::*;
     use crate::ipc::SpawnKind;
     use inf_ecs::components::{PcgVolume, Terrain, VoxelVolume};
+
+    /// **The editor viewport draws four times a second behind a Play window,
+    /// and every frame again the moment Play ends** (the PERF1 audit, b').
+    #[test]
+    fn the_editor_viewport_throttles_during_play_and_resumes_when_it_ends() {
+        use std::time::Duration;
+        let tick = Duration::from_millis(16);
+        // No Play: every iteration draws, whatever the clock says.
+        assert!(editor_viewport_draws(false, Some(Duration::ZERO)));
+        assert!(editor_viewport_draws(false, Some(tick)));
+        assert!(editor_viewport_draws(false, None));
+        // Play: the first frame draws, then not again inside the interval...
+        assert!(editor_viewport_draws(true, None));
+        assert!(!editor_viewport_draws(true, Some(tick)));
+        assert!(!editor_viewport_draws(
+            true,
+            Some(PIE_EDITOR_VIEWPORT_INTERVAL - Duration::from_millis(1))
+        ));
+        assert!(editor_viewport_draws(
+            true,
+            Some(PIE_EDITOR_VIEWPORT_INTERVAL)
+        ));
+        // ...which is a quarter of a second: at most four draws a second, and
+        // never a stall (it draws again once per interval, not never).
+        assert_eq!(PIE_EDITOR_VIEWPORT_INTERVAL, Duration::from_millis(250));
+        let mut draws = 0;
+        let mut last: Option<Duration> = None;
+        for i in 0..60u64 {
+            let now = Duration::from_millis(i * 16);
+            if editor_viewport_draws(true, last.map(|l| now - l)) {
+                draws += 1;
+                last = Some(now);
+            }
+        }
+        assert_eq!(
+            draws, 4,
+            "one second of 60 Hz iterations during Play drew {draws} frames"
+        );
+    }
 
     /// **Carried 142, as a value** (wave OUTFIT1): a garment a preview is about
     /// to wear reaches the payload even though the document never names it, is

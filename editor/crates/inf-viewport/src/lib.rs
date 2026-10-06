@@ -222,6 +222,8 @@ impl ViewportHandle {
     pub fn set_voxel(&self, _voxel: camera::VoxelSettings) {}
     /// P29.6: no native viewport, so nothing to capture a mouse with.
     pub fn set_sim_running(&self, _running: bool) {}
+    /// The PERF1 audit: no native viewport, so nothing to throttle.
+    pub fn set_pie_running(&self, _running: bool) {}
     pub fn set_biome_palette(&self, _entity: uuid::Uuid, _palette: Vec<[f32; 4]>) {}
     pub fn set_water_hints(&self, _entity: uuid::Uuid, _hints: Vec<Option<f64>>) {}
     pub fn set_gizmo_mode(&self, _mode: inf_editor_core::ipc::GizmoModeDto) {}

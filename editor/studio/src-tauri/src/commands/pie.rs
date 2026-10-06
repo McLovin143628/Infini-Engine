@@ -118,6 +118,26 @@ fn emit_state(app: &AppHandle, ev: PieStateEvent) {
     let _ = app.emit("pie://state", ev);
 }
 
+/// **The editor steps aside while Play runs, and comes back when it ends** (the
+/// PERF1 audit, priority b'). Measured during Play in New Window on the island:
+/// the editor's PCG stream evaluating a block every tick (165-178 ms each,
+/// under the document lock) and its viewport drawing the island at vsync,
+/// behind a Play window on the same GPU and CPU. While a session is live the
+/// stream yields (`EditorPcgStreams::set_yielded_to_play`) and every viewport
+/// draws at most every `PIE_EDITOR_VIEWPORT_INTERVAL`; the one call with
+/// `false` puts both back exactly as they were.
+///
+/// Called with `true` once a player process exists, and with `false` on EVERY
+/// path a session ends by: `pie_stop` and the monitor's exit arm.
+fn editor_yields_to_play(app: &AppHandle, playing: bool) {
+    if let Some(stream) = app.try_state::<super::PcgStreamState>() {
+        stream.yield_to_play(playing);
+    }
+    if let Some(vp) = app.try_state::<ViewportState>() {
+        vp.set_pie_running(playing);
+    }
+}
+
 /// Start PIE over the current scene. `mode` is `"embedded"` (reparent the player
 /// window into the viewport, Windows) or `"window"` (new window, all OSes). The
 /// live doc — unsaved edits included — is serialized and streamed to the player.
@@ -276,6 +296,7 @@ pub async fn pie_start(
         inner.install_monitor(Arc::clone(&run));
     }
 
+    editor_yields_to_play(&app, true);
     spawn_monitor(app.clone(), run, embedded);
     emit_state(
         &app,
@@ -384,6 +405,7 @@ fn spawn_monitor(app: AppHandle, run: Arc<AtomicBool>, embedded: bool) {
                         inner.paused = false;
                         inner.mode.clear();
                         drop(inner);
+                        editor_yields_to_play(&app, false);
                         if was_embedded {
                             // The embed's twin, and Primary for the same
                             // reason: only the scene viewport was hidden, so
@@ -510,6 +532,7 @@ pub async fn pie_stop(app: AppHandle, pie: State<'_, PieState>) -> Result<(), St
     if let Some(run) = run {
         run.store(false, Ordering::SeqCst);
     }
+    editor_yields_to_play(&app, false);
     if was_embedded {
         let vp = app.state::<ViewportState>();
         // Primary, explicitly: the stop path restores exactly the slot the
@@ -628,6 +651,54 @@ mod tests {
         let mut inner = state.lock().expect("not poisoned");
         assert!(!inner.starting && inner.session.is_none());
         inner.starting = true;
+    }
+
+    /// **The editor steps aside for Play, and every end path brings it back**
+    /// (the PERF1 audit) -- a source pin on the three call sites.
+    #[test]
+    fn the_editor_steps_aside_for_play_and_every_end_path_brings_it_back() {
+        // **The PERF1 audit, priority b'.** One `true` (the start, after the
+        // player exists), and a `false` on each of the two paths a session
+        // ends by -- the Stop command and the monitor's exit arm. A path that
+        // forgot it would leave the editor's PCG stream yielded and its
+        // viewport at four frames a second after Play had ended.
+        let src = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/commands/pie.rs"),
+        )
+        .expect("this module is readable")
+        .replace("\r\n", "\n");
+        let body = |start: &str| {
+            let a = src.find(start).expect(start);
+            let rest = &src[a..];
+            let b = rest[1..].find("\n}\n").map_or(rest.len(), |i| i + 1);
+            rest[..b].to_string()
+        };
+        let start = body("pub async fn pie_start(");
+        let stop = body("pub async fn pie_stop(");
+        let monitor = body("fn spawn_monitor(");
+        assert_eq!(
+            start.matches("editor_yields_to_play(&app, true)").count(),
+            1
+        );
+        assert!(
+            start.find("PieSession::spawn_scene_for_level").unwrap()
+                < start.find("editor_yields_to_play(&app, true)").unwrap(),
+            "the editor yields before a player exists"
+        );
+        assert_eq!(
+            stop.matches("editor_yields_to_play(&app, false)").count(),
+            1
+        );
+        let exited = &monitor[monitor.find("SessionHealth::Exited { code }").unwrap()..];
+        assert_eq!(
+            exited.matches("editor_yields_to_play(&app, false)").count(),
+            1
+        );
+        let helper = body("fn editor_yields_to_play(");
+        assert!(
+            helper.contains("yield_to_play(playing)")
+                && helper.contains("set_pie_running(playing)")
+        );
     }
 
     /// **The claim happens before the lock is released**, which is the whole of
