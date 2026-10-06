@@ -887,7 +887,9 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
     // this reads most — a kilometre-wide cloud shadow drifting over a valley is
     // the whole point of baking the map. Guarded like the CSM block above, so a
     // cloudless scene is byte-identical.
-    if (atmos.clouds.x > 0.5 && atmos.cloud_shadow.x > 0.0) {
+    // By day only (audit PAR0b): the moon's key is veiled by the coverage in
+    // the ECS already, and this map is cast along the sun.
+    if (atmos.clouds.x > 0.5 && atmos.cloud_shadow.x > 0.0 && view.sun_dir.y > 0.0) {
         let cf = cloud_shadow_factor(in.world_local);
         direct = direct * cf;
         spec_term = spec_term * cf;

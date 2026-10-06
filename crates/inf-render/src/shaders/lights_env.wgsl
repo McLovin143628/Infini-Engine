@@ -12,9 +12,13 @@ fn light_sun_shadow(p: vec3<f32>, n: vec3<f32>) -> f32 {
     return 1.0;
 }
 
-// P17.3's large-scale cloud shadowing of every directional light.
+// P17.3's large-scale cloud shadowing of every directional light — by DAY.
+// At night the key is the moon, whose light the ECS already veils by the cloud
+// coverage (`inf_ecs::sky::ResolvedSky::key_light`); the map is cast along the
+// SUN and applying it too veiled the moon twice (audit PAR0b, carried by the
+// wave).
 fn light_cloud_shadow(p: vec3<f32>) -> f32 {
-    if (atmos.clouds.x > 0.5 && atmos.cloud_shadow.x > 0.0) {
+    if (atmos.clouds.x > 0.5 && atmos.cloud_shadow.x > 0.0 && view.sun_dir.y > 0.0) {
         return cloud_shadow_factor(p);
     }
     return 1.0;
