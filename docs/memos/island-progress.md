@@ -42069,3 +42069,22 @@ before/after pair in the session scratchpad (`PAR0b-FINAL\goldens-moved\`).
    it), par0b_sealed_lit 0.173 / 0.201, par0b_moonlit_street 0.075 / 0.172 — all red.
 10. **Goldens — 74 -> 78**, eight re-blessed with the causes above, before/after pairs in
    `PAR0b-FINAL\goldens-moved\`.
+
+### Carried (cause, price) and the close
+
+- The 21:00 road reads near-black in Play: a June full moon is 5 deg up (12 at 02:00), asphalt
+  at grazing incidence, a small twilight ambient — street mean 7.6 / 255 at x256. PAR1b's
+  lamps are the honest answer; a stylised night floor is the cheap one.
+- Glass over / behind water draws in the wrong order (the glass pass lives in the scatter
+  pass, before water): a post-water glass node, ~0.5 d.
+- Doorway falloff is not monotone past 1.5 m (48-ray quadrature, 2.67 m probe pitch); a door
+  narrower than two voxels is closed to the probe march; `gi_terrain`'s terrain bounce lost to
+  the dilated wall's self-occlusion (red +2.46 -> -0.05; asserts retired with the numbers).
+- Shaded glazed facades read dark by day — their rooms are honestly dark; PAR1a's fixtures.
+- Mutations: 4 of the gate's 16 arms run (`PAR0b-FINAL\mutations.txt`).
+
+The close: battery on `909f9f12` `AGGREGATE over 407 binaries: 7895 passed, 0 failed, 34
+ignored`; clippy clean after two test-only lints (`8a90a62f`); rustdoc 398 (base 398); wasm32
+`inf-player` ok. Schema v28 / payload 14 / EXPECTED_LEVELS 24, `Cargo.lock` untouched.
+Goldens 78. Editor frames at 21:00, 02:00 and noon from Play in New Window
+(`PAR0b-FINAL\demo-21`, `demo-2`, `demo-12`).
