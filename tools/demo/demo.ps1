@@ -571,10 +571,10 @@ else { Remove-Item env:INF_PIE_SPAWN_AT -ErrorAction Ignore }
 if ($WearCloth -ne "") { $env:INF_PIE_WEAR_CLOTH = $WearCloth; Say "wear cloth: $WearCloth" }
 else { Remove-Item env:INF_PIE_WEAR_CLOTH -ErrorAction Ignore }
 if ($Hour -ne "") { $env:INF_PIE_HOUR = $Hour; Say "clock frozen at $Hour h local" }
+else { Remove-Item env:INF_PIE_HOUR -ErrorAction Ignore }
 # Wave PERF1: every frame the loop photographs carries its cost -- the player's
 # on-screen frame counter (top-right: mean ms, fps, p95 over the last second).
 $env:INF_FPS_HUD = "1"
-else { Remove-Item env:INF_PIE_HOUR -ErrorAction Ignore }
 # WPN2a: the WHOLE list goes to the player, which puts every one of them in the
 # hero's bag and equips the first. The loop cycles the rest in with the SCROLL
 # WHEEL -- the shipped `weapon_switch` verb -- so one session photographs one
