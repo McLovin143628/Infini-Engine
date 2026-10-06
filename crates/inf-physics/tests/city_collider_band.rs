@@ -717,6 +717,9 @@ fn the_radius_sweep_states_what_the_default_buys() {
 fn the_solver_pays_for_static_pairs_the_city_can_never_move() {
     let city = city(DVec3::ZERO);
     let mut bridge = PhysicsBridge3D::new(DVec3::new(0.0, -9.81, 0.0));
+    // Measured with the static dormancy OFF (wave PERF1b): this arm prices
+    // the static pairs themselves; the dormant city is priced at the end.
+    bridge.world_mut().set_static_dormancy(false);
     bridge.sync_from_world(&city.world);
     let dt = 1.0 / 60.0;
     // Warm: the first steps build the broad-phase tree and seat every manifold.
@@ -762,6 +765,9 @@ fn the_solver_pays_for_static_pairs_the_city_can_never_move() {
     // rapier's narrow phase early-outs on every edge it owns.
     {
         let mut w = PhysicsBridge3D::new(DVec3::new(0.0, -9.81, 0.0));
+        // Measured with the static dormancy OFF (wave PERF1b): this arm prices
+        // the static pairs themselves; the dormant city is priced at the end.
+        w.world_mut().set_static_dormancy(false);
         w.sync_from_world(&city.world);
         let b = w.world_mut().add_body(
             inf_physics::d3::BodyKind3D::Dynamic,
@@ -798,6 +804,9 @@ fn the_solver_pays_for_static_pairs_the_city_can_never_move() {
     // pairs with it.
     {
         let mut w = PhysicsBridge3D::new(DVec3::new(0.0, -9.81, 0.0));
+        // Measured with the static dormancy OFF (wave PERF1b): this arm prices
+        // the static pairs themselves; the dormant city is priced at the end.
+        w.world_mut().set_static_dormancy(false);
         w.sync_from_world(&city.world);
         let span = 128.0f64;
         let res = 129u32;
@@ -856,6 +865,40 @@ fn the_solver_pays_for_static_pairs_the_city_can_never_move() {
          manifold — `ActiveCollisionTypes` is back to `all()` for solids, and \
          this city's fixed step has just gone back to paying nine milliseconds \
          for contacts no solver can act on"
+    );
+    // **AND WITH THE DORMANCY ON** (wave PERF1b): the same city, the same host
+    // sync, nothing moving in it -- every static is asleep, so rapier tracks
+    // NO pair at all. On the cooked island 96 % of the 58 000-103 000 pairs
+    // the window's step tracked were these.
+    let mut dormant = PhysicsBridge3D::new(DVec3::new(0.0, -9.81, 0.0));
+    dormant.sync_from_world(&city.world);
+    for _ in 0..30 {
+        dormant.sync_from_world(&city.world);
+        dormant.step(dt);
+    }
+    let (dtracked, _) = dormant.world().contact_pair_counts();
+    let stats = dormant.world().dormancy_stats();
+    let mut asleep_ms = f64::INFINITY;
+    for _ in 0..5 {
+        let t = Instant::now();
+        for _ in 0..60 {
+            dormant.sync_from_world(&city.world);
+            dormant.step(dt);
+        }
+        asleep_ms = asleep_ms.min(t.elapsed().as_secs_f64() * 1000.0 / 60.0);
+    }
+    println!(
+        "  DORMANT (wave PERF1b): {dtracked} pairs tracked, {stats:?}, {asleep_ms:.3} ms/step \
+         with the sync (against {synced:.3} awake)"
+    );
+    assert_eq!(
+        dtracked, 0,
+        "a city nothing moves in still tracks {dtracked} static pairs"
+    );
+    assert!(
+        stats.asleep >= colliders,
+        "only {} of {colliders} structure colliders are asleep",
+        stats.asleep
     );
 }
 

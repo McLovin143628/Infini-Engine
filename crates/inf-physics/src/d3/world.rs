@@ -619,6 +619,9 @@ pub struct PhysicsWorld3D {
     set_aside: u64,
 
     pending_contacts: Vec<ContactEvent3D>,
+    /// **Static scenery asleep where nothing can touch it** (wave PERF1b) --
+    /// see [`super::dormancy`].
+    dormancy: super::dormancy::Dormancy,
 }
 
 impl PhysicsWorld3D {
@@ -644,7 +647,56 @@ impl PhysicsWorld3D {
             queries: 0,
             set_aside: 0,
             pending_contacts: Vec::new(),
+            dormancy: super::dormancy::Dormancy::default(),
         }
+    }
+
+    /// What the static-scenery dormancy has done (wave PERF1b): statics
+    /// managed and asleep, movers tracked, toggles and re-queries made.
+    pub fn dormancy_stats(&self) -> super::dormancy::DormancyStats {
+        self.dormancy.stats()
+    }
+
+    /// Switch the static-scenery dormancy off (`false` = every static awake,
+    /// the behaviour before wave PERF1b) or back on. The A/B door the arms
+    /// compare against; on by default.
+    pub fn set_static_dormancy(&mut self, on: bool) {
+        if !on && !self.dormancy.off {
+            self.dormancy.wake_all(&mut self.colliders);
+        }
+        self.dormancy.off = !on;
+    }
+
+    /// Run the dormancy update against this step's state (wave PERF1b).
+    fn update_dormancy(&mut self) {
+        if self.dormancy.off {
+            return;
+        }
+        self.refresh_query_tree_before_step();
+        let dt = self.integration_parameters.dt;
+        let Self {
+            dormancy,
+            bodies,
+            colliders,
+            query_bvh,
+            narrow_phase,
+            ..
+        } = self;
+        let mut query = |aabb: &rapier3d_f64::parry::bounding_volume::Aabb,
+                         set: &ColliderSet|
+         -> Vec<ColliderHandle> {
+            query_bvh
+                .as_query_pipeline(
+                    narrow_phase.query_dispatcher(),
+                    bodies,
+                    set,
+                    QueryFilter::default(),
+                )
+                .intersect_aabb_conservative(*aabb)
+                .map(|(h, _)| h)
+                .collect()
+        };
+        super::dormancy::update(dormancy, bodies, colliders, dt, &mut query);
     }
 
     /// The current gravity vector.
@@ -667,6 +719,9 @@ impl PhysicsWorld3D {
     /// read them with [`drain_contact_events`](Self::drain_contact_events).
     pub fn step(&mut self, dt: f64) {
         self.integration_parameters.dt = dt;
+        // Static scenery out of every mover's reach leaves the broad phase for
+        // this step (wave PERF1b) -- see `super::dormancy`.
+        self.update_dormancy();
         // **What the solver is about to move** (island wave I4b). Awake bodies
         // are the ones the integrator touches, so their query-BVH leaves are the
         // ones that go stale — and taking the set BEFORE the step as well as
@@ -798,6 +853,8 @@ impl PhysicsWorld3D {
             .rotation(rotation.to_scaled_axis())
             .build();
         let handle = self.bodies.insert(rb);
+        self.dormancy
+            .body_added(handle, !matches!(kind, BodyKind3D::Static));
         // No `query_*` mark: a body owns no query leaf — its COLLIDERS do, and
         // every one of them arrives through `try_add_collider` below.
         BodyId3D(handle)
@@ -806,6 +863,12 @@ impl PhysicsWorld3D {
     /// Destroy a body and all colliders attached to it. Returns `false` if the
     /// handle was already invalid.
     pub fn remove_body(&mut self, body: BodyId3D) -> bool {
+        let owned: Vec<ColliderHandle> = self
+            .bodies
+            .get(body.0)
+            .map(|rb| rb.colliders().to_vec())
+            .unwrap_or_default();
+        self.dormancy.body_removed(body.0, &owned);
         let removed = self
             .bodies
             .remove(
@@ -852,6 +915,10 @@ impl PhysicsWorld3D {
         if let Some(rb) = self.bodies.get_mut(body.0) {
             rb.set_translation(translation, true);
             self.query_moved_bodies.push(body.0);
+            if rb.is_fixed() {
+                let owned = rb.colliders().to_vec();
+                self.dormancy.static_moved(&owned, &mut self.colliders);
+            }
             true
         } else {
             false
@@ -863,6 +930,10 @@ impl PhysicsWorld3D {
         if let Some(rb) = self.bodies.get_mut(body.0) {
             rb.set_rotation(rotation, true);
             self.query_moved_bodies.push(body.0);
+            if rb.is_fixed() {
+                let owned = rb.colliders().to_vec();
+                self.dormancy.static_moved(&owned, &mut self.colliders);
+            }
             true
         } else {
             false
@@ -1061,8 +1132,15 @@ impl PhysicsWorld3D {
     /// Change a body's kind (Static/Kinematic/Dynamic) in place, waking it.
     pub fn set_body_kind(&mut self, body: BodyId3D, kind: BodyKind3D) -> bool {
         if let Some(rb) = self.bodies.get_mut(body.0) {
+            let was_fixed = rb.is_fixed();
             rb.set_body_type(kind.to_rapier(), true);
+            let owned = rb.colliders().to_vec();
+            let now_fixed = matches!(kind, BodyKind3D::Static);
             self.query_moved_bodies.push(body.0);
+            if was_fixed != now_fixed {
+                self.dormancy
+                    .body_kind_changed(body.0, !now_fixed, &owned, &mut self.colliders);
+            }
             true
         } else {
             false
@@ -1460,11 +1538,14 @@ impl PhysicsWorld3D {
             .colliders
             .insert_with_parent(collider, body.0, &mut self.bodies);
         self.query_moved.push(handle);
+        let parent_fixed = self.bodies.get(body.0).is_some_and(|b| b.is_fixed());
+        self.dormancy.collider_added(handle, parent_fixed);
         Ok(ColliderId3D(handle))
     }
 
     /// Destroy a collider. Returns `false` if the handle was already invalid.
     pub fn remove_collider(&mut self, collider: ColliderId3D) -> bool {
+        self.dormancy.collider_removed(collider.0);
         let removed = self
             .colliders
             .remove(collider.0, &mut self.islands, &mut self.bodies, true)
@@ -1494,6 +1575,9 @@ impl PhysicsWorld3D {
     ///
     /// Returns `false` for a handle that no longer exists.
     pub fn set_collider_enabled(&mut self, collider: ColliderId3D, enabled: bool) -> bool {
+        // A collider toggled by hand is the caller's from now on; the
+        // static-scenery dormancy (wave PERF1b) never touches it again.
+        self.dormancy.hand_toggled(collider.0);
         match self.colliders.get_mut(collider.0) {
             Some(c) => {
                 c.set_enabled(enabled);
@@ -1519,7 +1603,12 @@ impl PhysicsWorld3D {
     ///
     /// `None` for a handle that no longer exists.
     pub fn collider_enabled(&self, collider: ColliderId3D) -> Option<bool> {
-        self.colliders.get(collider.0).map(|c| c.is_enabled())
+        // A static asleep under the dormancy (wave PERF1b) is enabled as far as
+        // every caller is concerned: it is out of rapier's broad phase, not out
+        // of the world.
+        self.colliders
+            .get(collider.0)
+            .map(|c| c.is_enabled() || self.dormancy.is_asleep(collider.0))
     }
 
     /// Does this collider still exist?
@@ -1645,7 +1734,7 @@ impl PhysicsWorld3D {
             // it is a fact about one — and a caster asking what is in the way of
             // a bullet, a wheel, a camera or a ledge probe wants the same
             // answer about it.
-            c.is_enabled() && !exclude.contains(&ColliderId3D(h))
+            (c.is_enabled() || self.dormancy.is_asleep(h)) && !exclude.contains(&ColliderId3D(h))
         };
         // `skip_dynamic` asks the BROAD PHASE to leave dynamic bodies out
         // entirely, which is not the same as "cast, then reject a dynamic hit".
@@ -1825,7 +1914,7 @@ impl PhysicsWorld3D {
         // one either. See `cast_ray_where`.
         let predicate = |h: rapier3d_f64::geometry::ColliderHandle,
                          c: &rapier3d_f64::geometry::Collider| {
-            c.is_enabled() && !exclude.contains(&ColliderId3D(h))
+            (c.is_enabled() || self.dormancy.is_asleep(h)) && !exclude.contains(&ColliderId3D(h))
         };
         let base = match targets {
             CastTargets::All => QueryFilter::default(),
@@ -2066,6 +2155,46 @@ impl PhysicsWorld3D {
         // cannot drift from the list of doors. See [`queries`](Self::queries)
         // for what it is for.
         self.queries = self.queries.saturating_add(1);
+        self.refresh_query_tree();
+    }
+
+    /// [`ensure_query_pipeline`](Self::ensure_query_pipeline)'s work without
+    /// its count (wave PERF1b): the dormancy update reads the tree once a step
+    /// and is not a scene query anybody asked.
+    /// The query tree brought up to date for the dormancy update at the START
+    /// of a step (wave PERF1b): new and re-shaped leaves inserted, a pending
+    /// rebuild done -- and the bodies marked as moved KEPT marked. A body
+    /// teleported this frame has its colliders re-posed by rapier inside the
+    /// pipeline step, so a leaf refreshed now would hold the old pose; leaving
+    /// the mark lets the first query after the step refresh it at the new one,
+    /// exactly as before this update existed
+    /// (`a_teleported_body_answers_where_it_landed_and_not_where_it_was`).
+    fn refresh_query_tree_before_step(&mut self) {
+        let params = self.integration_parameters;
+        if self.query_rebuild {
+            let mut bvh = BroadPhaseBvh::new();
+            for (handle, collider) in self.colliders.iter() {
+                bvh.set_aabb(&params, handle, collider.compute_aabb());
+            }
+            self.query_bvh = bvh;
+            self.query_rebuild = false;
+            self.query_moved.clear();
+            return;
+        }
+        if self.query_moved.is_empty() {
+            return;
+        }
+        let mut moved = std::mem::take(&mut self.query_moved);
+        for c in &moved {
+            if let Some(aabb) = self.colliders.get(*c).map(|col| col.compute_aabb()) {
+                self.query_bvh.set_aabb(&params, *c, aabb);
+            }
+        }
+        moved.clear();
+        self.query_moved = moved;
+    }
+
+    fn refresh_query_tree(&mut self) {
         let params = self.integration_parameters;
         if self.query_rebuild {
             let mut bvh = BroadPhaseBvh::new();

@@ -43,6 +43,7 @@ pub mod door;
 // EMS2 dispatch: what has happened, who is going, and the stick their driver is
 // handed. The rules are `inf_ecs::dispatch`.
 pub mod dispatch;
+pub mod dormancy;
 mod ecs;
 // WPN2e: the NPC FIRING POLICY, applied -- the first shipped caller of
 // `gameplay::npc_aim_at` and `gameplay::equip_weapon`. The rules are

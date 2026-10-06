@@ -47,9 +47,37 @@ fn box_at(w: &mut PhysicsWorld3D, kind: BodyKind3D, at: DVec3, half: f64, sensor
 /// which is what `touching` counts. The **control** in the same arm makes one of
 /// them dynamic and the same overlap becomes a real contact, so this cannot pass
 /// by the two boxes simply not overlapping.
+///
+/// **And since wave PERF1b the pair is not even tracked** while nothing can
+/// touch either box: static scenery out of every mover's reach sleeps out of
+/// rapier's broad phase (`inf_physics::d3::dormancy`). The rule above is
+/// measured with that switched off (the pair is tracked, and still computes no
+/// manifold); the dormant world is measured beside it and must track none.
 #[test]
 fn two_static_solids_that_overlap_compute_no_manifold() {
+    let mut asleep = world();
+    box_at(&mut asleep, BodyKind3D::Static, DVec3::ZERO, 1.0, false);
+    box_at(
+        &mut asleep,
+        BodyKind3D::Static,
+        DVec3::new(0.5, 0.0, 0.0),
+        1.0,
+        false,
+    );
+    for _ in 0..4 {
+        asleep.step(DT);
+    }
+    let (dormant_tracked, _) = asleep.contact_pair_counts();
+    let stats = asleep.dormancy_stats();
+    println!("static solid ↔ static solid, dormancy on: {dormant_tracked} tracked, {stats:?}");
+    assert_eq!(
+        dormant_tracked, 0,
+        "two statics nothing can touch are still a tracked pair -- the dormancy is off"
+    );
+    assert_eq!(stats.asleep, 2, "both statics must be asleep: {stats:?}");
+
     let mut w = world();
+    w.set_static_dormancy(false);
     box_at(&mut w, BodyKind3D::Static, DVec3::ZERO, 1.0, false);
     box_at(
         &mut w,
