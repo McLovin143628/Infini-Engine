@@ -812,6 +812,32 @@ mod tests {
                             l.at
                         );
                     }
+                    // Every room fitting's light hangs in the upper half of
+                    // its storey (a ceiling fixture is not on the floor).
+                    for l in &out.lights {
+                        if l.tag.room == super::super::FixtureTag::EXTERIOR
+                            || fixture(l.tag.row).mount != Mount::Ceiling
+                        {
+                            continue;
+                        }
+                        let floor_y = out.plan.floor_y(l.tag.floor);
+                        assert!(
+                            l.at.y > floor_y + out.plan.floor_height * 0.5,
+                            "{arch:?} seed {seed}: a {} light at y {:.2} on a storey from {floor_y:.2}",
+                            l.tag.row.name(),
+                            l.at.y
+                        );
+                    }
+                    let fittings: Vec<_> = out
+                        .instances
+                        .iter()
+                        .filter(|i| i.kind_index == super::super::assemble::FIXTURE_KIND_INDEX)
+                        .collect();
+                    assert_eq!(
+                        fittings.len(),
+                        out.lights.iter().filter(|l| !l.tag.row.is_rig()).count(),
+                        "{arch:?}: a light without its fitting"
+                    );
                     // Every building hangs a porch light on its entrance.
                     assert!(
                         out.lights.iter().any(|l| l.tag.row == FixtureRow::Porch),
