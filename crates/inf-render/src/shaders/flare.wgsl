@@ -79,6 +79,21 @@ const FLARE_MAX_GHOSTS: i32 = 8;
 // coherent `textureLoad`s from one cached neighbourhood cost less than that
 // costs to schedule.
 const FLARE_OCCLUSION_TAPS: i32 = 1;
+// **A ghost is DEFOCUSED** (audit PAR1a): each ghost gathers the bright pass
+// over a disc of this many taps (a Vogel spiral, turned per pixel) instead of
+// one point. With one tap a ghost was a pixel-sharp copy of whatever was
+// bright, reflected through the frame centre — on a lit island at night every
+// room fitting threw sharp white and orange rectangles across lawns, roads,
+// car bodies and the hero (`PAR1a-FINAL/frames-f21/300-residential.png`: two
+// rows of them lie exactly on the source->centre lines of two fittings).
+const FLARE_GHOST_TAPS: i32 = 32;
+// The disc's radius, in frame heights, at the first and the last ghost.
+const FLARE_GHOST_BLUR_MIN: f32 = 0.06;
+const FLARE_GHOST_BLUR_MAX: f32 = 0.14;
+// Each ghost's share of the light it images (it was 0.25). A real lens's ghost
+// carries a small fraction of its source; at 0.25 a defocused ghost of one lit
+// window still read as a lamp in the lawn.
+const FLARE_GHOST_GAIN: f32 = 0.1;
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -211,6 +226,12 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let centre = vec2<f32>(0.5, 0.5);
     let to_centre = centre - in.uv;
     let ghosts = min(i32(fl.params.y), FLARE_MAX_GHOSTS);
+    // The disc's per-pixel turn (interleaved gradient noise): a fixed spiral
+    // would print FLARE_GHOST_TAPS faint copies of a small source; turned per
+    // pixel they average into one soft blob.
+    let ign = fract(52.9829189 * fract(dot(in.pos.xy, vec2<f32>(0.06711056, 0.00583715))));
+    let turn = ign * 6.2831853;
+    let aspect = vec2<f32>(fl.dims.y / max(fl.dims.x, 1.0), 1.0);
     for (var g = 1; g <= ghosts; g = g + 1) {
         let t = f32(g) / f32(FLARE_MAX_GHOSTS);
         let scale = 0.4 + 1.6 * t;
@@ -218,7 +239,19 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         // A ghost fades toward the frame edge, which is what keeps the chain from
         // laying a hard rectangle over the corners.
         let fade = 1.0 - clamp(length(uv - centre) * 1.6, 0.0, 1.0);
-        acc = acc + flare_bright(uv) * flare_ghost_tint(t) * (fade * fade * 0.25);
+        if (fade <= 0.0) {
+            continue;
+        }
+        let radius = mix(FLARE_GHOST_BLUR_MIN, FLARE_GHOST_BLUR_MAX, t);
+        var disc = vec3<f32>(0.0);
+        for (var k = 0; k < FLARE_GHOST_TAPS; k = k + 1) {
+            let fk = f32(k) + 0.5;
+            let r = radius * sqrt(fk / f32(FLARE_GHOST_TAPS));
+            let a = fk * 2.3999632 + turn;
+            disc = disc + flare_bright(uv + vec2<f32>(cos(a), sin(a)) * r * aspect);
+        }
+        disc = disc / f32(FLARE_GHOST_TAPS);
+        acc = acc + disc * flare_ghost_tint(t) * (fade * fade * FLARE_GHOST_GAIN);
     }
 
     // ── the halo ──

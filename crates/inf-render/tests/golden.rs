@@ -2831,6 +2831,114 @@ fn the_sun_glare_is_extinguished_when_the_sun_is_occluded() {
     );
 }
 
+/// **A room fitting's ghost is a defocused blob, not a copy of the fitting**
+/// (audit PAR1a, priority b').
+///
+/// Reads: a dark night frame with one small bright slab (a lit batten's size and
+/// radiance) off-centre, the shipped ghost chain (four ghosts, veil / halo /
+/// streak off) on vs off; the largest per-pixel luma the flare ADDS anywhere
+/// more than 12 px from the slab — where only a ghost can land. The ghost chain
+/// sampled the bright pass at ONE point per ghost, so a lit island at night was
+/// littered with sharp white and orange rectangles on lawns, roads, car bodies
+/// and the hero, each a pixel-exact image of a fitting reflected through the
+/// frame centre. Measured at 320 x 180: the base shader's single tap peaks at
+/// +210 luma over 515 px (four pixel-sharp copies of the batten); the
+/// defocused, 0.1-gain chain at +54 over ~3 700 px (one soft smudge). Mutation:
+/// one tap per ghost (the base shader) reds this arm.
+#[test]
+fn a_fittings_flare_ghost_is_defocused_not_a_copy() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let mut scene = RenderScene {
+        grid_enabled: false,
+        ..Default::default()
+    };
+    scene.lights.push(RenderLight {
+        kind: LightKind::Directional,
+        intensity: 1.0e-4,
+        direction: Vec3::new(0.2, 0.9, 0.3).normalize(),
+        cast_shadows: false,
+        ..RenderLight::default()
+    });
+    let eye = DVec3::new(0.0, 2.0, 0.0);
+    let mut ground = MeshInstance::lit(
+        DVec3::new(0.0, -0.25, 20.0),
+        Quat::IDENTITY,
+        Vec3::new(80.0, 0.5, 80.0),
+        [0.05, 0.05, 0.05, 1.0],
+        1,
+    );
+    ground.roughness = 1.0;
+    scene.instances.push(ground);
+    // A 1.2 x 0.1 x 0.3 m batten face 12 m out, up and to the left.
+    let lamp_at = DVec3::new(-3.5, 4.0, 12.0);
+    let mut lamp = MeshInstance::lit(
+        lamp_at,
+        Quat::IDENTITY,
+        Vec3::new(1.2, 0.1, 0.3),
+        [0.9, 0.9, 0.9, 1.0],
+        2,
+    );
+    lamp.emissive = [8.0; 3];
+    scene.instances.push(lamp);
+    scene.mark_dirty();
+    let view = RenderView {
+        origin: FloatingOrigin::new(DVec3::ZERO),
+        eye_world: eye,
+        forward: Vec3::Z,
+        up: Vec3::Y,
+        fov_y: 60f32.to_radians(),
+        near: 0.05,
+        width: W,
+        height: H,
+        ortho: None,
+    };
+    let settings = |on: bool| RenderSettings {
+        flare: FlareSettings {
+            enabled: on,
+            intensity: 0.0,
+            ghost_count: 4,
+            halo: 0.0,
+            streak: 0.0,
+        },
+        ..RenderSettings::default()
+    };
+    let on = render_with(&gpu, &scene, &view, settings(true));
+    let off = render_with(&gpu, &scene, &view, settings(false));
+    let c = view.view_proj() * (lamp_at - view.origin.origin()).as_vec3().extend(1.0);
+    let n = c.truncate() / c.w;
+    let (sx, sy) = ((n.x * 0.5 + 0.5) * W as f32, (0.5 - n.y * 0.5) * H as f32);
+    let luma = |p: [u8; 4]| 0.2126 * p[0] as f64 + 0.7152 * p[1] as f64 + 0.0722 * p[2] as f64;
+    let (mut peak, mut added, mut engaged) = (0.0f64, 0.0f64, 0usize);
+    for y in 0..H {
+        for x in 0..W {
+            let d = (x as f32 - sx).hypot(y as f32 - sy);
+            if d < 12.0 {
+                continue;
+            }
+            let g = luma(px(&on, x, y)) - luma(px(&off, x, y));
+            if g > 0.5 {
+                engaged += 1;
+            }
+            added += g.max(0.0);
+            peak = peak.max(g);
+        }
+    }
+    eprintln!(
+        "fitting ghost: source at ({sx:.0}, {sy:.0}); outside it the chain adds {added:.0} \
+         luma over {engaged} px, peak {peak:.1}"
+    );
+    // Engaged: the chain did throw its ghosts (a dead chain would pass a peak test).
+    assert!(
+        engaged > 200 && added > 300.0,
+        "the ghost chain added nothing: {added:.0} luma over {engaged} px"
+    );
+    assert!(
+        peak < 80.0,
+        "a ghost is a sharp copy of the fitting: peak +{peak:.1} luma (a defocused \
+         ghost spreads the same light over a disc)"
+    );
+}
+
 /// **The flare is off by default, and off costs the frame nothing.**
 ///
 /// `INF_GOLDEN_STRICT=1` over all committed frames is the pixel half of this; the
