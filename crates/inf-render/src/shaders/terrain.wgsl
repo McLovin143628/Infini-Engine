@@ -902,7 +902,7 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
     // has one. No local light in the frame (every committed terrain golden) adds
     // exactly zero.
     lo = lo + lights_local(in.world_local, in.clip.xy, n, view_dir, albedo, 0.0, roughness,
-                           vec3<f32>(0.04), LIGHT_LOCAL_SHADOW);
+                           vec3<f32>(0.04), LIGHT_LOCAL_SHADOW | LIGHT_SKIP_ROOMS);
     if (lights_debug_view()) {
         return vec4<f32>(lights_debug_heat(in.world_local, in.clip.xy), 1.0);
     }

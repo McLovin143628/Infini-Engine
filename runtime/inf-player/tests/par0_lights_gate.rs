@@ -709,6 +709,40 @@ fn a_point_light_over_terrain_raises_its_luminance() {
         "a point light 2.5 m over terrain raised its pool by {:.2} levels",
         l - d
     );
+
+    // **Audit PAR1a (b'): a ROOM's boxed lamp lights no terrain; an exterior
+    // box does.** The same lamp, its box enclosing the ground around it: as a
+    // room's box (a ground-floor room half under a slope — 81 of the CI
+    // island's 2 281 resident fixtures hang under the grade) the terrain must
+    // read the dark frame, as an exterior box (a porch's) the lit one.
+    // Mutation: the terrain call without `LIGHT_SKIP_ROOMS` reds the room case.
+    let boxed = |interior: bool| {
+        let mut s = build(true);
+        s.light_bounds.push(inf_render::LightBound {
+            light: 1,
+            clip: Some(inf_render::LightClip {
+                center: DVec3::new(16.0, 1.0, 16.0),
+                half: Vec3::new(6.0, 2.0, 6.0),
+                u: [1.0, 0.0],
+                interior,
+            }),
+            draw_m: 0.0,
+        });
+        s.mark_dirty();
+        s
+    };
+    let (room, _) = render(&gpu, &boxed(true), &view, RenderSettings::default());
+    let (porch, _) = render(&gpu, &boxed(false), &view, RenderSettings::default());
+    let (r, p) = (luma(&room, cx, cy, 80, 40), luma(&porch, cx, cy, 80, 40));
+    println!("PAR1a terrain: a room-boxed lamp {r:.2}, an exterior-boxed lamp {p:.2} (dark {d:.2}, unboxed {l:.2})");
+    assert!(
+        r <= d + 0.5,
+        "a room's boxed lamp lit the terrain inside its box: {r:.2} vs dark {d:.2}"
+    );
+    assert!(
+        p > d + 10.0,
+        "an exterior-boxed lamp no longer lights the ground: {p:.2} vs dark {d:.2}"
+    );
 }
 
 /// A 6 × 3 × 6 m room whose front wall (z = -3.15) holds a 2 × 1.5 m window

@@ -368,6 +368,7 @@ fn building_scene(
                         center: c.center,
                         half: c.half.as_vec3(),
                         u: [c.u.x as f32, c.u.y as f32],
+                        interior: l.tag.room != FixtureTag::EXTERIOR,
                     }),
                     draw_m: 0.0,
                 });
@@ -783,6 +784,87 @@ fn resident_fixtures(sim: &RuntimeSim) -> Vec<(DVec3, Vec<inf_ecs::components::S
     out
 }
 
+/// Whether `p` lies inside the oriented shell box `s`, padded by `pad` metres.
+fn in_shell(s: &inf_ecs::components::ScatteredSolid, p: DVec3, pad: f64) -> bool {
+    let l = s.rotation.inverse() * (p - s.center);
+    l.x.abs() <= s.half_extents.x + pad
+        && l.y.abs() <= s.half_extents.y + pad
+        && l.z.abs() <= s.half_extents.z + pad
+}
+
+/// **Every resident fixture is where its room is** (audit PAR1a, b'): over the
+/// loaded world's volumes, a room light lies inside its own clip box, the box's
+/// centre and the light lie inside ONE building shell of the volume, and the
+/// light is above the terrain under it; an exterior light lies within a metre
+/// of a shell. A fixture UNDER the ground is reported apart (`buried`): it is
+/// in its room, and the room is a ground-floor room of a building whose floor
+/// 0 sits below the grade of its slope (the building datum's ruling, not the
+/// vocabulary's) — terrain skips a room's lights (`LIGHT_SKIP_ROOMS`), so it
+/// lights no grass. Returns `(checked, misplaced, buried)`.
+fn fixtures_in_their_buildings(sim: &mut RuntimeSim) -> (usize, Vec<String>, Vec<(u32, String)>) {
+    let mut vols: Vec<(
+        Vec<inf_ecs::components::ScatteredLight>,
+        Vec<inf_ecs::StructureGroup>,
+    )> = Vec::new();
+    for e in sim.world().world().iter_entities() {
+        if let Some(v) = e.get::<inf_ecs::components::PcgVolume>() {
+            if !v.lights.is_empty() {
+                vols.push((v.lights.clone(), v.structure_groups.clone()));
+            }
+        }
+    }
+    let (mut checked, mut bad, mut buried) = (0usize, Vec::new(), Vec::new());
+    for (lights, groups) in &vols {
+        for l in lights {
+            if fixtures::FixtureRow::from_code(l.row).is_some_and(|r| r.is_rig()) {
+                continue;
+            }
+            checked += 1;
+            let ground = sim.terrain_height_at(l.at.x, l.at.z);
+            let why = if l.room == u32::MAX {
+                if !groups.iter().any(|g| in_shell(&g.shell, l.at, 1.0)) {
+                    Some("an exterior light more than 1 m from every shell")
+                } else {
+                    None
+                }
+            } else if let Some(c) = l.clip {
+                let clip = LightClip {
+                    center: c.center,
+                    half: c.half.as_vec3(),
+                    u: [c.u.x as f32, c.u.y as f32],
+                    interior: true,
+                };
+                if !inf_render::lights::clip_holds(&clip, l.at) {
+                    Some("a room light outside its own box")
+                } else if !groups
+                    .iter()
+                    .any(|g| in_shell(&g.shell, c.center, 0.25) && in_shell(&g.shell, l.at, 0.25))
+                {
+                    Some("a room's box outside every building shell")
+                } else {
+                    None
+                }
+            } else if !groups.iter().any(|g| in_shell(&g.shell, l.at, 0.25)) {
+                Some("a task lamp outside every building shell")
+            } else {
+                None
+            };
+            let line = |w: &str| {
+                format!(
+                    "{w}: row {} building {} floor {} room {} at ({:.1}, {:.2}, {:.1}), ground {ground:.2}",
+                    l.row, l.building, l.floor, l.room, l.at.x, l.at.y, l.at.z
+                )
+            };
+            if let Some(w) = why {
+                bad.push(line(w));
+            } else if l.at.y < ground {
+                buried.push((l.floor, line("under the ground")));
+            }
+        }
+    }
+    (checked, bad, buried)
+}
+
 /// The occupancy class a census table groups a fixture under.
 fn class_of(l: &inf_ecs::components::ScatteredLight) -> &'static str {
     use inf_ecs::components::FixtureOccupancy as O;
@@ -812,8 +894,11 @@ fn class_of(l: &inf_ecs::components::ScatteredLight) -> &'static str {
 /// dark but for a minority at 02:00, homes lit in the evening and dark at
 /// noon (the Dusk half) and in the small hours, the never-closing rooms the
 /// same at every hour, porches dusk to dawn. (3) The projected light list
-/// byte-identical between the hosts at every hour. Mutation: occupancy frozen
-/// at 1 reds (2). The base tree has no room fixtures: (1) and (2) fail.
+/// byte-identical between the hosts at every hour. (1b, audit PAR1a b') Every
+/// resident fixture inside its own box and one building shell, with the REAL
+/// terrain: 0 misplaced of 2 281, 81 under the grade (stated, ratcheted).
+/// Mutations: occupancy frozen at 1 reds (2); a room box offset 30 m reds (1b)
+/// (2 245 misplaced). The base tree has no room fixtures: (1) and (2) fail.
 #[test]
 fn the_24h_sweep_lights_rooms_by_who_is_in_them_and_pie_equals_shipping() {
     let tmp = tempfile::tempdir().expect("a temp dir");
@@ -861,6 +946,45 @@ fn the_24h_sweep_lights_rooms_by_who_is_in_them_and_pie_equals_shipping() {
     assert_eq!(
         unlit, 0,
         "{unlit} of {rooms} resident rooms hold no fixture"
+    );
+
+    // (1b) AUDIT PAR1a (b'): every fixture is where its room is, on the loaded
+    // island with its REAL terrain — a room light inside its own box, the box's
+    // centre and the light inside one building shell of the volume, the light
+    // above the ground under it; an exterior light within a metre of a shell.
+    let (placed, misplaced, buried) = fixtures_in_their_buildings(&mut ship);
+    println!(
+        "PAR1a PLACEMENT: {placed} resident fixtures, {} misplaced, {} under the ground",
+        misplaced.len(),
+        buried.len()
+    );
+    for m in misplaced.iter().chain(buried.iter().map(|b| &b.1)).take(12) {
+        println!("  {m}");
+    }
+    // The buried are the lowest storeys of buildings on a slope (the datum's
+    // ruling), a minority: measured 81 of 2 281 at the audit, 80 on floor 0
+    // and one on floor 1 of a steep lot (0.26 m under). A ratchet, not a law.
+    let mut by_floor: BTreeMap<u32, usize> = BTreeMap::new();
+    for (f, _) in &buried {
+        *by_floor.entry(*f).or_default() += 1;
+    }
+    println!("PAR1a PLACEMENT: under the ground by floor {by_floor:?}");
+    assert!(
+        buried.iter().all(|(f, _)| *f <= 1),
+        "a fixture above the first floor is under the terrain: {:?}",
+        buried.iter().find(|(f, _)| *f > 1)
+    );
+    assert!(
+        buried.len() * 20 <= placed,
+        "{} of {placed} fixtures are under the ground",
+        buried.len()
+    );
+    assert!(placed > 500, "only {placed} resident fixtures were checked");
+    assert!(
+        misplaced.is_empty(),
+        "{} of {placed} fixtures lie outside their building or under the ground: {:?}",
+        misplaced.len(),
+        &misplaced[..misplaced.len().min(4)]
     );
 
     // (2) + (3) the sweep.

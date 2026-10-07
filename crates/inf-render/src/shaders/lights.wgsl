@@ -36,6 +36,9 @@ const PI: f32 = 3.14159265359;
 const LIGHT_SUN_SHADOW: u32 = 1u;
 const LIGHT_CLOUD_SHADOW: u32 = 2u;
 const LIGHT_LOCAL_SHADOW: u32 = 4u;
+// Audit PAR1a: the surface is never inside a room (terrain, water), so a light
+// clipped to a ROOM's box (kind 3) is skipped.
+const LIGHT_SKIP_ROOMS: u32 = 8u;
 
 struct GpuLight {
     color: vec4<f32>,    // rgb = color, a = intensity
@@ -220,11 +223,18 @@ fn lights_local(
     for (var k = 0u; k < len; k = k + 1u) {
         let idx = light_cluster_item(c, k);
         let light = light_at(idx);
-        // Wave PAR1a: a CLIPPED point (w == 3) lights nothing outside its
-        // room's box — the party wall it cannot cast a shadow through.
-        if (light.pos_dir.w > 2.5 &&
-            !light_clip_holds(idx, p, light.pos_dir.xyz, light.params.y, light.params.z)) {
-            continue;
+        // Wave PAR1a: a CLIPPED point (w == 3 a room's box, w == 4 an
+        // exterior box) lights nothing outside its box — the party wall it
+        // cannot cast a shadow through. Audit PAR1a: a surface that is never
+        // inside a room (terrain, water) skips a ROOM's lights outright, so a
+        // ground-floor room half under a slope does not light the grass.
+        if (light.pos_dir.w > 2.5) {
+            if ((flags & LIGHT_SKIP_ROOMS) != 0u && light.pos_dir.w < 3.5) {
+                continue;
+            }
+            if (!light_clip_holds(idx, p, light.pos_dir.xyz, light.params.y, light.params.z)) {
+                continue;
+            }
         }
         let radiance_base = light.color.rgb * light.color.a;
         // Point (w == 1, 3) / spot (w == 2): shared windowed inverse-square

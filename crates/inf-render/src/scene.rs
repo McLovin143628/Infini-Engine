@@ -2014,6 +2014,15 @@ pub struct LightClip {
     pub half: Vec3,
     /// The first horizontal axis as a unit `(x, z)` pair.
     pub u: [f32; 2],
+    /// **A ROOM's box** (audit PAR1a), as against an exterior fixture's box
+    /// over its pavement. Terrain and water never lie inside a room, so they
+    /// skip a room's lights: a ground-floor room of a building on a slope sits
+    /// partly under the grade, and its boxed lamp lit the terrain inside its
+    /// box as a hard bright rectangle on the open grass (3.6 % of the CI
+    /// island's resident fixtures hang under the ground). An exterior box is
+    /// what a porch lamp lights its step and lawn through, so it is read by
+    /// terrain like any other light.
+    pub interior: bool,
 }
 
 impl Default for RenderLight {

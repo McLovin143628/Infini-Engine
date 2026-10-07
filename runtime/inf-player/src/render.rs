@@ -1174,6 +1174,8 @@ pub fn project_scene_full(
                             center: c.center,
                             half: c.half.as_vec3(),
                             u: [c.u.x as f32, c.u.y as f32],
+                            // Audit PAR1a: a room's box (terrain and water skip it).
+                            interior: l.room != u32::MAX,
                         }),
                         draw_m: l.draw_m,
                     });

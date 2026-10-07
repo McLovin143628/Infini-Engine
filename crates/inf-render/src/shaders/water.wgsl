@@ -574,7 +574,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // term the faint glow of the suspended water column under it. No local
     // light in the frame (every committed water golden) adds exactly zero.
     color += lights_local(in.world, in.pos.xy, n, vdir, water.shallow.rgb * 0.08, 0.0,
-                          rough, vec3<f32>(WATER_F0), 0u);
+                          rough, vec3<f32>(WATER_F0), LIGHT_SKIP_ROOMS);
 
     // ── foam ─────────────────────────────────────────────────────────────
     // Three sources, combined by max rather than added: foam is a coverage

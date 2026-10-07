@@ -137,7 +137,8 @@ impl Default for LightSettings {
 }
 
 /// One GPU light, std140-friendly (four `vec4`, 64 B). `pos_dir.w` = kind
-/// (0 directional, 1 point, 2 spot); for a directional light `pos_dir.xyz` is
+/// (0 directional, 1 point, 2 spot, 3 a point clipped to a ROOM's box, 4 a
+/// point clipped to an exterior box — PAR1a + its audit); for a directional light `pos_dir.xyz` is
 /// the unit direction toward it, for point/spot the render-local position.
 /// `color.a` = intensity. `params` = (range, spot inner_cos, spot outer_cos,
 /// virtual-shadow slot + 1). `spot_dir.xyz` = the beam's emission axis (spot
@@ -524,7 +525,8 @@ fn encode_clip(g: &mut GpuLight, light: DVec3, clip: &crate::scene::LightClip) {
     // v = (-u.z, u.x): the lot frame's own convention (`LotFrame::v`).
     let off_u = d.x * ux + d.z * uz;
     let off_v = -d.x * uz + d.z * ux;
-    g.pos_dir[3] = 3.0;
+    // 3: a room's box (terrain and water skip it); 4: an exterior box.
+    g.pos_dir[3] = if clip.interior { 3.0 } else { 4.0 };
     g.params[1] = d.y - clip.half.y;
     g.params[2] = d.y + clip.half.y;
     g.spot_dir[0] = pack2(off_u, off_v);
