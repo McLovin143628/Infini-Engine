@@ -1602,6 +1602,50 @@ pub fn population_of(out: inf_pcg::VolumeOutput) -> VolumePopulation {
                     inf_ecs::components::LightSchedule::Dusk
                 }
             },
+            // PAR1a: whose day the fixture keeps, which room it lights, the
+            // box it is confined to and how far it is drawn.
+            occupancy: match l.occupancy {
+                inf_pcg::building::fixtures::FixtureOccupancy::Crew => {
+                    inf_ecs::components::FixtureOccupancy::Crew
+                }
+                inf_pcg::building::fixtures::FixtureOccupancy::Work => {
+                    inf_ecs::components::FixtureOccupancy::Work
+                }
+                inf_pcg::building::fixtures::FixtureOccupancy::Shop => {
+                    inf_ecs::components::FixtureOccupancy::Shop
+                }
+                inf_pcg::building::fixtures::FixtureOccupancy::Home(r) => {
+                    inf_ecs::components::FixtureOccupancy::Home(match r {
+                        inf_pcg::building::fixtures::HomeRoom::Living => {
+                            inf_ecs::components::HomeRoom::Living
+                        }
+                        inf_pcg::building::fixtures::HomeRoom::Kitchen => {
+                            inf_ecs::components::HomeRoom::Kitchen
+                        }
+                        inf_pcg::building::fixtures::HomeRoom::Bedroom => {
+                            inf_ecs::components::HomeRoom::Bedroom
+                        }
+                        inf_pcg::building::fixtures::HomeRoom::Bath => {
+                            inf_ecs::components::HomeRoom::Bath
+                        }
+                        inf_pcg::building::fixtures::HomeRoom::Hall => {
+                            inf_ecs::components::HomeRoom::Hall
+                        }
+                    })
+                }
+            },
+            seed: l.seed,
+            building: l.tag.building,
+            floor: l.tag.floor,
+            room: l.tag.room,
+            row: l.tag.row.code(),
+            clip: l.clip.map(|c| inf_ecs::components::ScatteredClip {
+                center: c.center,
+                half: c.half,
+                u: c.u,
+            }),
+            draw_m: l.draw_m,
+            shadow: l.shadow,
         })
         .collect();
     (

@@ -1991,6 +1991,31 @@ pub struct RenderLight {
     pub cast_shadows: bool,
 }
 
+/// **The bounds of one scene light** (wave PAR1a) — see
+/// [`RenderScene::light_bounds`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LightBound {
+    /// Index into [`RenderScene::lights`].
+    pub light: u32,
+    /// The oriented box a POINT light is confined to (a fragment outside it
+    /// receives nothing from the light), or `None`.
+    pub clip: Option<LightClip>,
+    /// How far from the eye the light is submitted at all, metres (its sphere's
+    /// nearest point); `0` is unlimited.
+    pub draw_m: f32,
+}
+
+/// An oriented box in world space (wave PAR1a).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LightClip {
+    /// The box centre, world metres.
+    pub center: DVec3,
+    /// Half-extents along `u`, up and `v = (-u.z, u.x)`, metres.
+    pub half: Vec3,
+    /// The first horizontal axis as a unit `(x, z)` pair.
+    pub u: [f32; 2],
+}
+
 impl Default for RenderLight {
     fn default() -> Self {
         Self {
@@ -3405,6 +3430,12 @@ pub struct RenderScene {
     /// Scene lights (directional + point). Empty ⇒ the shader falls back to a
     /// default editor sun so unlit demo scenes still render.
     pub lights: Vec<RenderLight>,
+    /// **Per-light bounds** (wave PAR1a): a room fixture's box and its draw
+    /// distance, keyed by its index in [`lights`](Self::lights) and pushed in
+    /// that order by the projector. A light with no entry is unbounded, which
+    /// is every light that predates the wave. Read by
+    /// [`crate::lights::plan_lights`].
+    pub light_bounds: Vec<LightBound>,
     /// 2D sprites (batched + drawn by the sprite pass over the 3D scene).
     pub sprites: Vec<SpriteInstance>,
     /// Heightfield terrains (P10.1; **N of them** since P16.6). The terrain pass

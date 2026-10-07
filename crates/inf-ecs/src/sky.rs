@@ -746,6 +746,193 @@ pub fn fixture_level(
     (level * f64::from(occupancy.clamp(0.0, 1.0))) as f32
 }
 
+/// **The share of workplace rooms left lit ALL NIGHT** (wave PAR1a clause 4) —
+/// the deterministic minority of a dark office block: a cleaner's floor, a
+/// server room, a lamp nobody switched off.
+pub const WORK_LEFT_ON_ALL_NIGHT: f64 = 0.05;
+/// **The share of workplace rooms left lit into the EVENING**: their lights go
+/// off at a per-room hour drawn across [`WORK_LATE_SPAN_H`] after the crew
+/// walks home — why an office block at 19:00 is half lit and at 02:00 is dark.
+pub const WORK_LEFT_ON_LATE: f64 = 0.35;
+/// The hours after `HOME_H` a late-lit workplace room is drawn across:
+/// `(earliest, latest)`.
+pub const WORK_LATE_SPAN_H: (f64, f64) = (0.5, 5.0);
+/// The share of shop floors whose display stays lit all night.
+pub const SHOP_DISPLAY_SHARE: f64 = 0.35;
+/// A shop's closing hour is drawn across `(earliest, latest)`.
+pub const SHOP_CLOSE_SPAN_H: (f64, f64) = (20.0, 23.0);
+/// The share of households at home through the day (not commuting).
+pub const HOME_ALL_DAY_SHARE: f64 = 0.3;
+/// A household's bedtime is drawn across `(earliest, latest)` (past 24 wraps).
+pub const BEDTIME_SPAN_H: (f64, f64) = (22.0, 24.5);
+/// A household's waking hour is drawn across `(earliest, latest)`.
+pub const WAKE_SPAN_H: (f64, f64) = (6.25, 7.25);
+/// The share of dwelling rooms left lit all night (a hall light, a night
+/// light, a teenager).
+pub const HOME_LEFT_ON_SHARE: f64 = 0.06;
+
+/// A pure draw in `[0, 1)` from a fixture's seed, its room and a salt —
+/// splitmix64, integer-only, so it is the same on every target.
+fn occupancy_draw(seed: u32, room: u32, salt: u64) -> f64 {
+    let mut z = ((u64::from(seed) << 32) | u64::from(room)) ^ salt;
+    z = z.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^= z >> 31;
+    (z >> 11) as f64 / (1u64 << 53) as f64
+}
+
+/// The same window [`fixture_level`] lights its schedules by: `1` inside
+/// `[start, end]` (which may cross midnight), `0` outside, each edge ramped
+/// over [`FIXTURE_RAMP_H`].
+fn ramp_window(local_hour: f64, start: f64, end: f64) -> f64 {
+    let span = (end - start).rem_euclid(24.0);
+    let t = (local_hour - start).rem_euclid(24.0);
+    let half = FIXTURE_RAMP_H * 0.5;
+    let inside = if t <= span {
+        t.min(span - t)
+    } else {
+        -(t - span).min(24.0 - t)
+    };
+    ((inside + half) / FIXTURE_RAMP_H).clamp(0.0, 1.0)
+}
+
+/// **THE OCCUPANCY HALF OF THE NIGHT SCHEDULE** (wave PAR1a clause 4): whether
+/// someone is in a fixture's room at `local_hour`, `[0, 1]` — PAR0's hook
+/// (`fixture_level`'s `occupancy`), as a pure function of the fixture's
+/// content-derived `seed` and `room` and the level clock. Both projectors call
+/// it inside their MIRROR fence.
+///
+/// It is the SOCIETY's day, read off the same constants its legs walk by
+/// (`WORK_START_H`, `COMMUTE_H`, `HOME_H`, `EVENING_OUT_H`, `EVENING_H`,
+/// `NIGHT_HOME_H`, `NIGHTLIFE_SHARE`), applied to every room the content holds
+/// — not a readback of live agents, of which a level runs at most
+/// `SOCIETY_MAX_AGENTS` against the island's ~14 000 homes: reading positions
+/// would leave nineteen homes in twenty dark for ever.
+///
+/// * `Crew` — 1: the schedule alone decides (a venue's public rooms, an
+///   institution's never-closing rooms, every exterior light).
+/// * `Work` — the working day `[WORK_START_H − ramp, HOME_H]`; then
+///   [`WORK_LEFT_ON_LATE`] of rooms stay lit to a drawn hour, and
+///   [`WORK_LEFT_ON_ALL_NIGHT`] never go dark.
+/// * `Shop` — open to a drawn closing hour; [`SHOP_DISPLAY_SHARE`] keep the
+///   display lit all night.
+/// * `Home` — the household's day: up at a drawn waking hour, out at the
+///   commute unless it is one of [`HOME_ALL_DAY_SHARE`] at home, back at
+///   `HOME_H + COMMUTE_H`; [`NIGHTLIFE_SHARE`](crate::society::NIGHTLIFE_SHARE)
+///   go out at `EVENING_OUT_H` and are back at `NIGHT_HOME_H + EVENING_H`;
+///   bed at a drawn hour. Which room is lit when follows the household: the
+///   living room through the evening, the kitchen at the meals, the bedroom
+///   going to bed and getting up, the bathroom either side of sleep, the hall
+///   while anyone is up; [`HOME_LEFT_ON_SHARE`] of rooms burn all night.
+pub fn fixture_occupancy(
+    occupancy: crate::components::FixtureOccupancy,
+    seed: u32,
+    room: u32,
+    local_hour: f64,
+) -> f32 {
+    use crate::components::{FixtureOccupancy as O, HomeRoom as R};
+    use crate::society::{
+        COMMUTE_H, EVENING_H, EVENING_OUT_H, HOME_H, NIGHTLIFE_SHARE, NIGHT_HOME_H, WORK_START_H,
+    };
+    let h = local_hour.rem_euclid(24.0);
+    let w = |a: f64, b: f64| ramp_window(h, a, b);
+    let span = |r: (f64, f64), u: f64| r.0 + (r.1 - r.0) * u;
+    let level = match occupancy {
+        O::Crew => 1.0,
+        O::Work => {
+            if occupancy_draw(seed, room, 0x5741_4C4C) < WORK_LEFT_ON_ALL_NIGHT {
+                1.0
+            } else {
+                let tail = if occupancy_draw(seed, room, 0x4C41_5445) < WORK_LEFT_ON_LATE {
+                    span(WORK_LATE_SPAN_H, occupancy_draw(seed, room, 0x4C41_5448))
+                } else {
+                    0.0
+                };
+                w(WORK_START_H - FIXTURE_RAMP_H, HOME_H + tail)
+            }
+        }
+        O::Shop => {
+            if occupancy_draw(seed, room, 0x4449_5350) < SHOP_DISPLAY_SHARE {
+                1.0
+            } else {
+                w(
+                    WORK_START_H,
+                    span(SHOP_CLOSE_SPAN_H, occupancy_draw(seed, room, 0x434C_4F53)),
+                )
+            }
+        }
+        O::Home(r) => {
+            if occupancy_draw(seed, room, 0x4F4E_4C59) < HOME_LEFT_ON_SHARE {
+                1.0
+            } else {
+                // The household's own draws read the seed alone, so every room
+                // of one household keeps one evening.
+                let home_all_day = occupancy_draw(seed, 0, 0x484F_4D45) < HOME_ALL_DAY_SHARE;
+                let out = occupancy_draw(seed, 0, 0x4F55_5421) < NIGHTLIFE_SHARE;
+                let bed = span(BEDTIME_SPAN_H, occupancy_draw(seed, 0, 0x4245_4421));
+                let wake = span(WAKE_SPAN_H, occupancy_draw(seed, 0, 0x5741_4B45));
+                let home_from = if home_all_day {
+                    WORK_START_H
+                } else {
+                    HOME_H + COMMUTE_H
+                };
+                let morning_end = if home_all_day {
+                    wake + 1.5
+                } else {
+                    (WORK_START_H - COMMUTE_H).max(wake + 0.5)
+                };
+                let back = NIGHT_HOME_H + EVENING_H;
+                // The evening ends at the door for a household going out and
+                // at bedtime for one staying in; the one going out is back at
+                // `back` and goes to bed half an hour later.
+                let (eve_end, sleep) = if out {
+                    (EVENING_OUT_H, back + 0.5)
+                } else {
+                    (bed, bed)
+                };
+                let night = |a: f64, b: f64| if out { w(back + a, back + b) } else { 0.0 };
+                match r {
+                    R::Living => w(home_from, eve_end - 0.25),
+                    R::Kitchen => w(home_from, home_from + 1.5).max(w(wake, morning_end)),
+                    R::Bedroom => w(sleep - 0.75, sleep)
+                        .max(w(wake, wake + 0.3))
+                        .max(night(0.0, 0.5)),
+                    R::Bath => w(sleep - 0.5, sleep - 0.25)
+                        .max(w(wake + 0.1, wake + 0.4))
+                        .max(night(0.1, 0.35)),
+                    R::Hall => w(home_from, eve_end)
+                        .max(w(wake, morning_end))
+                        .max(night(0.0, 0.5)),
+                }
+            }
+        }
+    };
+    level as f32
+}
+
+/// The slack between a host's fixture anchor (the sim's camera FOCUS) and the
+/// eye the renderer measures a fixture's draw distance from, metres — a chase
+/// camera's boom with room to spare, so the coarse volume cut below never
+/// drops a light the renderer's own per-light cut would have kept.
+pub const FIXTURE_ANCHOR_SLACK_M: f64 = 30.0;
+
+/// **How far a volume's block lies from the fixture anchor** (wave PAR1a), in
+/// plan, less [`FIXTURE_ANCHOR_SLACK_M`]: the XZ distance from `anchor` to the
+/// rectangle `centre ± extent`. A fixture whose draw distance this exceeds is
+/// beyond the renderer's per-light cut for any eye within the slack, so both
+/// projectors skip it before resolving it — the island holds ~137 000 room
+/// fixtures and a frame wants a few thousand. `None` (a host with no anchor)
+/// answers `-inf`: nothing is skipped.
+pub fn fixture_volume_far(anchor: Option<DVec3>, centre: Option<DVec3>, extent: (f64, f64)) -> f64 {
+    let (Some(a), Some(c)) = (anchor, centre) else {
+        return f64::NEG_INFINITY;
+    };
+    let dx = ((a.x - c.x).abs() - extent.0.abs()).max(0.0);
+    let dz = ((a.z - c.z).abs() - extent.1.abs()).max(0.0);
+    (dx * dx + dz * dz).sqrt() - FIXTURE_ANCHOR_SLACK_M
+}
+
 /// The level clock's rate (simulated seconds per simulated second); `0` when the
 /// level has no clock, which is also what "frozen" means.
 pub fn time_of_day_rate(world: &EcsWorld) -> f64 {
@@ -888,6 +1075,55 @@ pub fn weather_wind_speed(world: &EcsWorld) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    /// **THE OCCUPANCY HALF, measured over a town of rooms** (wave PAR1a
+    /// clause 4): offices are full at noon, half lit at 19:00 and dark but for
+    /// a minority at 02:00; homes are lit in the evening and dark but for a
+    /// minority at 04:00; the household's rooms keep one evening; a crewed
+    /// room never empties. Shares read off 4 000 seeds.
+    #[test]
+    fn the_town_is_lit_by_who_is_in_it_hour_by_hour() {
+        use crate::components::{FixtureOccupancy as O, HomeRoom as R};
+        let share = |o: O, h: f64| {
+            let n = 4_000u32;
+            let lit: f32 = (0..n)
+                .map(|s| super::fixture_occupancy(o, s.wrapping_mul(2_654_435_761), s % 7, h))
+                .sum();
+            lit / n as f32
+        };
+        let work = |h| share(O::Work, h);
+        assert!(work(12.0) > 0.99, "offices at noon {}", work(12.0));
+        assert!(
+            (0.2..0.45).contains(&work(19.0)),
+            "offices at 19:00 {}",
+            work(19.0)
+        );
+        assert!(work(2.0) < 0.08, "offices at 02:00 {}", work(2.0));
+        assert!(work(19.0) > 3.0 * work(2.0));
+        let living = |h| share(O::Home(R::Living), h);
+        assert!(
+            living(20.5) > 0.35,
+            "living rooms at 20:30 {}",
+            living(20.5)
+        );
+        assert!(living(4.0) < 0.1, "living rooms at 04:00 {}", living(4.0));
+        assert!(share(O::Home(R::Bedroom), 23.0) > share(O::Home(R::Bedroom), 15.0));
+        let shop = |h| share(O::Shop, h);
+        assert!(shop(12.0) > 0.99 && (0.3..0.45).contains(&shop(3.0)));
+        for h in [0.0, 3.0, 12.0, 21.0] {
+            assert_eq!(super::fixture_occupancy(O::Crew, 7, 7, h), 1.0);
+        }
+        // Continuity: no hour-to-hour jump for one room exceeds the ramp's slope.
+        for s in 0..64u32 {
+            let mut prev = super::fixture_occupancy(O::Home(R::Living), s, 1, 0.0);
+            for k in 1..=24 * 64 {
+                let h = f64::from(k) / 64.0;
+                let now = super::fixture_occupancy(O::Home(R::Living), s, 1, h);
+                assert!((now - prev).abs() <= (1.0 / 64.0 / super::FIXTURE_RAMP_H) as f32 + 1e-4);
+                prev = now;
+            }
+        }
+    }
+
     /// **THE NIGHT SCHEDULE, as a function of the hour** (wave PAR0 clause 5):
     /// a night fixture is dark at 11:00 and fully lit at 21:00; the ramp is
     /// half on at each edge and continuous; a round-the-clock room never goes

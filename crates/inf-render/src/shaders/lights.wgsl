@@ -189,6 +189,26 @@ fn point_attenuation(dist: f32, range: f32) -> f32 {
     return inv_sq * t * t;
 }
 
+// **A clipped point light's box** (wave PAR1a): `spot_dir.xyz` hold three
+// `pack2x16float` words — the box centre's offset from the light along (u, v),
+// the half extents along (u, v), and u as (x, z) — read as RAW words so no
+// float lane is ever reinterpreted; `y_lo` / `y_hi` are the box's floor and
+// ceiling relative to the light. v = (-u.z, u.x). Mirrored on the CPU by
+// `crate::lights::clip_holds`.
+fn light_clip_holds(i: u32, p: vec3<f32>, lp: vec3<f32>, y_lo: f32, y_hi: f32) -> bool {
+    let w = light_words[i * 4u + 3u];
+    let off = unpack2x16float(w.x);
+    let half = unpack2x16float(w.y);
+    let u = unpack2x16float(w.z);
+    let d = p - lp;
+    if (d.y < y_lo || d.y > y_hi) {
+        return false;
+    }
+    let du = d.x * u.x + d.z * u.y - off.x;
+    let dv = -d.x * u.y + d.z * u.x - off.y;
+    return abs(du) <= half.x && abs(dv) <= half.y;
+}
+
 // Every LOCAL light (point + spot) the fragment's froxel lists.
 fn lights_local(
     p: vec3<f32>, frag_xy: vec2<f32>, n: vec3<f32>, v: vec3<f32>,
@@ -198,16 +218,23 @@ fn lights_local(
     let c = light_cluster_of(frag_xy, p);
     let len = light_cluster_len(c);
     for (var k = 0u; k < len; k = k + 1u) {
-        let light = light_at(light_cluster_item(c, k));
+        let idx = light_cluster_item(c, k);
+        let light = light_at(idx);
+        // Wave PAR1a: a CLIPPED point (w == 3) lights nothing outside its
+        // room's box — the party wall it cannot cast a shadow through.
+        if (light.pos_dir.w > 2.5 &&
+            !light_clip_holds(idx, p, light.pos_dir.xyz, light.params.y, light.params.z)) {
+            continue;
+        }
         let radiance_base = light.color.rgb * light.color.a;
-        // Point (w == 1) / spot (w == 2): shared windowed inverse-square
+        // Point (w == 1, 3) / spot (w == 2): shared windowed inverse-square
         // attenuation; a spot additionally masks by its cone.
         let to_light = light.pos_dir.xyz - p;
         let dist = length(to_light);
         let l = to_light / max(dist, 1e-4);
         let att = point_attenuation(dist, light.params.x);
         var cone = 1.0;
-        if (light.pos_dir.w > 1.5) {
+        if (light.pos_dir.w > 1.5 && light.pos_dir.w < 2.5) {
             let cos_dir = dot(l, -light.spot_dir.xyz);
             cone = smoothstep(light.params.z, light.params.y, cos_dir);
         }

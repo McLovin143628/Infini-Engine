@@ -392,6 +392,14 @@ pub fn evaluate_buildings_in(
         // A building nobody lives or works in contributes no interior: a
         // route's endpoints are slots, and carrying a warehouse's corridors
         // into a level's network is nodes nothing ever asks for.
+        // PAR1a: each fixture learns WHICH building it lights (the census
+        // key) and its household draw takes the building's own salt, so two
+        // identical houses on one street keep different hours.
+        let mut lights = out.lights;
+        for l in &mut lights {
+            l.tag.building = ordinal;
+            l.seed = super::fixtures::household_seed(salt, l.seed);
+        }
         let interior = if slots.is_empty() {
             inf_nav::NavGraph::new()
         } else {
@@ -415,7 +423,7 @@ pub fn evaluate_buildings_in(
             // moved every fixture into the lot's frame beside the instances
             // and the colliders, so these are world metres like everything
             // else here.
-            lights: out.lights,
+            lights,
             // `build_in` has already folded the assembler's decoration tail
             // into `instances` (I8b), so a building's panes are inside its own
             // group's instance range and there is nothing left here.

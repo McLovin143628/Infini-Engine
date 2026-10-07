@@ -818,6 +818,8 @@ pub fn project_scene_full(
     let vt_lib = vt;
     scene.instances.clear();
     scene.lights.clear();
+    // PAR1a: the bounds are keyed by light index, so they clear with the list.
+    scene.light_bounds.clear();
     scene.sprites.clear();
     scene.tilemaps.clear();
     scene.prebatched.clear();
@@ -927,6 +929,10 @@ pub fn project_scene_full(
     let fixture_hour = inf_ecs::sky::local_hour(world);
     // MIRROR-END fixture_clock
     let fixture_sun_y = scene.sun.direction.y;
+    // PAR1a: the anchor a volume's room fixtures are culled against before
+    // they are resolved at all -- the sim's own camera focus, a fold of actor
+    // positions (`RuntimeSim::camera_focus`), so PIE and shipping agree.
+    let fixture_anchor = Some(sim.camera_focus());
     // MIRROR-BEGIN powered_clock
     // Wave PAR0b clause 8: the level every fixture schedule burns at now, for
     // the POWERED emitters (a TV, a bar's rim, a venue sign) — the same door
@@ -1131,13 +1137,25 @@ pub fn project_scene_full(
             //
             // MIRROR: the same block in the other host, in the same place.
             // MIRROR-BEGIN venue_rig_lights
+            // Wave PAR1a: how far this volume's block lies beyond the anchor; a
+            // fixture whose draw distance it exceeds is not resolved at all.
+            let vol_far = inf_ecs::sky::fixture_volume_far(
+                fixture_anchor,
+                w.get::<GlobalTransform>(entity).map(|g| g.translation()),
+                (vol.extent.x, vol.extent.y),
+            );
             for l in &vol.lights {
+                if l.draw_m > 0.0 && vol_far > f64::from(l.draw_m) {
+                    continue;
+                }
                 // **THE NIGHT SCHEDULE** (wave PAR0 clause 5): the fixture's
                 // intensity is a pure function of the level clock through the one
                 // Ring-0 door, so a stage rig is dark at 11:00 and lit at 21:00 in
                 // both hosts alike. A fixture at zero is not pushed at all.
+                let occ =
+                    inf_ecs::sky::fixture_occupancy(l.occupancy, l.seed, l.room, fixture_hour);
                 let level =
-                    inf_ecs::sky::fixture_level(l.schedule, fixture_hour, fixture_sun_y, 1.0);
+                    inf_ecs::sky::fixture_level(l.schedule, fixture_hour, fixture_sun_y, occ);
                 if level <= 0.0 {
                     continue;
                 }
@@ -1147,6 +1165,19 @@ pub fn project_scene_full(
                 // says so with a 180-degree outer angle rather than a second
                 // type. Resolved here, once, because `RenderLight` has a kind.
                 let point = l.outer_deg >= 180.0;
+                // Wave PAR1a: a room fixture's box and draw distance ride beside it,
+                // keyed by the index it is about to take.
+                if l.clip.is_some() || l.draw_m > 0.0 {
+                    scene.light_bounds.push(inf_render::LightBound {
+                        light: scene.lights.len() as u32,
+                        clip: l.clip.map(|c| inf_render::LightClip {
+                            center: c.center,
+                            half: c.half.as_vec3(),
+                            u: [c.u.x as f32, c.u.y as f32],
+                        }),
+                        draw_m: l.draw_m,
+                    });
+                }
                 scene.lights.push(RenderLight {
                     kind: if point {
                         LightKind::Point
@@ -1162,13 +1193,14 @@ pub fn project_scene_full(
                     range: l.range_m,
                     inner_cos: l.inner_deg.to_radians().cos(),
                     outer_cos: l.outer_deg.to_radians().cos(),
-                    // **The shadow policy decides** (wave PAR0 clause 2). The rig
+                    // **The shadow policy decides** (wave PAR0 clause 2; PAR1a: a
+                    // fixture whose row asks). The rig
                     // ASKS for a shadow; `inf_render::lights::shadow_policy` grants
                     // page trees to the brightest few local lights at the camera,
                     // within `VSM_MAX_PROJECTIONS`, so a room's fixture stops lighting
                     // the street through its walls. (It was `false` while every
                     // shadowed light spent a slot of a 16-light uniform.)
-                    cast_shadows: true,
+                    cast_shadows: l.shadow,
                 });
             }
             // MIRROR-END venue_rig_lights

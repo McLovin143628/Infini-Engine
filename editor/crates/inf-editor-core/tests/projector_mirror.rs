@@ -3521,7 +3521,12 @@ fn the_light_projection_and_its_clock_are_one_body_in_both_projectors() {
         "inf_ecs::sky::fixture_level(",
         "intensity:l.intensity*level,",
         "scene.lights.push(RenderLight{",
-        "cast_shadows:true,",
+        // PAR1a: a fixture asks for a shadow by its row, is lit by who is in
+        // its room, and carries its room's box and draw distance.
+        "cast_shadows:l.shadow,",
+        "inf_ecs::sky::fixture_occupancy(l.occupancy,l.seed,l.room,fixture_hour)",
+        "fixture_level(l.schedule,fixture_hour,fixture_sun_y,occ)",
+        "scene.light_bounds.push(inf_render::LightBound{",
     ] {
         assert!(rig.contains(needle), "the rig fence lost `{needle}`");
     }

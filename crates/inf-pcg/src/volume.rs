@@ -101,10 +101,25 @@ pub fn compose_volume(scatter: Vec<PcgInstance>, grammar: GrammarOutput) -> Volu
         // **Capped here, at the one door**, so no host can produce a volume
         // that overruns the frame's light budget and no host can produce a
         // different four from the other. See `VOLUME_LIGHT_CAP`.
+        // **Wave PAR1a re-scopes the cap to what it guards: the RIG.** The cap
+        // exists against a runaway stage palette (a froxel over a strip of
+        // rigs); a room's own fixtures are bounded per room by the vocabulary
+        // (`fixtures::MAX_FIXTURES_PER_ROOM`) and confined to the room's box,
+        // so they pass whole — truncating them at 64 would leave every room
+        // after the 64th in a block dark, which is the census this wave closes.
         lights: {
-            let mut l = grammar.lights;
-            l.truncate(VOLUME_LIGHT_CAP);
-            l
+            let mut rig = 0usize;
+            grammar
+                .lights
+                .into_iter()
+                .filter(|l| {
+                    if !l.tag.row.is_rig() {
+                        return true;
+                    }
+                    rig += 1;
+                    rig <= VOLUME_LIGHT_CAP
+                })
+                .collect()
         },
         // **The stations nobody stands at** (VEN1b). `pass.rs` has already
         // taken the occupied ones into `slots`; what is left on the list is the
@@ -259,6 +274,17 @@ mod tests {
             phase: 0,
             phases: 3,
             schedule: crate::building::FixtureSchedule::Night,
+            occupancy: crate::building::fixtures::FixtureOccupancy::Crew,
+            seed: 0,
+            tag: crate::building::FixtureTag {
+                building: 0,
+                floor: 0,
+                room: 0,
+                row: crate::building::fixtures::FixtureRow::RigSpot,
+            },
+            clip: None,
+            draw_m: 0.0,
+            shadow: true,
         };
         // Nine nightclubs' worth -- what a 100 m city block at a 32 m frontage
         // actually subdivides into.

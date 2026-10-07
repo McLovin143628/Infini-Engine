@@ -45,7 +45,8 @@
 
 use glam::{DVec2, DVec3};
 
-use super::palettes::{archetype, BuildingArchetype, FurnitureDef, Placement};
+use super::fixtures::{self, FixtureOccupancy, FixtureRow};
+use super::palettes::{archetype, ArchetypeId, BuildingArchetype, FurnitureDef, Placement};
 use super::plan::BuildingParams;
 use super::PcgLight;
 use super::{BuildingPlan, Opening, OpeningKind, Rect2, Room, RoomType, Wall};
@@ -133,6 +134,64 @@ const RIG_RANGE_STOREYS: f64 = 2.0;
 /// beside them. Twelve is a real club's truss (two rows of six), and the
 /// palettes ask for three, so no committed content moves for the re-mint.
 pub(crate) const MAX_RIG_SPOTS: u32 = 12;
+
+/// **How far a fixture's box reaches past the surfaces that bound it**,
+/// metres (wave PAR1a). A room's walls, floor and ceiling are inside the box
+/// by this much, and the far side of a party wall or a slab — at least twice
+/// this away, since the thinnest wall the palettes build is 0.15 m — is not.
+const CLIP_PAD_M: f64 = 0.05;
+/// A task lamp's reach, metres: its desk or its bed and the floor around it.
+const TASK_LAMP_RANGE_M: f32 = 2.5;
+/// The longest range any room fixture is given, metres — the far corner of a
+/// grid cell is never this far, so it bites only on a degenerate box.
+const MAX_FIXTURE_RANGE_M: f64 = 14.0;
+/// The `kind_index` a fitting carries. It names no palette module (a fitting
+/// is drawn by its mesh GUID and its own surface, which carries a tint), so it
+/// is a value no grammar's module table reaches.
+pub const FIXTURE_KIND_INDEX: u32 = 0xF17E;
+/// The exterior box: how far out from the facade, how high, and how far
+/// along it either way an exterior fixture may light, metres — a pavement and
+/// a kerb lane in front of the entrance.
+const EXTERIOR_BOX_OUT_M: f64 = 8.0;
+const EXTERIOR_BOX_UP_M: f64 = 8.0;
+const EXTERIOR_BOX_ALONG_M: f64 = 8.0;
+/// Where the porch lantern sits beside the door's far jamb, metres.
+const PORCH_BESIDE_JAMB_M: f64 = 0.35;
+/// How far beyond each jamb a facade wash hangs, metres.
+const WASH_BEYOND_JAMB_M: f64 = 1.2;
+/// How far either side of an institution's door its floods hang, metres.
+const FLOOD_BESIDE_DOOR_M: f64 = 3.0;
+
+/// An exterior row's reach on the ground, metres: a porch lights its step and
+/// the pavement, a flood the forecourt.
+fn exterior_range(row: FixtureRow) -> f32 {
+    match row {
+        FixtureRow::Porch => 6.0,
+        FixtureRow::FacadeWash => 7.0,
+        FixtureRow::SignLight => 5.0,
+        FixtureRow::ForecourtFlood => 18.0,
+        _ => 8.0,
+    }
+}
+
+/// The grid a row of pitch `spacing` lays over `rect`: one cell per pitch on
+/// each axis (one in all for a pitch of zero), capped at
+/// [`fixtures::MAX_FIXTURES_PER_ROOM`] by thinning the longer axis.
+fn grid_of(rect: Rect2, spacing: f64) -> (u32, u32) {
+    if spacing <= 0.0 {
+        return (1, 1);
+    }
+    let n = |len: f64| ((len / spacing).round() as u32).clamp(1, fixtures::MAX_FIXTURES_PER_ROOM);
+    let (mut nx, mut nz) = (n(rect.size_x()), n(rect.size_z()));
+    while nx * nz > fixtures::MAX_FIXTURES_PER_ROOM {
+        if nx >= nz {
+            nx -= 1;
+        } else {
+            nz -= 1;
+        }
+    }
+    (nx, nz)
+}
 
 /// How much a room-centre piece shrinks per attempt when it fouls an opening
 /// void or a door swing, and how many attempts it gets (wave VEN1a).
@@ -260,6 +319,12 @@ pub fn assemble_in(
         interior: wall_pass(&grammar, arch.interior_axiom),
         grammar: &grammar,
         hash,
+        // PAR1a: a building holding a room that is never closed keeps its
+        // circulation lit round the clock (`fixtures::room_keeps`).
+        never_closes: plan
+            .rooms
+            .iter()
+            .any(|r| super::society::crews_of(r.kind).len() > 1),
     };
 
     let floors: Vec<u32> = (0..plan.floors).collect();
@@ -271,6 +336,9 @@ pub fn assemble_in(
     ctx.roof(&mut out);
     ctx.stairs(&mut out);
     ctx.street_face(&mut out);
+    // PAR1a clause 3: the porch, the facade wash, the sign light and the
+    // forecourt floods — on the entrance the street faces.
+    ctx.exterior_fixtures(&mut out);
     // **The decoration tail, folded in exactly once** (island wave I8b). Every
     // instance up to this point has a collider beside it at the same index;
     // everything appended here has none. Doing it before `place_in_frame` is
@@ -321,6 +389,12 @@ fn place_in_frame(out: &mut GrammarOutput, frame: crate::building::LotFrame) {
     for l in &mut out.lights {
         l.at = map(l.at);
         l.dir = yaw * l.dir;
+        // PAR1a: the box a fixture is confined to turns with the lot too —
+        // its centre maps like a point and its axis like a direction.
+        if let Some(c) = &mut l.clip {
+            c.center = map(c.center);
+            c.u = frame.u * c.u.x + frame.v() * c.u.y;
+        }
     }
     // **A station turns with its lot too** (VEN1b), and its FACING turns with
     // the same quaternion the beam does. That is why the facing is carried as a
@@ -361,6 +435,7 @@ struct Ctx<'a> {
     interior: GrammarPass,
     grammar: &'a Grammar,
     hash: Hash64,
+    never_closes: bool,
 }
 
 impl Ctx<'_> {
@@ -698,12 +773,23 @@ impl Ctx<'_> {
         if furnish {
             let blockers = self.blockers(floor);
             for (ri, room) in self.plan.rooms_on(floor) {
+                let start = out.instances.len();
                 self.furnish(&mut out, ri, room, y, &blockers);
+                // PAR1a: the task lamps the furniture just placed implies — a
+                // lamp on each desk, a reading light at each bed.
+                self.task_lamps(&mut out, ri, room, start);
                 // …and the real lights it hangs (VEN1a), aimed at what the
                 // furniture above just put in the middle of the room.
-                self.rig(&mut out, room, y);
+                self.rig(&mut out, ri, room, y);
             }
             self.music(&mut out, floor, y);
+        }
+        // **EVERY ROOM, EVERY FLOOR, EVERY ARCHETYPE** (wave PAR1a clause 2):
+        // the room's own fixture from the vocabulary, furnished or not. A
+        // fitting is not furniture — an office block the furnish battery left
+        // bare is still a lit office block at 19:00.
+        for (ri, room) in self.plan.rooms_on(floor) {
+            self.room_fixtures(&mut out, ri, room, y, furnish);
         }
         out
     }
@@ -1012,7 +1098,7 @@ impl Ctx<'_> {
     /// business, resolved once per frame from the level clock. That is the same
     /// division `PcgInstance::glow` has had since I8b, for the same reason: this
     /// is committed, cacheable content and the hour is not.
-    fn rig(&self, out: &mut GrammarOutput, room: &Room, y: f64) {
+    fn rig(&self, out: &mut GrammarOutput, ri: usize, room: &Room, y: f64) {
         let Some(rig) = self.arch.rig else {
             return;
         };
@@ -1069,6 +1155,12 @@ impl Ctx<'_> {
                         phase: k,
                         phases: n,
                         schedule: super::society::schedule_of(room.kind),
+                        occupancy: FixtureOccupancy::Crew,
+                        seed: 0,
+                        tag: self.tag(ri, room, FixtureRow::RigSpot),
+                        clip: None,
+                        draw_m: 0.0,
+                        shadow: true,
                     });
                 }
             }
@@ -1093,9 +1185,399 @@ impl Ctx<'_> {
                     phase: 0,
                     phases: 1,
                     schedule: super::society::schedule_of(room.kind),
+                    occupancy: FixtureOccupancy::Crew,
+                    seed: 0,
+                    tag: self.tag(ri, room, FixtureRow::BarGlow),
+                    clip: None,
+                    draw_m: 0.0,
+                    shadow: true,
                 });
             }
             _ => {}
+        }
+    }
+
+    /// Whether this archetype's VEN1a rig lights a room of `kind` (so the
+    /// vocabulary's venue pendant would be a second lamp over a lit stage).
+    fn rig_lights(&self, kind: RoomType, furnish: bool) -> bool {
+        let Some(rig) = self.arch.rig else {
+            return false;
+        };
+        furnish
+            && match kind {
+                RoomType::Stage | RoomType::DanceFloor => rig.spots > 0,
+                RoomType::BarRoom => rig.bar_glow.is_some(),
+                _ => false,
+            }
+    }
+
+    /// The census key of a fixture in room `ri`. The building ordinal is the
+    /// evaluator's to assign (`pass.rs`); zero until then.
+    fn tag(&self, ri: usize, room: &Room, row: FixtureRow) -> super::FixtureTag {
+        super::FixtureTag {
+            building: 0,
+            floor: room.floor,
+            room: ri as u32,
+            row,
+        }
+    }
+
+    /// The household a room's lamps keep the hours of (clause 4), before
+    /// `pass.rs` folds the building's own salt in: a house is one household,
+    /// an apartment storey is a run of three-room flats, and every other
+    /// building's rooms keep their own.
+    fn household(&self, ri: usize, room: &Room) -> u32 {
+        match self.plan.archetype {
+            ArchetypeId::House | ArchetypeId::Estate => 0,
+            ArchetypeId::Apartment => (room.floor << 12) | (ri as u32 / 3),
+            _ => ri as u32,
+        }
+    }
+
+    /// **A room's own fixture** (wave PAR1a clauses 1–2): the vocabulary's
+    /// row for its kind, on a socket derived from the room's rectangle — the
+    /// ceiling centre, a grid over a large ceiling at the row's pitch, or (a
+    /// stair core) the core's own wall — with its light confined to the
+    /// room's box.
+    fn room_fixtures(
+        &self,
+        out: &mut GrammarOutput,
+        ri: usize,
+        room: &Room,
+        y: f64,
+        furnish: bool,
+    ) {
+        let row = fixtures::room_row(room.kind);
+        if row == FixtureRow::VenuePendant && self.rig_lights(room.kind, furnish) {
+            return;
+        }
+        let def = fixtures::fixture(row);
+        let half_t = self.arch.wall_thickness * 0.5;
+        let inner = room.rect.inset(half_t);
+        if !inner.is_positive() {
+            return;
+        }
+        let ceil = y + self.arch.floor_height - self.arch.slab_thickness;
+        // The room's box: its inner faces, its floor and its ceiling, each
+        // padded so the surface itself is inside and the far side of a wall
+        // (≥ 2 × the pad) is not.
+        let pad = CLIP_PAD_M;
+        let c = inner.center();
+        let clip = super::FixtureClip {
+            center: DVec3::new(c.x, (y + ceil) * 0.5, c.y),
+            half: DVec3::new(
+                inner.size_x() * 0.5 + pad,
+                (ceil - y) * 0.5 + pad,
+                inner.size_z() * 0.5 + pad,
+            ),
+            u: DVec2::X,
+        };
+        let (schedule, occupancy) =
+            fixtures::room_keeps(self.plan.archetype, room.kind, self.never_closes);
+        let seed = self.household(ri, room);
+        let tag = self.tag(ri, room, row);
+        let hang = |out: &mut GrammarOutput, fit: DVec3, rot: glam::DQuat, light: DVec3| {
+            out.decor.push(self.fitting(&def, fit, rot));
+            out.lights
+                .push(self.fixture_light(&def, light, clip, schedule, occupancy, seed, tag));
+        };
+        match def.mount {
+            fixtures::Mount::Wall => {
+                // The stair core's wall: the middle of its `min.z` face, the
+                // lit face pointing into the core.
+                let fit = DVec3::new(c.x, y + def.drop_m, inner.min.y + def.half[2]);
+                let light = fit + DVec3::Z * (def.half[2] + fixtures::DIFFUSER_GAP_M);
+                hang(out, fit, glam::DQuat::IDENTITY, light);
+            }
+            _ => {
+                let along_x = inner.size_x() >= inner.size_z();
+                let rot = if along_x {
+                    glam::DQuat::IDENTITY
+                } else {
+                    yaw_onto(DVec3::NEG_X)
+                };
+                let (nx, nz) = grid_of(inner, def.spacing_m);
+                let fit_y = ceil - def.half[1].max(def.drop_m);
+                let light_y = fit_y - def.half[1] - fixtures::DIFFUSER_GAP_M;
+                for i in 0..nx {
+                    for k in 0..nz {
+                        let px =
+                            inner.min.x + inner.size_x() * (f64::from(i) + 0.5) / f64::from(nx);
+                        let pz =
+                            inner.min.y + inner.size_z() * (f64::from(k) + 0.5) / f64::from(nz);
+                        hang(
+                            out,
+                            DVec3::new(px, fit_y, pz),
+                            rot,
+                            DVec3::new(px, light_y, pz),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// **The task lamps a room's furniture implies** (clause 1): a desk lamp
+    /// on each desk, a reading light at the head corner of each bed — read off
+    /// the instances `furnish` placed from `start`, in the piece's own frame.
+    fn task_lamps(&self, out: &mut GrammarOutput, ri: usize, room: &Room, start: usize) {
+        let (schedule, occupancy) =
+            fixtures::room_keeps(self.plan.archetype, room.kind, self.never_closes);
+        let seed = self.household(ri, room);
+        let mut found: Vec<(FixtureRow, DVec3, glam::DQuat, DVec3)> = Vec::new();
+        for inst in &out.instances[start..] {
+            let Some(m) = self.grammar.modules().get(inst.kind_index as usize) else {
+                continue;
+            };
+            let row = match m.name.as_str() {
+                "Desk" => FixtureRow::DeskLamp,
+                "Bed" => FixtureRow::BedsideLamp,
+                _ => continue,
+            };
+            let Some(e) = inst.extent else { continue };
+            let h = DVec3::new(f64::from(e[0]), f64::from(e[1]), f64::from(e[2]));
+            found.push((row, inst.pos, inst.rotation, h));
+        }
+        for (row, pos, rot, h) in found {
+            let def = fixtures::fixture(row);
+            // A back corner of the top, a lamp's width in from each edge.
+            let corner = DVec3::new(
+                (h.x - def.half[0] * 1.5).max(0.0),
+                h.y + def.half[1],
+                -(h.z - def.half[2] * 1.5).max(0.0),
+            );
+            let fit = pos + rot * corner;
+            // Under the head (the head overhangs the fitting's `+X`).
+            let light = fit + rot * DVec3::new(def.half[0] * 0.3, def.half[1] * 0.45, 0.0);
+            out.decor.push(self.fitting(&def, fit, rot));
+            let tag = self.tag(ri, room, row);
+            let mut l = self.fixture_light(
+                &def,
+                light,
+                super::FixtureClip {
+                    center: light,
+                    half: DVec3::ZERO,
+                    u: DVec2::X,
+                },
+                schedule,
+                occupancy,
+                seed,
+                tag,
+            );
+            // A task lamp is a downward spot over its own top: the cone keeps
+            // it in the room, so it is not boxed.
+            l.clip = None;
+            l.dir = DVec3::NEG_Y;
+            l.range_m = TASK_LAMP_RANGE_M;
+            out.lights.push(l);
+        }
+    }
+
+    /// One placed fitting of `def`'s family.
+    fn fitting(&self, def: &fixtures::FixtureDef, at: DVec3, rot: glam::DQuat) -> PcgInstance {
+        PcgInstance {
+            pos: at,
+            rotation: rot,
+            scale: 1.0,
+            kind_index: FIXTURE_KIND_INDEX,
+            mesh: Some(super::modules::module_mesh_guid(def.shape)),
+            extent: Some([def.half[0] as f32, def.half[1] as f32, def.half[2] as f32]),
+            glow: 0.0,
+            surface: def.shape.surface(),
+        }
+    }
+
+    /// One fixture's light: `def`'s colour and lumens, at `at`, confined to
+    /// `clip`, its range the farthest corner of that box.
+    #[allow(clippy::too_many_arguments)]
+    fn fixture_light(
+        &self,
+        def: &fixtures::FixtureDef,
+        at: DVec3,
+        clip: super::FixtureClip,
+        schedule: super::FixtureSchedule,
+        occupancy: FixtureOccupancy,
+        seed: u32,
+        tag: super::FixtureTag,
+    ) -> PcgLight {
+        let mut reach = 0.0f64;
+        for sx in [-1.0, 1.0] {
+            for sy in [-1.0, 1.0] {
+                for sz in [-1.0, 1.0] {
+                    let corner = clip.center
+                        + DVec3::new(clip.half.x * sx, clip.half.y * sy, clip.half.z * sz);
+                    reach = reach.max((corner - at).length());
+                }
+            }
+        }
+        let colour = def.colour();
+        let (inner_deg, outer_deg) = def.cone_deg.unwrap_or((180.0, 180.0));
+        PcgLight {
+            at,
+            dir: DVec3::NEG_Y,
+            sweep: (colour, colour),
+            intensity: def.intensity(),
+            range_m: (reach * 1.05).clamp(1.5, MAX_FIXTURE_RANGE_M) as f32,
+            inner_deg,
+            outer_deg,
+            cycle_hz: 0.0,
+            phase: 0,
+            phases: 1,
+            schedule,
+            occupancy,
+            seed,
+            tag,
+            clip: Some(clip),
+            draw_m: if def.row.is_exterior() {
+                fixtures::EXTERIOR_DRAW_M
+            } else {
+                fixtures::ROOM_DRAW_M
+            },
+            shadow: def.shadow,
+        }
+    }
+
+    /// **THE EXTERIOR** (wave PAR1a clause 3) — on the entrance the street
+    /// faces: a porch lantern beside every entrance; a facade wash either side
+    /// of a shop's or a venue's door and a light on its fascia or sign; floods
+    /// over an institution's forecourt. Every one is a point light boxed to
+    /// the OUTSIDE of the facade, so a porch lamp cannot light the hall behind
+    /// its wall.
+    fn exterior_fixtures(&self, out: &mut GrammarOutput) {
+        let Some(wi) = self.plan.entrance else {
+            return;
+        };
+        let Some(w) = self.plan.walls.get(wi) else {
+            return;
+        };
+        let Some(op) = self
+            .plan
+            .openings
+            .iter()
+            .find(|o| o.wall == wi && o.kind == OpeningKind::Door)
+        else {
+            return;
+        };
+        let dir = w.direction();
+        let along_x = dir.x.abs() >= dir.y.abs();
+        let mid_s = (op.start + op.end) * 0.5;
+        let mid = w.point_at(mid_s);
+        let inside_c = self
+            .plan
+            .rooms
+            .get(w.inside)
+            .map_or(mid, |r| r.rect.center());
+        let outward = if along_x {
+            if mid.y >= inside_c.y {
+                1.0
+            } else {
+                -1.0
+            }
+        } else if mid.x >= inside_c.x {
+            1.0
+        } else {
+            -1.0
+        };
+        let normal2 = if along_x {
+            DVec2::new(0.0, outward)
+        } else {
+            DVec2::new(outward, 0.0)
+        };
+        let normal = DVec3::new(normal2.x, 0.0, normal2.y);
+        let face = self.arch.wall_thickness * 0.5;
+        let y = self.plan.floor_y(0);
+        let room = self.plan.rooms.get(w.inside).copied();
+        // The street in front of the facade: a box from the wall's outer face
+        // out across the pavement, the length of the facade either side.
+        let reach_out = EXTERIOR_BOX_OUT_M;
+        let clip = super::FixtureClip {
+            center: DVec3::new(
+                mid.x + normal2.x * (face + reach_out * 0.5),
+                y + EXTERIOR_BOX_UP_M * 0.5 - 1.0,
+                mid.y + normal2.y * (face + reach_out * 0.5),
+            ),
+            half: DVec3::new(
+                EXTERIOR_BOX_ALONG_M,
+                EXTERIOR_BOX_UP_M * 0.5,
+                reach_out * 0.5 + CLIP_PAD_M,
+            ),
+            // `u` along the wall, so `v` is the outward normal's axis.
+            u: if along_x { DVec2::X } else { DVec2::Y },
+        };
+        let rot = yaw_onto(normal);
+        let tag = |row: FixtureRow| super::FixtureTag {
+            building: 0,
+            floor: 0,
+            room: super::FixtureTag::EXTERIOR,
+            row,
+        };
+        let hang = |out: &mut GrammarOutput,
+                    row: FixtureRow,
+                    s: f64,
+                    h: f64,
+                    sched: super::FixtureSchedule| {
+            let def = fixtures::fixture(row);
+            let p = w.point_at(s.clamp(0.0, w.length()));
+            let fit = DVec3::new(
+                p.x + normal2.x * (face + def.half[2]),
+                y + h,
+                p.y + normal2.y * (face + def.half[2]),
+            );
+            let light = fit + normal * (def.half[2] + fixtures::DIFFUSER_GAP_M)
+                - DVec3::Y * (def.half[1] * 0.5);
+            out.decor.push(self.fitting(&def, fit, rot));
+            let mut l = self.fixture_light(
+                &def,
+                light,
+                clip,
+                sched,
+                FixtureOccupancy::Crew,
+                0,
+                tag(row),
+            );
+            l.range_m = l.range_m.min(exterior_range(row));
+            out.lights.push(l);
+        };
+        let dusk = super::FixtureSchedule::Dusk;
+        // The porch lantern: beside the door's far jamb, a head's height up.
+        hang(
+            out,
+            FixtureRow::Porch,
+            op.end + PORCH_BESIDE_JAMB_M,
+            op.head + 0.25,
+            dusk,
+        );
+        let arch = self.plan.archetype;
+        if arch == ArchetypeId::Shop || arch.is_venue() {
+            // A venue's facade keeps the venue's hours; a shop's, dusk to dawn.
+            let sched = if arch.is_venue() {
+                room.map_or(dusk, |r| super::society::schedule_of(r.kind))
+            } else {
+                dusk
+            };
+            for s in [
+                op.start - WASH_BEYOND_JAMB_M,
+                op.end + WASH_BEYOND_JAMB_M + PORCH_BESIDE_JAMB_M,
+            ] {
+                hang(
+                    out,
+                    FixtureRow::FacadeWash,
+                    s,
+                    self.arch.floor_height - 0.4,
+                    sched,
+                );
+            }
+            let sign_h = self
+                .arch
+                .entrance_sign
+                .map_or(op.head + 0.55, |s| s.height_m + s.half[1] + 0.12);
+            hang(out, FixtureRow::SignLight, mid_s, sign_h, sched);
+        }
+        if arch.is_institution() {
+            for s in [op.start - FLOOD_BESIDE_DOOR_M, op.end + FLOOD_BESIDE_DOOR_M] {
+                let def = fixtures::fixture(FixtureRow::ForecourtFlood);
+                hang(out, FixtureRow::ForecourtFlood, s, def.drop_m, dusk);
+            }
         }
     }
 
@@ -1874,8 +2356,12 @@ mod tests {
                         seed,
                         true,
                     );
-                    worst = worst.max(out.lights.len());
-                    spots = spots.max(out.lights.iter().filter(|l| l.outer_deg < 180.0).count());
+                    // PAR1a: the RIG is what this ceiling guards — every room
+                    // now hangs its own boxed fixture, counted by the PAR1a
+                    // census and gate rather than against a 16-light frame.
+                    let rig = || out.lights.iter().filter(|l| l.tag.row.is_rig());
+                    worst = worst.max(rig().count());
+                    spots = spots.max(rig().filter(|l| l.outer_deg < 180.0).count());
                 }
             }
             table.push((arch.display, worst, spots));
@@ -2999,7 +3485,26 @@ mod tests {
                 .filter(|o| o.kind == OpeningKind::Window)
                 .count();
             assert!(windows > 0, "{}: no windows at all", arch.display);
-            let decor = &out.instances[out.colliders.len()..];
+            // PAR1a: the room fittings ride the decoration tail too (a lamp is
+            // not a wall), one per non-rig fixture and interleaved per floor;
+            // they are set aside by their reserved kind before the pane claims.
+            let fittings = out.lights.iter().filter(|l| !l.tag.row.is_rig()).count();
+            let all_decor = &out.instances[out.colliders.len()..];
+            assert_eq!(
+                all_decor
+                    .iter()
+                    .filter(|d| d.kind_index == FIXTURE_KIND_INDEX)
+                    .count(),
+                fittings,
+                "{}: a fixture without its fitting",
+                arch.display
+            );
+            let decor: Vec<PcgInstance> = all_decor
+                .iter()
+                .filter(|d| d.kind_index != FIXTURE_KIND_INDEX)
+                .copied()
+                .collect();
+            let decor = &decor[..];
             // **The tail is panes THEN the street face** (wave VEN1a). A venue
             // hangs a sign and a festoon over its entrance, and both are decor
             // for the same reason a pane is: a sign you cannot walk through is
@@ -3078,7 +3583,11 @@ mod tests {
     #[test]
     fn a_pane_fills_the_void_it_was_hung_in() {
         let out = built(ArchetypeId::House, 2, 7);
-        let decor = &out.instances[out.colliders.len()..];
+        // PAR1a: the fittings share the tail; the panes are the rest.
+        let decor: Vec<&PcgInstance> = out.instances[out.colliders.len()..]
+            .iter()
+            .filter(|d| d.kind_index != FIXTURE_KIND_INDEX)
+            .collect();
         let windows: Vec<&Opening> = out
             .plan
             .openings

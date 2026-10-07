@@ -4254,6 +4254,65 @@ pub struct ScatteredLight {
     /// mirrored here because the two crates do not depend on each other.
     /// Resolved to an intensity by [`crate::sky::fixture_level`].
     pub schedule: LightSchedule,
+    /// **Whose day it keeps** (wave PAR1a) — the occupancy half, resolved by
+    /// [`crate::sky::fixture_occupancy`]; the twin of `inf_pcg`'s
+    /// `FixtureOccupancy`.
+    pub occupancy: FixtureOccupancy,
+    /// The household / room draw [`crate::sky::fixture_occupancy`] reads.
+    pub seed: u32,
+    /// The building ordinal inside its volume (wave PAR1a census key).
+    pub building: u32,
+    /// The storey, 0-based.
+    pub floor: u32,
+    /// The room index inside its building, or `u32::MAX` for an exterior
+    /// fixture.
+    pub room: u32,
+    /// The vocabulary row's wire word (`inf_pcg::building::fixtures::FixtureRow::code`).
+    pub row: u16,
+    /// **The box the light is confined to** (wave PAR1a), or `None` for an
+    /// unbounded light.
+    pub clip: Option<ScatteredClip>,
+    /// The light's draw distance from the eye, metres; `0` is unlimited.
+    pub draw_m: f32,
+    /// Whether it asks the shadow policy for a page tree (wave PAR1a; every
+    /// VEN1a rig light asks).
+    pub shadow: bool,
+}
+
+/// **An oriented box a scattered light is confined to** (wave PAR1a) — the
+/// twin of `inf_pcg::building::FixtureClip`. Derived, never serialized.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScatteredClip {
+    /// The box centre, world metres.
+    pub center: DVec3,
+    /// Half-extents along `u`, up, and along `v = (-u.y, u.x)`, metres.
+    pub half: DVec3,
+    /// The first horizontal axis, unit, world XZ (`x`, `z`).
+    pub u: glam::DVec2,
+}
+
+/// **Whose day a fixture keeps** (wave PAR1a) — the ECS twin of
+/// `inf_pcg::building::fixtures::FixtureOccupancy`. Derived, never serialized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FixtureOccupancy {
+    /// Lit whenever its schedule says.
+    Crew,
+    /// A workplace's day, then a share left lit.
+    Work,
+    /// A shop floor's hours, then a share left lit for the display.
+    Shop,
+    /// A dwelling room's household day.
+    Home(HomeRoom),
+}
+
+/// Which room of a household (wave PAR1a).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HomeRoom {
+    Living,
+    Kitchen,
+    Bedroom,
+    Bath,
+    Hall,
 }
 
 /// **When a fixture burns** (wave PAR0) — the ECS twin of

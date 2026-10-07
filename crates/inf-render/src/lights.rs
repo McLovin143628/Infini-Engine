@@ -42,7 +42,7 @@ use glam::{DVec3, Vec3};
 
 use crate::camera::RenderView;
 use crate::gpu::GpuContext;
-use crate::scene::{LightKind, RenderLight, RenderScene};
+use crate::scene::{LightBound, LightKind, RenderLight, RenderScene};
 
 /// Froxel grid columns (screen x).
 pub const CLUSTER_X: u32 = 16;
@@ -235,6 +235,12 @@ pub struct LightPlan {
     pub culled_ceiling: u32,
     /// Local lights skipped because [`LightSettings::local_lights`] is off.
     pub skipped_local: u32,
+    /// **Local lights past their own draw distance** (wave PAR1a): a room
+    /// fixture whose sphere's nearest point is farther from the eye than its
+    /// [`LightBound::draw_m`].
+    pub culled_distance: u32,
+    /// Local records emitted as a CLIPPED point (kind 3, wave PAR1a).
+    pub clipped: u32,
 }
 
 impl LightPlan {
@@ -386,6 +392,15 @@ pub fn plan_lights(
                 plan.culled_energy += 1;
                 continue;
             }
+            // PAR1a: a fixture's own draw distance, measured to the nearest
+            // point of its sphere.
+            if let Some(b) = bound_of(&scene.light_bounds, i as u32) {
+                if b.draw_m > 0.0 && (l.position - viewer.eye).length() - r as f64 > b.draw_m as f64
+                {
+                    plan.culled_distance += 1;
+                    continue;
+                }
+            }
             if !viewer.sees(l.position, r as f64) {
                 if l.range <= 0.0 || r < l.range {
                     // Would the RANGE sphere have been seen? Then it was the
@@ -451,11 +466,80 @@ pub fn plan_lights(
             g.params[1] = l.inner_cos;
             g.params[2] = l.outer_cos;
             g.spot_dir = [emit.x, emit.y, emit.z, r];
+        } else if let Some(clip) = bound_of(&scene.light_bounds, i).and_then(|b| b.clip) {
+            encode_clip(&mut g, l.position, &clip);
+            plan.clipped += 1;
         }
         plan.records.push(g);
         plan.scene_index.push(i);
     }
     plan
+}
+
+/// The bound a scene light carries, if any — `bounds` is in light order, so a
+/// binary search.
+fn bound_of(bounds: &[LightBound], i: u32) -> Option<&LightBound> {
+    bounds
+        .binary_search_by_key(&i, |b| b.light)
+        .ok()
+        .map(|k| &bounds[k])
+}
+
+/// IEEE half-precision bits of `x` (truncating; finite range clamped) — the
+/// packing `unpack2x16float` reads back in `lights.wgsl`.
+pub fn f16_bits(x: f32) -> u16 {
+    let b = x.to_bits();
+    let sign = ((b >> 16) & 0x8000) as u16;
+    let exp = ((b >> 23) & 0xff) as i32 - 127 + 15;
+    let man = b & 0x007f_ffff;
+    if exp >= 31 {
+        return sign | 0x7bff;
+    }
+    if exp <= 0 {
+        if exp < -10 {
+            return sign;
+        }
+        return sign | ((man | 0x0080_0000) >> (14 - exp)) as u16;
+    }
+    let mut h = u32::from(sign) | ((exp as u32) << 10) | (man >> 13);
+    if man & 0x1000 != 0 {
+        h += 1;
+    }
+    h as u16
+}
+
+/// Two values as one `pack2x16float` word, stored in an `f32` lane by bits.
+fn pack2(lo: f32, hi: f32) -> f32 {
+    f32::from_bits(u32::from(f16_bits(lo)) | (u32::from(f16_bits(hi)) << 16))
+}
+
+/// **A CLIPPED POINT LIGHT** (wave PAR1a): kind `3`, its box in the lanes a
+/// point light leaves free — `spot_dir.xyz` hold three `pack2x16float` words
+/// (the box centre's offset from the light along `u` and `v`, the box's half
+/// extents along `u` and `v`, and `u` itself as `(x, z)`), `params.yz` the box's
+/// floor and ceiling relative to the light. `spot_dir.w` keeps the cull radius.
+fn encode_clip(g: &mut GpuLight, light: DVec3, clip: &crate::scene::LightClip) {
+    let d = (clip.center - light).as_vec3();
+    let (ux, uz) = (clip.u[0], clip.u[1]);
+    // v = (-u.z, u.x): the lot frame's own convention (`LotFrame::v`).
+    let off_u = d.x * ux + d.z * uz;
+    let off_v = -d.x * uz + d.z * ux;
+    g.pos_dir[3] = 3.0;
+    g.params[1] = d.y - clip.half.y;
+    g.params[2] = d.y + clip.half.y;
+    g.spot_dir[0] = pack2(off_u, off_v);
+    g.spot_dir[1] = pack2(clip.half.x, clip.half.z);
+    g.spot_dir[2] = pack2(ux, uz);
+}
+
+/// The CPU mirror of `lights.wgsl`'s `light_clip_holds`: whether world point
+/// `p` is inside a clipped light's box (for arms that ask without a GPU).
+pub fn clip_holds(clip: &crate::scene::LightClip, p: DVec3) -> bool {
+    let d = (p - clip.center).as_vec3();
+    let (ux, uz) = (clip.u[0], clip.u[1]);
+    let du = d.x * ux + d.z * uz;
+    let dv = -d.x * uz + d.z * ux;
+    du.abs() <= clip.half.x && dv.abs() <= clip.half.z && d.y.abs() <= clip.half.y
 }
 
 fn slot(vsm_slots: &[u32], i: u32) -> f32 {

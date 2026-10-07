@@ -69,6 +69,8 @@ pub mod assemble;
 // I6: where a building's DOORS go - the openings the grammar already plans,
 // turned into hinges a door system can hang a leaf on.
 pub mod doorway;
+// PAR1a: what light every room hangs -- the fixture vocabulary as one table.
+pub mod fixtures;
 pub mod lod;
 // I8b: what a module LOOKS like -- the shape families, their content-derived
 // GUIDs and the unit-space meshes both hosts register under them.
@@ -420,6 +422,56 @@ pub struct PcgLight {
     /// division as the colour sweep: committed content says WHEN, the hour
     /// says whether it is now.
     pub schedule: FixtureSchedule,
+    /// **Whose day it keeps** (wave PAR1a clause 4) — the occupancy half of
+    /// the schedule, resolved beside [`schedule`](Self::schedule) by
+    /// `inf_ecs::sky::fixture_occupancy`.
+    pub occupancy: fixtures::FixtureOccupancy,
+    /// The household / room draw the occupancy reads (content-derived: the
+    /// building's salt and the room, folded in `pass.rs`).
+    pub seed: u32,
+    /// **Which room of which building this fixture lights** (wave PAR1a) —
+    /// the census key.
+    pub tag: FixtureTag,
+    /// **The volume the fixture may light** (wave PAR1a): an oriented box,
+    /// world metres, outside which an unshadowed fixture contributes nothing —
+    /// a lit flat must not light the flat next door through a party wall.
+    /// `None` leaves the light unbounded (a venue rig, a task lamp's spot).
+    pub clip: Option<FixtureClip>,
+    /// How far from the eye the fixture is drawn as a light, metres; `0` is
+    /// unlimited.
+    pub draw_m: f32,
+    /// Whether it asks PAR0's shadow policy for a page tree.
+    pub shadow: bool,
+}
+
+/// **Which room of which building a fixture belongs to** (wave PAR1a) — the
+/// key the zero-unlit-rooms census counts by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FixtureTag {
+    /// The building's ordinal inside its volume (`pass.rs` assigns it).
+    pub building: u32,
+    /// The storey, 0-based.
+    pub floor: u32,
+    /// Index into the plan's rooms, or [`FixtureTag::EXTERIOR`].
+    pub room: u32,
+    /// The vocabulary row.
+    pub row: fixtures::FixtureRow,
+}
+
+impl FixtureTag {
+    /// The `room` of a fixture hung on the outside of its building.
+    pub const EXTERIOR: u32 = u32::MAX;
+}
+
+/// **An oriented box a fixture's light is confined to** (wave PAR1a).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FixtureClip {
+    /// The box centre, world metres.
+    pub center: DVec3,
+    /// Half-extents along `u`, up, and along `v = (-u.y, u.x)`, metres.
+    pub half: DVec3,
+    /// The box's first horizontal axis, a unit vector in world XZ.
+    pub u: DVec2,
 }
 
 /// **When a fixture burns** (wave PAR0) — derived, never serialized, on
