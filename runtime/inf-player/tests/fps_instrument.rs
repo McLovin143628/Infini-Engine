@@ -3658,6 +3658,52 @@ fn the_light_loop_on_the_island_at_nine() {
         let census = renderer
             .light_census(&gpu)
             .expect("the froxel grid reads back");
+        // **PAR1a: the lights the SHADER saw, by band** — every froxel's
+        // list read back from the GPU, unioned, each light's record placed
+        // near (< 30 m) / mid (< 96 m, the structure LOD) / far from the eye;
+        // and what the plan submitted vs culled, by cause.
+        {
+            let plan = renderer.light_plan();
+            let mut seen = std::collections::BTreeSet::new();
+            for c in 0..inf_render::lights::CLUSTER_COUNT {
+                if census.counts.get(c as usize).copied().unwrap_or(0) == 0 {
+                    continue;
+                }
+                if let Ok(list) = renderer.light_froxel(&gpu, c) {
+                    seen.extend(list);
+                }
+            }
+            let eye = view.eye_local();
+            let mut bands = [0usize; 3];
+            for i in &seen {
+                let Some(r) = plan.records.get(*i as usize) else {
+                    continue;
+                };
+                let p = glam::Vec3::new(r.pos_dir[0], r.pos_dir[1], r.pos_dir[2]);
+                let d = (p - eye).length();
+                bands[if d < 30.0 {
+                    0
+                } else if d < 96.0 {
+                    1
+                } else {
+                    2
+                }] += 1;
+            }
+            println!(
+                "PAR1a LIGHT BANDS {label}: in the shader (GPU froxel lists) {} local -- near {} / mid {} / far {}; plan submitted {} local ({} clipped), culled frustum {} (energy {}), distance {}, ceiling {}; scene {} lights",
+                seen.len(),
+                bands[0],
+                bands[1],
+                bands[2],
+                plan.local(),
+                plan.clipped,
+                plan.culled_frustum,
+                plan.culled_energy,
+                plan.culled_distance,
+                plan.culled_ceiling,
+                scene.lights.len()
+            );
+        }
         let mut dear: Vec<(&str, f64)> = m.passes.iter().map(|p| (p.0, p.1)).collect();
         dear.sort_by(|a, b| b.1.total_cmp(&a.1));
         let vsm_ms: f64 = m
