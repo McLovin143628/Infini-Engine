@@ -123,11 +123,17 @@ pub enum FixtureRow {
     BarGlow,
     /// A venue room the rig does not reach — a dim pendant on the venue's hours.
     VenuePendant,
+    /// **The light a lit room throws out through a street-facing opening**
+    /// (audit PAR1a, c'): a low wide spot just outside a ground-floor window or
+    /// door, aimed down at the pavement, its colour and flux the room's own
+    /// fixtures' share through the opening, lit exactly when the room is. No
+    /// fitting: it is the room's light leaving, not a lamp.
+    OpeningSpill,
 }
 
 impl FixtureRow {
     /// Every row, in declaration order.
-    pub const ALL: [FixtureRow; 21] = [
+    pub const ALL: [FixtureRow; 22] = [
         FixtureRow::Pendant,
         FixtureRow::OfficeBatten,
         FixtureRow::ShopStrip,
@@ -149,6 +155,7 @@ impl FixtureRow {
         FixtureRow::RigSpot,
         FixtureRow::BarGlow,
         FixtureRow::VenuePendant,
+        FixtureRow::OpeningSpill,
     ];
 
     /// The row's wire word (its declaration index).
@@ -165,6 +172,12 @@ impl FixtureRow {
     /// `volume::VOLUME_LIGHT_CAP` guards).
     pub fn is_rig(self) -> bool {
         matches!(self, FixtureRow::RigSpot | FixtureRow::BarGlow)
+    }
+
+    /// Whether a light of this row hangs a fitting mesh (the rig carries its
+    /// own, an opening's spill is the room's light and has none).
+    pub fn has_fitting(self) -> bool {
+        !self.is_rig() && self != FixtureRow::OpeningSpill
     }
 
     /// Whether this row hangs on the OUTSIDE of a building.
@@ -202,6 +215,7 @@ impl FixtureRow {
             FixtureRow::RigSpot => "rig spot",
             FixtureRow::BarGlow => "bar glow",
             FixtureRow::VenuePendant => "venue pendant",
+            FixtureRow::OpeningSpill => "opening spill",
         }
     }
 }
@@ -553,8 +567,33 @@ pub fn fixture(row: FixtureRow) -> FixtureDef {
             5.0,
             false,
         ),
+        // The spill takes its colour and flux from the room it leaves
+        // (`assemble::opening_spill`); the row carries its cone only.
+        R::OpeningSpill => def(
+            row,
+            S::Fitting,
+            [0.0; 3],
+            M::Wall,
+            0.0,
+            3000,
+            300.0,
+            Some((SPILL_INNER_DEG, SPILL_OUTER_DEG)),
+            0.0,
+            false,
+        ),
     }
 }
+
+/// The opening spill's cone half-angles, degrees (audit PAR1a): wide, so the
+/// pool on the pavement has no edge to it.
+pub const SPILL_INNER_DEG: f32 = 40.0;
+/// See [`SPILL_INNER_DEG`].
+pub const SPILL_OUTER_DEG: f32 = 75.0;
+/// The share of a room's flux an opening's glass passes (PAR0's transmitting
+/// glass is 0.85).
+pub const SPILL_TRANSMISSION: f64 = 0.85;
+/// The spill's reach on the ground, metres.
+pub const SPILL_RANGE_M: f32 = 6.0;
 
 /// **Which row lights a room** — one exhaustive answer per room type, so a
 /// twenty-third room type fails to compile here rather than standing dark.
@@ -745,7 +784,7 @@ mod tests {
     fn the_rows_are_plausible_lamps() {
         for row in FixtureRow::ALL {
             let d = fixture(row);
-            if matches!(row, FixtureRow::RigSpot | FixtureRow::BarGlow) {
+            if !row.has_fitting() {
                 continue;
             }
             let i = d.intensity();
@@ -835,7 +874,10 @@ mod tests {
                         .collect();
                     assert_eq!(
                         fittings.len(),
-                        out.lights.iter().filter(|l| !l.tag.row.is_rig()).count(),
+                        out.lights
+                            .iter()
+                            .filter(|l| l.tag.row.has_fitting())
+                            .count(),
                         "{arch:?}: a light without its fitting"
                     );
                     // Every building hangs a porch light on its entrance.

@@ -161,6 +161,13 @@ const PORCH_BESIDE_JAMB_M: f64 = 0.35;
 const WASH_BEYOND_JAMB_M: f64 = 1.2;
 /// How far either side of an institution's door its floods hang, metres.
 const FLOOD_BESIDE_DOOR_M: f64 = 3.0;
+/// How far outside a wall's face an opening's spill hangs, metres (audit
+/// PAR1a, c').
+const SPILL_OUT_M: f64 = 0.15;
+/// The spill's beam, 40 degrees under the horizontal: `cos 40`, `sin 40`
+/// (constants, not trigonometry — P14).
+const SPILL_DIR_OUT: f64 = 0.766_044_443_118_978;
+const SPILL_DIR_DOWN: f64 = 0.642_787_609_686_539_3;
 
 /// A quarter turn about `X` taking the fitting's lit `-Y` face onto `+Z` —
 /// written as its components (a rotation constant, no trigonometry: P14).
@@ -799,6 +806,11 @@ impl Ctx<'_> {
         // bare is still a lit office block at 19:00.
         for (ri, room) in self.plan.rooms_on(floor) {
             self.room_fixtures(&mut out, ri, room, y, furnish);
+        }
+        // Audit PAR1a (c'): the street-facing ground-floor openings throw
+        // their rooms' light onto the pavement.
+        if floor == 0 {
+            self.opening_spill(&mut out, y, furnish);
         }
         out
     }
@@ -1455,6 +1467,119 @@ impl Ctx<'_> {
             },
             shadow: def.shadow,
         }
+    }
+
+    /// **LIGHT THROUGH THE OPENINGS** (audit PAR1a, c'). A room's fixtures
+    /// are clipped to its box, so a lit shop threw nothing onto its pavement
+    /// and a lit front room nothing onto its path. For every window and door
+    /// on a ground-floor wall that faces the street (the entrance wall's side
+    /// of the building), a low wide spot hangs just outside the opening, aimed
+    /// out and down: its colour the room's row, its flux the room's fixtures'
+    /// share through the opening — `lumens × fixtures × glass × opening area /
+    /// room surface` — and it keeps the room's own schedule and occupancy, so
+    /// it is lit exactly while the room is. A spot, not a boxed point: its
+    /// cone faces away from the facade, so it lights nothing behind the wall.
+    fn opening_spill(&self, out: &mut GrammarOutput, y: f64, furnish: bool) {
+        let Some(ei) = self.plan.entrance else {
+            return;
+        };
+        let Some(street) = self.outward(ei) else {
+            return;
+        };
+        let face = self.arch.wall_thickness * 0.5;
+        let h = self.arch.floor_height - self.arch.slab_thickness;
+        let spill = fixtures::fixture(FixtureRow::OpeningSpill);
+        for op in &self.plan.openings {
+            if !matches!(op.kind, OpeningKind::Window | OpeningKind::Door) {
+                continue;
+            }
+            let Some(w) = self.plan.walls.get(op.wall) else {
+                continue;
+            };
+            if w.floor != 0 || !w.is_exterior() {
+                continue;
+            }
+            let Some(n) = self.outward(op.wall) else {
+                continue;
+            };
+            // The street side: the entrance wall's own outward normal.
+            if n.dot(street) < 0.99 {
+                continue;
+            }
+            let ri = w.inside;
+            let Some(room) = self.plan.rooms.get(ri) else {
+                continue;
+            };
+            let row = fixtures::room_row(room.kind);
+            if row == FixtureRow::VenuePendant && self.rig_lights(room.kind, furnish) {
+                continue;
+            }
+            let def = fixtures::fixture(row);
+            let inner = room.rect.inset(self.arch.wall_thickness * 0.5);
+            if !inner.is_positive() {
+                continue;
+            }
+            let (nx, nz) = if def.mount == fixtures::Mount::Wall {
+                (1, 1)
+            } else {
+                grid_of(inner, def.spacing_m)
+            };
+            let surface =
+                2.0 * inner.size_x() * inner.size_z() + 2.0 * (inner.size_x() + inner.size_z()) * h;
+            let area = (op.end - op.start).max(0.0) * (op.head - op.sill).max(0.0);
+            let lumens =
+                f64::from(def.lumens) * f64::from(nx * nz) * fixtures::SPILL_TRANSMISSION * area
+                    / surface.max(1.0);
+            if lumens <= 0.0 {
+                continue;
+            }
+            let mid = w.point_at((op.start + op.end) * 0.5);
+            let at = DVec3::new(
+                mid.x + n.x * (face + SPILL_OUT_M),
+                y + (op.sill + op.head) * 0.5,
+                mid.y + n.y * (face + SPILL_OUT_M),
+            );
+            // Out and down: 40 degrees under the horizontal, written as its
+            // components (P14: no trigonometry in committed content).
+            let dir = DVec3::new(n.x * SPILL_DIR_OUT, -SPILL_DIR_DOWN, n.y * SPILL_DIR_OUT);
+            let (schedule, occupancy) =
+                fixtures::room_keeps(self.plan.archetype, room.kind, self.never_closes);
+            let def_here = fixtures::FixtureDef {
+                kelvin: def.kelvin,
+                lumens: lumens as f32,
+                ..spill
+            };
+            out.lights.push(PcgLight {
+                at,
+                dir,
+                sweep: (def_here.colour(), def_here.colour()),
+                intensity: def_here.intensity(),
+                range_m: fixtures::SPILL_RANGE_M,
+                inner_deg: fixtures::SPILL_INNER_DEG,
+                outer_deg: fixtures::SPILL_OUTER_DEG,
+                cycle_hz: 0.0,
+                phase: 0,
+                phases: 1,
+                schedule,
+                occupancy,
+                seed: self.household(ri, room),
+                tag: self.tag(ri, room, FixtureRow::OpeningSpill),
+                clip: None,
+                draw_m: fixtures::EXTERIOR_DRAW_M,
+                shadow: false,
+            });
+        }
+    }
+
+    /// The unit outward normal (plan XZ) of exterior wall `wi`, by the side of
+    /// it its inside room's centre is not on.
+    fn outward(&self, wi: usize) -> Option<DVec2> {
+        let w = self.plan.walls.get(wi)?;
+        let d = w.direction();
+        let n = DVec2::new(-d.y, d.x);
+        let mid = w.point_at(w.length() * 0.5);
+        let c = self.plan.rooms.get(w.inside)?.rect.center();
+        Some(if (mid - c).dot(n) >= 0.0 { n } else { -n })
     }
 
     /// **THE EXTERIOR** (wave PAR1a clause 3) — on the entrance the street
@@ -2585,7 +2710,13 @@ mod tests {
             );
             assert!(!out.lights.is_empty(), "{id:?}: no rig");
             let ceiling = out.plan.floor_y(0) + arch.floor_height - arch.slab_thickness;
-            for l in &out.lights {
+            // (An opening's spill is the room's light leaving through a window
+            // at sill height, not a hung fixture.)
+            for l in out
+                .lights
+                .iter()
+                .filter(|l| l.tag.row != fixtures::FixtureRow::OpeningSpill)
+            {
                 assert!(
                     l.at.y < ceiling,
                     "{id:?}: a fixture at {} is inside the slab whose underside is {ceiling}",
@@ -2610,7 +2741,11 @@ mod tests {
                 assert!(l.inner_deg <= l.outer_deg, "{id:?}: an inverted cone");
             }
             // The spots are SPREAD, or three lamps are one lamp.
-            let spots: Vec<&PcgLight> = out.lights.iter().filter(|l| l.outer_deg < 180.0).collect();
+            let spots: Vec<&PcgLight> = out
+                .lights
+                .iter()
+                .filter(|l| l.outer_deg < 180.0 && l.tag.row != fixtures::FixtureRow::OpeningSpill)
+                .collect();
             if spots.len() > 1 {
                 let spread = spots.iter().map(|l| l.at.x).fold(f64::MIN, f64::max)
                     - spots.iter().map(|l| l.at.x).fold(f64::MAX, f64::min)
@@ -3508,7 +3643,11 @@ mod tests {
             // PAR1a: the room fittings ride the decoration tail too (a lamp is
             // not a wall), one per non-rig fixture and interleaved per floor;
             // they are set aside by their reserved kind before the pane claims.
-            let fittings = out.lights.iter().filter(|l| !l.tag.row.is_rig()).count();
+            let fittings = out
+                .lights
+                .iter()
+                .filter(|l| l.tag.row.has_fitting())
+                .count();
             let all_decor = &out.instances[out.colliders.len()..];
             assert_eq!(
                 all_decor

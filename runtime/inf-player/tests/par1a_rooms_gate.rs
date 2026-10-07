@@ -1188,6 +1188,103 @@ fn a_lit_shop_is_seen_from_the_street_through_its_glass() {
     );
 }
 
+/// **A LIT SHOP THROWS ITS LIGHT ONTO ITS PAVEMENT; A PORCH LAMP LIGHTS ITS
+/// STEP** (audit PAR1a, c').
+///
+/// Reads: the same real shop at night from a high pavement camera, the ground
+/// 2 m in front of its door and 2 m in front of its glazing, with (a) its
+/// interior fixtures + their opening spills on, (b) the interior fixtures
+/// alone (the room box — what the wave shipped), (c) all dark; and the porch
+/// lantern on vs off on the ground under it vs 7 m along the facade. The
+/// room box stops a shop's light at its glass, so (b) reads the dark: the
+/// spill is what lights the pavement. Mutation: no `opening_spill` -> (a) ==
+/// (b), red.
+#[test]
+fn a_lit_shop_spills_onto_its_pavement_and_a_porch_lights_its_step() {
+    use inf_pcg::building::OpeningKind;
+    let Some(gpu) = gpu() else { return };
+    let out = building(ArchetypeId::Shop, 1, 7, true);
+    let plan = &out.plan;
+    let wi = plan.entrance.expect("a shop has an entrance");
+    let w = plan.walls[wi];
+    let door = plan
+        .openings
+        .iter()
+        .find(|o| o.wall == wi && o.kind == OpeningKind::Door)
+        .copied()
+        .expect("the entrance has a door");
+    let mid = w.point_at((door.start + door.end) * 0.5);
+    let rc = plan.rooms[w.inside].rect.center();
+    let d = w.direction();
+    let n = {
+        let n = DVec2::new(-d.y, d.x);
+        if (mid - rc).dot(n) >= 0.0 {
+            n
+        } else {
+            -n
+        }
+    };
+    let y = plan.floor_y(0);
+    let ground = |along: f64, out_m: f64| {
+        let p = mid + d * along + n * out_m;
+        DVec3::new(p.x, y + 0.01, p.y)
+    };
+    let eye = ground(0.0, 9.0) + DVec3::Y * 5.0;
+    let view = look(eye, ground(0.0, 1.5));
+    let spill = |l: &PcgLight| l.tag.row == FixtureRow::OpeningSpill;
+    let interior = |l: &PcgLight| l.tag.room != FixtureTag::EXTERIOR;
+    let a = render(&gpu, &building_scene(&out, &|l| interior(l), true), &view);
+    let b = render(
+        &gpu,
+        &building_scene(&out, &|l| interior(l) && !spill(l), true),
+        &view,
+    );
+    let c = render(&gpu, &building_scene(&out, &|_| false, true), &view);
+    dump("spill_on", &a);
+    dump("spill_boxed_only", &b);
+    let spills = out.lights.iter().filter(|l| spill(l)).count();
+    let pave = |img: &[u8]| {
+        [0.0f64, 2.6]
+            .iter()
+            .map(|s| patch_at(img, &view, ground(*s, 2.0), 8))
+            .fold(0.0f64, f64::max)
+    };
+    let (pa, pb, pc) = (pave(&a), pave(&b), pave(&c));
+    // The porch lantern alone, on vs off.
+    let porch = |l: &PcgLight| l.tag.row == FixtureRow::Porch;
+    let pl = out.lights.iter().find(|l| porch(l)).expect("a porch light");
+    let under = {
+        let p = DVec2::new(pl.at.x, pl.at.z);
+        let along = (p - mid).dot(d);
+        (ground(along, 1.0), ground(along + 7.0, 1.0))
+    };
+    let pview = look(
+        under.0 + DVec3::new(n.x, 0.0, n.y) * 7.0 + DVec3::Y * 4.0,
+        under.0,
+    );
+    let p_on = render(&gpu, &building_scene(&out, &|l| porch(l), true), &pview);
+    let p_off = render(&gpu, &building_scene(&out, &|_| false, true), &pview);
+    let (st_on, st_off, beside) = (
+        patch_at(&p_on, &pview, under.0, 8),
+        patch_at(&p_off, &pview, under.0, 8),
+        patch_at(&p_on, &pview, under.1, 8),
+    );
+    println!(
+        "PAR1a SPILL: {spills} opening spill(s); the pavement 2 m out: shop lit + spill {pa:.1}, \
+         the room box alone {pb:.1}, dark {pc:.1}; the porch step: lit {st_on:.1}, off {st_off:.1}, \
+         7 m along {beside:.1}"
+    );
+    assert!(spills > 0, "the shop's street openings throw no spill");
+    assert!(
+        pa >= pb + 8.0 && pa >= pc + 8.0,
+        "the lit shop does not light its pavement: {pa:.1} vs boxed {pb:.1} vs dark {pc:.1}"
+    );
+    assert!(
+        st_on >= st_off + 8.0 && st_on > beside,
+        "the porch lamp does not light its step: {st_on:.1} vs off {st_off:.1}, beside {beside:.1}"
+    );
+}
+
 /// **THE FAR BAND, MEASURED** (clause 5): a room fixture is a light only
 /// inside its draw distance (`fixtures::ROOM_DRAW_M`); past it `plan_lights`
 /// drops it (`LightPlan::culled_distance`). This arm reads the plan's
