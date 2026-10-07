@@ -3099,14 +3099,16 @@ fn scatter_caster_stamps(
     hashes: &[u64],
 ) -> u64 {
     let mut grids: std::collections::BTreeMap<u32, LightGrids> = std::collections::BTreeMap::new();
-    let mut perspective: Vec<usize> = Vec::new();
+    // The perspective pages, **grouped by their light** (wave PERF1c). See
+    // `stamp_perspective` for why the grouping is the whole point.
+    let mut perspective: PerspectivePages = std::collections::BTreeMap::new();
     for (i, p) in pages.iter().enumerate() {
         let handle = VsmLightHandle(p.light);
         let Some(desc) = residency.desc(handle) else {
             continue;
         };
         if desc.kind != VsmTreeKind::Clipmap {
-            perspective.push(i);
+            perspective.entry(p.light).or_default().push(i);
             continue;
         }
         let Some(g) = desc.levels.get(p.page.level as usize) else {
@@ -3239,29 +3241,8 @@ fn scatter_caster_stamps(
         // once. The clipmap half above cannot be hoisted the same way: its bucket
         // is the level, which that loop is over.
         if bucket == 0 || bucket & PERSPECTIVE_BUCKET != 0 {
-            for &i in &perspective {
-                touches += 1;
-                let p = &mut pages[i];
-                // **THE LIGHT'S RANGE BOUNDS ITS CASTERS** (PAR0 audit). A cube
-                // face or a spot cone has an INFINITE far plane, so before this
-                // test every car and pedestrian anywhere in a face's frustum
-                // re-stamped that face's pages every frame: one shadowed room
-                // fixture on the island re-rasterized ~154 pages a frame with a
-                // STATIC camera (~1.0 G indices, 33 ms GPU). A receiver the light
-                // reaches is inside its range ball, and so is the segment from it
-                // to the light, so a caster wholly outside the ball shadows
-                // nothing this light lights — exact, not a heuristic.
-                if !caster_within_reach(geom, p.light, centre, radius) {
-                    continue;
-                }
-                if crate::vsm::vsm_page_sees_sphere(&p.view_proj, centre, radius) {
-                    fold_into(&mut p.caster_fold, hash);
-                    p.casters += 1;
-                    if let Some(w) = p.group_mask.get_mut(word) {
-                        *w |= bit;
-                    }
-                }
-            }
+            touches +=
+                stamp_perspective(pages, &perspective, geom, centre, radius, hash, (word, bit));
         }
     }
 
@@ -3274,8 +3255,71 @@ fn scatter_caster_stamps(
     touches
 }
 
+/// A frame's perspective pages (spot cones and cube faces), as indices into the
+/// page list, grouped by the light that owns them — the shape
+/// [`stamp_perspective`] walks.
+type PerspectivePages = std::collections::BTreeMap<u32, Vec<usize>>;
+
+/// **Fold one caster into the perspective pages it can shadow** (wave PERF1c),
+/// returning the touches it spent — one per light asked, plus one per page of
+/// every light the caster is within reach of.
+///
+/// # THE LIGHT'S RANGE BOUNDS ITS CASTERS (PAR0 audit)
+///
+/// A cube face or a spot cone has an INFINITE far plane, so before the range
+/// test every car and pedestrian anywhere in a face's frustum re-stamped that
+/// face's pages every frame: one shadowed room fixture on the island
+/// re-rasterized ~154 pages a frame with a STATIC camera (~1.0 G indices, 33 ms
+/// GPU). A receiver the light reaches is inside its range ball, and so is the
+/// segment from it to the light, so a caster wholly outside the ball shadows
+/// nothing this light lights — exact, not a heuristic.
+///
+/// # Why the test is asked once per LIGHT and not once per page
+///
+/// [`caster_within_reach`] reads nothing of the page but its light, so the
+/// PAR0 shape — the test inside the page loop — asked the same question once
+/// for every page the light owned. On the island at 21:00 that was the frame's
+/// dearest CPU row after the submit: 2 271 casters against every resident
+/// perspective page, **2.2 M touches and 3.30 ms a frame**, nearly all of them
+/// answering "out of reach" about a fixture across the street. Asked once per
+/// light, a caster out of a fixture's reach costs one test for all of that
+/// fixture's pages. The folds are the same folds into the same pages — the
+/// test's inputs did not change, only how often it is asked — which
+/// `the_perspective_stamp_asks_the_reach_once_per_light` holds against the
+/// per-page spelling.
+#[allow(clippy::too_many_arguments)]
+fn stamp_perspective(
+    pages: &mut [PageDraw],
+    perspective: &PerspectivePages,
+    geom: PageGeometry<'_>,
+    centre: glam::Vec3,
+    radius: f32,
+    hash: u64,
+    (word, bit): (usize, u64),
+) -> u64 {
+    let mut touches = 0u64;
+    for (&light, owned) in perspective {
+        touches += 1;
+        if !caster_within_reach(geom, light, centre, radius) {
+            continue;
+        }
+        for &i in owned {
+            touches += 1;
+            let p = &mut pages[i];
+            if crate::vsm::vsm_page_sees_sphere(&p.view_proj, centre, radius) {
+                fold_into(&mut p.caster_fold, hash);
+                p.casters += 1;
+                if let Some(w) = p.group_mask.get_mut(word) {
+                    *w |= bit;
+                }
+            }
+        }
+    }
+    touches
+}
+
 /// **Whether a caster's sphere reaches into a perspective light's range ball**
-/// (PAR0 audit) — see the call site in [`scatter_caster_stamps`]. `true` for a
+/// (PAR0 audit) — see the call site in [`stamp_perspective`]. `true` for a
 /// light with no finite reach, so a missing entry can only over-stamp (a page
 /// re-rasterized for nothing), never miss a caster (a stale shadow).
 fn caster_within_reach(
@@ -4775,6 +4819,169 @@ mod tests {
         assert!(
             !src.contains("@fragment"),
             "the clear grew a fragment stage"
+        );
+    }
+
+    /// **The reach test is asked once per LIGHT, and folds exactly what the
+    /// per-page spelling folded** (wave PERF1c, clause 3).
+    ///
+    /// Three spot lights 30 m apart with a 10 m reach, four pages each, and 240
+    /// casters strung along the row. The reference is the PAR0 loop as it was —
+    /// the reach test inside the page loop — run over a clone of the same pages.
+    /// Every page must end with the same fold, the same count and the same
+    /// group bits, and the touches must be the light-grouped number: one per
+    /// light asked plus one per page of every light the caster reached.
+    ///
+    /// READS `stamp_perspective`'s folds and its touch count. Mutation: the
+    /// reach test moved back inside the page loop (one touch per page whatever
+    /// the reach) — RED on the touch arithmetic (the base tree's shape spends
+    /// 240 x 12 = 2 880 touches here).
+    #[test]
+    fn the_perspective_stamp_asks_the_reach_once_per_light() {
+        let lights = [
+            glam::Vec3::new(0.0, 5.0, 0.0),
+            glam::Vec3::new(30.0, 5.0, 0.0),
+            glam::Vec3::new(60.0, 5.0, 0.0),
+        ];
+        let reach = [10.0f32; 3];
+        let projections: Vec<crate::vsm::VsmProjection> = lights
+            .iter()
+            .map(|l| crate::vsm::VsmProjection {
+                view_proj: Mat4::IDENTITY.to_cols_array(),
+                info: [0, 0, 0, 1],
+                light: [l.x, l.y, l.z, 0.01],
+                level_offset: [[0.0; 2]; inf_vsm::MAX_VSM_LEVELS],
+            })
+            .collect();
+        let proj_base = [0u32, 1, 2];
+        let geom = PageGeometry {
+            projections: &projections,
+            proj_base: &proj_base,
+            layouts: &[],
+            reach: &reach,
+        };
+        // Four pages per light: a cone looking down from the light, split into
+        // quadrants by an off-centre projection so the four see different
+        // ground.
+        let mut pages: Vec<PageDraw> = Vec::new();
+        let mut perspective: PerspectivePages = std::collections::BTreeMap::new();
+        for (li, l) in lights.iter().enumerate() {
+            for q in 0..4u32 {
+                let (sx, sz) = ((q % 2) as f32 * 2.0 - 1.0, (q / 2) as f32 * 2.0 - 1.0);
+                let view = glam::camera::rh::view::look_at_mat4(
+                    *l,
+                    *l + glam::Vec3::new(sx, -4.0, sz),
+                    glam::Vec3::X,
+                );
+                let proj = glam::camera::rh::proj::directx::perspective(0.9, 1.0, 0.1, 50.0);
+                perspective.entry(li as u32).or_default().push(pages.len());
+                pages.push(PageDraw {
+                    view_proj: proj * view,
+                    rect: (0, 0, 64),
+                    slot: pages.len() as u32,
+                    light: li as u32,
+                    page: VsmPage {
+                        face: 0,
+                        level: 0,
+                        x: q % 2,
+                        y: q / 2,
+                    },
+                    ident: PageIdent {
+                        light: li as u32,
+                        face: 0,
+                        level: 0,
+                        cell: (i64::from(q % 2), i64::from(q / 2)),
+                    },
+                    geo_key: 0,
+                    caster_fold: 0,
+                    casters: 0,
+                    group_mask: [0; VSM_GROUP_MASK_WORDS],
+                    level_bit: 1,
+                    world_per_texel: 0.01,
+                    key: 0,
+                });
+            }
+        }
+        // `PageDraw` is not `Clone` (nothing in the renderer copies one), so the
+        // reference set is the same pages rebuilt field by field.
+        let mut reference: Vec<PageDraw> = pages
+            .iter()
+            .map(|p| PageDraw {
+                view_proj: p.view_proj,
+                rect: p.rect,
+                slot: p.slot,
+                light: p.light,
+                page: p.page,
+                ident: p.ident,
+                geo_key: p.geo_key,
+                caster_fold: p.caster_fold,
+                casters: p.casters,
+                group_mask: p.group_mask,
+                level_bit: p.level_bit,
+                world_per_texel: p.world_per_texel,
+                key: p.key,
+            })
+            .collect();
+        let (mut touches, mut old_touches) = (0u64, 0u64);
+        let (mut reached, mut missed) = (0u32, 0u32);
+        for c in 0..240u32 {
+            let centre = glam::Vec3::new(-10.0 + c as f32 * (80.0 / 240.0), 0.5, 0.0);
+            let radius = 0.6;
+            let hash = 0x9E37_79B9_7F4A_7C15u64.wrapping_mul(u64::from(c) + 1);
+            let group = (c % 5) as usize;
+            let (word, bit) = (group / 64, 1u64 << (group % 64));
+            let spent = stamp_perspective(
+                &mut pages,
+                &perspective,
+                geom,
+                centre,
+                radius,
+                hash,
+                (word, bit),
+            );
+            let in_reach = (0..3)
+                .filter(|&li| caster_within_reach(geom, li, centre, radius))
+                .count() as u64;
+            reached += in_reach as u32;
+            missed += 3 - in_reach as u32;
+            assert_eq!(
+                spent,
+                3 + 4 * in_reach,
+                "caster {c}: one touch per light asked, plus one per page of the {in_reach} light(s) it reaches"
+            );
+            touches += spent;
+            // The PAR0 spelling, verbatim in its logic: the reach test per PAGE.
+            for idx in perspective.values().flatten() {
+                old_touches += 1;
+                let p = &mut reference[*idx];
+                if !caster_within_reach(geom, p.light, centre, radius) {
+                    continue;
+                }
+                if crate::vsm::vsm_page_sees_sphere(&p.view_proj, centre, radius) {
+                    fold_into(&mut p.caster_fold, hash);
+                    p.casters += 1;
+                    p.group_mask[word] |= bit;
+                }
+            }
+        }
+        let folded = pages.iter().map(|p| p.casters).sum::<u32>();
+        assert!(
+            reached > 0 && missed > 0 && folded > 0,
+            "the fixture must exercise both answers and fold something: reached {reached}, missed {missed}, folded {folded}"
+        );
+        for (a, b) in pages.iter().zip(&reference) {
+            assert_eq!(
+                (a.caster_fold, a.casters, a.group_mask),
+                (b.caster_fold, b.casters, b.group_mask),
+                "page {} of light {} folded differently from the per-page spelling",
+                a.slot,
+                a.light
+            );
+        }
+        assert_eq!(old_touches, 240 * 12, "the reference's own arithmetic");
+        assert!(
+            touches * 2 < old_touches,
+            "the grouped stamp spent {touches} touches against the per-page spelling's {old_touches}"
         );
     }
 }
