@@ -1125,21 +1125,32 @@ fn project(sim: &RuntimeSim) -> RenderScene {
 }
 
 /// Every resident volume's fixtures (the derived content, before any clock).
+/// The VEN1a RIG fixtures the resident volumes derived. (Wave PAR1a hung a
+/// fixture in every room beside the rig; this arm's subject is the rig's
+/// schedule, so it counts the rig's rows by their census word.)
 fn resident_fixtures(sim: &RuntimeSim) -> usize {
+    use inf_pcg::building::fixtures::FixtureRow;
     let w = sim.world().world();
     w.iter_entities()
         .filter_map(|e| {
-            e.get::<inf_ecs::components::PcgVolume>()
-                .map(|v| v.lights.len())
+            e.get::<inf_ecs::components::PcgVolume>().map(|v| {
+                v.lights
+                    .iter()
+                    .filter(|l| FixtureRow::from_code(l.row).is_some_and(FixtureRow::is_rig))
+                    .count()
+            })
         })
         .sum()
 }
 
+/// The local lights the projector pushed that ASK for a shadow — since wave
+/// PAR1a, exactly the rig's (a room fixture is boxed to its room and asks
+/// none), so this is the rig's half of the frame.
 fn local_lights(scene: &RenderScene) -> Vec<&RenderLight> {
     scene
         .lights
         .iter()
-        .filter(|l| l.kind != LightKind::Directional)
+        .filter(|l| l.kind != LightKind::Directional && l.cast_shadows)
         .collect()
 }
 
