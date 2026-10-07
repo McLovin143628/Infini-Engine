@@ -1805,6 +1805,13 @@ function Invoke-PerfLeg {
     $b = & $now
     Add-Content -Path $legs -Value ("{0} {1:F2} {2:F2}" -f $kind, $a, $b)
     Say "PERF: legs written to $legs"
+    # The PERF1b audit: the session is RECORDED for the window arm
+    # (`perf1b_frame_gate::the_window_counter_holds_the_floor_at_real_time`),
+    # which reads `target\perf1b-sessions.txt` when INF_PERF1B_SESSIONS is unset
+    # -- so the arm a release run makes off CI asserts the sessions this machine ran.
+    $sessions = Join-Path $repo "target\perf1b-sessions.txt"
+    Add-Content -Path $sessions -Value ((Resolve-Path $OutDir).Path)
+    Say "PERF: session recorded in $sessions"
 }
 if ($PerfOnly) {
     Say "PERF ONLY (-PerfOnly): the frame-rate leg, and nothing else"

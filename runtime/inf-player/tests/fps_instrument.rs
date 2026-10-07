@@ -4178,6 +4178,10 @@ fn the_shipped_island_by_the_hour() {
     // hours measured, against `ISLAND_FRAME_CEILING_MS` at the end.
     let mut worst_p95 = 0.0f64;
     let mut measured_hours = 0usize;
+    // THE STEP'S OWN RATCHET ON THE COOKED ISLAND (the PERF1b audit): the
+    // isolated fixed step at the strip, best of five rounds per hour, against
+    // `CITY_STEP_BUDGET_MS` at the end.
+    let mut worst_step = 0.0f64;
     for hour in hours {
         {
             let w = fx.sim.world_mut().world_mut();
@@ -4332,6 +4336,29 @@ fn the_shipped_island_by_the_hour() {
                 best.p99,
                 piped.iter().map(|r| (r.p50, r.p95)).collect::<Vec<_>>()
             );
+            // The isolated step AFTER the frames (so the frame rows measure the
+            // world they always did): warmed (never a cold first step), then
+            // five rounds, the cheapest round's mean wall clock per step.
+            for _ in 0..STEP_WARMUP {
+                fx.sim
+                    .step_once(inf_player::runtime_sim::RuntimeInput::default());
+            }
+            let mut best_step = f64::INFINITY;
+            let mut rounds_ms = Vec::new();
+            for _ in 0..ISLAND_ROUNDS {
+                let t0 = std::time::Instant::now();
+                for _ in 0..STEP_SAMPLES {
+                    fx.sim
+                        .step_once(inf_player::runtime_sim::RuntimeInput::default());
+                }
+                let ms = t0.elapsed().as_secs_f64() * 1000.0 / STEP_SAMPLES as f64;
+                rounds_ms.push(ms);
+                best_step = best_step.min(ms);
+            }
+            worst_step = worst_step.max(best_step);
+            println!(
+                "SHIPPED ISLAND {hour:05.2} STEP: best of {ISLAND_ROUNDS} rounds {best_step:.3} ms/step (rounds {rounds_ms:.3?}) against CITY_STEP_BUDGET_MS {CITY_STEP_BUDGET_MS} ms"
+            );
         }
     }
     // **THE ISLAND'S CEILING** (wave PERF1, clause 8). Printed everywhere;
@@ -4342,6 +4369,10 @@ fn the_shipped_island_by_the_hour() {
         println!(
             "THE ISLAND'S CEILING: worst serialized p95 {worst_p95:.2} ms over {measured_hours} hour(s), against ISLAND_FRAME_CEILING_MS {} ms",
             inf_player::budget::ISLAND_FRAME_CEILING_MS
+        );
+        println!(
+            "THE STEP RATCHET: worst best-of-{ISLAND_ROUNDS} step {worst_step:.3} ms over {measured_hours} hour(s), against CITY_STEP_BUDGET_MS {CITY_STEP_BUDGET_MS} ms{}",
+            if worst_step <= CITY_STEP_BUDGET_MS { "" } else { " -- NOT MET (PERF1c)" }
         );
         if cfg!(debug_assertions) {
             println!("dev build: the island's frame is reported, not asserted");
@@ -4359,6 +4390,16 @@ fn the_shipped_island_by_the_hour() {
             worst_p95 <= inf_player::budget::ISLAND_FRAME_CEILING_MS,
             "the shipped island's worst p95 is {worst_p95:.2} ms against a {} ms ceiling {}",
             inf_player::budget::ISLAND_FRAME_CEILING_MS,
+            RATCHET_NOTE
+        );
+        // **THE STEP RATCHET, ASSERTED WHERE IT IS NOT MET** (the PERF1b
+        // audit). §8 does not let a ratchet go unasserted because it would
+        // fail: this arm is RED until the cooked island's isolated step is
+        // under `CITY_STEP_BUDGET_MS`. Measured at the audit: 7.0 ms at noon,
+        // 13.8 at 21:00 on the strip.
+        assert!(
+            worst_step <= CITY_STEP_BUDGET_MS,
+            "the cooked island's fixed step is {worst_step:.3} ms (worst hour, best of {ISLAND_ROUNDS} rounds) against the {CITY_STEP_BUDGET_MS} ms CITY_STEP_BUDGET_MS {} -- routed to PERF1c: animation sim-LOD (Near every 2nd step, interpolated; Far held) ~2 d and the dormancy's waker set narrowed (door leaves, kinematic crowd) ~1.5 d",
             RATCHET_NOTE
         );
     }
