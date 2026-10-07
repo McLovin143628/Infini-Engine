@@ -42536,3 +42536,68 @@ backlog = hitches (the 288 ms activation step amortised ~1-2 d); the 21:00 step 
 (serial pose half ~0.5 d, character move ~1 d, waker set ~1.5 d). Battery on the final code:
 `AGGREGATE over 413 binaries: 7941 passed, 0 failed, 34 ignored`. No schema, dependency,
 lockfile, level or golden moved.
+
+## Wave PERF1c — adversarial audit (auditor, 2026-10-07)
+
+One `audit(PERF1c)` commit over `b1927c89` (`465272d8`); battery on the final code tree
+**7942 passed, 0 failed, 34 ignored over 415 binaries**. MEASURED unless marked. The wave as
+built took five exact fixes, so the brief's indirect-path, GI-epoch, incremental-projection
+and sim-LOD equivalence items have no subject (N/A); the five fixes were audited instead.
+
+**The parallel pose step is bit-identical, now on the island.** `pose_probe` opens the cooked
+island, stands the hero on the Harbour City strip at 21:00 and drives 600 steps (walk,
+sprint, ADS + fire, cover, jumps, crouch; a crowd character ragdolled through the gameplay
+door), folding `state_bytes`, the pose store and the state-machine trace every step;
+`perf1c_pose_pool` runs it in one subprocess per pool size (1, 2, 3, 8, 32, 32 -- the pool
+is a process-global `OnceLock`) and the three hashes are equal. 101 posed characters, every
+step on the pool path, riders / a ragdoll / aim / cover engaged (mantle not). Mutation (a job
+inherits its chunk predecessor's runtime): RED at pool 2. The same probe over the base's
+serial `pose.rs` printed the same hashes. Why it holds: every map the serial loop wrote is
+now written in the merge from per-job results, every TAKE is in the serial gather in the old
+order, the evaluation reads only state the loop never writes, the merge maps are Guid-keyed
+(order-free) and `par_chunk_map_mut` returns in spawn order. `bevy_tasks` was already a
+direct dependency (`inf-ecs/Cargo.toml:19`); inf-core's `parallel_map` would have been a new
+edge.
+
+**The worn-palette door, the reach per light and the GI reject are exact.** The door's
+refusals are `resolve_skinned`'s verbatim and its palette argument is dead (the projector
+takes the wearer's entry, as the base did); an island projection probe hashed every skinned
+instance over 40 frames base vs final: identical. The reach test reads only the light, so
+asking it per light is the same predicate with the page frustum still applied; per-page fold
+order unchanged. The GI bound: |Lv| <= (sum of column lengths)|v| covers spheres (radius x
+max scale) and boxes (half-sum of sides) under any linear map, the volume is this frame's,
+the kept list is a subsequence in order -- correct, but 3x looser than a TRS model needs
+(PERF1d, 0.25 d). Same-camera instrument frames at 21:00, base vs final binaries: five
+cameras byte-identical over four runs (the `wide` camera is run-to-run noisy in both trees).
+
+**The red street at 21:00 is content.** Those frames are byte-identical base vs final, and no
+analytic red light is within 80 m of the cameras (warm room fixtures, one blue spot): the red
+rides the vehicles' tail-lamp emissive (*inferred*) -- to PAR1a / PAR1c.
+
+**The numbers on the audit's own sessions** (release, final tree, 1080p Play in New Window):
+noon walk 25.4 / 28.4 at 0.99x, 21:00 walk 29.4 / 32.2 at 0.98x, 21:00 run 31.0 / 33.7 at
+0.99x; stand legs 23.7-26.4 / 24.8-29.1 at 1.00x everywhere. Worst leg embedded 1080p noon
+run 38.3 / 40.0 at 0.87x; the run legs vary more by session than by tree (the same window
+21:00 run read 35.0 / 38.3 at 0.94x on the next session). **Window arm RED**: worst p95 40.0,
+24 of 36 legs drop backlog (12 pass the arm, 15 the brief's <= 0.1 s floor). **Hour arm RED**:
+step 6.061 noon (the implementer's 5.75 did not reproduce) / 9.468 at 21:00 / 8.773 at 02:00;
+ceiling holds -- 21:00 p95 58.21 (rounds 58.1-60.5), 02:00 54.86, under 70. Same-session A/B
+at 21:00: step 12.32 -> 9.49 ms, serialized p95 69.0 -> 54.8, GPU 23.4 -> 20.5.
+
+**The hitch census** (temporary per-frame probe, windowed player, noon + 21:00, 335 frames,
+6.8 s dropped): step-bound run frames 175 (3.0 s); unattributed present / GPU waits 59 (2.7 s,
+worst 149 ms); render-bound 66 (1.1 s); projection spikes 17 (to 62 ms); meshlet residency
+commit 7 (148 ms); VT uploads 5 (256 ms); activation (solver + physics3d sync 96 ms) 3 (241
+ms); VSM caster sync 3 (161 ms). The activation step at 120 m/s now 88.8 ms (cell stream 36).
+**The window's VSM row** (5.68 ms walk at 21:00) is classify/uploads/cull 1.84 + raster
+encode 1.74 + pack 0.98 + stamps 0.84 + sync 0.25: the stamps the hoist cut are 15 % of it;
+the re-cast volume is the page split's subject.
+
+**PERF1d, priced:** hitch attribution + budgets (GPU timestamps 0.5 d, VT / cluster commit /
+caster sync budgets ~3 d, activation 1-2 d); the step (sim-LOD 2 d, character move 1 d,
+waker set 1.5 d); submit indirect 3-4 d; VSM page split ~3 d; GI epoch cache 1.5 d + reject
+k 0.25 d; projection memo 0.5 d / incremental 2-3 d; GPU night rows 3-5 d. 33 at 1.0x on
+every leg ~10-12 d; 16.6 ~25-30 d. **PAR1's per-light budget:** a shadowed fixture ~0.74 ms
+GPU + ~0.42 ms CPU, an unshadowed clustered light ~0.012 ms GPU (*inferred* from the noon /
+21:00 deltas); headroom at 21:00 ~0 ms -- PAR1a needs <= ~0.001 ms GPU per light or must
+follow PERF1d's VSM and GPU rows.
