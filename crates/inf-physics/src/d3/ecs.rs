@@ -3581,7 +3581,7 @@ mod perf1b_sweep_tests {
     use super::*;
 
     fn uuid(i: u32) -> Uuid {
-        Uuid::from_u128(0x5eed_0000_0000_0000_0000_0000_0000_0000 | u128::from(i) * 0x9e37_79b9)
+        Uuid::from_u128(0x5eed_0000_0000_0000_0000_0000_0000_0000 | (u128::from(i) * 0x9e37_79b9))
     }
 
     fn static_box(g: Uuid, i: u32) -> EntitySync3D {

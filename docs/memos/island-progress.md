@@ -42338,3 +42338,77 @@ animation 4.7, physics sync + solver 3.8. Until the step is under ~8 ms a frame 
 0 failed, 34 ignored`; clippy `-D warnings` clean; rustdoc 398; wasm check clean. Final
 frames on the final build, Play in New Window: noon `62.7 ms 16 fps p95 67.0 steps 2.0`,
 21:00 `63.3 ms 16 fps p95 66.5 steps 2.0` (walk p50 56.5 / 60.6 ms over the logged frames).
+
+## Wave PERF1b — THE ISLAND AT FRAME RATE, PART TWO (implementer, 2026-10-06)
+
+Base `98c03336`. Measured unless marked *inferred*. Window numbers are the player's own
+counter log (`INF_FPS_LOG`) over `demo.ps1 -PerfOnly` legs (20 s stand, 60 s walk, 60 s
+drive -- or run when no car is boarded), cooked island, RTX 4070 Ti.
+
+**CLAUSE 0 -- why the window's step was twice the instrument's.** `INF_STEP_LOG` arms the
+fixed step's own phase clock (and the record path's, without GPU queries) inside the
+windowed player. Standalone, 720p, before: the step was 10.2 ms standing, 14.1 walking,
+16.5-17.7 running/driving at noon (21:00: 10.7 / 14.3 / 16.7), against the instrument's
+7.9 at a still hero on the strip. Not the window: the moving hero and the place.
+physics3d sync (3.0 / 4.2 / 4.8) + the rapier step (2.7 / 4.4 / 5.0-5.3) were 5.7-10.1 ms
+of it, and grew with the walk because the band admitted more city (17 840 -> 29 557
+structure colliders). Two causes, both per-step O(city): **96 % of rapier's 58 774-
+102 872 tracked pairs were fixed-fixed** (rapier 0.34's BVH broad phase pairs every
+overlapping AABB pair and walks the whole pair map and every contact edge each step; a
+static solid carries `all() - FIXED_FIXED`, so none could ever act), and the bridge's
+despawn sweep probed a 18 000-30 000-entry `BTreeSet` per tracked collider per step.
+The render side of the window frame was projection 3.7-5.1 + record 20.6-26.5 ms (graph
+8.5-9.0, submit 7.5-9.6, vsm raster 2.3-5.8).
+
+**What was taken (commits `ae91ab0e`, `47e4c5dd`, and the close):**
+- **The loop steps beside the record** (`window.rs`): this frame's owed fixed steps run on
+  a scoped worker while the main thread records and submits the frame projected from the
+  previous steps -- one frame of display latency, the sim / accumulator / cap untouched,
+  one `run_frame` door. `RuntimeSim` is `Send` (inf-wasm-host's `ModState` world pointer
+  is `None` between calls). A frame is now `projection + max(record, steps)`.
+- **The despawn sweep is skipped when provably empty** (`|T| = |seen| + |retained|` and a
+  128-bit signature match; the exact old sweep otherwise), `retained` is a `Vec`, the
+  structure gather an archetype query: physics3d sync 3.0 / 4.2 / 4.8 -> 1.0 / 1.3 / 1.5.
+- **Static scenery sleeps out of rapier's broad phase** where no mover can reach it
+  (`inf_physics::d3::dormancy`): a static is enabled in rapier only while a mover (dynamic
+  or kinematic, or a static sensor / `FIXED_FIXED` pairing) is within 0.75 m + two steps
+  of travel; asleep it is still in the query tree and the filtered query doors treat it
+  as enabled. Rapier step 3.0 / 4.6 -> 2.3 / 3.7 (stand / walk, noon); the city fixture
+  0.458 -> 0.057 ms/step, 21 962 -> 0 pairs.
+- `FixedStep` counts the backlog its cap drops (`drop=` in the frame log);
+  `INF_PIE_WINDOW_SIZE` / `demo.ps1 -Resolution` (Play in New Window at 1080p).
+- `ISLAND_FRAME_CEILING_MS` 95 -> **90** (instrument, five rounds: noon 41.61 / 48.36,
+  21:00 68.97 / 78.93; instrument step 7.89 -> 7.02 at noon, 13.80 -> 13.78 at 21:00).
+
+**THE WINDOW COUNTER (walk leg p50 / p95 ms, sim rate):**
+
+| host | res | 12:00 before | 12:00 after | 21:00 before | 21:00 after |
+|---|---|---|---|---|---|
+| standalone | 720p | 55.4 / 65.0, 0.59x | 29.4 / 31.2, 0.99x | 61.1 / 67.0, 0.55x | 34.7 / 39.7, 0.94x |
+| standalone | 1080p | -- | 29.5 / 31.7, 0.99x | -- | 34.3 / 40.6, 0.94x |
+| Play in New Window | 720p | 55.6 / 62.9, 0.58x | 29.2 / 32.6, 0.99x | 60.2 / 64.5, 0.55x | 34.1 / 37.8, 0.94x |
+| Play in New Window | 1080p | -- | 30.1 / 32.5, 0.99x | -- | 33.8 / 39.8, 0.95x |
+| embedded | 720p | 55.5 / 62.1, 0.59x | 29.5 / 30.9, 0.99x | 59.8 / 63.3, 0.55x | 34.5 / 40.0, 0.93x |
+| embedded | 1080p* | -- | 29.5 / 32.1, 0.99x | -- | 33.7 / 38.0, 0.95x |
+
+(before = the PERF1 audit's sessions, 720p only; *embedded runs at the editor's viewport
+size, whatever `-Resolution` says.) Drive / run legs after: noon 29.2-37.9 / 32.1-40.5
+(0.88-0.99x), 21:00 35.5-47.3 / 36.9-52.3 (0.72-0.94x). Stand legs: 27.7-30.5 / 29.0-32.7
+at 1.00x everywhere.
+
+**THE FLOOR (p95 <= 33 ms at 1.0x) IS MET AT NOON ON THE WALK IN EVERY HOST AND NOT AT
+21:00, AND NOT ON THE FAST LEGS.** Noon walk/drive legs sit at p95 30.9-32.8 with 0.5-0.9 s
+of 60 s dropped (0.99x, not 1.00x). At 21:00 the frame is record-bound: the window's
+record is 27.5-29.9 ms (vsm raster 5.6-6.2, submit 11.1-11.5, graph 9.4-10.8) and the
+21:00 run leg reaches the strip's revellers (step 16.9 ms, animation 4.7). The 16.6 ms
+target is not reached anywhere.
+
+**PERF1c (measured on the final tree, 21:00 window walk / run unless marked):** VSM re-cast
+by the crowd 5.6-6.2 CPU + ~7 GPU (static/dynamic page split ~3 d); submit 11.1-11.5
+(GPU-driven cull + indirect for vgeom/scatter ~3-4 d); record graph 9.4-10.8 (vgeom
+per-frame params buffer + GI staging cache ~2.5 d); animation 2.2 / 4.7 (sim-LOD for
+Near/Far, interpolated ~2 d); rapier step 4.0 / 5.2 (the remaining awake statics around
+~600-1 600 movers -- door leaves and the crowd -- ~1.5 d to narrow the waker set);
+projection 4.2 / 6.1 (incremental ~2-3 d); character move 1.4 on the run (~1 d); the
+288 ms activation step, per-asset load distance, HLOD, vehicle LOD (1-2 d / 3 d / 5 d / --,
+untaken).

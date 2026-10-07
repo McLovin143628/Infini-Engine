@@ -97,7 +97,7 @@ struct MoverRec {
     covered: Vec<Key>,
 }
 
-/// What [`Dormancy`] has done, for arms and diagnostics.
+/// What the dormancy has done, for arms and diagnostics.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DormancyStats {
     /// Statics under management (neither exempt nor a mover's).

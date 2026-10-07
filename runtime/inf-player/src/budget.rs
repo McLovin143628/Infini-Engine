@@ -1111,8 +1111,20 @@ pub const SHIPPING_FRAME_P99_CEILING_MS: f64 = 46.0;
 /// flight) is therefore a PROJECTION of a window that steps once a frame, not
 /// a measurement of the shipped one.
 ///
+/// **Re-minted DOWN by wave PERF1b, 95 -> 90.** The static-scenery dormancy
+/// and the proven-empty despawn sweep took the instrument's step from 7.89 to
+/// 7.02 ms at noon; measured on the final tree (release, off CI, five rounds
+/// x 120 frames): noon p50 41.61 / p95 48.36 (rounds' p95 48.0-52.0), 21:00
+/// p50 68.97 / p95 78.93 (rounds' p95 78.9-86.1) -- the worst best-of-five
+/// p95 78.93 plus ~14 % for the session spread PERF1's audit measured
+/// (83.6-85.5 at 21:00 over three sessions). The window's own counter --
+/// which since PERF1b steps BESIDE the record rather than before it, so the
+/// paragraph above about two steps a frame now describes a frame of
+/// `projection + max(record, steps)` -- is held by
+/// `perf1b_frame_gate::the_window_counter_holds_the_floor_at_real_time`.
+///
 /// **RATCHET RULE (§8): this constant may only ever DECREASE.**
-pub const ISLAND_FRAME_CEILING_MS: f64 = 95.0;
+pub const ISLAND_FRAME_CEILING_MS: f64 = 90.0;
 
 /// **How many triangles a world's ROAD MESHES may hold** (wave ROAD1b).
 ///
