@@ -1055,6 +1055,80 @@ pub fn pose_state_bytes(world: &EcsWorld) -> Vec<u8> {
     out
 }
 
+/// **Below this many posed characters the pose step evaluates on the calling
+/// thread** (wave PERF1c). The hand-off to the task pool costs a few
+/// microseconds; one character's pose costs ~45 µs on the island (measured:
+/// 4.79 ms over 103 posed characters at 21:00). Either path runs the same
+/// function on the same jobs, so the threshold moves time and never a byte.
+pub const PARALLEL_POSE_MIN: usize = 4;
+
+/// One posed character's inputs to the parallel evaluation — everything the
+/// serial loop read through a host resolver or TOOK from a shared map, lifted
+/// out first so the evaluation itself only reads (wave PERF1c).
+struct PoseJob<'c> {
+    entity: Entity,
+    guid: Uuid,
+    machine: &'c inf_anim::StateMachine,
+    rt: SmRuntimeState,
+    skeleton_id: Option<Uuid>,
+    /// The resolved, non-empty rig (rule 3), or `None`.
+    rig: Option<&'c inf_anim::SkeletonAsset>,
+    hands_ok: bool,
+    posture: Option<(inf_anim::Posture, f32)>,
+    actor_vars: BTreeMap<String, f64>,
+    triggers: Option<std::collections::BTreeSet<String>>,
+    blender: Option<PoseBlender>,
+    ragdoll_requested: bool,
+}
+
+/// One posed character's results — every write the serial loop made into a
+/// shared map, held until the merge makes it in `Guid` order (wave PERF1c).
+struct PoseOut {
+    entity: Entity,
+    guid: Uuid,
+    rt: Option<SmRuntimeState>,
+    blender: Option<PoseBlender>,
+    blended: bool,
+    state: Option<crate::anim_bridge::AnimStateInfo>,
+    traversal: Option<crate::anim_bridge::TraversalArc>,
+    root_motion: Option<inf_anim::RootMotion3D>,
+    curves: Option<BTreeMap<String, f32>>,
+    events: Vec<String>,
+    feet: Option<[Option<crate::anim_bridge::FootState>; 2]>,
+    look: Option<inf_anim::LookAtReport>,
+    foot_error: Option<[Option<f64>; 2]>,
+    hand: Option<HandIkReport>,
+    ragdoll_consumed: bool,
+    ragdoll_rig: Option<Vec<crate::anim_bridge::RigBone>>,
+    posed: Option<EvaluatedPose>,
+    verdict: Option<Vec<IkOutcome>>,
+}
+
+impl PoseOut {
+    fn new(entity: Entity, guid: Uuid) -> Self {
+        Self {
+            entity,
+            guid,
+            rt: None,
+            blender: None,
+            blended: false,
+            state: None,
+            traversal: None,
+            root_motion: None,
+            curves: None,
+            events: Vec::new(),
+            feet: None,
+            look: None,
+            foot_error: None,
+            hand: None,
+            ragdoll_consumed: false,
+            ragdoll_rig: None,
+            posed: None,
+            verdict: None,
+        }
+    }
+}
+
 /// **The fixed-step pose slot**: advance every [`AnimStateMachine`], evaluate the
 /// pose it is now in, and publish it for the projectors and the attachment
 /// system.
@@ -1106,7 +1180,7 @@ pub fn step_pose_evaluation<'c>(
     dt: f64,
     machines: &dyn Fn(Uuid) -> Option<&'c StateMachine>,
     skeletons: &dyn Fn(Uuid) -> Option<&'c SkeletonAsset>,
-    clips: &dyn Fn(ClipRef) -> Option<&'c AnimClip>,
+    clips: &(dyn Fn(ClipRef) -> Option<&'c AnimClip> + Sync),
     vars: &dyn Fn(Uuid) -> BTreeMap<String, f64>,
 ) {
     // 1. Read pass — collect targets so the write-back never overlaps the query.
@@ -1320,11 +1394,19 @@ pub fn step_pose_evaluation<'c>(
     // from the same `clips` the pose is sampled through, so there is exactly one
     // notion of how long a clip is.
     let clip_len = |c: ClipRef| clips(c).map(|a| a.duration as f64);
+    // ── 2a. GATHER (serial) ── everything per entity that reads a host
+    //    resolver or TAKES from a shared map, in `Guid` order (wave PERF1c).
+    //
+    // The evaluation below is a pure function of these jobs plus state nothing
+    // in it writes (the world, the bridge's input maps, the goals), so it can run
+    // on every core; what it cannot do is take from a map two entities share, or
+    // call `vars` (a host closure that need not be `Sync`). Those happen here,
+    // once per entity, in the order the serial loop did them.
+    let mut jobs: Vec<PoseJob<'c>> = Vec::with_capacity(targets.len());
     for (entity, guid, sm_guid, rt_state, skeleton_id, hands_ok, posture) in targets {
         let Some(machine) = machines(sm_guid) else {
             continue;
         };
-        let mut outcomes: Vec<IkOutcome> = Vec::new();
         // **The bridge's parameter overlay** (P29.4). A name set through
         // `anim.set_param` shadows an actor variable of the same name, because a
         // gameplay system that has just said "landed hard" must not be silently
@@ -1335,13 +1417,53 @@ pub fn step_pose_evaluation<'c>(
                 actor_vars.insert(k.clone(), *v);
             }
         }
+        jobs.push(PoseJob {
+            entity,
+            guid,
+            machine,
+            rt: rt_state,
+            skeleton_id,
+            // Rule 3's rig, resolved once: the blender and the posed branch
+            // below asked `skeletons` the same question twice.
+            rig: skeleton_id
+                .and_then(skeletons)
+                .filter(|a| !a.skeleton.is_empty()),
+            hands_ok,
+            posture,
+            actor_vars,
+            // **The bridge's armed triggers** (P29.4), TAKEN rather than read —
+            // an arm is consumed by the step that delivers it.
+            triggers: bridge.triggers.remove(&guid),
+            // The entity's own blender, lifted out of the shared map so the
+            // evaluation owns it; put back in the publish below.
+            blender: blenders.remove(&guid),
+            ragdoll_requested: bridge.ragdoll_requested.contains(&guid),
+        });
+    }
+    // ── 2b. EVALUATE (every core) ── one entity's whole pose step, from its job
+    //    and from state this pass only READS. Bit-identical to the serial loop
+    //    it was: each entity's arithmetic is the arithmetic it always was, on
+    //    the same inputs, and `par_chunk_map_mut` returns in job order.
+    let bridge_in = &bridge;
+    let world_in: &EcsWorld = world;
+    let (goals, hand_requests, riders, getup_prev) = (&goals, &hand_requests, &riders, &getup_prev);
+    let evaluate = |job: &mut PoseJob<'c>| -> PoseOut {
+        let (entity, guid, machine, skeleton_id, hands_ok, posture) = (
+            job.entity,
+            job.guid,
+            job.machine,
+            job.skeleton_id,
+            job.hands_ok,
+            job.posture,
+        );
+        let world = world_in;
+        let bridge = bridge_in;
+        let mut out = PoseOut::new(entity, guid);
+        let mut outcomes: Vec<IkOutcome> = Vec::new();
+        let actor_vars = std::mem::take(&mut job.actor_vars);
         let mut pending_pose: Option<Pose> = None;
-        let mut rt = rt_state;
-        // **The bridge's armed triggers** (P29.4), handed to the machine BEFORE
-        // it evaluates anything, and taken rather than read — an arm is consumed
-        // by the step that delivers it, and the bit it sets survives on the
-        // runtime until a transition reads it as true.
-        if let Some(names) = bridge.triggers.remove(&guid) {
+        let mut rt = job.rt;
+        if let Some(names) = job.triggers.take() {
             for n in &names {
                 rt.arm_trigger(machine, n);
             }
@@ -1394,14 +1516,12 @@ pub fn step_pose_evaluation<'c>(
             // skeleton still needs the machine stepped (rule 3), so the two calls
             // are split rather than nested — `advance_only` for that case, the
             // blender for the posed one.
-            let rig = skeleton_id
-                .and_then(skeletons)
-                .filter(|a| !a.skeleton.is_empty());
+            let rig = job.rig;
             let step = match rig {
                 None => rt.advance(machine, &ctx, dt),
                 Some(asset) => {
-                    blended_this_step.push(guid);
-                    let blender = blenders.entry(guid).or_insert_with(|| {
+                    out.blended = true;
+                    let blender = job.blender.get_or_insert_with(|| {
                         let mut b = PoseBlender::new();
                         b.mode = mode;
                         b
@@ -1434,15 +1554,12 @@ pub fn step_pose_evaluation<'c>(
             // than by two host-side loops that would have to agree.
             let mut events = step.events;
             if let Some(state) = machine.states.get(rt.current) {
-                bridge.states.insert(
-                    guid,
-                    crate::anim_bridge::AnimStateInfo {
-                        index: rt.current,
-                        name: state.name.clone(),
-                        time_s: rt.state_time,
-                        blending: rt.prev.is_some(),
-                    },
-                );
+                out.state = Some(crate::anim_bridge::AnimStateInfo {
+                    index: rt.current,
+                    name: state.name.clone(),
+                    time_s: rt.state_time,
+                    blending: rt.prev.is_some(),
+                });
                 // **The traversal arc** (P29.5), published outside the
                 // same-state guard below because it is a property of the STATE's
                 // clip and not of the interval this step covered: a mantle needs
@@ -1456,7 +1573,7 @@ pub fn step_pose_evaluation<'c>(
                 if !state.looping {
                     if let inf_anim::Motion::Clip(cref) = &state.motion {
                         if let Some(arc) = clips(*cref).and_then(traversal_arc_of) {
-                            bridge.traversal.insert(guid, arc);
+                            out.traversal = Some(arc);
                         }
                     }
                 }
@@ -1509,7 +1626,7 @@ pub fn step_pose_evaluation<'c>(
                                 state.looping,
                             );
                             if !d.is_zero() {
-                                bridge.root_motion.insert(guid, d);
+                                out.root_motion = Some(d);
                             }
                         }
                         for m in crossed_markers(&clip.markers, t0, t1, state.looping) {
@@ -1534,19 +1651,19 @@ pub fn step_pose_evaluation<'c>(
                                 }
                             }
                             if !vals.is_empty() {
-                                bridge.curves.insert(guid, vals);
+                                out.curves = Some(vals);
                             }
                         }
                     }
                 }
             }
-            if !events.is_empty() {
-                fired_events.insert(guid, events);
-            }
+            // Published in the merge below, only when non-empty (a step that
+            // fired nothing leaves no entry).
+            out.events = events;
             // Rule 3: no skeleton ⇒ the machine still steps, nothing is posed.
             if let Some(id) = skeleton_id {
-                if let Some(asset) = skeletons(id) {
-                    if !asset.skeleton.is_empty() {
+                if let Some(asset) = rig {
+                    {
                         let mut pose = pending_pose
                             .take()
                             .unwrap_or_else(|| Pose::rest(&asset.skeleton));
@@ -1695,10 +1812,7 @@ pub fn step_pose_evaluation<'c>(
                             let release = dur * inf_anim::THROW_RELEASE_FRAC;
                             let now = dur - t;
                             if now >= release && now - dt < release {
-                                fired_events
-                                    .entry(guid)
-                                    .or_default()
-                                    .push(crate::weapon::THROW_NOTIFY.to_string());
+                                out.events.push(crate::weapon::THROW_NOTIFY.to_string());
                             }
                         }
                         // ── **BLIND FIRE** (wave WPN2e) ──
@@ -1838,7 +1952,7 @@ pub fn step_pose_evaluation<'c>(
                         let to_world = model_to_world(world, entity);
                         let feet = foot_states(asset, &pose, to_world);
                         if feet.iter().any(Option::is_some) {
-                            bridge.feet.insert(guid, feet);
+                            out.feet = Some(feet);
                         }
                         // **Did anything below CORRECT this pose** — the gate on
                         // the SK1b re-drive at the bottom of this block. A
@@ -1909,7 +2023,7 @@ pub fn step_pose_evaluation<'c>(
                             );
                             corrected |= r.wrote();
                             if r.wrote() {
-                                looks.insert(guid, r);
+                                out.look = Some(r);
                             }
                         }
                         let drop = pelvis_drop(world, entity);
@@ -2011,7 +2125,7 @@ pub fn step_pose_evaluation<'c>(
                             corrected |=
                                 apply_foot_ik(asset, &mut pose, &goals, to_world, &mut error);
                             if error.iter().any(Option::is_some) {
-                                foot_errors.insert(guid, error);
+                                out.foot_error = Some(error);
                             }
                         }
                         // ── SK1b: **hands** — the arms that reach and the
@@ -2035,7 +2149,7 @@ pub fn step_pose_evaluation<'c>(
                         if let Some(request) = hands {
                             let report = apply_hand_ik(asset, &mut pose, request, to_world);
                             corrected |= report.wrote();
-                            hand_reports.insert(guid, report);
+                            out.hand = Some(report);
                         }
                         // ── SK1b: **the correction re-drive**, and the ordering
                         //    bound SK1a routed here by name ──
@@ -2092,7 +2206,7 @@ pub fn step_pose_evaluation<'c>(
                         }
                         if corrected {
                             let n = redrive(asset, &mut pose);
-                            if let Some(r) = hand_reports.get_mut(&guid) {
+                            if let Some(r) = out.hand.as_mut() {
                                 r.redriven = n;
                             }
                         }
@@ -2101,24 +2215,23 @@ pub fn step_pose_evaluation<'c>(
                         // the entity's own transform -- this is the one place
                         // that has the skeleton, the pose AND the placement, so
                         // it is the only place the answer can be computed.
-                        if bridge.ragdoll_requested.remove(&guid) {
+                        // The request is CONSUMED here (removed in the merge),
+                        // exactly as the serial loop's `remove` consumed it:
+                        // only an entity that reaches this branch takes it.
+                        if job.ragdoll_requested {
+                            out.ragdoll_consumed = true;
                             // The same character-space lift the feet take — a
                             // ragdoll that spawned half a capsule above its own
                             // body would be the A12 seam wearing a different hat.
-                            if let Some(bones) = rig_bones(asset, &pose, to_world) {
-                                bridge.ragdoll_rig.insert(guid, bones);
-                            }
+                            out.ragdoll_rig = rig_bones(asset, &pose, to_world);
                         }
                         let sockets =
                             inf_anim::socket_transforms(&asset.skeleton, &pose, &asset.sockets);
-                        posed.insert(
-                            guid,
-                            EvaluatedPose {
-                                skeleton: id,
-                                pose,
-                                sockets,
-                            },
-                        );
+                        out.posed = Some(EvaluatedPose {
+                            skeleton: id,
+                            pose,
+                            sockets,
+                        });
                     }
                 }
             }
@@ -2129,10 +2242,80 @@ pub fn step_pose_evaluation<'c>(
             if outcomes.is_empty() {
                 outcomes.push(IkOutcome::NotPosed);
             }
-            verdicts.insert(guid, outcomes);
+            out.verdict = Some(outcomes);
         }
-        if let Some(mut asm) = world.world_mut().get_mut::<AnimStateMachine>(entity) {
-            asm.runtime = rt;
+        out.rt = Some(rt);
+        out.blender = job.blender.take();
+        out
+    };
+    let outs: Vec<PoseOut> = if jobs.len() < PARALLEL_POSE_MIN {
+        // A handful of characters is cheaper on this thread than a hand-off;
+        // the arithmetic is the same function either way.
+        jobs.iter_mut().map(evaluate).collect()
+    } else {
+        use bevy_tasks::ParallelSliceMut;
+        let pool = bevy_tasks::ComputeTaskPool::get_or_init(bevy_tasks::TaskPool::default);
+        let per = jobs.len().div_ceil(pool.thread_num().max(1)).max(1);
+        jobs.par_chunk_map_mut(pool, per, |_, chunk| {
+            chunk.iter_mut().map(evaluate).collect::<Vec<PoseOut>>()
+        })
+        .into_iter()
+        .flatten()
+        .collect()
+    };
+    // ── 2c. MERGE (serial, `Guid` order) ── every map the serial loop wrote,
+    //    written from the jobs' results in the order it wrote them.
+    for out in outs {
+        let guid = out.guid;
+        if let Some(b) = out.blender {
+            blenders.insert(guid, b);
+        }
+        if out.blended {
+            blended_this_step.push(guid);
+        }
+        if let Some(s) = out.state {
+            bridge.states.insert(guid, s);
+        }
+        if let Some(arc) = out.traversal {
+            bridge.traversal.insert(guid, arc);
+        }
+        if let Some(d) = out.root_motion {
+            bridge.root_motion.insert(guid, d);
+        }
+        if let Some(vals) = out.curves {
+            bridge.curves.insert(guid, vals);
+        }
+        if !out.events.is_empty() {
+            fired_events.insert(guid, out.events);
+        }
+        if let Some(feet) = out.feet {
+            bridge.feet.insert(guid, feet);
+        }
+        if let Some(r) = out.look {
+            looks.insert(guid, r);
+        }
+        if let Some(e) = out.foot_error {
+            foot_errors.insert(guid, e);
+        }
+        if let Some(r) = out.hand {
+            hand_reports.insert(guid, r);
+        }
+        if out.ragdoll_consumed {
+            bridge.ragdoll_requested.remove(&guid);
+        }
+        if let Some(bones) = out.ragdoll_rig {
+            bridge.ragdoll_rig.insert(guid, bones);
+        }
+        if let Some(p) = out.posed {
+            posed.insert(guid, p);
+        }
+        if let Some(v) = out.verdict {
+            verdicts.insert(guid, v);
+        }
+        if let Some(rt) = out.rt {
+            if let Some(mut asm) = world.world_mut().get_mut::<AnimStateMachine>(out.entity) {
+                asm.runtime = rt;
+            }
         }
     }
 
@@ -4443,6 +4626,109 @@ mod tests {
         // The bytes MOVE when the pose does (a constant would compare equal too).
         f.step(&mut a, 1.0 / 60.0, 1.0);
         assert_ne!(pose_state_bytes(&a), bb);
+    }
+
+    /// **A character posed among forty, on every core, poses the bytes it poses
+    /// alone** (wave PERF1c, clause 4a).
+    ///
+    /// The pose step evaluates its characters in parallel since PERF1c, and the
+    /// claim that makes that safe is that one character's evaluation reads
+    /// nothing another one writes. This holds it against an oracle the parallel
+    /// path cannot share: each of the forty characters stepped ALONE in its own
+    /// world (one job — under [`PARALLEL_POSE_MIN`], so the calling thread).
+    /// Every step, every character's published pose, sockets, machine runtime
+    /// and bridge state must be the solo world's to the bit.
+    ///
+    /// The characters are made to DIFFER — each enters `wave` on a different
+    /// step and some carry a bridge parameter that holds them in `idle` — so a
+    /// result filed under the wrong guid is a different pose, not the same one.
+    ///
+    /// READS the crowd world's and the solo worlds' `PoseStoreRes`,
+    /// `AnimStateMachine::runtime` and `AnimBridgeRes::states`. Mutation: phase
+    /// A hands each job its NEIGHBOUR's runtime (`rt: rt_state` read off the
+    /// previous target) — RED at the first transition step.
+    #[test]
+    fn a_crowd_poses_each_character_as_it_poses_alone() {
+        const N: u128 = 40;
+        let f = Fixture::new();
+        let guids: Vec<Uuid> = (0..N).map(|i| Uuid::from_u128(1000 + i)).collect();
+        let mut crowd = EcsWorld::new();
+        for g in &guids {
+            crowd.world_mut().spawn((
+                Guid(*g),
+                AnimStateMachine {
+                    sm: Some(SM),
+                    ..Default::default()
+                },
+                SkeletalMesh {
+                    mesh: Some(Uuid::from_u128(9)),
+                    skeleton: Some(SKEL),
+                },
+            ));
+        }
+        crowd.reindex_guids();
+        let mut alone: Vec<EcsWorld> = guids.iter().map(|g| world_with_character(*g)).collect();
+        // Every third character carries a bridge parameter that shadows its
+        // variable and holds it in `idle` — the overlay is read in the gather.
+        let held = |g: &Uuid| g.as_u128() % 3 == 0;
+        let hold = |w: &mut EcsWorld, g: Uuid| {
+            assert!(crate::anim_bridge::set_anim_param(w, g, "moving", 0.0));
+        };
+        for g in guids.iter().filter(|g| held(g)) {
+            hold(&mut crowd, *g);
+        }
+        for (w, g) in alone.iter_mut().zip(&guids) {
+            if held(g) {
+                hold(w, *g);
+            }
+        }
+        let machines = |g: Uuid| (g == SM).then_some(&f.machine);
+        let skeletons = |g: Uuid| (g == SKEL).then_some(&f.skeleton);
+        let clips = |c: ClipRef| (c == WAVE).then_some(&f.clip);
+        let (mut waving, mut idling) = (0usize, 0usize);
+        for step in 0..12u128 {
+            // Character `i` starts moving on step `i % 9`.
+            let vars = |g: Uuid| {
+                let start = (g.as_u128() - 1000) % 9;
+                BTreeMap::from([("moving".to_string(), if step >= start { 1.0 } else { 0.0 })])
+            };
+            step_pose_evaluation(&mut crowd, 1.0 / 60.0, &machines, &skeletons, &clips, &vars);
+            for w in alone.iter_mut() {
+                step_pose_evaluation(w, 1.0 / 60.0, &machines, &skeletons, &clips, &vars);
+            }
+            for (w, g) in alone.iter().zip(&guids) {
+                let a = evaluated_pose(&crowd, *g).expect("posed in the crowd");
+                let b = evaluated_pose(w, *g).expect("posed alone");
+                assert_eq!(
+                    (&a.pose, &a.sockets),
+                    (&b.pose, &b.sockets),
+                    "step {step}: {g} posed differently in the crowd"
+                );
+                let rt = |w: &EcsWorld| {
+                    let e = w.entity_of(*g).unwrap();
+                    w.world().get::<AnimStateMachine>(e).unwrap().runtime
+                };
+                assert_eq!(rt(&crowd), rt(w), "step {step}: {g}'s machine runtime");
+                let state = |w: &EcsWorld| {
+                    w.world()
+                        .get_resource::<crate::anim_bridge::AnimBridgeRes>()
+                        .and_then(|b| b.states.get(g).cloned())
+                };
+                assert_eq!(
+                    state(&crowd),
+                    state(w),
+                    "step {step}: {g}'s published state"
+                );
+                match state(&crowd).map(|s| s.index) {
+                    Some(1) => waving += 1,
+                    _ => idling += 1,
+                }
+            }
+        }
+        assert!(
+            waving > 40 && idling > 40,
+            "the crowd must hold characters in both states to tell them apart: {waving} waving, {idling} idling"
+        );
     }
 
     /// A world that poses nothing is byte-for-byte its pre-P24.1 self: no
