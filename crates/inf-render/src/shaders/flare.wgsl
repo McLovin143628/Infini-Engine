@@ -94,6 +94,10 @@ const FLARE_GHOST_BLUR_MAX: f32 = 0.14;
 // carries a small fraction of its source; at 0.25 a defocused ghost of one lit
 // window still read as a lamp in the lawn.
 const FLARE_GHOST_GAIN: f32 = 0.1;
+// The sun elevations (`sun_dir.y`) the ghost chain fades out across: gone a
+// degree under the horizon, whole three degrees over it.
+const FLARE_GHOST_SUN_LO: f32 = -0.02;
+const FLARE_GHOST_SUN_HI: f32 = 0.05;
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -223,9 +227,17 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // frame centre and scaled — the standard aperture-ghost construction. It
     // does NOT depend on the sun having a screen position: a ghost is an image
     // of whatever is bright, and a window at the edge of frame throws one too.
+    //
+    // **By day** (audit PAR1a). At night the bright part of the frame is a
+    // city of small sources — every lit fitting, pane and lamp — and the chain
+    // imaged each of them across the lawns, the cars and the hero; a ghost
+    // that reads at the exposure a night street is seen at is a defect, not a
+    // lens. The chain fades out as the sun sets (`view.sun_dir.y` through the
+    // horizon), so the sun's own ghosts (`golden_sun_flare`) are untouched.
+    let day = smoothstep(FLARE_GHOST_SUN_LO, FLARE_GHOST_SUN_HI, normalize(view.sun_dir.xyz).y);
     let centre = vec2<f32>(0.5, 0.5);
     let to_centre = centre - in.uv;
-    let ghosts = min(i32(fl.params.y), FLARE_MAX_GHOSTS);
+    let ghosts = select(0, min(i32(fl.params.y), FLARE_MAX_GHOSTS), day > 0.0);
     // The disc's per-pixel turn (interleaved gradient noise): a fixed spiral
     // would print FLARE_GHOST_TAPS faint copies of a small source; turned per
     // pixel they average into one soft blob.
@@ -251,7 +263,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
             disc = disc + flare_bright(uv + vec2<f32>(cos(a), sin(a)) * r * aspect);
         }
         disc = disc / f32(FLARE_GHOST_TAPS);
-        acc = acc + disc * flare_ghost_tint(t) * (fade * fade * FLARE_GHOST_GAIN);
+        acc = acc + disc * flare_ghost_tint(t) * (fade * fade * FLARE_GHOST_GAIN * day);
     }
 
     // ── the halo ──

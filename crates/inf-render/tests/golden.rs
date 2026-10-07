@@ -2831,25 +2831,32 @@ fn the_sun_glare_is_extinguished_when_the_sun_is_occluded() {
     );
 }
 
-/// **A room fitting's ghost is a defocused blob, not a copy of the fitting**
-/// (audit PAR1a, priority b').
+/// **A room fitting throws no ghost across the night street** (audit PAR1a,
+/// priority b').
 ///
-/// Reads: a dark night frame with one small bright slab (a lit batten's size and
-/// radiance) off-centre, the shipped ghost chain (four ghosts, veil / halo /
-/// streak off) on vs off; the largest per-pixel luma the flare ADDS anywhere
-/// more than 12 px from the slab — where only a ghost can land. The ghost chain
-/// sampled the bright pass at ONE point per ghost, so a lit island at night was
-/// littered with sharp white and orange rectangles on lawns, roads, car bodies
-/// and the hero, each a pixel-exact image of a fitting reflected through the
-/// frame centre. Measured at 320 x 180: the base shader's single tap peaks at
-/// +210 luma over 515 px (four pixel-sharp copies of the batten); the
-/// defocused, 0.1-gain chain at +54 over ~3 700 px (one soft smudge). Mutation:
-/// one tap per ghost (the base shader) reds this arm.
+/// Reads: a moonless night frame (the sun under the horizon) with one small
+/// bright slab (a lit batten's size, emissive 8) off-centre, the shipped ghost
+/// chain (four ghosts, veil / halo / streak off) on vs off; the largest
+/// per-pixel luma the flare ADDS anywhere more than 12 px from the slab —
+/// where only a ghost can land. The chain sampled the bright pass at ONE point
+/// per ghost at any hour, so a lit island at night was littered with sharp
+/// white and orange rectangles on lawns, roads, car bodies and the hero, each
+/// a pixel-exact image of a fitting reflected through the frame centre.
+/// Measured at 320 x 180: the base shader peaks at +210 luma over 515 px (four
+/// sharp copies of the batten); defocused alone (a 32-tap disc at 0.1 gain)
+/// +54 over ~3 700 px, a grainy smudge that the 3 % highlight guard's wider
+/// night eye made read on a parked van; with the chain faded out under the
+/// horizon, +0. The sun's own ghosts by day are `golden_sun_flare`'s.
+/// Mutation: the base shader reds this arm.
 #[test]
-fn a_fittings_flare_ghost_is_defocused_not_a_copy() {
+fn a_fitting_throws_no_flare_ghost_across_the_night_street() {
     let Some(gpu) = gpu_or_skip() else { return };
     let mut scene = RenderScene {
         grid_enabled: false,
+        sun: SunParams {
+            direction: Vec3::new(0.3, -0.45, 0.84).normalize(),
+            ..SunParams::default()
+        },
         ..Default::default()
     };
     scene.lights.push(RenderLight {
@@ -2927,15 +2934,9 @@ fn a_fittings_flare_ghost_is_defocused_not_a_copy() {
         "fitting ghost: source at ({sx:.0}, {sy:.0}); outside it the chain adds {added:.0} \
          luma over {engaged} px, peak {peak:.1}"
     );
-    // Engaged: the chain did throw its ghosts (a dead chain would pass a peak test).
     assert!(
-        engaged > 200 && added > 300.0,
-        "the ghost chain added nothing: {added:.0} luma over {engaged} px"
-    );
-    assert!(
-        peak < 80.0,
-        "a ghost is a sharp copy of the fitting: peak +{peak:.1} luma (a defocused \
-         ghost spreads the same light over a disc)"
+        peak < 12.0,
+        "a night fitting throws a ghost: peak +{peak:.1} luma over {engaged} px (added {added:.0})"
     );
 }
 
