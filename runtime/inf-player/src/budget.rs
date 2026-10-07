@@ -1131,8 +1131,19 @@ pub const SHIPPING_FRAME_P99_CEILING_MS: f64 = 46.0;
 /// and the pixel it moves at the measured noon window, ~34 ms at 21:00. No
 /// simulated state moves; `perf1b_frame_gate`'s source arm pins the order.
 ///
+/// **Re-minted DOWN by wave PERF1c, 90 -> 70.** The pose step on every core,
+/// the reach asked once per perspective light, the meshlet node's args arena,
+/// the GI whole-instance reject for meshlet instances and the worn-palette
+/// door; measured on the final tree (release, off CI, five rounds x 120
+/// frames): noon p50 34.91 / p95 36.90 (rounds' p95 36.5-41.0), GPU 13.30;
+/// 21:00 p50 53.27 / p95 59.97 (rounds' p95 58.6-60.3), GPU 20.39. 70 is the
+/// worst best-of-five p95 59.97 plus ~17 % (the PERF1b mint kept ~14 % for
+/// the session spread; one point more for the rounds' own 2.9 % range). The
+/// instrument step at noon is 5.75 ms (under `CITY_STEP_BUDGET_MS` for the
+/// first time on the cooked island) and 9.67 at 21:00 (still over it).
+///
 /// **RATCHET RULE (§8): this constant may only ever DECREASE.**
-pub const ISLAND_FRAME_CEILING_MS: f64 = 90.0;
+pub const ISLAND_FRAME_CEILING_MS: f64 = 70.0;
 
 /// **How many triangles a world's ROAD MESHES may hold** (wave ROAD1b).
 ///
