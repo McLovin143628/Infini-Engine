@@ -162,6 +162,15 @@ const WASH_BEYOND_JAMB_M: f64 = 1.2;
 /// How far either side of an institution's door its floods hang, metres.
 const FLOOD_BESIDE_DOOR_M: f64 = 3.0;
 
+/// A quarter turn about `X` taking the fitting's lit `-Y` face onto `+Z` —
+/// written as its components (a rotation constant, no trigonometry: P14).
+const WALL_PITCH: glam::DQuat = glam::DQuat::from_xyzw(
+    -std::f64::consts::FRAC_1_SQRT_2,
+    0.0,
+    0.0,
+    std::f64::consts::FRAC_1_SQRT_2,
+);
+
 /// An exterior row's reach on the ground, metres: a porch lights its step and
 /// the pavement, a flood the forecourt.
 fn exterior_range(row: FixtureRow) -> f32 {
@@ -1347,8 +1356,9 @@ impl Ctx<'_> {
                 -(h.z - def.half[2] * 1.5).max(0.0),
             );
             let fit = pos + rot * corner;
-            // Under the head (the head overhangs the fitting's `+X`).
-            let light = fit + rot * DVec3::new(def.half[0] * 0.3, def.half[1] * 0.45, 0.0);
+            // Over the shade: the fitting's top face is the lit one a viewer
+            // sees, and the cone throws the pool on the top around it.
+            let light = fit + DVec3::Y * (def.half[1] + fixtures::DIFFUSER_GAP_M);
             out.decor.push(self.fitting(&def, fit, rot));
             let tag = self.tag(ri, room, row);
             let mut l = self.fixture_light(
@@ -1375,13 +1385,23 @@ impl Ctx<'_> {
 
     /// One placed fitting of `def`'s family.
     fn fitting(&self, def: &fixtures::FixtureDef, at: DVec3, rot: glam::DQuat) -> PcgInstance {
+        // The one fitting family is lit on its `-Y` face with its back plate on
+        // `+Y`: a ceiling or furniture mount uses it as drawn, a wall mount is
+        // pitched a quarter turn (lit face out along the yaw's `+Z`, back plate
+        // on the wall) and its row's `(along, up, depth)` becomes the mesh's
+        // `(x, z, y)`.
+        let (half, rot) = if def.mount == fixtures::Mount::Wall {
+            ([def.half[0], def.half[2], def.half[1]], rot * WALL_PITCH)
+        } else {
+            (def.half, rot)
+        };
         PcgInstance {
             pos: at,
             rotation: rot,
             scale: 1.0,
             kind_index: FIXTURE_KIND_INDEX,
             mesh: Some(super::modules::module_mesh_guid(def.shape)),
-            extent: Some([def.half[0] as f32, def.half[1] as f32, def.half[2] as f32]),
+            extent: Some([half[0] as f32, half[1] as f32, half[2] as f32]),
             glow: 0.0,
             surface: def.shape.surface(),
         }

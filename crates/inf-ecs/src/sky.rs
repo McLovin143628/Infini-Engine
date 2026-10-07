@@ -912,10 +912,10 @@ pub fn fixture_occupancy(
 }
 
 /// The slack between a host's fixture anchor (the sim's camera FOCUS) and the
-/// eye the renderer measures a fixture's draw distance from, metres — a chase
-/// camera's boom with room to spare, so the coarse volume cut below never
+/// eye the renderer measures a fixture's draw distance from, metres — the
+/// chase camera's boom (a few metres) with room to spare, so the coarse volume cut below never
 /// drops a light the renderer's own per-light cut would have kept.
-pub const FIXTURE_ANCHOR_SLACK_M: f64 = 30.0;
+pub const FIXTURE_ANCHOR_SLACK_M: f64 = 12.0;
 
 /// **How far a volume's block lies from the fixture anchor** (wave PAR1a), in
 /// plan, less [`FIXTURE_ANCHOR_SLACK_M`]: the XZ distance from `anchor` to the

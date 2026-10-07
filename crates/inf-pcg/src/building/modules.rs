@@ -335,25 +335,14 @@ pub enum ModuleShape {
     /// of its own it should look like the thing it is — and they are the
     /// smallest change that reads as a wardrobe rather than as a cupboard.
     Wardrobe,
-    /// **A ceiling pendant** (wave PAR1a): a canopy at the ceiling, a stem and
-    /// a flat diffuser at the bottom. The fixture's light hangs just under the
-    /// diffuser, so the diffuser is lit by the lamp it is.
-    Pendant,
-    /// **A batten** (wave PAR1a): a long shallow fitting with a diffuser along
-    /// its underside — an office panel, a shop strip, a ward light.
-    Batten,
-    /// **A bulkhead** (wave PAR1a): a squat sealed fitting on a backplate —
-    /// corridors, stairs, cells, bathrooms.
-    Bulkhead,
-    /// **A task lamp** (wave PAR1a): a base, a stem and a head over the desk
-    /// or the bedside table it stands on.
-    DeskLamp,
-    /// **A wall lantern** (wave PAR1a): a backplate and a lit box standing off
-    /// a facade — a porch light, a facade wash.
-    Lantern,
-    /// **A floodlight** (wave PAR1a): a deep head on a bracket — a bay's
-    /// high-bay, an institution's forecourt.
-    Flood,
+    /// **A light fitting** (wave PAR1a): a back plate (`+Y`, the mount) and
+    /// an opal body whose lit face is `-Y` — scaled per vocabulary row onto a
+    /// ceiling pendant, a batten, a bulkhead, a desk lamp, a wall lantern or a
+    /// flood, and pitched onto a wall for a wall mount. ONE family, because a
+    /// family is a scatter bucket: six families measured +1.26 ms graph and
+    /// +0.46 ms submit per frame in the 21:00 window (a batch per family per
+    /// volume, each with its own cull dispatch and draws).
+    Fitting,
 }
 
 /// Which entry of an archetype's surface set a [`ModuleShape`] takes (wave
@@ -379,7 +368,7 @@ impl ModuleShape {
     /// end, and the seven venue families (wave VEN1a) and the institutions' one
     /// (wave EMS1) are appended for that reason rather than filed beside their
     /// nearest relatives.
-    pub const ALL: [ModuleShape; 27] = [
+    pub const ALL: [ModuleShape; 22] = [
         ModuleShape::Panel,
         ModuleShape::Glazing,
         ModuleShape::Column,
@@ -401,12 +390,7 @@ impl ModuleShape {
         ModuleShape::Festoon,
         ModuleShape::Grille,
         ModuleShape::Wardrobe,
-        ModuleShape::Pendant,
-        ModuleShape::Batten,
-        ModuleShape::Bulkhead,
-        ModuleShape::DeskLamp,
-        ModuleShape::Lantern,
-        ModuleShape::Flood,
+        ModuleShape::Fitting,
     ];
 
     /// The stable name the GUID is derived from. **Never change one of these
@@ -435,12 +419,7 @@ impl ModuleShape {
             ModuleShape::Festoon => "festoon",
             ModuleShape::Grille => "grille",
             ModuleShape::Wardrobe => "wardrobe",
-            ModuleShape::Pendant => "pendant",
-            ModuleShape::Batten => "batten",
-            ModuleShape::Bulkhead => "bulkhead",
-            ModuleShape::DeskLamp => "desk_lamp",
-            ModuleShape::Lantern => "lantern",
-            ModuleShape::Flood => "flood",
+            ModuleShape::Fitting => "fitting",
         }
     }
 
@@ -502,13 +481,8 @@ impl ModuleShape {
             // PAR1a: a fitting fixed to the building is fabric — a lit room is
             // seen from the street, and its lamp must not vanish at the fit-out
             // band while its light still lights the room.
-            | ModuleShape::Pendant
-            | ModuleShape::Batten
-            | ModuleShape::Bulkhead
-            | ModuleShape::Lantern
-            | ModuleShape::Flood => false,
+            | ModuleShape::Fitting => false,
             ModuleShape::Legged
-            | ModuleShape::DeskLamp
             | ModuleShape::Carcass
             | ModuleShape::Soft
             | ModuleShape::Planter
@@ -685,24 +659,9 @@ impl ModuleShape {
             // lit face, so the face reads as the brightest thing in the room
             // exactly while the lamp is on — no emissive constant to keep in
             // step with the occupancy schedule.
-            ModuleShape::Pendant
-            | ModuleShape::Batten
-            | ModuleShape::Bulkhead
-            | ModuleShape::Lantern => PcgSurface {
+            ModuleShape::Fitting => PcgSurface {
                 roughness: 0.6,
                 tint: Some([0.95, 0.94, 0.90, 1.0]),
-                ..PcgSurface::DEFAULT
-            },
-            ModuleShape::DeskLamp => PcgSurface {
-                metallic: 0.5,
-                roughness: 0.4,
-                tint: Some([0.80, 0.74, 0.58, 1.0]),
-                ..PcgSurface::DEFAULT
-            },
-            ModuleShape::Flood => PcgSurface {
-                metallic: 0.3,
-                roughness: 0.5,
-                tint: Some([0.78, 0.79, 0.80, 1.0]),
                 ..PcgSurface::DEFAULT
             },
         }
@@ -914,40 +873,11 @@ impl ModuleShape {
                     m.push_box([0.0, 0.0, z], [0.35, 0.38, 0.025]);
                 }
             }
-            // A canopy at the ceiling, a stem, and the diffuser at the bottom
-            // of the unit box — the face the light hangs under.
-            ModuleShape::Pendant => {
-                m.push_box([0.0, 0.46, 0.0], [0.2, 0.04, 0.2]);
-                m.push_box([0.0, 0.1, 0.0], [0.03, 0.32, 0.03]);
-                m.push_prism_y(0.5, -0.5, -0.22);
-            }
-            // A shallow body with a diffuser proud of its underside.
-            ModuleShape::Batten => {
-                m.push_box([0.0, 0.2, 0.0], [0.5, 0.3, 0.5]);
-                m.push_box([0.0, -0.3, 0.0], [0.47, 0.2, 0.42]);
-            }
-            // A backplate (`+Y`, the mount) and a sealed lens below it.
-            ModuleShape::Bulkhead => {
-                m.push_box([0.0, 0.35, 0.0], [0.5, 0.15, 0.5]);
-                m.push_prism_y(0.4, -0.5, 0.2);
-            }
-            // A base plate, a stem, and a head overhanging `+X` whose open
-            // underside the light hangs under.
-            ModuleShape::DeskLamp => {
-                m.push_box([0.0, -0.47, 0.0], [0.5, 0.03, 0.5]);
-                m.push_box([0.0, -0.05, 0.0], [0.05, 0.42, 0.05]);
-                m.push_box([0.15, 0.4, 0.0], [0.35, 0.1, 0.3]);
-            }
-            // A backplate on the wall (`-Z`) and the lit box standing off it.
-            ModuleShape::Lantern => {
-                m.push_box([0.0, 0.0, -0.45], [0.35, 0.5, 0.05]);
-                m.push_box([0.0, 0.0, 0.05], [0.5, 0.45, 0.45]);
-            }
-            // A bracket and a deep head, its lens at the bottom.
-            ModuleShape::Flood => {
-                m.push_box([0.0, 0.42, 0.0], [0.08, 0.08, 0.08]);
-                m.push_box([0.0, 0.0, 0.0], [0.5, 0.35, 0.5]);
-                m.push_box([0.0, -0.42, 0.0], [0.46, 0.08, 0.46]);
+            // A back plate on the mount (`+Y`) and the opal body under it;
+            // the light hangs just off the body's `-Y` face.
+            ModuleShape::Fitting => {
+                m.push_box([0.0, 0.4, 0.0], [0.4, 0.1, 0.4]);
+                m.push_box([0.0, -0.1, 0.0], [0.5, 0.4, 0.5]);
             }
         }
         m
@@ -1254,13 +1184,8 @@ mod tests {
                     | ModuleShape::Grille
                     // Wave PAR0: glazing is glass (`GLAZING`).
                     | ModuleShape::Glazing
-                    // Wave PAR1a: the fittings state an opal diffuser.
-                    | ModuleShape::Pendant
-                    | ModuleShape::Batten
-                    | ModuleShape::Bulkhead
-                    | ModuleShape::DeskLamp
-                    | ModuleShape::Lantern
-                    | ModuleShape::Flood
+                    // Wave PAR1a: the fitting states an opal diffuser.
+                    | ModuleShape::Fitting
             );
             if authored {
                 continue;

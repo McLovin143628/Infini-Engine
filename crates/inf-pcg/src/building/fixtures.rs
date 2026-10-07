@@ -311,7 +311,7 @@ pub fn fixture(row: FixtureRow) -> FixtureDef {
     match row {
         R::Pendant => def(
             row,
-            S::Pendant,
+            S::Fitting,
             [0.22, 0.17, 0.22],
             M::Ceiling,
             0.17,
@@ -323,7 +323,7 @@ pub fn fixture(row: FixtureRow) -> FixtureDef {
         ),
         R::OfficeBatten => def(
             row,
-            S::Batten,
+            S::Fitting,
             [0.6, 0.04, 0.15],
             M::Ceiling,
             0.04,
@@ -335,7 +335,7 @@ pub fn fixture(row: FixtureRow) -> FixtureDef {
         ),
         R::ShopStrip => def(
             row,
-            S::Batten,
+            S::Fitting,
             [0.75, 0.04, 0.08],
             M::Ceiling,
             0.04,
@@ -347,7 +347,7 @@ pub fn fixture(row: FixtureRow) -> FixtureDef {
         ),
         R::WorkBatten => def(
             row,
-            S::Batten,
+            S::Fitting,
             [0.75, 0.04, 0.08],
             M::Ceiling,
             0.04,
@@ -359,7 +359,7 @@ pub fn fixture(row: FixtureRow) -> FixtureDef {
         ),
         R::CorridorLight => def(
             row,
-            S::Bulkhead,
+            S::Fitting,
             [0.16, 0.05, 0.16],
             M::Ceiling,
             0.05,
@@ -371,7 +371,7 @@ pub fn fixture(row: FixtureRow) -> FixtureDef {
         ),
         R::StairLight => def(
             row,
-            S::Bulkhead,
+            S::Fitting,
             [0.16, 0.12, 0.05],
             M::Wall,
             2.3,
@@ -383,7 +383,7 @@ pub fn fixture(row: FixtureRow) -> FixtureDef {
         ),
         R::WardLight => def(
             row,
-            S::Batten,
+            S::Fitting,
             [0.6, 0.04, 0.15],
             M::Ceiling,
             0.04,
@@ -395,7 +395,7 @@ pub fn fixture(row: FixtureRow) -> FixtureDef {
         ),
         R::ExamLight => def(
             row,
-            S::Batten,
+            S::Fitting,
             [0.6, 0.04, 0.3],
             M::Ceiling,
             0.04,
@@ -407,7 +407,7 @@ pub fn fixture(row: FixtureRow) -> FixtureDef {
         ),
         R::CellLight => def(
             row,
-            S::Bulkhead,
+            S::Fitting,
             [0.16, 0.05, 0.16],
             M::Ceiling,
             0.05,
@@ -419,7 +419,7 @@ pub fn fixture(row: FixtureRow) -> FixtureDef {
         ),
         R::BayFlood => def(
             row,
-            S::Flood,
+            S::Fitting,
             [0.25, 0.12, 0.25],
             M::Ceiling,
             0.5,
@@ -431,7 +431,7 @@ pub fn fixture(row: FixtureRow) -> FixtureDef {
         ),
         R::KitchenLight => def(
             row,
-            S::Batten,
+            S::Fitting,
             [0.5, 0.04, 0.12],
             M::Ceiling,
             0.04,
@@ -443,7 +443,7 @@ pub fn fixture(row: FixtureRow) -> FixtureDef {
         ),
         R::BathLight => def(
             row,
-            S::Bulkhead,
+            S::Fitting,
             [0.14, 0.05, 0.14],
             M::Ceiling,
             0.05,
@@ -455,7 +455,7 @@ pub fn fixture(row: FixtureRow) -> FixtureDef {
         ),
         R::DeskLamp => def(
             row,
-            S::DeskLamp,
+            S::Fitting,
             [0.1, 0.22, 0.1],
             M::Furniture,
             0.0,
@@ -467,7 +467,7 @@ pub fn fixture(row: FixtureRow) -> FixtureDef {
         ),
         R::BedsideLamp => def(
             row,
-            S::DeskLamp,
+            S::Fitting,
             [0.1, 0.2, 0.1],
             M::Furniture,
             0.0,
@@ -479,7 +479,7 @@ pub fn fixture(row: FixtureRow) -> FixtureDef {
         ),
         R::Porch => def(
             row,
-            S::Lantern,
+            S::Fitting,
             [0.1, 0.16, 0.1],
             M::Wall,
             0.0,
@@ -491,7 +491,7 @@ pub fn fixture(row: FixtureRow) -> FixtureDef {
         ),
         R::FacadeWash => def(
             row,
-            S::Lantern,
+            S::Fitting,
             [0.1, 0.16, 0.1],
             M::Wall,
             0.0,
@@ -503,7 +503,7 @@ pub fn fixture(row: FixtureRow) -> FixtureDef {
         ),
         R::SignLight => def(
             row,
-            S::Batten,
+            S::Fitting,
             [0.5, 0.04, 0.08],
             M::Wall,
             0.0,
@@ -515,7 +515,7 @@ pub fn fixture(row: FixtureRow) -> FixtureDef {
         ),
         R::ForecourtFlood => def(
             row,
-            S::Flood,
+            S::Fitting,
             [0.25, 0.12, 0.25],
             M::Wall,
             4.5,
@@ -529,7 +529,7 @@ pub fn fixture(row: FixtureRow) -> FixtureDef {
         // intensity; the row exists so a census can name it.
         R::RigSpot | R::BarGlow => def(
             row,
-            S::Pendant,
+            S::Fitting,
             [0.0; 3],
             M::Ceiling,
             0.0,
@@ -541,7 +541,7 @@ pub fn fixture(row: FixtureRow) -> FixtureDef {
         ),
         R::VenuePendant => def(
             row,
-            S::Pendant,
+            S::Fitting,
             [0.22, 0.17, 0.22],
             M::Ceiling,
             0.17,
