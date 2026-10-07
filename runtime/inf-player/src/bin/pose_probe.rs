@@ -87,14 +87,14 @@ mod native {
             200..=299 => RuntimeInput::with_down(["aim"]).axis_at("move_y", 0.5),
             300..=339 => RuntimeInput::with_down(["aim", "attack"]).axis_at("look_x", 0.3),
             340..=399 => {
-                if s % 20 == 0 {
+                if s.is_multiple_of(20) {
                     RuntimeInput::with_down(["cover"])
                 } else {
                     RuntimeInput::default().axis_at("move_x", 0.5)
                 }
             }
             400..=499 => {
-                if s % 25 == 0 {
+                if s.is_multiple_of(25) {
                     walk(RuntimeInput::with_down(["jump"]))
                 } else {
                     walk(RuntimeInput::default())
@@ -201,7 +201,7 @@ mod native {
             (0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
         let mut ragdolled = false;
         for s in 0..steps {
-            if s == 150 || (s > 150 && !ragdolled && s % 10 == 0) {
+            if s == 150 || (s > 150 && !ragdolled && s.is_multiple_of(10)) {
                 ragdolled |= ragdoll_someone(&mut sim);
             }
             sim.step_once(input(s));
@@ -249,7 +249,7 @@ mod native {
                 .map_or(0, |p| p.0.len());
             posed_max = posed_max.max(posed);
             parallel_steps += usize::from(posed >= PARALLEL_POSE_MIN);
-            if (s + 1) % 50 == 0 {
+            if (s + 1).is_multiple_of(50) {
                 marks.push(format!(
                     "{:032x}",
                     state.0 ^ pose.0.rotate_left(1) ^ trace.0.rotate_left(2)
