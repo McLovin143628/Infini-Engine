@@ -3687,4 +3687,102 @@ mod perf1b_sweep_tests {
             "every despawn step ran the sweep"
         );
     }
+
+    /// **THE SAME COUNT IS NOT THE SAME SET** (the PERF1b audit, (c')). The
+    /// count half of the skip's premise is blind to a swap; the signature is
+    /// what sees it. Three steps with the tracked count UNCHANGED and
+    /// something gone: (1) one live entity leaves as a new one arrives, (2) a
+    /// retained guid is replaced in the retained list by a guid nothing ever
+    /// attached, (3) a retained guid is replaced by a DUPLICATE of another
+    /// retained guid. Each must run the full sweep and remove exactly the
+    /// departed entity. Then a guid despawned and described again the next
+    /// step comes back as a NEW rapier body (the old handle is gone), as the
+    /// full sweep always made it. Count-only skip: RED on (2) and (3).
+    #[test]
+    fn a_swap_at_the_same_count_runs_the_sweep() {
+        let mut bridge = PhysicsBridge3D::new(DVec3::new(0.0, -9.81, 0.0));
+        let snaps = |ids: &[u32]| -> Vec<EntitySync3D> {
+            ids.iter().map(|&i| static_box(uuid(i), i)).collect()
+        };
+        // Steady: live 0..10, nothing retained. Two syncs so the second skips.
+        let live: Vec<u32> = (0..10).collect();
+        bridge.sync_retaining(&snaps(&live), &[]);
+        let skipped0 = bridge.despawn_sweeps().0;
+        bridge.sync_retaining(&snaps(&live), &[]);
+        assert_eq!(
+            bridge.despawn_sweeps().0,
+            skipped0 + 1,
+            "the steady step skips"
+        );
+
+        // (1) 9 leaves, 10 arrives: the count is 10 either side.
+        let live1: Vec<u32> = (0..9).chain([10]).collect();
+        let run0 = bridge.despawn_sweeps().1;
+        bridge.sync_retaining(&snaps(&live1), &[]);
+        assert_eq!(
+            bridge.despawn_sweeps().1,
+            run0 + 1,
+            "(1) the swap ran the sweep"
+        );
+        assert!(
+            !bridge.entities.contains_key(&uuid(9)),
+            "(1) the departed entity is gone"
+        );
+        assert_eq!(bridge.entities.len(), 10);
+
+        // Now 0..5 live and 5..9 + 10 retained (a band that stopped describing them).
+        let live2: Vec<u32> = (0..5).collect();
+        let mut retained: Vec<Uuid> = [5u32, 6, 7, 8, 10].iter().map(|&i| uuid(i)).collect();
+        bridge.sync_retaining(&snaps(&live2), &retained);
+        let skipped = bridge.despawn_sweeps().0;
+        bridge.sync_retaining(&snaps(&live2), &retained);
+        assert_eq!(
+            bridge.despawn_sweeps().0,
+            skipped + 1,
+            "the retained steady step skips"
+        );
+
+        // (2) 8 dropped from the retained list, a stranger in its place.
+        retained[3] = uuid(9_999);
+        let run1 = bridge.despawn_sweeps().1;
+        bridge.sync_retaining(&snaps(&live2), &retained);
+        assert_eq!(
+            bridge.despawn_sweeps().1,
+            run1 + 1,
+            "(2) a stranger at the same count ran the sweep"
+        );
+        assert!(!bridge.entities.contains_key(&uuid(8)), "(2) 8 is gone");
+        assert_eq!(bridge.entities.len(), 9);
+
+        // (3) 7 dropped, a duplicate of 5 in its place.
+        retained.retain(|g| *g != uuid(9_999));
+        let at7 = retained
+            .iter()
+            .position(|g| *g == uuid(7))
+            .expect("7 retained");
+        retained[at7] = uuid(5);
+        let run2 = bridge.despawn_sweeps().1;
+        bridge.sync_retaining(&snaps(&live2), &retained);
+        assert_eq!(
+            bridge.despawn_sweeps().1,
+            run2 + 1,
+            "(3) a duplicate at the same count ran the sweep"
+        );
+        assert!(!bridge.entities.contains_key(&uuid(7)), "(3) 7 is gone");
+        assert_eq!(bridge.entities.len(), 8);
+
+        // (4) Despawned, then described again: a NEW body.
+        let old = bridge.entities[&uuid(0)].body;
+        let live3: Vec<u32> = (1..5).collect();
+        bridge.sync_retaining(&snaps(&live3), &retained);
+        assert!(!bridge.entities.contains_key(&uuid(0)), "(4) 0 is gone");
+        assert!(!bridge.world.contains_body(old), "(4) its body left rapier");
+        bridge.sync_retaining(&snaps(&live2), &retained);
+        let new = bridge.entities[&uuid(0)].body;
+        assert_ne!(
+            old, new,
+            "(4) the respawn is a new body, not the old handle"
+        );
+        println!("swap sweeps: {:?}", bridge.despawn_sweeps());
+    }
 }
