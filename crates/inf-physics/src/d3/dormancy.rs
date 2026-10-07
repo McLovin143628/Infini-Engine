@@ -363,11 +363,22 @@ fn requery_movers(
             d.drop_mover(k);
             continue;
         };
+        // **Where the body IS, not where its colliders were** (the PERF1b
+        // audit). rapier re-poses a body's colliders only inside the pipeline,
+        // so after `set_body_translation` -- a teleport, a dispatcher placement,
+        // every kinematic pose the bridge pushes -- `Collider::compute_aabb`
+        // answers at the pose of the LAST step. Measured: a ball teleported
+        // against a dormant wall fell 1.6 mm through the dormant floor on its
+        // first step there (`perf1b_dormancy_cases`). The box is taken at the
+        // body's current pose AND its next one (a kinematic target), merged.
         let mut need: Option<Aabb> = None;
         for c in rb.colliders() {
             if let Some(col) = colliders.get(*c) {
                 if col.is_enabled() || d.is_asleep(*c) {
-                    let a = col.compute_aabb();
+                    let local = col.position_wrt_parent().copied().unwrap_or_default();
+                    let now = col.shape().compute_aabb(&(*rb.position() * local));
+                    let next = col.shape().compute_aabb(&(*rb.next_position() * local));
+                    let a = now.merged(&next);
                     need = Some(need.map_or(a, |n| n.merged(&a)));
                 }
             }
