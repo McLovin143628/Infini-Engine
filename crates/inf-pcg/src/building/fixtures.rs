@@ -29,7 +29,7 @@
 //! put a lit room's walls so far over the night street that the shipped eye's
 //! highlight guard closed it from ×183 to ×5.6 at 21:00 (`fps_instrument`'s
 //! street60 camera) and the street went black; at 0.03 a lit window still
-//! reads 39 codes over its dark self from 14 m at a fixed ×8 (`par1a_rooms_gate`).
+//! reads 30 codes over its dark self from 14 m at a fixed ×8 (`par1a_rooms_gate`).
 //!
 //! # No room fixture asks for a shadow
 //!
@@ -49,11 +49,13 @@ use super::{ArchetypeId, RoomType};
 /// the moon, not a photometer.
 pub const CANDELA_TO_INTENSITY: f32 = 0.03;
 
-/// How far in front of its lit face a fixture's light sits, metres. Small
-/// enough that the face is the brightest thing in the room (it IS the light),
-/// large enough that the renderer's `max(d², 1e-4)` clamp is never what lights
-/// it.
-pub const DIFFUSER_GAP_M: f64 = 0.10;
+/// How far in front of its lit face a fixture's light sits, metres. The face
+/// is lit by its own lamp, so this sets how much brighter than the room the
+/// fitting reads: at 0.04 / 0.10 m it was 600x / 100x the walls and the
+/// window frames showed the screen-space reflection mirroring every batten as
+/// a hard glowing tile on a 0.75-rough floor (`PAR1a-FINAL/frames-f21`); at
+/// 0.30 m it is ~10x — still the brightest thing in the room.
+pub const DIFFUSER_GAP_M: f64 = 0.30;
 
 /// The most primary fixtures one room may hang, whatever its area — the
 /// guard a grid over a runaway room would otherwise lack. Sixteen is a

@@ -660,8 +660,8 @@ impl ModuleShape {
             // exactly while the lamp is on — no emissive constant to keep in
             // step with the occupancy schedule.
             ModuleShape::Fitting => PcgSurface {
-                roughness: 0.6,
-                tint: Some([0.95, 0.94, 0.90, 1.0]),
+                roughness: 0.8,
+                tint: Some([0.62, 0.61, 0.58, 1.0]),
                 ..PcgSurface::DEFAULT
             },
         }
