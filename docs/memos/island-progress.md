@@ -42601,3 +42601,56 @@ every leg ~10-12 d; 16.6 ~25-30 d. **PAR1's per-light budget:** a shadowed fixtu
 GPU + ~0.42 ms CPU, an unshadowed clustered light ~0.012 ms GPU (*inferred* from the noon /
 21:00 deltas); headroom at 21:00 ~0 ms -- PAR1a needs <= ~0.001 ms GPU per light or must
 follow PERF1d's VSM and GPU rows.
+
+## Wave PAR1a — BUILDING ILLUMINATION (implementer, 2026-10-07)
+
+Base `6dd7933d`. Commits `977cf7f9..adaab9fb` (10) + this docs commit. Battery on `adaab9fb`:
+`AGGREGATE over 416 binaries: 7952 passed, 0 failed, 34 ignored`. Report:
+`campaign-briefs/par1a-implementer-report.md`. Frames, logs, tables: session scratchpad
+`PAR1a-FINAL\`. Zero schema moves (v28 / payload 14 / EXPECTED_LEVELS 24); no `.inf_lvl` moved
+(every fixture is derived, serde-skipped state); goldens 78 unmoved (139 strict-green); no new
+dependency. The EDIT1 block digests moved in both hosts' pins (the fittings joined the instances).
+
+**What landed.** `inf_pcg::building::fixtures` — ONE vocabulary per `RoomType` (pendant, office
+batten, shop strip, work batten, corridor / stair bulkhead, ward, exam, cell, bay flood, kitchen,
+bath, desk lamp, bedside lamp; porch, facade wash, sign light, forecourt flood): kelvin colour,
+lumens-derived intensity (candela x 0.03, measured, not physical), cone, a grid pitch for large
+rooms, a shadow ask. The assembler hangs a fitting (one `Fitting` family, an opal body lit by its
+own light 0.30 m off its face — no emissive) and a real light in EVERY room of EVERY archetype on
+EVERY floor, furnished or not, on a socket from the room's own rectangle; task lamps on placed
+desks and beds; porch / facade / sign / forecourt lights on the street door. Each fixture carries
+a census tag, a draw distance (the structure LOD, 96 m) and its room's BOX: a clipped point light
+(kind 3, the box packed into the lanes a point leaves free) lights nothing outside its room — the
+direct leak through a party wall, measured, is gone. The occupancy half of the night schedule:
+`inf_ecs::sky::fixture_occupancy` — the society's own day (work, shop hours, households: waking,
+commute, evening, nights out, bedtime, a deterministic left-on minority) as a pure function of a
+content seed and the level clock, inside both projectors' `venue_rig_lights` fence, plus a coarse
+per-volume anchor cut (`fixture_volume_far`) so the island's 137 112 fixtures cost a frame only
+the ~3 000 near the camera. The volume light cap is re-scoped to the rig it guards.
+
+**Numbers.** Island census (shipped recipe, the `compose_volume` door): 172 blocks, 1 764
+buildings, 89 239 rooms, **0 unlit**, 137 112 fixtures; every building a porch light. World-side
+(CI island, both hosts): 1 166 resident rooms, 0 unlit. 24 h sweep: workplaces 622/622 08:30-
+17:30, 239 at 18:30, 107 at 21:30, 28 (4.5 %) overnight; never-closing rooms 178/178 every hour;
+porches dusk to dawn; light lists PIE == shipping at all 24 hours. Rendered (x8, GI on): a lit
+room's floor 120.9 vs 0.0 unlit; next door's ceiling boxed 0.0 vs unboxed 7.7; the room below's
+wall boxed 6.3 vs unboxed 13.2 (residue = GI's probe field, bounce-off control 0.0); a fourth-floor
+window from the street 30.2 vs 0.0; a shop frontage through its glass 178.7 vs 0.0. The island
+at 21:00 (instrument, cook-h/perf1): **GPU 20.57 -> 21.83 ms (+1.26)**, noon 13.18 -> 14.72;
+the shader saw 448 local lights (near 21 / mid 297 / far 130), submitted 448 (424 clipped),
+culled frustum 698, distance 2 411, ceiling 0; the light loop 0.29 ms GPU (~0.0007 ms a light).
+**21:00 1080p window walk p95, min of five: base 31.5 -> 33.6 ms (+2.1)**, p50 29.4 -> 30.0.
+
+**Laws.** A shadow ask is not free when thousands ask: the first cut let every room fixture ask,
+the granted set churned across the camera lattice (448 VSM page re-slots a frame vs 1.7) and noon
+paid +8.6 ms GPU — the box, not the shadow, is what keeps a room's light in its room. A scatter
+family is a batch per volume: six fitting families cost graph +1.26 / submit +0.46 ms in the
+window. A lamp lit 100x its room closes the night eye (highlight guard x183 -> x5.6) and mirrors
+in glossy glass as hard tiles: the fitting reads ~10x.
+
+**Carried.** The far band (lit windows on a building's SHELL past 96 m) ~1.5 d; GI probe field
+carrying a room's bounce through a slab (13.8 -> 6.3 at x8 after recalibration) — the PAR0b GI
+cascade item; airfield apron floods (an authored `Light` has no schedule: a schema move, priced);
+the office 19:00 vs 02:00 street-side frame and the editor at 21:00 (the frames taken show the
+interior and the editor at its authored clock); hard reflections of fittings in glossy panes /
+floors (SSR, the renderer's).
