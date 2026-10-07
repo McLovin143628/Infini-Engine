@@ -984,3 +984,166 @@ fn the_24h_sweep_lights_rooms_by_who_is_in_them_and_pie_equals_shipping() {
         projected[21].1
     );
 }
+
+/// **A LIT SHOP IS SEEN FROM THE STREET THROUGH ITS GLASS** (clause 6; FIX3's
+/// shop is the proof target).
+///
+/// Reads: a real ground-floor shop at night from the far pavement, 10 m out
+/// on the entrance's axis at eye height: the glazed frontage beside the door
+/// (its shopfront modules and panes drawn as PAR0's transmitting glass) with
+/// the shop's own fixtures on vs off, and against the solid fascia above it.
+/// The base tree hangs no fixture in a shop: its frontage reads the dark.
+#[test]
+fn a_lit_shop_is_seen_from_the_street_through_its_glass() {
+    use inf_pcg::building::OpeningKind;
+    let Some(gpu) = gpu() else { return };
+    let out = building(ArchetypeId::Shop, 1, 7, true);
+    let plan = &out.plan;
+    let wi = plan.entrance.expect("a shop has an entrance");
+    let w = plan.walls[wi];
+    let door = plan
+        .openings
+        .iter()
+        .find(|o| o.wall == wi && o.kind == OpeningKind::Door)
+        .copied()
+        .expect("the entrance has a door");
+    let mid = w.point_at((door.start + door.end) * 0.5);
+    let rc = plan.rooms[w.inside].rect.center();
+    let d = w.direction();
+    let n = {
+        let n = DVec2::new(-d.y, d.x);
+        if (mid - rc).dot(n) >= 0.0 {
+            n
+        } else {
+            -n
+        }
+    };
+    let y = plan.floor_y(0);
+    let eye = DVec3::new(mid.x + n.x * 10.0, y + 1.6, mid.y + n.y * 10.0);
+    let target = DVec3::new(mid.x, y + 1.3, mid.y);
+    let view = look(eye, target);
+    let lit = render(
+        &gpu,
+        &building_scene(&out, &|l| l.tag.room != FixtureTag::EXTERIOR, true),
+        &view,
+    );
+    let dark = render(&gpu, &building_scene(&out, &|_| false, true), &view);
+    dump("shop_lit", &lit);
+    dump("shop_dark", &dark);
+    // The frontage: the door itself and the glazing either side of it, at
+    // shop-window height; the fascia: the wall above the door's head.
+    let front = |img: &[u8]| {
+        [-1.6f64, 0.0, 1.6]
+            .iter()
+            .map(|s| {
+                let p = mid + d * *s;
+                patch_at(img, &view, DVec3::new(p.x, y + 1.3, p.y), 8)
+            })
+            .fold(0.0f64, f64::max)
+    };
+    let fascia = patch_at(
+        &lit,
+        &view,
+        DVec3::new(mid.x, y + door.head + 0.4, mid.y) + DVec3::new(n.x, 0.0, n.y) * 0.2,
+        6,
+    );
+    let (fl, fd) = (front(&lit), front(&dark));
+    let lamps = out
+        .lights
+        .iter()
+        .filter(|l| l.tag.room != FixtureTag::EXTERIOR)
+        .count();
+    println!("PAR1a SHOP: {lamps} interior fixture(s); the frontage from 10 m: lit {fl:.1}, dark {fd:.1}; the fascia above the door {fascia:.1}");
+    assert!(
+        fl >= fd + 15.0,
+        "the lit shop's frontage {fl:.1} vs dark {fd:.1}"
+    );
+    assert!(
+        fl >= fascia + 10.0,
+        "the frontage {fl:.1} vs the fascia {fascia:.1}"
+    );
+}
+
+/// **THE FAR BAND, MEASURED** (clause 5): a room fixture is a light only
+/// inside its draw distance (`fixtures::ROOM_DRAW_M`); past it `plan_lights`
+/// drops it (`LightPlan::culled_distance`). This arm reads the plan's
+/// counters on both sides of the swap and the lit window's luminance at the
+/// swap distance — the step a viewer sees when the light leaves — and REPORTS
+/// it (the far band that would hide the step is carried, priced, in the
+/// report: no pane glow stands in for it).
+#[test]
+fn a_room_fixture_is_dropped_past_its_draw_distance_and_the_swap_is_measured() {
+    let out = building(ArchetypeId::Apartment, 5, 41, false);
+    let plan = &out.plan;
+    let (ri, win, ..) = pick_room(plan);
+    let o = plan.openings[win];
+    let w = plan.walls[o.wall];
+    let mid = w.point_at((o.start + o.end) * 0.5);
+    let rc = plan.rooms[ri].rect.center();
+    let n = {
+        let d = w.direction();
+        let n = DVec2::new(-d.y, d.x);
+        if (mid - rc).dot(n) >= 0.0 {
+            n
+        } else {
+            -n
+        }
+    };
+    let y = plan.floor_y(plan.rooms[ri].floor);
+    let window = DVec3::new(mid.x, y + (o.sill + o.head) * 0.5, mid.y);
+    let mine = |l: &PcgLight| l.tag.room == ri as u32;
+    let mut scene = building_scene(&out, &mine, true);
+    for b in &mut scene.light_bounds {
+        b.draw_m = fixtures::ROOM_DRAW_M;
+    }
+    let lamp = out.lights.iter().find(|l| mine(l)).expect("a lamp");
+    let mut counts = Vec::new();
+    for metres in [
+        fixtures::ROOM_DRAW_M as f64 - 5.0,
+        fixtures::ROOM_DRAW_M as f64 + lamp.range_m as f64 + 5.0,
+    ] {
+        let eye = window + DVec3::new(n.x, 0.0, n.y) * metres;
+        let view = look(eye, window);
+        let plan_now = inf_render::lights::plan_lights(
+            &scene,
+            &view,
+            &[],
+            &inf_render::lights::LightSettings::default(),
+            1.0,
+        );
+        counts.push((metres, plan_now.local(), plan_now.culled_distance));
+    }
+    println!("PAR1a FAR BAND: (metres, local lights, culled by distance) {counts:?}");
+    // The draw distance IS the structure LOD both hosts swap a building's
+    // parts for its shell at: past it no window is drawn to see a room through.
+    assert_eq!(
+        f64::from(fixtures::ROOM_DRAW_M),
+        inf_render::STRUCTURE_LOD_M
+    );
+    assert_eq!(
+        counts[0].1, 1,
+        "inside its draw distance the fixture is a light"
+    );
+    assert_eq!(
+        (counts[1].1, counts[1].2),
+        (0, 1),
+        "past it the fixture is dropped"
+    );
+    if let Some(gpu) = gpu() {
+        let dark_scene = building_scene(&out, &|_| false, true);
+        for metres in [20.0, 45.0, fixtures::ROOM_DRAW_M as f64 - 5.0] {
+            let eye = window + DVec3::new(n.x, 0.0, n.y) * metres;
+            let view = look(eye, window);
+            let lit = render(&gpu, &scene, &view);
+            let dark = render(&gpu, &dark_scene, &view);
+            dump(&format!("far_{metres:.0}_lit"), &lit);
+            let (l, d) = (
+                patch_at(&lit, &view, window, 3),
+                patch_at(&dark, &view, window, 3),
+            );
+            println!(
+                "PAR1a FAR BAND: the lit window at {metres:.0} m reads {l:.1} at x{NIGHT_EXPOSURE}, dark {d:.1} -- the step the light's departure would leave"
+            );
+        }
+    }
+}

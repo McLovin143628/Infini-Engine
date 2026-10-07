@@ -24,9 +24,22 @@
 //! candela × [`CANDELA_TO_INTENSITY`]: candela is `lm / 4π` for a point light
 //! and `lm / Ω` for a spot of solid angle `Ω = 2π(1 − cos θ_outer)`. The
 //! factor is the engine's calibration (a renderer intensity of 1 is the sun's
-//! third), stated once: an 800 lm bulb (63.7 cd) lands at 5.1, beside the
-//! venue bar glow's authored 5.0 and the PAR0b sealed-room arm's 6.0 lamp, so
-//! a room fixture and the rooms PAR0b measured read in the same eye.
+//! third), stated once and MEASURED, not physical: an 800 lm bulb (63.7 cd)
+//! lands at 1.9. The first cut (0.08, 800 lm → 5.1, beside the bar glow's 5.0)
+//! put a lit room's walls so far over the night street that the shipped eye's
+//! highlight guard closed it from ×183 to ×5.6 at 21:00 (`fps_instrument`'s
+//! street60 camera) and the street went black; at 0.03 a lit window still
+//! reads 39 codes over its dark self from 14 m at a fixed ×8 (`par1a_rooms_gate`).
+//!
+//! # No room fixture asks for a shadow
+//!
+//! A room's fixture is confined to its room's BOX (`FixtureClip`), which is
+//! what keeps it out of the flat next door — the job PAR0 gave the eight
+//! shadowed fixtures. Asking for shadows as well put thousands of near-equal
+//! candidates in front of `shadow_policy`, the granted set churned as the
+//! camera crossed its lattice (448 page re-slots a frame at 21:00 against 1.7)
+//! and noon paid +8.6 ms GPU. The budget is PAR0's and unchanged; the VEN1a rig
+//! still asks.
 
 use super::modules::ModuleShape;
 use super::{ArchetypeId, RoomType};
@@ -34,13 +47,13 @@ use super::{ArchetypeId, RoomType};
 /// Renderer intensity per candela (see the module docs). A calibration, not a
 /// physical constant — the island's night eye is an eight-stop range around
 /// the moon, not a photometer.
-pub const CANDELA_TO_INTENSITY: f32 = 0.08;
+pub const CANDELA_TO_INTENSITY: f32 = 0.03;
 
 /// How far in front of its lit face a fixture's light sits, metres. Small
 /// enough that the face is the brightest thing in the room (it IS the light),
 /// large enough that the renderer's `max(d², 1e-4)` clamp is never what lights
 /// it.
-pub const DIFFUSER_GAP_M: f64 = 0.04;
+pub const DIFFUSER_GAP_M: f64 = 0.10;
 
 /// The most primary fixtures one room may hang, whatever its area — the
 /// guard a grid over a runaway room would otherwise lack. Sixteen is a
@@ -48,10 +61,16 @@ pub const DIFFUSER_GAP_M: f64 = 0.04;
 /// largest rooms the palettes plan.
 pub const MAX_FIXTURES_PER_ROOM: u32 = 16;
 
-/// How close to its own range a fixture is drawn as a LIGHT, metres from the
-/// eye (the renderer's per-light draw distance). Past it the light is not
-/// submitted at all — see the far band in `inf_render::lights`.
-pub const ROOM_DRAW_M: f32 = 90.0;
+/// **How far from the eye a room fixture is a LIGHT**, metres — the building's
+/// own structure LOD (`lod::DEFAULT_STRUCTURE_LOD_M`, the 96 m both hosts swap
+/// a building's parts for its SHELL at). Past it there is no window to see the
+/// room through: the shell is one opaque box, so a light kept past it would
+/// light nothing a pixel shows, and one dropped inside it would leave a dark
+/// window in a drawn facade. `plan_lights` measures it to the nearest point of
+/// the light's sphere, so every lit surface inside the band keeps its light.
+/// (The far band — what a SHELL shows of its lit rooms — is carried; see the
+/// wave report.)
+pub const ROOM_DRAW_M: f32 = super::lod::DEFAULT_STRUCTURE_LOD_M as f32;
 /// The exterior rows' draw distance: a porch lamp is seen down a street.
 pub const EXTERIOR_DRAW_M: f32 = 160.0;
 
@@ -300,7 +319,7 @@ pub fn fixture(row: FixtureRow) -> FixtureDef {
             900.0,
             None,
             5.0,
-            true,
+            false,
         ),
         R::OfficeBatten => def(
             row,
@@ -312,7 +331,7 @@ pub fn fixture(row: FixtureRow) -> FixtureDef {
             2400.0,
             None,
             4.5,
-            true,
+            false,
         ),
         R::ShopStrip => def(
             row,
@@ -324,7 +343,7 @@ pub fn fixture(row: FixtureRow) -> FixtureDef {
             3000.0,
             None,
             3.5,
-            true,
+            false,
         ),
         R::WorkBatten => def(
             row,
@@ -336,7 +355,7 @@ pub fn fixture(row: FixtureRow) -> FixtureDef {
             2600.0,
             None,
             4.5,
-            true,
+            false,
         ),
         R::CorridorLight => def(
             row,
@@ -348,7 +367,7 @@ pub fn fixture(row: FixtureRow) -> FixtureDef {
             900.0,
             None,
             6.0,
-            true,
+            false,
         ),
         R::StairLight => def(
             row,
@@ -360,7 +379,7 @@ pub fn fixture(row: FixtureRow) -> FixtureDef {
             900.0,
             None,
             0.0,
-            true,
+            false,
         ),
         R::WardLight => def(
             row,
@@ -372,7 +391,7 @@ pub fn fixture(row: FixtureRow) -> FixtureDef {
             2000.0,
             None,
             4.0,
-            true,
+            false,
         ),
         R::ExamLight => def(
             row,
@@ -384,7 +403,7 @@ pub fn fixture(row: FixtureRow) -> FixtureDef {
             2600.0,
             None,
             0.0,
-            true,
+            false,
         ),
         R::CellLight => def(
             row,
@@ -396,7 +415,7 @@ pub fn fixture(row: FixtureRow) -> FixtureDef {
             600.0,
             None,
             0.0,
-            true,
+            false,
         ),
         R::BayFlood => def(
             row,
@@ -408,7 +427,7 @@ pub fn fixture(row: FixtureRow) -> FixtureDef {
             6000.0,
             None,
             7.0,
-            true,
+            false,
         ),
         R::KitchenLight => def(
             row,
@@ -420,7 +439,7 @@ pub fn fixture(row: FixtureRow) -> FixtureDef {
             1400.0,
             None,
             0.0,
-            true,
+            false,
         ),
         R::BathLight => def(
             row,
@@ -432,7 +451,7 @@ pub fn fixture(row: FixtureRow) -> FixtureDef {
             700.0,
             None,
             0.0,
-            true,
+            false,
         ),
         R::DeskLamp => def(
             row,
@@ -530,7 +549,7 @@ pub fn fixture(row: FixtureRow) -> FixtureDef {
             600.0,
             None,
             5.0,
-            true,
+            false,
         ),
     }
 }
@@ -738,7 +757,7 @@ mod tests {
         }
         // An 800-lm-class bulb lands beside the calibrated rooms PAR0b measured.
         let p = fixture(FixtureRow::Pendant).intensity();
-        assert!((4.0..8.0).contains(&p), "pendant {p}");
+        assert!((1.5..3.5).contains(&p), "pendant {p}");
         let flood = fixture(FixtureRow::BayFlood).intensity();
         assert!(flood > 4.0 * p, "a bay flood {flood} vs a pendant {p}");
     }
