@@ -892,9 +892,76 @@ const GI_MESHLET_SKIP_SPAN_M: f32 = 5.0;
 /// tightest proxy the voxelizer already understands; its thinness is floored
 /// so a perfectly flat meshlet is still a (half-voxel-dilated) slab.
 fn local_box(lo: Vec3, hi: Vec3) -> Mat4 {
+    Mat4::from_scale_rotation_translation(local_box_size(lo, hi), Quat::IDENTITY, (lo + hi) * 0.5)
+}
+
+/// The box [`local_box`] scales the unit cube to — the floor keeps a flat
+/// meshlet's box from being singular.
+fn local_box_size(lo: Vec3, hi: Vec3) -> Vec3 {
     let floor = ((hi - lo).max_element() * 1.0e-3).max(1.0e-3);
-    let size = (hi - lo).max(Vec3::splat(floor));
-    Mat4::from_scale_rotation_translation(size, Quat::IDENTITY, (lo + hi) * 0.5)
+    (hi - lo).max(Vec3::splat(floor))
+}
+
+/// **A mesh-space sphere around everything an instance of this asset can
+/// stage** (wave PERF1c): every proxy's sphere AND every proxy's box, whichever
+/// of the two the staging picks for it.
+///
+/// For a box the staged radius is [`box_radius`] of `model * local_box`, which
+/// is at most half the sum of the box's sides times the model's column length,
+/// so the box enters as its centre plus that half-sum — larger than its true
+/// circumradius, which only makes the bound looser.
+fn proxy_bound(list: &[MeshletProxy]) -> (Vec3, f32) {
+    let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+    for m in list {
+        lo = lo.min(m.center - Vec3::splat(m.radius));
+        hi = hi.max(m.center + Vec3::splat(m.radius));
+        if let Some((a, b)) = m.aabb {
+            lo = lo.min(a);
+            hi = hi.max(b);
+        }
+    }
+    if list.is_empty() || !lo.is_finite() || !hi.is_finite() {
+        return (Vec3::ZERO, f32::INFINITY);
+    }
+    let c = (lo + hi) * 0.5;
+    let mut r = 0.0f32;
+    for m in list {
+        r = r.max((m.center - c).length() + m.radius);
+        if let Some((a, b)) = m.aabb {
+            let size = local_box_size(a, b);
+            r = r.max(((a + b) * 0.5 - c).length() + 0.5 * (size.x + size.y + size.z));
+        }
+    }
+    (c, r)
+}
+
+/// **Can any proxy of this instance reach the GI volume?** (wave PERF1c) —
+/// `false` only when provably none can, so skipping the instance stages
+/// exactly what the per-proxy clip would have kept: nothing.
+///
+/// `k` is the sum of the model's three column lengths, which bounds how far
+/// the linear part can stretch any mesh-space distance (and is at least the
+/// largest axis scale, which is what a sphere proxy's radius is multiplied
+/// by). Every staged proxy's sphere then lies inside the world sphere of
+/// radius `bound.1 × k` about the model's image of `bound.0`. A non-finite
+/// bound fails OPEN — the instance stages as before.
+fn vgeom_instance_reaches_volume(
+    model: &Mat4,
+    bound: (Vec3, f32),
+    vol_min: Vec3,
+    extent: f32,
+) -> bool {
+    let k = model.x_axis.truncate().length()
+        + model.y_axis.truncate().length()
+        + model.z_axis.truncate().length();
+    let world = GiBounds {
+        center: model.transform_point3(bound.0),
+        radius: bound.1 * k,
+    };
+    if !world.radius.is_finite() || !world.center.is_finite() {
+        return true;
+    }
+    intersects_volume(&world, vol_min, extent)
 }
 
 /// The mesh-space bounds of one root meshlet from its own vertices, or `None`
@@ -1156,19 +1223,31 @@ impl RenderNode for GiNode {
             }
         }
 
-        // vgeom instances, as the root page's meshlet spheres.
+        // vgeom instances, as the root page's meshlet spheres — **behind a
+        // whole-instance reject** (wave PERF1c), the skinned path's NPC1e shape
+        // applied to the meshlet path: an instance whose every proxy provably
+        // misses the volume stages nothing, instead of staging every proxy for
+        // the clip below to throw away. See `vgeom_instance_reaches_volume`.
         if !frame.scene.vgeom_instances.is_empty() {
-            let spheres: HashMap<u128, Arc<Vec<MeshletProxy>>> = frame
+            #[allow(clippy::type_complexity)]
+            let spheres: HashMap<u128, (Arc<Vec<MeshletProxy>>, (Vec3, f32))> = frame
                 .scene
                 .vgeom_assets
                 .iter()
-                .map(|a| (a.id, self.meshlet_spheres_for(a)))
+                .map(|a| {
+                    let list = self.meshlet_spheres_for(a);
+                    let bound = proxy_bound(&list);
+                    (a.id, (list, bound))
+                })
                 .collect();
             for inst in &frame.scene.vgeom_instances {
-                let Some(list) = spheres.get(&inst.asset) else {
+                let Some((list, bound)) = spheres.get(&inst.asset) else {
                     continue;
                 };
                 let model = origin.model_matrix(inst.translation, inst.rotation, inst.scale);
+                if !vgeom_instance_reaches_volume(&model, *bound, vol_min, extent) {
+                    continue;
+                }
                 let scale = inst.scale.abs().max_element();
                 let albedo = [inst.color[0], inst.color[1], inst.color[2]];
                 // An occluder voxelizes as its meshlet's BOX (audit PAR0b); an
@@ -2114,6 +2193,127 @@ gi_probes:
             "the probe march no longer subtracts the sky it blocks — the lit
              passes add the whole sky, so without this the open sky is counted
              twice"
+        );
+    }
+}
+
+#[cfg(test)]
+mod perf1c_reject_tests {
+    use super::*;
+
+    /// **The whole-instance reject never drops a proxy the clip would keep**
+    /// (wave PERF1c).
+    ///
+    /// 4 000 deterministic instances of three proxy sets (spheres, boxes, a
+    /// mix with a wide one), under rotations, non-uniform scales and
+    /// translations scattered around a 40 m volume. Whenever
+    /// `vgeom_instance_reaches_volume` says "no", every proxy is staged through
+    /// the REAL `stage_box` / `stage_sphere` exactly as `run` stages it, and
+    /// none may intersect the volume.
+    ///
+    /// READS the reject and the staged bounds. Mutation: the bound's radius not
+    /// multiplied by the model's stretch `k` -- RED (a scaled instance's
+    /// proxies escape the unscaled sphere).
+    #[test]
+    fn a_rejected_instance_has_no_proxy_in_the_volume() {
+        let proxy = |c: [f32; 3], r: f32, aabb: Option<([f32; 3], [f32; 3])>| MeshletProxy {
+            center: Vec3::from(c),
+            radius: r,
+            aabb: aabb.map(|(a, b)| (Vec3::from(a), Vec3::from(b))),
+            wide: false,
+        };
+        let sets: Vec<Vec<MeshletProxy>> = vec![
+            vec![
+                proxy([0.0, 1.0, 0.0], 1.2, None),
+                proxy([3.0, 0.5, -2.0], 0.8, None),
+            ],
+            vec![
+                proxy(
+                    [0.0, 0.0, 0.0],
+                    2.0,
+                    Some(([-1.5, -0.2, -1.0], [1.5, 0.2, 1.0])),
+                ),
+                proxy(
+                    [4.0, 2.0, 0.0],
+                    1.0,
+                    Some(([3.2, 1.4, -0.6], [4.8, 2.6, 0.6])),
+                ),
+            ],
+            vec![
+                proxy([0.0, 0.0, 0.0], 0.5, None),
+                proxy(
+                    [-6.0, 0.0, 1.0],
+                    1.5,
+                    Some(([-7.0, -0.5, 0.0], [-5.0, 0.5, 2.0])),
+                ),
+                MeshletProxy {
+                    wide: true,
+                    ..proxy(
+                        [0.0, 0.0, 9.0],
+                        9.0,
+                        Some(([-9.0, -0.1, 0.0], [9.0, 0.1, 18.0])),
+                    )
+                },
+            ],
+        ];
+        let vol_min = Vec3::new(-20.0, -20.0, -20.0);
+        let extent = 40.0;
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut rnd = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 40) as f32 / (1u64 << 24) as f32
+        };
+        let (mut rejected, mut kept_some) = (0u32, 0u32);
+        for i in 0..4000 {
+            let list = &sets[i % sets.len()];
+            let bound = proxy_bound(list);
+            let t = Vec3::new(
+                rnd() * 160.0 - 80.0,
+                rnd() * 40.0 - 20.0,
+                rnd() * 160.0 - 80.0,
+            );
+            let axis = Vec3::new(rnd() - 0.5, rnd() - 0.5, rnd() - 0.5).normalize_or(Vec3::Y);
+            let rot = Quat::from_axis_angle(axis, rnd() * 6.28);
+            let scale = Vec3::new(0.2 + rnd() * 6.0, 0.2 + rnd() * 6.0, 0.2 + rnd() * 6.0);
+            let model = Mat4::from_scale_rotation_translation(scale, rot, t);
+            let max_scale = scale.abs().max_element();
+            let emits = i % 7 == 0;
+            let reaches = vgeom_instance_reaches_volume(&model, bound, vol_min, extent);
+            let mut any_in = false;
+            for m in list {
+                if !emits && m.wide {
+                    continue;
+                }
+                let p = match m.aabb {
+                    Some((lo, hi)) if !emits => {
+                        stage_box(model * local_box(lo, hi), [1.0; 3], [0.0; 3])
+                    }
+                    _ => stage_sphere(
+                        model.transform_point3(m.center),
+                        m.radius * max_scale,
+                        [1.0; 3],
+                        [0.0; 3],
+                    ),
+                };
+                if let Some(p) = p {
+                    any_in |= intersects_volume(&p.bounds, vol_min, extent);
+                }
+            }
+            if reaches {
+                kept_some += u32::from(any_in);
+            } else {
+                rejected += 1;
+                assert!(
+                    !any_in,
+                    "instance {i}: rejected, but a proxy it would stage intersects the volume"
+                );
+            }
+        }
+        assert!(
+            rejected > 1000 && kept_some > 100,
+            "the fixture must exercise both answers: {rejected} rejected, {kept_some} kept with a proxy inside"
         );
     }
 }
