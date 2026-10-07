@@ -42469,3 +42469,70 @@ animation 2.1 / 4.3 per step (4.76 on the instrument's strip); rapier 4.0 / 5.5 
 projection 4.2 / 5.8 per frame; character move 1.5 per step on the run. Arms to turn green:
 `fps_instrument::the_shipped_island_by_the_hour` (step ratchet), `perf1b_frame_gate::
 the_window_counter_holds_the_floor_at_real_time`.
+
+## Wave PERF1c — THE ISLAND AT FRAME RATE, PART THREE (implementer, 2026-10-07)
+
+Base `fe00ae41`. Measured unless marked *inferred*; window numbers are the player's own
+counter (`INF_FPS_LOG`, `INF_STEP_LOG`) over `demo.ps1 -PerfOnly` legs, instrument numbers
+the hour arm (release, off CI, five rounds x 120 frames), cooked island, RTX 4070 Ti.
+
+**CLAUSE 0 re-read the audit's rows on the base tree** (Play in New Window, 1080p, 21:00,
+walk / run): projection 4.25 / 8.11, record graph 9.52 / 10.94, submit 11.11 / 11.04, vsm
+raster 5.64 / 5.74, step 11.40 / 17.33 (solver 4.09 / 5.27, animation 2.18 / 5.82).
+Temporary probes (never committed) split them: the pose step 4.79 ms over 103 posed
+characters, serial; the projection built a palette for every WEARABLE of a posed character
+and threw it away (309 palettes, 3.05 ms) and re-packed the terrain's biome population every
+frame (2.0 ms); the VSM stamp asked a caster's reach once per perspective PAGE (2.2 M
+touches, 3.30 ms); the meshlet node wrote five tiny buffers per asset per frame (~1 600
+`queue.write_buffer`s, each its own staging copy); the GI node staged every root proxy of
+all 1 217 meshlet instances for the 40 m volume clip to discard.
+
+**What was taken:**
+- **The pose step on every core** (`inf_ecs::pose`): gather (serial, Guid order; the
+  bridge's triggers and blenders TAKEN, `vars` called) -> evaluate (every core through
+  `bevy_tasks`' ComputeTaskPool, `par_chunk_map_mut` in job order) -> merge (serial, Guid
+  order). Each character's arithmetic is the arithmetic it was; `clips` gained `+ Sync`.
+  Animation 4.75 -> 1.85 ms at 21:00 (instrument). Arm
+  `a_crowd_poses_each_character_as_it_poses_alone` (40 on the pool vs each alone).
+- **The reach asked once per perspective light** (`vsm_raster::stamp_perspective`): same
+  test, same inputs, same folds. Record vsm raster 7.66 -> 5.12 ms at 21:00 (instrument).
+- **The meshlet node's args arena** (`passes::vgeom::ArgsArena`): per-asset slots in two
+  shared buffers, one byte image per half, 3 writes a frame; the debug flags one node
+  uniform. vgeom record 3.01 -> 1.27 ms. Arm `tests/perf1c_arena.rs` (byte-identical frames
+  with every asset re-seated every frame over a 24-frame churning drive).
+- **The GI whole-instance reject for meshlet instances** (`proxy_bound`,
+  `vgeom_instance_reaches_volume`): an instance stages nothing only when no proxy can reach
+  the volume. GI record 3.47 -> 3.06 ms (*split inferred*).
+- **The worn-palette door** (`resolve_skinned_with_palette`, both stores, MIRROR-pinned): a
+  wearer's later draws are handed its palette. Projection 6.52 -> 4.35 ms at 21:00.
+- `ISLAND_FRAME_CEILING_MS` 90 -> **70** (noon p50 34.91 / p95 36.90, GPU 13.30; 21:00 p50
+  53.27 / p95 59.97, rounds 58.6-60.3, GPU 20.39 -- was 82.92 / 23.69).
+
+**THE WINDOW COUNTER, after (p50 / p95 ms, sim rate):** Play in New Window 1080p 21:00
+walk 29.8 / 32.5 0.98x (was 34.2 / 40.4 0.94x), run 31.9 / 34.6 0.99x (was 46.7 / 50.5
+0.73x); noon walk 25.3 / 27.6 0.99x. Standalone 1080p 21:00 walk 29.7 / 31.9 0.99x, run
+31.6 / 39.7 0.93x; embedded 21:00 walk 29.2 / 32.2 1.00x, run 32.2 / 33.7 0.99x. Stand legs
+23.9-27.1 / 24.9-29.8 at 1.00x everywhere. Worst leg: standalone 720p 21:00 run 36.9 /
+41.1 at 0.89x (step-bound on the strip, 2 x 14.8 ms).
+
+**BOTH RED ARMS STAY RED.** `perf1b_frame_gate::the_window_counter_holds_the_floor_at_real_
+time` over the twelve final sessions: worst p95 41.1; p95 <= 33 on 31 of 36 legs, but most
+walk/run legs still drop 0.2-1.3 s of backlog at 0.98-0.99x (hitches) and the arm allows
+none -- 12 of 36 legs pass it, 17 meet the brief's <= 0.1 s floor.
+`fps_instrument::the_shipped_island_by_the_hour`: the step is **5.75 ms at noon -- under
+`CITY_STEP_BUDGET_MS` 6.0 for the first time on the cooked island** -- and 9.67 at 21:00
+(animation 1.93, character move 1.84, solver 1.29, sync 1.15). 16.6 ms is reached nowhere.
+
+**NOT taken:** GPU-driven indirect (clause 1), the GI staging epoch cache, the VSM
+static/dynamic split, animation sim-LOD (replaced by the bit-identical parallel step), the
+waker set / character move / sync, the incremental projection, clauses 6-7. The brief's
+`perf1c_frame_gate.rs` was not written: the wave is judged by PERF1b's two arms,
+un-re-aimed.
+
+**PERF1c -> next (21:00 window 1080p walk / run, final tree):** submit 9.7 / 9.8 ms (indirect
+~3-4 d); vsm raster 5.7 / 5.9 CPU + 6.24 GPU (page split ~3 d); record graph 7.0 / 7.8 (GI
+epoch cache ~1.5 d); projection 3.7 / 4.4 (biome memo ~0.5 d, needs a stamp); the dropped
+backlog = hitches (the 288 ms activation step amortised ~1-2 d); the 21:00 step 9.67 vs 6.0
+(serial pose half ~0.5 d, character move ~1 d, waker set ~1.5 d). Battery on the final code:
+`AGGREGATE over 413 binaries: 7941 passed, 0 failed, 34 ignored`. No schema, dependency,
+lockfile, level or golden moved.
