@@ -566,10 +566,12 @@ mod tests {
     /// That is the clause-1 claim in full: the editor's blocks ARE the player's
     /// blocks, position for position and extent for extent.
     const EXPECTED: [(u64, usize, usize); 4] = [
-        (0x6437_8b2a_54b3_6b5a, 5054, 4677), // Office
-        (0xb254_2d28_93b0_ceff, 1950, 1801), // Shop
-        (0xc21c_5456_d6c1_78dc, 6194, 5811), // Apartment
-        (0x6e9c_c242_18ad_cca6, 2302, 2146), // House
+        // PAR1a: every room's fitting joined the instances (+510 / +234 / +514 /
+        // +190, one per non-rig fixture); the solids are unmoved.
+        (0x5904_6c2a_c5f7_29af, 5564, 4677), // Office
+        (0x7b2e_8737_18e7_a46d, 2184, 1801), // Shop
+        (0x8818_8e9d_be43_a869, 6708, 5811), // Apartment
+        (0x7107_4e1d_5745_ebbb, 2492, 2146), // House
     ];
 
     /// Four of the archetypes Harbour City's own blocks are built from.
