@@ -122,6 +122,11 @@ fn town(dormant: bool, reversed: bool) -> PhysicsWorld3D {
     w
 }
 
+/// A case's script: called before every step with the step index, the
+/// tracked bodies, and whether this is the reversed-order control run.
+type Act<'a> = dyn Fn(&mut PhysicsWorld3D, usize, &mut Vec<BodyId3D>, bool) + 'a;
+type ActMut<'a> = dyn FnMut(&mut PhysicsWorld3D, usize, &mut Vec<BodyId3D>, bool) + 'a;
+
 /// One run's record: per step, every tracked body's translation and the
 /// contact events by (pair, phase).
 type Record = Vec<(Vec<DVec3>, Vec<(ColliderId3D, ColliderId3D, bool, bool)>)>;
@@ -136,7 +141,7 @@ fn run(
     reversed: bool,
     steps: usize,
     setup: &dyn Fn(&mut PhysicsWorld3D),
-    act: &mut dyn FnMut(&mut PhysicsWorld3D, usize, &mut Vec<BodyId3D>, bool),
+    act: &mut ActMut<'_>,
 ) -> (Record, usize) {
     let mut w = town(dormant, reversed);
     setup(&mut w);
@@ -212,7 +217,7 @@ fn case(
     name: &str,
     steps: usize,
     setup: &dyn Fn(&mut PhysicsWorld3D),
-    act: &dyn Fn(&mut PhysicsWorld3D, usize, &mut Vec<BodyId3D>, bool),
+    act: &Act<'_>,
     min_starts: usize,
 ) {
     let (awake, _) = run(false, false, steps, setup, &mut |w, s, t, r| {
