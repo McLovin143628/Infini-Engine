@@ -1368,3 +1368,142 @@ fn a_room_fixture_is_dropped_past_its_draw_distance_and_the_swap_is_measured() {
         }
     }
 }
+
+/// **TWENTY ROOMS, DRAWN BY A SEEDED HASH, ARE BOXED IN THEIR SHELLS AND LIT
+/// FROM INSIDE** (audit PAR1a, priorities a and i').
+///
+/// Reads: twenty rooms drawn by a splitmix hash across all fourteen
+/// archetypes, each building at its archetype's TOP storey count, the room
+/// drawn from the top two storeys: its fixture's box inside the building's
+/// solid bounds, every ceiling light under its slab and in the storey's upper
+/// half, and — rendered from inside the room at eye height toward the floor
+/// under its first lamp — the room lit by its own fixtures alone vs the same
+/// room dark (the view's median, lit >= dark + 5; the floor patch under the
+/// lamp is reported, since a desk or a stair flight may stand on it). A lamp inside a wall, above the slab or in a void reads dark
+/// here. The base tree hangs no fixture in eighteen of these rooms' kinds.
+#[test]
+fn twenty_rooms_drawn_by_hash_are_boxed_in_their_shells_and_lit_from_inside() {
+    let Some(gpu) = gpu() else { return };
+    let mix = |mut z: u64| {
+        z = z.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    };
+    let mut rows = Vec::new();
+    let mut archetypes = BTreeSet::new();
+    let mut k = 0u64;
+    while rows.len() < 20 {
+        let h = mix(0x5041_5231_4100 + k);
+        k += 1;
+        let arch = ArchetypeId::ALL[(h % ArchetypeId::ALL.len() as u64) as usize];
+        // Cover every archetype once before any repeats.
+        if archetypes.len() < ArchetypeId::ALL.len() && archetypes.contains(&arch) {
+            continue;
+        }
+        let floors = inf_pcg::building::archetype(arch).floors.1.max(1);
+        let out = building(arch, floors, h >> 16, true);
+        let plan = &out.plan;
+        let top = plan.floors.saturating_sub(1);
+        let pick: Vec<usize> = plan
+            .rooms
+            .iter()
+            .enumerate()
+            .filter(|(ri, r)| {
+                r.floor + 1 >= top.max(1)
+                    && out.lights.iter().any(|l| {
+                        l.tag.room == *ri as u32 && l.tag.row.has_fitting() && l.clip.is_some()
+                    })
+            })
+            .map(|(ri, _)| ri)
+            .collect();
+        if pick.is_empty() {
+            continue;
+        }
+        let ri = pick[((h >> 8) % pick.len() as u64) as usize];
+        archetypes.insert(arch);
+        let room = plan.rooms[ri];
+        let mine: Vec<&PcgLight> = out
+            .lights
+            .iter()
+            .filter(|l| l.tag.room == ri as u32 && l.tag.row.has_fitting() && l.clip.is_some())
+            .collect();
+        // The building's solid bounds.
+        let (mut lo, mut hi) = (DVec3::splat(f64::MAX), DVec3::splat(f64::MIN));
+        for c in &out.colliders {
+            lo = lo.min(c.center - c.half_extents.abs().max_element() * DVec3::ONE);
+            hi = hi.max(c.center + c.half_extents.abs().max_element() * DVec3::ONE);
+        }
+        let floor_y = plan.floor_y(room.floor);
+        let a = inf_pcg::building::archetype(arch);
+        let ceiling = floor_y + a.floor_height - a.slab_thickness;
+        for l in &mine {
+            let c = l.clip.expect("boxed");
+            assert!(
+                c.center.cmpge(lo).all() && c.center.cmple(hi).all(),
+                "{arch:?} room {ri}: its box centre {:?} is outside the building {lo:?}..{hi:?}",
+                c.center
+            );
+            assert!(
+                l.at.y < ceiling && l.at.y > floor_y + 0.25,
+                "{arch:?} room {ri} floor {}: a {} at y {:.2} outside its storey {floor_y:.2}..{ceiling:.2}",
+                room.floor,
+                l.tag.row.name(),
+                l.at.y
+            );
+        }
+        // Rendered from inside: eye at 1.6 m in the room's inner rect, a
+        // third of the way from a corner, toward the floor under the first lamp.
+        let inner = room.rect.inset(a.wall_thickness * 0.5 + 0.2);
+        let lamp = mine[0].at;
+        let eye = DVec3::new(
+            inner.min.x + inner.size_x() * 0.3,
+            floor_y + 1.6,
+            inner.min.y + inner.size_z() * 0.3,
+        );
+        let under = DVec3::new(lamp.x, floor_y + 0.02, lamp.z);
+        let target = if (DVec2::new(eye.x, eye.z) - DVec2::new(under.x, under.z)).length() < 0.5 {
+            DVec3::new(inner.max.x, floor_y, inner.max.y)
+        } else {
+            under
+        };
+        let view = look(eye, target);
+        let lit_scene = building_scene(
+            &out,
+            &|l| l.tag.room == ri as u32 && l.tag.row.has_fitting(),
+            true,
+        );
+        let dark_scene = building_scene(&out, &|_| false, true);
+        let lit = render(&gpu, &lit_scene, &view);
+        let dark = render(&gpu, &dark_scene, &view);
+        let (pl, pd) = (
+            patch_at(&lit, &view, target, 10),
+            patch_at(&dark, &view, target, 10),
+        );
+        let (frame_l, frame_d) = (p50(&lit, 0, 0, W, H), p50(&dark, 0, 0, W, H));
+        println!(
+            "PAR1a SAMPLE {:>2}: {:<13} floor {}/{} {:<10} {} x{} — floor under the lamp lit {pl:.1} dark {pd:.1}; the view's median lit {frame_l:.1} dark {frame_d:.1}",
+            rows.len() + 1,
+            arch.name(),
+            room.floor,
+            plan.floors - 1,
+            format!("{:?}", room.kind),
+            mine[0].tag.row.name(),
+            mine.len()
+        );
+        rows.push((arch, room.floor, frame_l, frame_d));
+    }
+    assert_eq!(
+        archetypes.len(),
+        ArchetypeId::ALL.len(),
+        "the sample missed an archetype"
+    );
+    // The room's own view, lit vs dark (the floor patch under the lamp is
+    // reported; a desk or a stair flight can stand on it).
+    for (arch, floor, fl, fd) in &rows {
+        assert!(
+            *fl >= *fd + 5.0,
+            "{arch:?} floor {floor}: a sampled room's view reads {fl:.1} lit vs {fd:.1} dark from inside"
+        );
+    }
+}

@@ -1144,8 +1144,14 @@ pub fn project_scene_full(
                 w.get::<GlobalTransform>(entity).map(|g| g.translation()),
                 (vol.extent.x, vol.extent.y),
             );
+            // Audit PAR1a (a'): the room the anchor stands in; the same building's
+            // rooms more than a storey away are behind its slabs.
+            let here = inf_ecs::sky::fixture_anchor_room(fixture_anchor, vol_far, &vol.lights);
             for l in &vol.lights {
                 if l.draw_m > 0.0 && vol_far > f64::from(l.draw_m) {
+                    continue;
+                }
+                if inf_ecs::sky::fixture_behind_slabs(here, l) {
                     continue;
                 }
                 // **THE NIGHT SCHEDULE** (wave PAR0 clause 5): the fixture's

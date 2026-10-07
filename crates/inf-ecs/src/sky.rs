@@ -933,6 +933,54 @@ pub fn fixture_volume_far(anchor: Option<DVec3>, centre: Option<DVec3>, extent: 
     (dx * dx + dz * dz).sqrt() - FIXTURE_ANCHOR_SLACK_M
 }
 
+/// **The room the fixture anchor stands in** (audit PAR1a, a'): `(building,
+/// floor)` of the first room-boxed light of `lights` whose box holds `anchor`,
+/// looked for only when the anchor is inside this volume's block (`vol_far`
+/// from [`fixture_volume_far`]). `None` with no anchor (the editor's host) or
+/// outside every room.
+pub fn fixture_anchor_room(
+    anchor: Option<DVec3>,
+    vol_far: f64,
+    lights: &[crate::components::ScatteredLight],
+) -> Option<(u32, u32)> {
+    let a = anchor?;
+    if vol_far > -FIXTURE_ANCHOR_SLACK_M {
+        return None;
+    }
+    lights.iter().find_map(|l| {
+        let c = l.clip?;
+        if l.room == u32::MAX {
+            return None;
+        }
+        let d = a - c.center;
+        let du = d.x * c.u.x + d.z * c.u.y;
+        let dv = -d.x * c.u.y + d.z * c.u.x;
+        (du.abs() <= c.half.x && dv.abs() <= c.half.z && d.y.abs() <= c.half.y)
+            .then_some((l.building, l.floor))
+    })
+}
+
+/// **Whether a room's lamp is behind the slabs of the building the anchor is
+/// in** (audit PAR1a, a'): a room-boxed light of the SAME building more than
+/// one storey from the anchor's room lights nothing a viewer inside that
+/// building can see — its box stops at its own slabs, and a stair well shows
+/// one storey either way. Such lights are not submitted, which is what keeps
+/// a never-closing institution (every room of every storey lit all night)
+/// from filling the frame's froxels with lamps behind floors. Every other
+/// light — other buildings seen through windows, exterior lights, the
+/// openings' spills, task lamps — is untouched.
+pub fn fixture_behind_slabs(
+    here: Option<(u32, u32)>,
+    l: &crate::components::ScatteredLight,
+) -> bool {
+    match here {
+        Some((b, f)) => {
+            l.clip.is_some() && l.room != u32::MAX && l.building == b && l.floor.abs_diff(f) > 1
+        }
+        None => false,
+    }
+}
+
 /// The level clock's rate (simulated seconds per simulated second); `0` when the
 /// level has no clock, which is also what "frozen" means.
 pub fn time_of_day_rate(world: &EcsWorld) -> f64 {
@@ -1075,6 +1123,61 @@ pub fn weather_wind_speed(world: &EcsWorld) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    /// **A room's lamp behind its own building's slabs is not submitted**
+    /// (audit PAR1a, a'): the anchor in building 3's floor-0 room; the same
+    /// building's floor-2 room is hidden, its floor-1 room (the stair well's
+    /// storey) and its spill/exterior lights are kept, building 4's floor-2
+    /// room (seen through windows) is kept; no anchor, or an anchor outside
+    /// the block, hides nothing. Mutation: `> 1` -> `> 99` reds the hidden case.
+    #[test]
+    fn a_rooms_lamp_behind_the_slabs_of_the_anchors_building_is_not_submitted() {
+        use crate::components::{FixtureOccupancy, LightSchedule, ScatteredClip, ScatteredLight};
+        use glam::{DVec2, DVec3};
+        let room = |building: u32, floor: u32, boxed: bool| ScatteredLight {
+            at: DVec3::new(0.0, f64::from(floor) * 3.5 + 2.6, 0.0),
+            dir: DVec3::NEG_Y,
+            sweep: ([1.0; 3], [1.0; 3]),
+            intensity: 2.0,
+            range_m: 6.0,
+            inner_deg: 180.0,
+            outer_deg: 180.0,
+            cycle_hz: 0.0,
+            phase: 0,
+            phases: 1,
+            schedule: LightSchedule::Always,
+            occupancy: FixtureOccupancy::Crew,
+            seed: 0,
+            building,
+            floor,
+            room: floor * 10,
+            row: 0,
+            clip: boxed.then_some(ScatteredClip {
+                center: DVec3::new(0.0, f64::from(floor) * 3.5 + 1.6, 0.0),
+                half: DVec3::new(3.0, 1.65, 3.0),
+                u: DVec2::X,
+            }),
+            draw_m: 96.0,
+            shadow: false,
+        };
+        let lights = vec![
+            room(3, 0, true),
+            room(3, 1, true),
+            room(3, 2, true),
+            room(4, 2, true),
+            room(3, 2, false),
+        ];
+        let anchor = Some(DVec3::new(0.5, 1.2, -0.5));
+        let here = super::fixture_anchor_room(anchor, -super::FIXTURE_ANCHOR_SLACK_M, &lights);
+        assert_eq!(here, Some((3, 0)));
+        let hidden: Vec<bool> = lights
+            .iter()
+            .map(|l| super::fixture_behind_slabs(here, l))
+            .collect();
+        assert_eq!(hidden, vec![false, false, true, false, false]);
+        assert_eq!(super::fixture_anchor_room(None, -20.0, &lights), None);
+        assert_eq!(super::fixture_anchor_room(anchor, 5.0, &lights), None);
+    }
+
     /// **THE OCCUPANCY HALF, measured over a town of rooms** (wave PAR1a
     /// clause 4): offices are full at noon, half lit at 19:00 and dark but for
     /// a minority at 02:00; homes are lit in the evening and dark but for a
