@@ -828,6 +828,10 @@ public class InfInput {
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
+  [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
+  [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
+  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
   [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern IntPtr GetParent(IntPtr h);
   [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
@@ -949,6 +953,26 @@ if ($hasWindow) {
     # 12.1-12.8 m. The click exists to give an EMBEDDED player the focus its
     # reparented child window is denied; a top-level one needs raising, not
     # clicking.
+    # **A WINDOW AS LARGE AS THE SCREEN, PLACED WHOLE** (the PERF1b audit): a
+    # 1920x1080 client inside its frame runs off a 1920x1080 screen, and the
+    # frame counter (top-right) was cut in every 1080p frame. When the client
+    # does not fit beside its frame, the window is moved so its CLIENT origin
+    # is the screen's (the title bar goes above the top edge); the size is not
+    # touched, so the swap chain is the size the session asked for.
+    $client = New-Object InfInput+RECT
+    $origin = New-Object InfInput+POINT
+    if ([InfInput]::GetClientRect($player.MainWindowHandle, [ref]$client) -and [InfInput]::ClientToScreen($player.MainWindowHandle, [ref]$origin)) {
+        $outside = ($target.Right -gt $screen.Width) -or ($target.Bottom -gt $screen.Height) -or ($origin.X -lt 0) -or ($origin.Y -lt 0)
+        if ($outside -and $client.Right -le $screen.Width -and $client.Bottom -le $screen.Height) {
+            $dx = $origin.X - $target.Left; $dy = $origin.Y - $target.Top
+            [InfInput]::SetWindowPos($player.MainWindowHandle, [IntPtr]::Zero, -$dx, -$dy, 0, 0, 0x0015) | Out-Null   # NOSIZE|NOZORDER|NOACTIVATE
+            Start-Sleep -Milliseconds 300
+            [InfInput]::GetWindowRect($player.MainWindowHandle, [ref]$target) | Out-Null
+            $cx = [int](($target.Left + $target.Right) / 2)
+            $cy = [int](($target.Top + $target.Bottom) / 2)
+            Say ("the player's {0}x{1} client did not fit beside its frame; moved so the client is the screen's origin" -f $client.Right, $client.Bottom)
+        }
+    }
     Say ("the player owns its own window [{0},{1} {2}x{3}]; raising it rather than clicking into it" -f $target.Left, $target.Top, ($target.Right - $target.Left), ($target.Bottom - $target.Top))
     [InfInput]::ShowWindow($player.MainWindowHandle, 5) | Out-Null   # SW_SHOW
     [InfInput]::SetForegroundWindow($player.MainWindowHandle) | Out-Null
