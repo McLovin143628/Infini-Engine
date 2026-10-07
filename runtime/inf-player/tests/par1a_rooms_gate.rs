@@ -610,3 +610,377 @@ fn an_upper_floor_window_is_lit_from_the_street_by_its_rooms_own_lamp() {
         "the lit window {wl:.1} vs the wall beside it {pl:.1}"
     );
 }
+
+// ── the loaded island: the census world-side, the 24 h sweep, PIE == shipping ─
+
+use inf_player::runtime_sim::RuntimeSim;
+
+fn fixture_recipe() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../samples/island-fixture/island.toml")
+}
+
+/// Build + cook the CI-scale island; the shipping sim (the pack) and the PIE
+/// sim (the loose level the author saved), both with their streamers, built
+/// the way `island_gate`'s two hosts are.
+fn fixture_hosts(tmp: &std::path::Path) -> (RuntimeSim, RuntimeSim) {
+    let recipe =
+        inf_island::IslandRecipe::load(&fixture_recipe()).expect("the fixture recipe loads");
+    let build = inf_island::build_island(&recipe, &inf_island::BuildOptions::default())
+        .expect("the fixture island builds");
+    let proj = tmp.join("island");
+    inf_project::ProjectManifest::new(&recipe.name, "blank-3d")
+        .save(&proj)
+        .expect("the project scaffolds");
+    let content = proj.join("Content");
+    inf_island::write_content(&build, &content).expect("the island's content writes");
+    let out = tmp.join("out");
+    inf_packager::cook(&proj, &out, &inf_packager::CookOptions::default())
+        .expect("the island cooks");
+    let source = inf_player::level::PackLevelSource::open(&out).expect("the pack opens");
+    let mut built = inf_player::build_world_from_pack(&source).expect("the world builds");
+    let partition = built.take_partition();
+    let pcg = built.pcg_context();
+    let mut ship = inf_player::sim_from_built(built);
+    inf_player::attach_cell_streaming(&mut ship, &partition, pcg);
+    inf_player::attach_terrain_streaming(
+        &mut ship,
+        &inf_player::TerrainContent::Pack(source.clone()),
+    );
+
+    let slug = inf_island::slug(&recipe.name);
+    let source = inf_player::level::DevDirLevelSource::new(content.join(format!("{slug}.inf_lvl")));
+    let terrains = inf_player::level::terrain_paths_by_guid_from_dir(&content);
+    let pcg_terrains = terrains.clone();
+    let (skeletons, clips, machines) = inf_player::level::load_anim_assets_from_dir(&content);
+    let builder = inf_player::level::InfSceneWorldBuilder::with_defaults(
+        inf_player::level::load_actor_classes_from_dir(&content),
+    )
+    .with_bindings(inf_player::level::load_actor_classes_by_guid_from_dir(
+        &content,
+    ))
+    .with_pcgs(inf_player::level::load_pcg_payloads_by_guid_from_dir(
+        &content,
+    ))
+    .with_biome_sets(inf_player::level::load_biome_sets_by_guid_from_dir(
+        &content,
+    ))
+    .with_anim_assets(skeletons, clips, machines)
+    .with_audio(inf_player::level::load_audio_assets_from_dir(&content))
+    .with_terrain_resolver(std::sync::Arc::new(move |g| {
+        inf_player::level::terrain_source_from_file(pcg_terrains.get(&g)?).ok()
+    }));
+    let mut built = inf_player::level::load(&source, &builder).expect("the loose level builds");
+    let partition = built.take_partition();
+    let pcg = built.pcg_context();
+    let mut pie = inf_player::sim_from_built(built);
+    inf_player::attach_cell_streaming(&mut pie, &partition, pcg);
+    inf_player::attach_terrain_streaming(&mut pie, &inf_player::TerrainContent::Dir(terrains));
+    (ship, pie)
+}
+
+/// Put the hero at `at`, freeze the clock at local `hour`, and step `steps`.
+fn stand(sim: &mut RuntimeSim, at: DVec3, hour: f64, steps: usize) {
+    let hero = sim
+        .world()
+        .world()
+        .iter_entities()
+        .find(|e| {
+            e.get::<inf_ecs::components::CharacterMovement>()
+                .is_some_and(|m| m.player_controlled)
+        })
+        .map(|e| e.id());
+    if let Some(e) = hero {
+        if let Some(mut t) = sim
+            .world_mut()
+            .world_mut()
+            .get_mut::<inf_ecs::components::Transform>(e)
+        {
+            t.translation = inf_ecs::math::Vec3d::new(at.x, at.y + 2.0, at.z);
+        }
+    }
+    {
+        let w = sim.world_mut().world_mut();
+        let mut q = w.query::<&mut inf_ecs::components::TimeOfDay>();
+        for mut tod in q.iter_mut(w) {
+            tod.seconds = (hour * 3600.0 - tod.longitude_deg * 240.0).rem_euclid(86_400.0);
+            tod.rate = 0.0;
+        }
+    }
+    sim.world_mut().mark_dirty();
+    for _ in 0..steps {
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+    }
+}
+
+fn project_world(sim: &RuntimeSim) -> RenderScene {
+    let mut scene = RenderScene::default();
+    let voxels = inf_voxel::VoxelVolumes::default();
+    let mut meshes = inf_render::ScatterMeshes::new();
+    inf_player::scatter_mesh::add_building_modules(&mut meshes);
+    inf_player::render::project_scene_full(
+        &mut scene,
+        sim,
+        1.0,
+        &inf_player::vmesh::VmeshRegistry::default(),
+        &inf_player::skinned::SkinnedRegistry::new(),
+        &voxels,
+        &mut inf_render::DebrisCache::default(),
+        None,
+        &meshes,
+        &std::collections::HashMap::new(),
+    );
+    scene
+}
+
+/// The projected light list and its bounds as bytes — what the two hosts
+/// must agree on.
+fn light_bytes(scene: &RenderScene) -> Vec<u8> {
+    let mut b = Vec::new();
+    for l in &scene.lights {
+        b.push(l.kind as u8);
+        for f in l
+            .color
+            .iter()
+            .chain([l.intensity, l.range, l.inner_cos, l.outer_cos].iter())
+        {
+            b.extend_from_slice(&f.to_bits().to_le_bytes());
+        }
+        for f in [l.position.x, l.position.y, l.position.z] {
+            b.extend_from_slice(&f.to_bits().to_le_bytes());
+        }
+        b.push(u8::from(l.cast_shadows));
+    }
+    for lb in &scene.light_bounds {
+        b.extend_from_slice(&lb.light.to_le_bytes());
+        b.extend_from_slice(&lb.draw_m.to_bits().to_le_bytes());
+        if let Some(c) = lb.clip {
+            for f in [c.center.x, c.center.y, c.center.z] {
+                b.extend_from_slice(&f.to_bits().to_le_bytes());
+            }
+        }
+    }
+    b
+}
+
+/// Every resident volume's fixtures: `(volume guid, centre, the lights)`.
+fn resident_fixtures(sim: &RuntimeSim) -> Vec<(DVec3, Vec<inf_ecs::components::ScatteredLight>)> {
+    let w = sim.world().world();
+    let mut out = Vec::new();
+    for e in w.iter_entities() {
+        let Some(v) = e.get::<inf_ecs::components::PcgVolume>() else {
+            continue;
+        };
+        if v.lights.is_empty() {
+            continue;
+        }
+        let c = e
+            .get::<inf_ecs::components::GlobalTransform>()
+            .map(|g| g.translation())
+            .unwrap_or(DVec3::ZERO);
+        out.push((c, v.lights.clone()));
+    }
+    out.sort_by(|a, b| a.0.x.total_cmp(&b.0.x).then(a.0.z.total_cmp(&b.0.z)));
+    out
+}
+
+/// The occupancy class a census table groups a fixture under.
+fn class_of(l: &inf_ecs::components::ScatteredLight) -> &'static str {
+    use inf_ecs::components::FixtureOccupancy as O;
+    if l.room == u32::MAX {
+        return "exterior";
+    }
+    match (l.occupancy, l.schedule) {
+        (O::Crew, inf_ecs::components::LightSchedule::Always) => "never closes",
+        (O::Crew, _) => "venue",
+        (O::Work, _) => "work",
+        (O::Shop, _) => "shop",
+        (O::Home(inf_ecs::components::HomeRoom::Living), _) => "home living",
+        (O::Home(inf_ecs::components::HomeRoom::Bedroom), _) => "home bedroom",
+        (O::Home(_), _) => "home other",
+    }
+}
+
+/// **THE CENSUS WORLD-SIDE, THE 24 H SWEEP AND PIE == SHIPPING** (clauses 2
+/// and 4).
+///
+/// Reads: the CI island loaded by BOTH hosts (the cooked pack and the loose
+/// level), the hero in the first settlement's core. (1) Every resident
+/// volume's `ScatteredLight`s against the plans its block builds — zero rooms
+/// without a fixture, world-side. (2) Every hour of a day: the rooms lit
+/// (`fixture_occupancy` × `fixture_level`, the projector's own door) by
+/// occupancy class, against the society's day: workplaces full at noon and
+/// dark but for a minority at 02:00, homes lit in the evening and dark at
+/// noon (the Dusk half) and in the small hours, the never-closing rooms the
+/// same at every hour, porches dusk to dawn. (3) The projected light list
+/// byte-identical between the hosts at every hour. Mutation: occupancy frozen
+/// at 1 reds (2). The base tree has no room fixtures: (1) and (2) fail.
+#[test]
+fn the_24h_sweep_lights_rooms_by_who_is_in_them_and_pie_equals_shipping() {
+    let tmp = tempfile::tempdir().expect("a temp dir");
+    let (mut ship, mut pie) = fixture_hosts(tmp.path());
+    let recipe =
+        inf_island::IslandRecipe::load(&fixture_recipe()).expect("the fixture recipe loads");
+    let design = inf_island::read_design(&recipe).expect("the design reads");
+    let plans = inf_editor_core::settlement::settlements(&design);
+    let core = plans[0].centre;
+    let at = DVec3::new(core.x, 0.0, core.y);
+    for sim in [&mut ship, &mut pie] {
+        stand(sim, at, 21.0, 600);
+    }
+
+    // (1) the census, world-side.
+    let resident = resident_fixtures(&ship);
+    assert!(!resident.is_empty(), "no volume with fixtures streamed in");
+    let mut table: BTreeMap<(ArchetypeId, u32), CensusRow> = BTreeMap::new();
+    let mut matched = 0usize;
+    for (c, lights) in &resident {
+        let Some(block) = plans
+            .iter()
+            .flat_map(|s| s.blocks.iter())
+            .find(|b| (b.centre.x - c.x).abs() < 1e-6 && (b.centre.y - c.z).abs() < 1e-6)
+        else {
+            continue;
+        };
+        matched += 1;
+        let guid =
+            inf_editor_core::settlement::block_guid(&recipe.name, block.site, block.col, block.row);
+        let e = eval_block(block, guid);
+        let lit = lit_rooms(lights.iter().map(|l| (l.building, l.room)));
+        fixtures::census(&e.plans, &lit, &mut table);
+    }
+    let (rooms, unlit) = table
+        .values()
+        .fold((0, 0), |a, r| (a.0 + r.rooms, a.1 + r.unlit));
+    println!(
+        "PAR1a WORLD CENSUS: {matched} resident block volume(s), {rooms} rooms, {unlit} unlit"
+    );
+    assert!(
+        matched > 0 && rooms > 100,
+        "{matched} volumes, {rooms} rooms"
+    );
+    assert_eq!(
+        unlit, 0,
+        "{unlit} of {rooms} resident rooms hold no fixture"
+    );
+
+    // (2) + (3) the sweep.
+    let mut by_hour: Vec<BTreeMap<&'static str, (usize, usize)>> = Vec::new();
+    let mut projected = Vec::new();
+    for hour in 0..24 {
+        let h = f64::from(hour) + 0.5;
+        for sim in [&mut ship, &mut pie] {
+            stand(sim, at, h, 2);
+        }
+        let (a, b) = (project_world(&ship), project_world(&pie));
+        assert_eq!(
+            light_bytes(&a),
+            light_bytes(&b),
+            "{h:.1} h: the two hosts projected different light lists ({} vs {})",
+            a.lights.len(),
+            b.lights.len()
+        );
+        projected.push((a.lights.len(), a.light_bounds.len()));
+        let hour_now = inf_ecs::sky::local_hour(ship.world());
+        let sun_y = inf_ecs::sky::resolve_sky(ship.world())
+            .map(|s| s.sun.y as f32)
+            .unwrap_or(1.0);
+        let mut row: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
+        let mut seen: BTreeSet<(usize, u32, u32)> = BTreeSet::new();
+        for (vi, (_, lights)) in resident_fixtures(&ship).iter().enumerate() {
+            for l in lights {
+                if !seen.insert((
+                    vi,
+                    l.building,
+                    if l.room == u32::MAX {
+                        u32::MAX - l.row as u32
+                    } else {
+                        l.room
+                    },
+                )) {
+                    continue;
+                }
+                let occ = inf_ecs::sky::fixture_occupancy(l.occupancy, l.seed, l.room, hour_now);
+                let lvl = inf_ecs::sky::fixture_level(l.schedule, hour_now, sun_y, occ);
+                let e = row.entry(class_of(l)).or_default();
+                e.0 += 1;
+                if lvl > 0.5 {
+                    e.1 += 1;
+                }
+            }
+        }
+        by_hour.push(row);
+    }
+    println!("PAR1a SWEEP (rooms lit / rooms, by hour; projected lights, bounds):");
+    for (h, row) in by_hour.iter().enumerate() {
+        let cells: Vec<String> = row
+            .iter()
+            .map(|(k, (n, l))| format!("{k} {l}/{n}"))
+            .collect();
+        println!(
+            "  {h:02}:30  {}  | {} lights, {} bounds",
+            cells.join(", "),
+            projected[h].0,
+            projected[h].1
+        );
+    }
+    let share = |h: usize, k: &str| {
+        by_hour[h]
+            .get(k)
+            .map_or(f64::NAN, |(n, l)| *l as f64 / (*n).max(1) as f64)
+    };
+    assert!(
+        share(12, "work") > 0.95,
+        "workplaces at noon {}",
+        share(12, "work")
+    );
+    assert!(
+        share(2, "work") < 0.15,
+        "workplaces at 02:30 {}",
+        share(2, "work")
+    );
+    assert!(
+        share(19, "work") > share(2, "work") + 0.1,
+        "the evening tail"
+    );
+    // Homes: lit when it is dark AND the household is up — the living room
+    // through the evening, the bedroom going to bed; none at noon (the Dusk
+    // half), a minority in the small hours.
+    // (The CI island's resident blocks hold apartments' and a hotel's
+    // bedrooms; living rooms are held by `inf_ecs`'s own occupancy arm.)
+    let held = |k: &str| by_hour[0].get(k).is_some_and(|(n, _)| *n >= 20);
+    if held("home living") {
+        assert!(share(12, "home living") < 0.05, "living rooms at noon");
+        assert!(share(21, "home living") > 0.45, "living rooms at 21:30");
+        assert!(share(4, "home living") < 0.12, "living rooms at 04:30");
+    }
+    assert!(
+        held("home bedroom"),
+        "the resident blocks hold no dwelling bedrooms"
+    );
+    assert!(share(12, "home bedroom") < 0.05, "bedrooms lit at noon");
+    assert!(
+        share(23, "home bedroom") > 1.5 * share(4, "home bedroom"),
+        "bedrooms at 23:30 {} vs 04:30 {}",
+        share(23, "home bedroom"),
+        share(4, "home bedroom")
+    );
+    if by_hour[0].contains_key("never closes") {
+        for h in 0..24 {
+            assert_eq!(
+                share(h, "never closes"),
+                1.0,
+                "a never-closing room dark at {h}:30"
+            );
+        }
+    }
+    assert!(
+        share(12, "exterior") < 0.05 && share(22, "exterior") > 0.95,
+        "porches dusk to dawn"
+    );
+    assert!(
+        projected[21].0 > 100 && projected[21].1 + 1 >= projected[21].0,
+        "21:30 projects {} lights, {} of them bounded",
+        projected[21].0,
+        projected[21].1
+    );
+}
