@@ -1712,6 +1712,24 @@ impl EngineRenderer {
             .map_or((0, 0), passes::vgeom::VgeomNode::bind_group_counts)
     }
 
+    /// The meshlet node's cull-uniform / indirect-args queue writes,
+    /// cumulative (wave PERF1c) -- see
+    /// `passes::vgeom::VgeomNode::arg_write_count`.
+    pub fn vgeom_arg_write_count(&self) -> u64 {
+        self.graph
+            .node::<passes::vgeom::VgeomNode>()
+            .map_or(0, passes::vgeom::VgeomNode::arg_write_count)
+    }
+
+    /// The arena equivalence arm's switch (wave PERF1c) -- see
+    /// `passes::vgeom::VgeomNode::set_arena_shuffle`.
+    #[doc(hidden)]
+    pub fn set_vgeom_arena_shuffle(&mut self, on: bool) {
+        if let Some(n) = self.graph.node_mut::<passes::vgeom::VgeomNode>() {
+            n.set_arena_shuffle(on);
+        }
+    }
+
     /// The equivalence arm's switch (wave PERF1) -- see
     /// `passes::vgeom::VgeomNode::set_cluster_tile_cache`.
     #[doc(hidden)]

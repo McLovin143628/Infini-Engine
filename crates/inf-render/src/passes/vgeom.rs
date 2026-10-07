@@ -701,12 +701,12 @@ impl CullPipeline {
     fn bind_group(
         &self,
         gpu: &GpuContext,
-        params: &wgpu::Buffer,
+        params: wgpu::BufferBinding<'_>,
         pools: &VgeomPoolBuffers,
         remap: &wgpu::Buffer,
         instances: &wgpu::Buffer,
         visible: &wgpu::Buffer,
-        draw_args: &wgpu::Buffer,
+        draw_args: wgpu::BufferBinding<'_>,
         hzb: &wgpu::TextureView,
         prev_visible: &wgpu::Buffer,
         cur_visible: &wgpu::Buffer,
@@ -718,7 +718,7 @@ impl CullPipeline {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: params.as_entire_binding(),
+                    resource: wgpu::BindingResource::Buffer(params),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -734,7 +734,7 @@ impl CullPipeline {
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
-                    resource: draw_args.as_entire_binding(),
+                    resource: wgpu::BindingResource::Buffer(draw_args),
                 },
                 wgpu::BindGroupEntry {
                     binding: 5,
@@ -969,12 +969,12 @@ pub fn cull_visible_source(
     let cull = CullPipeline::new(gpu);
     let bg = cull.bind_group(
         gpu,
-        &params_buf,
+        params_buf.as_entire_buffer_binding(),
         &pools,
         &remap,
         &inst_buf,
         &visible,
-        &draw_args,
+        draw_args.as_entire_buffer_binding(),
         &hzb,
         &vis_flags,
         &vis_flags_cur,
@@ -1118,6 +1118,10 @@ struct CullBgKey {
     buffers: [wgpu::Buffer; 9],
     /// `0` for the dummy pyramid, else the HZB chain's generation plus one.
     hzb: u64,
+    /// The asset's byte offsets into the [`ArgsArena`]'s uniform and args
+    /// buffers (wave PERF1c) -- a slot is part of what the group binds.
+    params_at: u64,
+    args_at: u64,
 }
 
 /// What a raster bind group binds, by identity (wave PERF1).
@@ -1160,6 +1164,163 @@ impl<K: PartialEq, T> TwoSlot<K, T> {
     }
 }
 
+/// **Every drawn asset's cull uniforms and indirect args, in two shared
+/// buffers** (wave PERF1c, clause 2).
+///
+/// # The row it retires
+///
+/// Each resident asset owned five tiny buffers -- the early and late cull
+/// uniforms, the early and late indirect args and a debug-flags uniform -- and
+/// the record path wrote all five every frame through `queue.write_buffer`. On
+/// the shipped island (320 resident assets) that was ~1 600 queue writes a frame,
+/// each of which wgpu turns into its own staging allocation and its own copy at
+/// submit, for payloads of 16 to 224 bytes. The vgeom node's asset loop measured
+/// **2.1 ms** of CPU at 21:00 with the writes as its largest part.
+///
+/// Now every asset owns a SLOT: its early uniform and args live at
+/// `slot × stride` in the first half of the two arena buffers and its late ones
+/// at `(cap + slot) × stride` in the second. The bind groups bind a sub-range
+/// (a static offset, so no shader and no layout changed), the raster's indirect
+/// draw reads at an offset, and the CPU fills one contiguous byte image per
+/// half and writes it with ONE `write_buffer` -- three writes a frame instead
+/// of ~1 600. The debug flags, which are a constant of the frame's settings and
+/// were written per asset, are one node-level uniform written when they change.
+///
+/// The bytes the shaders read are the bytes they read before: the same
+/// `CullParamsGpu` and the same `[max_tri × 3, 0, 0, 0]` reset, at an offset.
+/// `the_meshlet_frame_is_the_same_frame_through_the_arena` holds the pixels.
+struct ArgsArena {
+    /// Asset -> slot. An asset that leaves the frame's draw set gives its slot
+    /// back on the next frame's [`ArgsArena::begin`].
+    slots: BTreeMap<u128, u32>,
+    free: Vec<u32>,
+    /// Slots per half.
+    cap: u32,
+    /// Bytes per slot: the larger of the uniform and storage offset alignments
+    /// this device demands and the uniform's own size.
+    stride: u64,
+    params: wgpu::Buffer,
+    args: wgpu::Buffer,
+    /// The equivalence arm's switch: every frame re-seats every asset in a
+    /// rotated order, so no asset keeps its slot (and its offsets) two frames
+    /// running. Off in every shipped path.
+    shuffle: bool,
+    rotation: u32,
+}
+
+/// Slots a fresh arena holds per half before it first grows.
+const ARENA_INITIAL_SLOTS: u32 = 64;
+
+impl ArgsArena {
+    fn new(gpu: &GpuContext) -> Self {
+        let limits = gpu.device.limits();
+        let align = u64::from(
+            limits
+                .min_uniform_buffer_offset_alignment
+                .max(limits.min_storage_buffer_offset_alignment),
+        );
+        let size = std::mem::size_of::<CullParamsGpu>() as u64;
+        let stride = size.div_ceil(align) * align;
+        let (params, args) = Self::buffers(gpu, ARENA_INITIAL_SLOTS, stride);
+        Self {
+            slots: BTreeMap::new(),
+            free: Vec::new(),
+            cap: ARENA_INITIAL_SLOTS,
+            stride,
+            params,
+            args,
+            shuffle: false,
+            rotation: 0,
+        }
+    }
+
+    fn buffers(gpu: &GpuContext, cap: u32, stride: u64) -> (wgpu::Buffer, wgpu::Buffer) {
+        let bytes = u64::from(cap) * 2 * stride;
+        let params = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("vgeom-cull-params-arena"),
+            size: bytes,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let args = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("vgeom-args-arena"),
+            size: bytes,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::INDIRECT
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        (params, args)
+    }
+
+    /// Seat this frame's draw set: slots of assets that left are freed, new
+    /// assets take the lowest free slot (deterministic: a pure function of the
+    /// frame sequence's asset sets), and the arena doubles when it must. A grown
+    /// arena is two NEW buffers, so every bind group keyed on the old ones is
+    /// rebuilt by the identity keys that already guard them.
+    fn begin<'a>(&mut self, gpu: &GpuContext, drawn: impl Iterator<Item = &'a u128> + Clone) {
+        if self.shuffle {
+            // Every asset to a new slot, rotated by one each frame.
+            let all: Vec<u128> = drawn.clone().copied().collect();
+            let n = all.len().max(1) as u32;
+            self.rotation = self.rotation.wrapping_add(1);
+            self.slots = all
+                .iter()
+                .enumerate()
+                .map(|(i, a)| (*a, (i as u32 + self.rotation) % n))
+                .collect();
+            self.free.clear();
+        }
+        let live: std::collections::BTreeSet<u128> = drawn.clone().copied().collect();
+        let gone: Vec<u128> = self
+            .slots
+            .keys()
+            .filter(|a| !live.contains(a))
+            .copied()
+            .collect();
+        for a in gone {
+            if let Some(s) = self.slots.remove(&a) {
+                self.free.push(s);
+            }
+        }
+        // Lowest first, so slot reuse does not depend on the order assets left.
+        self.free.sort_unstable_by(|a, b| b.cmp(a));
+        let mut next = self.slots.len() as u32 + self.free.len() as u32;
+        for a in drawn {
+            if self.slots.contains_key(a) {
+                continue;
+            }
+            let s = match self.free.pop() {
+                Some(s) => s,
+                None => {
+                    next += 1;
+                    next - 1
+                }
+            };
+            self.slots.insert(*a, s);
+        }
+        if next > self.cap {
+            let cap = next.next_power_of_two().max(ARENA_INITIAL_SLOTS);
+            let (params, args) = Self::buffers(gpu, cap, self.stride);
+            self.params = params;
+            self.args = args;
+            self.cap = cap;
+        }
+    }
+
+    /// Byte offset of `asset`'s early (`late == false`) or late block.
+    fn offset(&self, asset: u128, late: bool) -> Option<u64> {
+        let s = *self.slots.get(&asset)?;
+        let i = if late { self.cap + s } else { s };
+        Some(u64::from(i) * self.stride)
+    }
+
+    /// A zeroed byte image of one half of the arena.
+    fn half_image(&self) -> Vec<u8> {
+        vec![0u8; (u64::from(self.cap) * self.stride) as usize]
+    }
+}
+
 struct AssetDraw {
     instances: wgpu::Buffer,
     instance_cap: u32,
@@ -1175,14 +1336,9 @@ struct AssetDraw {
     /// dispatches, `cur` is written by the late one; they swap at end of frame).
     vis_prev: wgpu::Buffer,
     vis_cur: wgpu::Buffer,
-    draw_args: wgpu::Buffer,
-    draw_args_late: wgpu::Buffer,
-    /// Cull uniforms — one per dispatch, because both are recorded into the same
-    /// encoder before submit (a single buffer written twice would apply both
-    /// writes before either dispatch ran).
-    params: wgpu::Buffer,
-    params_late: wgpu::Buffer,
-    debug_flags: wgpu::Buffer,
+    // The draw args, the cull uniforms (one per dispatch, because both are
+    // recorded into the same encoder before submit) and the debug flags live in
+    // the node's `ArgsArena` and its shared flags uniform since wave PERF1c.
     /// Asset-local meshlet id → slot in the shared meshlet pool, or
     /// `inf_vgeom::NOT_RESIDENT` (P18.2). Read by BOTH the cull compute and the
     /// raster; re-uploaded only when the streamer's residency generation moves.
@@ -1203,11 +1359,6 @@ impl AssetDraw {
                 mapped_at_creation: false,
             })
         };
-        let args = wgpu::BufferUsages::STORAGE
-            | wgpu::BufferUsages::INDIRECT
-            | wgpu::BufferUsages::COPY_DST;
-        let uniform = wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST;
-        let params_size = std::mem::size_of::<CullParamsGpu>() as u64;
         Self {
             instances: mk(
                 "vgeom-instances",
@@ -1220,15 +1371,6 @@ impl AssetDraw {
             visible_cap: 0,
             vis_prev: mk("vgeom-vis-prev", 256, wgpu::BufferUsages::STORAGE),
             vis_cur: mk("vgeom-vis-cur", 256, wgpu::BufferUsages::STORAGE),
-            draw_args: mk("vgeom-args", 16, args),
-            draw_args_late: mk("vgeom-args-late", 16, args),
-            params: mk("vgeom-cull-params", params_size, uniform),
-            params_late: mk("vgeom-cull-params-late", params_size, uniform),
-            debug_flags: mk(
-                "vgeom-flags",
-                std::mem::size_of::<FlagsGpu>() as u64,
-                uniform,
-            ),
             remap: mk(
                 "vgeom-remap",
                 16,
@@ -1570,6 +1712,17 @@ pub struct VgeomNode {
     /// the cache's engagement pair.
     bind_groups_built: u64,
     bind_groups_reused: u64,
+    /// Every drawn asset's cull uniforms and indirect args (wave PERF1c) --
+    /// see [`ArgsArena`].
+    arena: ArgsArena,
+    /// The raster's debug-flags uniform, ONE for the node (wave PERF1c): it is
+    /// a constant of the frame's settings and was written once per asset.
+    debug_flags: wgpu::Buffer,
+    /// What `debug_flags` holds, so it is written only when it changes.
+    debug_written: Option<[u32; 4]>,
+    /// `queue.write_buffer` calls the asset loops made, cumulative (wave
+    /// PERF1c) -- the arena's engagement counter.
+    arg_writes: u64,
 }
 
 /// **One asset's cluster pairing, page by page, carried across frames** (wave
@@ -1782,6 +1935,15 @@ impl VgeomNode {
             bind_groups: BTreeMap::new(),
             bind_groups_built: 0,
             bind_groups_reused: 0,
+            arena: ArgsArena::new(gpu),
+            debug_flags: gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("vgeom-flags"),
+                size: std::mem::size_of::<FlagsGpu>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            debug_written: None,
+            arg_writes: 0,
         }
     }
 
@@ -1791,6 +1953,22 @@ impl VgeomNode {
     #[inline]
     pub fn bind_group_counts(&self) -> (u64, u64) {
         (self.bind_groups_built, self.bind_groups_reused)
+    }
+
+    /// `queue.write_buffer` calls the meshlet node's asset loops made for cull
+    /// uniforms, indirect args and debug flags, cumulative (wave PERF1c): at
+    /// most three a frame through [`ArgsArena`] (plus one when the debug flags
+    /// change), where it was five per drawn asset.
+    #[inline]
+    pub fn arg_write_count(&self) -> u64 {
+        self.arg_writes
+    }
+
+    /// The arena equivalence arm's switch (wave PERF1c): `true` re-seats every
+    /// drawn asset in a new slot every frame. See [`ArgsArena`].
+    #[doc(hidden)]
+    pub fn set_arena_shuffle(&mut self, on: bool) {
+        self.arena.shuffle = on;
     }
 
     /// The equivalence arm's switch (wave PERF1): `false` re-walks every
@@ -2360,8 +2538,24 @@ impl RenderNode for VgeomNode {
             vis,
             vis_bases,
             vis_report: _,
+            arena,
+            debug_flags,
+            debug_written,
+            arg_writes,
         } = self;
         vis_bases.clear();
+        // Seat this frame's draw set in the arena before any bind group is
+        // looked up: a grown arena is a new pair of buffers, and the keys below
+        // name them.
+        arena.begin(gpu, by_asset.keys());
+        let mut params_early = arena.half_image();
+        let mut params_late = arena.half_image();
+        let mut args_image = vec![0u8; params_early.len() * 2];
+        let params_size = std::mem::size_of::<CullParamsGpu>();
+        let put = |image: &mut Vec<u8>, at: u64, bytes: &[u8]| {
+            let at = at as usize;
+            image[at..at + bytes.len()].copy_from_slice(bytes);
+        };
 
         let occlusion = settings.occlusion;
         let two_pass = occlusion && settings.two_pass;
@@ -2405,6 +2599,13 @@ impl RenderNode for VgeomNode {
         let debug = FlagsGpu {
             flags: [settings.debug_meshlets as u32, 0, 0, 0],
         };
+        if *debug_written != Some(debug.flags) {
+            gpu.queue
+                .write_buffer(debug_flags, 0, bytemuck::bytes_of(&debug));
+            *debug_written = Some(debug.flags);
+            *arg_writes += 1;
+        }
+        let debug_flags: &wgpu::Buffer = debug_flags;
 
         // A vertex-pulled indirect draw of `visible`/`args` into the MSAA targets.
         // Both passes are identical apart from which pair of buffers they read.
@@ -2427,6 +2628,7 @@ impl RenderNode for VgeomNode {
             pools: &VgeomPoolBuffers,
             draw: &AssetDraw,
             visible: &wgpu::Buffer,
+            debug_flags: &wgpu::Buffer,
         ) -> RasterBgKey {
             RasterBgKey {
                 buffers: [
@@ -2436,7 +2638,7 @@ impl RenderNode for VgeomNode {
                     pools.mltris.clone(),
                     draw.instances.clone(),
                     visible.clone(),
-                    draw.debug_flags.clone(),
+                    debug_flags.clone(),
                     draw.remap.clone(),
                 ],
             }
@@ -2472,7 +2674,7 @@ impl RenderNode for VgeomNode {
                     },
                     wgpu::BindGroupEntry {
                         binding: 6,
-                        resource: draw.debug_flags.as_entire_binding(),
+                        resource: debug_flags.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 7,
@@ -2484,7 +2686,7 @@ impl RenderNode for VgeomNode {
         let raster_batch =
             |encoder: &mut wgpu::CommandEncoder,
              label: &str,
-             items: &[(&wgpu::BindGroup, &wgpu::Buffer)]| {
+             items: &[(&wgpu::BindGroup, &wgpu::Buffer, u64)]| {
                 if items.is_empty() {
                     return;
                 }
@@ -2514,9 +2716,9 @@ impl RenderNode for VgeomNode {
                 pass.set_pipeline(raster);
                 pass.set_bind_group(0, frame.view_bg, &[]);
                 pass.set_bind_group(2, &env_bg, &[]);
-                for (raster_bg, args) in items {
+                for (raster_bg, args, offset) in items {
                     pass.set_bind_group(3, *raster_bg, &[]);
-                    pass.draw_indirect(args, 0);
+                    pass.draw_indirect(args, *offset);
                 }
             };
         // Every asset's cull, in one compute pass: `(bind group, workgroups)`.
@@ -2646,16 +2848,21 @@ impl RenderNode for VgeomNode {
                 _ => None,
             };
 
+            // The asset's arena blocks, seated by `ArgsArena::begin` above.
+            let (Some(off_early), Some(off_late)) = (
+                arena.offset(*asset_id, false),
+                arena.offset(*asset_id, true),
+            ) else {
+                debug_assert!(false, "asset {asset_id:#034x} has no arena slot");
+                continue;
+            };
             // Reset draw args: vertex_count = max_tri*3, instance_count = 0.
             // `max_tri` is the header's whole-mesh maximum, so the draw shape is a
             // constant of the asset and does not move as pages come and go.
+            // Into the arena's byte image (wave PERF1c): ONE write after the loop.
             let reset = [max_tri * 3, 0u32, 0u32, 0u32];
-            gpu.queue
-                .write_buffer(&draw.draw_args, 0, bytemuck::cast_slice(&reset));
-            gpu.queue
-                .write_buffer(&draw.draw_args_late, 0, bytemuck::cast_slice(&reset));
-            gpu.queue
-                .write_buffer(&draw.debug_flags, 0, bytemuck::bytes_of(&debug));
+            put(&mut args_image, off_early, bytemuck::cast_slice(&reset));
+            put(&mut args_image, off_late, bytemuck::cast_slice(&reset));
 
             let mode = if two_pass {
                 CullMode::Early
@@ -2673,8 +2880,7 @@ impl RenderNode for VgeomNode {
                 audit,
                 floor_lod,
             );
-            gpu.queue
-                .write_buffer(&draw.params, 0, bytemuck::bytes_of(&params));
+            put(&mut params_early, off_early, bytemuck::bytes_of(&params));
 
             // The early dispatch runs no occlusion test, so it binds the dummy.
             let hzb_view = if occlusion && !two_pass {
@@ -2691,27 +2897,37 @@ impl RenderNode for VgeomNode {
             let (cull_bg, built) = bgs.cull_early.get_or_build(
                 CullBgKey {
                     buffers: [
-                        draw.params.clone(),
+                        arena.params.clone(),
                         pools.meshlets.clone(),
                         draw.remap.clone(),
                         draw.instances.clone(),
                         draw.visible.clone(),
-                        draw.draw_args.clone(),
+                        arena.args.clone(),
                         draw.vis_prev.clone(),
                         draw.vis_cur.clone(),
                         frame.vgeom_audit.stats.clone(),
                     ],
                     hzb: hzb_key,
+                    params_at: off_early,
+                    args_at: off_early,
                 },
                 || {
                     cull.bind_group(
                         gpu,
-                        &draw.params,
+                        wgpu::BufferBinding {
+                            buffer: &arena.params,
+                            offset: off_early,
+                            size: std::num::NonZeroU64::new(params_size as u64),
+                        },
                         pools,
                         &draw.remap,
                         &draw.instances,
                         &draw.visible,
-                        &draw.draw_args,
+                        wgpu::BufferBinding {
+                            buffer: &arena.args,
+                            offset: off_early,
+                            size: std::num::NonZeroU64::new(16),
+                        },
                         hzb_view,
                         &draw.vis_prev,
                         &draw.vis_cur,
@@ -2743,7 +2959,7 @@ impl RenderNode for VgeomNode {
                         &v.flags[slot],
                         &draw.visible,
                         &draw.remap,
-                        &draw.draw_args,
+                        (&arena.args, off_early),
                         frame.view_bg,
                         !vis_cleared,
                     );
@@ -2754,7 +2970,7 @@ impl RenderNode for VgeomNode {
                     let mut built = false;
                     let raster_bg = bgs
                         .raster_early
-                        .get_or_build(raster_key(pools, draw, &draw.visible), || {
+                        .get_or_build(raster_key(pools, draw, &draw.visible, debug_flags), || {
                             built = true;
                             raster_bg_of(pools, draw, &draw.visible)
                         })
@@ -2765,6 +2981,13 @@ impl RenderNode for VgeomNode {
                 }
             }
         }
+        // The arena's early half and every reset, one write each (wave PERF1c):
+        // `queue.write_buffer` lands before this encoder's commands run, so the
+        // dispatches recorded above read these bytes exactly as they read the
+        // per-asset writes they replace.
+        gpu.queue.write_buffer(&arena.params, 0, &params_early);
+        gpu.queue.write_buffer(&arena.args, 0, &args_image);
+        *arg_writes += 2;
         // The forward path's early culls, then its early draws, one pass each.
         cull_batch(
             encoder,
@@ -2776,7 +2999,7 @@ impl RenderNode for VgeomNode {
             "vgeom-raster-early",
             &early
                 .iter()
-                .filter_map(|e| draws.get(&e.0).map(|d| (&e.3, &d.draw_args)))
+                .filter_map(|e| arena.offset(e.0, false).map(|at| (&e.3, &arena.args, at)))
                 .collect::<Vec<_>>(),
         );
 
@@ -2818,6 +3041,9 @@ impl RenderNode for VgeomNode {
                 continue;
             };
             let instance_count = insts.len() as u32;
+            let Some(off_late) = arena.offset(asset_id, true) else {
+                continue;
+            };
             let params = cull_params(
                 frame.view,
                 meshlet_count,
@@ -2829,8 +3055,11 @@ impl RenderNode for VgeomNode {
                 audit,
                 floor_lod,
             );
-            gpu.queue
-                .write_buffer(&draw.params_late, 0, bytemuck::bytes_of(&params));
+            put(
+                &mut params_late,
+                off_late - params_early.len() as u64,
+                bytemuck::bytes_of(&params),
+            );
             let hzb_key = if hzb_chain.full_view().is_some() {
                 hzb_chain.generation() + 1
             } else {
@@ -2840,27 +3069,37 @@ impl RenderNode for VgeomNode {
             let (cull_bg, built) = bgs.cull_late.get_or_build(
                 CullBgKey {
                     buffers: [
-                        draw.params_late.clone(),
+                        arena.params.clone(),
                         pools.meshlets.clone(),
                         draw.remap.clone(),
                         draw.instances.clone(),
                         draw.visible_late.clone(),
-                        draw.draw_args_late.clone(),
+                        arena.args.clone(),
                         draw.vis_prev.clone(),
                         draw.vis_cur.clone(),
                         frame.vgeom_audit.stats.clone(),
                     ],
                     hzb: hzb_key,
+                    params_at: off_late,
+                    args_at: off_late,
                 },
                 || {
                     cull.bind_group(
                         gpu,
-                        &draw.params_late,
+                        wgpu::BufferBinding {
+                            buffer: &arena.params,
+                            offset: off_late,
+                            size: std::num::NonZeroU64::new(params_size as u64),
+                        },
                         pools,
                         &draw.remap,
                         &draw.instances,
                         &draw.visible_late,
-                        &draw.draw_args_late,
+                        wgpu::BufferBinding {
+                            buffer: &arena.args,
+                            offset: off_late,
+                            size: std::num::NonZeroU64::new(16),
+                        },
                         hzb_view,
                         &draw.vis_prev,
                         &draw.vis_cur,
@@ -2898,7 +3137,7 @@ impl RenderNode for VgeomNode {
                         &v.flags[slot],
                         &draw.visible_late,
                         &draw.remap,
-                        &draw.draw_args_late,
+                        (&arena.args, off_late),
                         frame.view_bg,
                         !vis_cleared,
                     );
@@ -2909,10 +3148,13 @@ impl RenderNode for VgeomNode {
                     let mut built = false;
                     let raster_bg = bgs
                         .raster_late
-                        .get_or_build(raster_key(pools, draw, &draw.visible_late), || {
-                            built = true;
-                            raster_bg_of(pools, draw, &draw.visible_late)
-                        })
+                        .get_or_build(
+                            raster_key(pools, draw, &draw.visible_late, debug_flags),
+                            || {
+                                built = true;
+                                raster_bg_of(pools, draw, &draw.visible_late)
+                            },
+                        )
                         .clone();
                     *bind_groups_built += u64::from(built);
                     *bind_groups_reused += u64::from(!built);
@@ -2934,6 +3176,10 @@ impl RenderNode for VgeomNode {
                 residency_generation,
             });
         }
+        // The arena's late half, one write (wave PERF1c).
+        gpu.queue
+            .write_buffer(&arena.params, params_early.len() as u64, &params_late);
+        *arg_writes += 1;
         // The forward path's late culls, then its late draws, one pass each. The
         // swap above only moved handles: every bind group gathered here holds
         // its own reference to the buffer it was built with.
@@ -2947,7 +3193,7 @@ impl RenderNode for VgeomNode {
             "vgeom-raster-late",
             &late
                 .iter()
-                .filter_map(|e| draws.get(&e.0).map(|d| (&e.3, &d.draw_args_late)))
+                .filter_map(|e| arena.offset(e.0, true).map(|at| (&e.3, &arena.args, at)))
                 .collect::<Vec<_>>(),
         );
 
@@ -2989,7 +3235,9 @@ fn vis_raster_draw(
     flags: &wgpu::Buffer,
     visible: &wgpu::Buffer,
     remap: &wgpu::Buffer,
-    args: &wgpu::Buffer,
+    // The indirect args and their byte offset — a block of the node's
+    // `ArgsArena` since wave PERF1c.
+    (args, args_at): (&wgpu::Buffer, u64),
     view_bg: &wgpu::BindGroup,
     clear: bool,
 ) {
@@ -3076,7 +3324,7 @@ fn vis_raster_draw(
     pass.set_pipeline(&vis.raster);
     pass.set_bind_group(0, view_bg, &[]);
     pass.set_bind_group(1, &bg, &[]);
-    pass.draw_indirect(args, 0);
+    pass.draw_indirect(args, args_at);
 }
 
 /// The material-resolve pass and the per-fragment feedback, in that order.
