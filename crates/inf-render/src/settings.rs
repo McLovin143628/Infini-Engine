@@ -1739,10 +1739,18 @@ pub fn exposure_target_ev(avg: f32, min_luminance: f32, max_luminance: f32) -> f
 }
 
 /// **The highlight guard's percentile** (wave PAR0b, clause 3c): the
-/// brightest `EXPOSURE_HIGHLIGHT_FRACTION` of the frame (1 %) is what the eye
+/// brightest `EXPOSURE_HIGHLIGHT_FRACTION` of the frame (3 %) is what the eye
 /// must not blow out. (2 % at a white of 4.0 was measured first and held the
 /// island's 21:00 street at ×120 for a pair of headlamps.)
-pub const EXPOSURE_HIGHLIGHT_FRACTION: f32 = 0.01;
+///
+/// **3 %, not PAR0b's 1 % (audit PAR1a, d').** Once every room on the island
+/// hung a lamp, the brightest 1 % of a night street was its lit fittings and
+/// panes — small highlights that should clip — and they drove the key: the
+/// shipped island's kerb eyes fell ×67 / ×191 / ×204 → ×6.2 / ×10.2 / ×11.8
+/// and the ground band to 6.2 / 4.5 / 4.9 (PAR0b's readable floor is 4). At
+/// 3 % they are ×15.6 / ×51.5 / ×73.0 with the ground band 13.7 / 21.4 / 26.4
+/// and at most 1 % of the frame clipped; noon stays ×1.000.
+pub const EXPOSURE_HIGHLIGHT_FRACTION: f32 = 0.03;
 /// The scene luminance × exposure the guarded percentile is allowed to reach:
 /// `6.0` is where the engine's ACES fit reaches ~0.99 of white — a lamp lens
 /// may touch white, a lit wall may not pass it.
@@ -2405,8 +2413,8 @@ mod tests {
     }
 
     /// PAR0b clause 3c: the highlight guard caps the exposure at what keeps
-    /// the brightest 2 % under white, and only bites when something bright is
-    /// in the frame.
+    /// the brightest 3 % under white, and only bites when something bright and
+    /// LARGE is in the frame (audit PAR1a: small highlights may clip).
     #[test]
     fn the_highlight_guard_keeps_the_brightest_percent_under_white() {
         let mut bins = vec![0u32; EXPOSURE_BINS as usize];
@@ -2426,6 +2434,17 @@ mod tests {
             "a window at 1.0 caps the eye at log2(white): {lit}"
         );
         assert_eq!(exposure_highlight_cap_ev(&vec![0u32; 256]), f32::MAX);
+        // Audit PAR1a (d'): 2 % of the frame is a lit city's small highlights
+        // (fittings and panes at luminance 1.0) over a dark street: they may
+        // clip, and they do NOT drive the key — the cap is the street's.
+        let mut city = vec![0u32; EXPOSURE_BINS as usize];
+        city[exposure_bin(1.0e-4) as usize] = 9_800;
+        city[exposure_bin(1.0) as usize] = 200;
+        let small = exposure_highlight_cap_ev(&city);
+        assert!(
+            small > lit + 8.0,
+            "2 % of small highlights drove the key to {small} (a 3 % window caps at {lit})"
+        );
     }
 
     /// PAR0b clause 3c: the eye adapts to light faster than to dark — the same

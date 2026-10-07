@@ -69,7 +69,7 @@ const EXPOSURE_KEY: f32 = 0.18;
 const EXPOSURE_LIGHT_ADAPTATION_RATIO: f32 = 3.0;
 // MIRROR: `inf_render::settings::EXPOSURE_HIGHLIGHT_FRACTION` /
 // `EXPOSURE_HIGHLIGHT_WHITE` (PAR0b) — the highlight guard.
-const EXPOSURE_HIGHLIGHT_FRACTION: f32 = 0.01;
+const EXPOSURE_HIGHLIGHT_FRACTION: f32 = 0.03;
 const EXPOSURE_HIGHLIGHT_WHITE: f32 = 6.0;
 
 var<workgroup> tile: array<atomic<u32>, 256>;
