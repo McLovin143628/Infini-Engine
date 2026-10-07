@@ -77,14 +77,19 @@ struct ModState {
     world: Option<WorldPtr>,
 }
 
-// SAFETY (wave PERF1b): the only non-`Send` field is `world`, a raw pointer that
-// is `Some` exclusively for the duration of one synchronous guest call inside
-// `call_with_world` -- set, used by host imports on the calling thread, and
-// cleared before that function returns (the trap path included). Outside a call
-// it is `None`, so moving the store to another thread between calls moves no
-// live pointer. The player's fixed step runs on a worker thread while the main
-// thread records the frame (the windowed loop's pipelining), and the mod session
-// rides inside the sim it ticks.
+// SAFETY (wave PERF1b; enforced by its audit): the only non-`Send` field is
+// `world`, a raw pointer that is `Some` exclusively for the duration of one
+// synchronous guest call inside `call_with_world` -- set, used by host imports
+// on the calling thread, and cleared before that function returns or unwinds
+// (the trap path AND a panicking host import: `call_with_world` catches the
+// unwind, clears, and resumes it). The call holds `&mut WasmMod`, so the store
+// cannot cross a thread while the pointer is set; outside a call it is `None`
+// (debug-asserted at every call's entry, and pinned by
+// `perf1b_send_tests::the_world_pointer_is_cleared_when_a_host_import_panics`),
+// so moving the store to another thread between calls moves no live pointer.
+// The player's fixed step runs on a worker thread while the main thread records
+// the frame (the windowed loop's pipelining), and the mod session rides inside
+// the sim it ticks.
 unsafe impl Send for ModState {}
 
 /// Execution + memory limits applied to every mod in a session.
@@ -408,11 +413,27 @@ impl WasmMod {
         world: &mut dyn ModWorld,
         f: impl FnOnce(&mut Self) -> wasmtime::Result<()>,
     ) -> Result<(), ModTrap> {
+        // The invariant `unsafe impl Send for ModState` rests on: no pointer is
+        // published outside this function. A store that arrives here holding
+        // one has broken it already.
+        debug_assert!(
+            self.store.data().world.is_none(),
+            "a world pointer outlived the call that published it"
+        );
         let raw: *mut dyn ModWorld = world;
         let raw: WorldPtr = unsafe { std::mem::transmute::<*mut dyn ModWorld, WorldPtr>(raw) };
         self.store.data_mut().world = Some(raw);
-        let result = f(self);
+        // **Cleared on EVERY exit, the unwind included** (the PERF1b audit). A
+        // host import that panics (an embedder's `ModWorld` method) unwinds
+        // through wasmtime and out of `f`; without the catch the pointer stayed
+        // `Some` and dangling in a store the player's step then sends to
+        // another thread -- the case the `Send` impl's SAFETY note excludes.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)));
         self.store.data_mut().world = None;
+        let result = match result {
+            Ok(r) => r,
+            Err(p) => std::panic::resume_unwind(p),
+        };
 
         match result {
             Ok(()) => Ok(()),
@@ -745,4 +766,72 @@ pub enum ModTrap {
     /// The mod trapped during this tick and has now been disabled.
     #[error("{0}")]
     Trap(String),
+}
+
+#[cfg(test)]
+mod perf1b_send_tests {
+    use super::*;
+
+    /// A world whose translation write panics -- an embedder's bug in a host
+    /// import, unwinding through the guest call.
+    struct PanickingWorld;
+
+    impl ModWorld for PanickingWorld {
+        fn entity_translation(&mut self, _entity: i64) -> Option<[f64; 3]> {
+            None
+        }
+        fn set_entity_translation(&mut self, _entity: i64, _translation: [f64; 3]) {
+            panic!("the embedder's world refused the write");
+        }
+        fn input_is_down(&mut self, _key: &str) -> bool {
+            false
+        }
+        fn spawn_cube(&mut self, _x: f64, _y: f64, _z: f64) -> i64 {
+            0
+        }
+    }
+
+    const MOVE_WAT: &str = r#"
+        (module
+          (import "env" "set_entity_translation"
+            (func $set (param i64 f64 f64 f64)))
+          (memory (export "memory") 1)
+          (func (export "mod_update") (param $dt f64)
+            (call $set (i64.const 1) (f64.const 5) (f64.const 6) (f64.const 7))))
+    "#;
+
+    /// **The `Send` impl's invariant, held on the unwind** (the PERF1b audit).
+    /// A host import that panics must leave no world pointer behind: the
+    /// panic reaches the caller, and the store it leaves is one that may cross
+    /// a thread. Before the audit the clear was a statement after the call,
+    /// which an unwind skips (RED: `world` is `Some` after the panic).
+    #[test]
+    fn the_world_pointer_is_cleared_when_a_host_import_panics() {
+        fn is_send<T: Send>() {}
+        is_send::<WasmMod>();
+        let engine = WasmEngine::new().expect("an engine");
+        let mut m = WasmMod::instantiate(
+            &engine,
+            "mover",
+            MOVE_WAT.as_bytes(),
+            ModCaps {
+                entities: true,
+                ..ModCaps::NONE
+            },
+            ExecLimits::default(),
+        )
+        .expect("the mod instantiates");
+        let mut world = PanickingWorld;
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = m.update(&mut world, 0.016);
+        }));
+        assert!(
+            unwound.is_err(),
+            "the host import's panic reaches the caller"
+        );
+        assert!(
+            m.store.data().world.is_none(),
+            "a dangling world pointer survived the unwind"
+        );
+    }
 }

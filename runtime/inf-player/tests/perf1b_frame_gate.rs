@@ -25,6 +25,10 @@ use std::path::Path;
 /// in every host at both hours, WITH the simulation at real time.
 pub const PERF1B_FLOOR_MS: f64 = 33.0;
 
+/// The file under the workspace `target/` that `demo.ps1 -PerfOnly` appends
+/// each perf session's directory to (the PERF1b audit).
+const PERF1B_SESSIONS_FILE: &str = "perf1b-sessions.txt";
+
 /// **THE STEPS RUN BESIDE THE RECORD, THROUGH ONE DOOR** (wave PERF1b).
 ///
 /// The windowed frame used to be steps + projection + record end to end; on
@@ -73,8 +77,36 @@ fn the_windowed_loop_steps_beside_the_record_through_one_door() {
         "the order must be project -> scope -> spawn(steps) -> render -> join \
          (project {project}, scope {scope}, spawn {spawn}, render {render}, join {join})"
     );
+    // **THE INPUT PATH** (the PERF1b audit): the held set this frame's steps
+    // run on is resolved BEFORE the projection and moved into the worker, so a
+    // key resolved in frame N reaches frame N's steps -- the step it reached
+    // before the wave. What moved is the IMAGE: frame N presents the world as
+    // of frame N-1's steps, one frame of display latency, stated beside
+    // `ISLAND_FRAME_CEILING_MS` and in docs/profiling.md.
+    let held = frame
+        .find("let held = input::held_actions(&self.input_state, dt);")
+        .expect("the frame resolves the held set");
+    assert!(
+        held < project,
+        "the held set must be resolved before the projection and the steps (held {held}, project {project})"
+    );
+    // **NO EDITOR STATE IN THE PROCESS** (the PERF1b audit): the editor runs
+    // embedded Play as a SUBPROCESS (`--pie`, the window reparented), so the
+    // worker cannot reach editor state -- no editor crate links inf-player.
+    for manifest in [
+        include_str!("../../../editor/studio/src-tauri/Cargo.toml"),
+        include_str!("../../../editor/crates/inf-editor-core/Cargo.toml"),
+        include_str!("../../../editor/crates/inf-viewport/Cargo.toml"),
+    ] {
+        assert!(
+            !manifest
+                .lines()
+                .any(|l| l.trim_start().starts_with("inf-player")),
+            "an editor crate links inf-player: the windowed loop's worker would share the editor's process"
+        );
+    }
     println!(
-        "PERF1b: project @{project}, scope @{scope}, spawn @{spawn}, render @{render}, join @{join}"
+        "PERF1b: held @{held}, project @{project}, scope @{scope}, spawn @{spawn}, render @{render}, join @{join}"
     );
 }
 
@@ -203,13 +235,44 @@ fn session_legs(dir: &Path, step_s: f64) -> Vec<Leg> {
 /// noon and 21:00. Every leg of every session is printed with its p50 / p95,
 /// its simulation rate and the backlog the cap dropped; in release, off CI,
 /// every leg must be at or under [`PERF1B_FLOOR_MS`] at p95 with the sim at
-/// real time (rate >= 0.99) and nothing dropped. Unset, it says so and
-/// returns: the sessions need a GPU, a display and the cooked island.
+/// real time (rate >= 0.99) and nothing dropped.
+///
+/// **Not vacuous by default** (the PERF1b audit): unset, it reads the
+/// sessions `demo.ps1 -PerfOnly` RECORDED -- every perf leg appends its
+/// session directory to `target/perf1b-sessions.txt` -- so on a machine that
+/// has run the window, a release run off CI asserts what it ran. With neither,
+/// it prints the skip and returns: the sessions need a GPU, a display and the
+/// cooked island, which no CI runner has.
 #[test]
 fn the_window_counter_holds_the_floor_at_real_time() {
-    let Some(list) = std::env::var_os("INF_PERF1B_SESSIONS") else {
-        println!("SKIP: INF_PERF1B_SESSIONS names no session (a GPU, a display and the cooked island are needed)");
-        return;
+    let recorded = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target")
+        .join(PERF1B_SESSIONS_FILE);
+    let list: std::ffi::OsString = match std::env::var_os("INF_PERF1B_SESSIONS") {
+        Some(l) => l,
+        None => match std::fs::read_to_string(&recorded) {
+            Ok(text) if !text.trim().is_empty() => {
+                let dirs: Vec<std::path::PathBuf> = text
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .map(std::path::PathBuf::from)
+                    .collect();
+                println!(
+                    "PERF1b: {} session(s) recorded by the demo loop in {}",
+                    dirs.len(),
+                    recorded.display()
+                );
+                std::env::join_paths(dirs).expect("session paths join")
+            }
+            _ => {
+                println!(
+                    "SKIP: INF_PERF1B_SESSIONS names no session and {} records none (a GPU, a display and the cooked island are needed)",
+                    recorded.display()
+                );
+                return;
+            }
+        },
     };
     let step_s = 1.0 / f64::from(inf_runtime::TICK_HZ);
     let mut worst = 0.0f64;

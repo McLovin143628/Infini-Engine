@@ -1123,6 +1123,14 @@ pub const SHIPPING_FRAME_P99_CEILING_MS: f64 = 46.0;
 /// `projection + max(record, steps)` -- is held by
 /// `perf1b_frame_gate::the_window_counter_holds_the_floor_at_real_time`.
 ///
+/// **THE PRICE OF THE OVERLAP, STATED** (the PERF1b audit): ONE FRAME OF
+/// DISPLAY LATENCY. A key resolved in frame N still reaches frame N's fixed
+/// steps -- the held set is resolved before the projection and moved into the
+/// worker, the step it reached before the wave -- but the image frame N
+/// presents is the world as of frame N-1's steps: ~30 ms more between a key
+/// and the pixel it moves at the measured noon window, ~34 ms at 21:00. No
+/// simulated state moves; `perf1b_frame_gate`'s source arm pins the order.
+///
 /// **RATCHET RULE (§8): this constant may only ever DECREASE.**
 pub const ISLAND_FRAME_CEILING_MS: f64 = 90.0;
 

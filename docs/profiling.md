@@ -218,6 +218,19 @@ Notes:
   human-verified on real hardware**: CI can bound the CPU-side streaming work, not
   a frame.
 
+- **The shipped window's fixed steps run BESIDE the record (wave PERF1b), at the
+  price of one frame of display latency.** A key resolved in frame N reaches
+  frame N's fixed steps, exactly as before; the frame N presents shows the world
+  as of frame N-1's steps (~30 ms at the measured noon window, ~34 ms at 21:00).
+  The window's counter (`INF_FPS_HUD` / `INF_FPS_LOG`) prints `drop=`, the
+  backlog the catch-up cap discarded, and the sim rate is read off it; the floor
+  arm `perf1b_frame_gate::the_window_counter_holds_the_floor_at_real_time` reads
+  the sessions `tools/demo/demo.ps1 -PerfOnly` records in
+  `target/perf1b-sessions.txt`. The isolated step's ratchet
+  (`CITY_STEP_BUDGET_MS`) is asserted on the cooked island by
+  `fps_instrument::the_shipped_island_by_the_hour` (release, off CI) and is RED
+  until PERF1c brings the step under it.
+
 - **A load is never held against a frame budget.** `FRAME_BUDGET_MS` /
   `SIM_STEP_BUDGET_MS` / `STREAMED_STEP_BUDGET_MS` bound work that **recurs** (per
   frame, per step); `LOAD_BUDGET_MS` (`inf_player::budget`) and the editor's
