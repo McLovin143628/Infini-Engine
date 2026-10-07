@@ -52,7 +52,7 @@ fn scene(meshes: &[Arc<VgeomMesh>], frame: usize) -> RenderScene {
         ..Default::default()
     };
     for k in 0..ASSETS {
-        if (frame as u128 + k) % 4 == 0 {
+        if (frame as u128 + k).is_multiple_of(4) {
             continue;
         }
         let id = 0x1c00_0000_0000_0000 + k;

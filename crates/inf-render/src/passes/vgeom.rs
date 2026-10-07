@@ -1957,7 +1957,7 @@ impl VgeomNode {
 
     /// `queue.write_buffer` calls the meshlet node's asset loops made for cull
     /// uniforms, indirect args and debug flags, cumulative (wave PERF1c): at
-    /// most three a frame through [`ArgsArena`] (plus one when the debug flags
+    /// most three a frame through the node's `ArgsArena` (plus one when the debug flags
     /// change), where it was five per drawn asset.
     #[inline]
     pub fn arg_write_count(&self) -> u64 {

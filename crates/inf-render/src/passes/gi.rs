@@ -2275,7 +2275,7 @@ mod perf1c_reject_tests {
                 rnd() * 160.0 - 80.0,
             );
             let axis = Vec3::new(rnd() - 0.5, rnd() - 0.5, rnd() - 0.5).normalize_or(Vec3::Y);
-            let rot = Quat::from_axis_angle(axis, rnd() * 6.28);
+            let rot = Quat::from_axis_angle(axis, rnd() * std::f32::consts::TAU);
             let scale = Vec3::new(0.2 + rnd() * 6.0, 0.2 + rnd() * 6.0, 0.2 + rnd() * 6.0);
             let model = Mat4::from_scale_rotation_translation(scale, rot, t);
             let max_scale = scale.abs().max_element();

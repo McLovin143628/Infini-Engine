@@ -4670,7 +4670,7 @@ mod tests {
         let mut alone: Vec<EcsWorld> = guids.iter().map(|g| world_with_character(*g)).collect();
         // Every third character carries a bridge parameter that shadows its
         // variable and holds it in `idle` — the overlay is read in the gather.
-        let held = |g: &Uuid| g.as_u128() % 3 == 0;
+        let held = |g: &Uuid| g.as_u128().is_multiple_of(3);
         let hold = |w: &mut EcsWorld, g: Uuid| {
             assert!(crate::anim_bridge::set_anim_param(w, g, "moving", 0.0));
         };
