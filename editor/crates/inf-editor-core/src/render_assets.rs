@@ -695,6 +695,43 @@ impl EditorRenderAssets {
         })
     }
 
+    /// **A wearer's later draws, on the palette its first draw already built**
+    /// (wave PERF1c, clause 5).
+    ///
+    /// A dressed character is a body and its wearables, each its own skinned
+    /// draw, and since wave OUTFIT1 every one of them is drawn with the WEARER's
+    /// palette: the first of the group to be projected publishes its palette and
+    /// the rest borrow it by pointer (`wearer_palettes`). What they did NOT stop
+    /// doing was building their own first -- a pose clone and a full
+    /// `skinning_matrices` walk, thrown away one line later. On the island at
+    /// 21:00 that was 309 palettes a projection for 103 posed characters,
+    /// **3.05 ms**, two thirds of it discarded.
+    ///
+    /// This is `resolve_skinned` with the palette handed in: the same four
+    /// refusals in the same order (no mesh, no skeleton, an empty skeleton, no
+    /// skinned geometry), which are the only ways that door returns `None` --
+    /// its pose rule never refuses -- so a draw resolves here exactly when it
+    /// resolved there, and draws the palette it was always going to be given.
+    pub fn resolve_skinned_with_palette(
+        &mut self,
+        sm: &SkeletalMesh,
+        palette: Arc<Vec<Mat4>>,
+    ) -> Option<SkinnedDraw> {
+        let mesh_id = sm.mesh?;
+        let skeleton_id = sm.skeleton?;
+        let skeleton = self.skeleton(skeleton_id)?;
+        if skeleton.is_empty() {
+            return None;
+        }
+        let mesh = self.skinned_geometry(mesh_id, skeleton_id)?;
+        Some(SkinnedDraw {
+            mesh,
+            palette,
+            key: (mesh_id, skeleton_id),
+            sections: self.skinned_sections(mesh_id),
+        })
+    }
+
     /// The shared palette for one `(mesh, skeleton, entry clip)` triple, cached.
     ///
     /// With no entry clip this is the rest pose it has been since NPC1b; with one

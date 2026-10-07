@@ -1316,6 +1316,55 @@ fn the_shared_tier_pose_is_identical_in_both_stores() {
     }
 }
 
+/// **A wearer's later draws reuse its palette in BOTH hosts** (wave PERF1c).
+///
+/// `resolve_skinned_with_palette` is `resolve_skinned` with the palette handed
+/// in, and it is only sound if it refuses exactly when `resolve_skinned` does:
+/// a host whose copy skipped the empty-skeleton reject would draw a wearable
+/// the other host leaves out. So the door is held byte-identical across the two
+/// stores (modulo the receiver, as for `resolve_skinned`), it must carry the
+/// four refusals, and both projectors must reach it through the same arm --
+/// the wearer's published palette, else the full pose rule.
+#[test]
+fn the_worn_palette_door_is_identical_in_both_stores() {
+    let raw = extract_method_with_doc(&read(EDITOR_ASSETS), "resolve_skinned_with_palette");
+    assert_eq!(
+        raw.matches("&mut self").count(),
+        1,
+        "`resolve_skinned_with_palette` has a second `&mut self`; the normalization below would erase it"
+    );
+    let mine = raw.replace("&mut self", "&self");
+    let theirs = extract_method_with_doc(&read(PLAYER_ASSETS), "resolve_skinned_with_palette");
+    assert_eq!(
+        mine, theirs,
+        "the two `resolve_skinned_with_palette` have drifted: a dressed character's garments resolve differently in the two hosts"
+    );
+    for fragment in [
+        "let mesh_id = sm.mesh?;",
+        "let skeleton_id = sm.skeleton?;",
+        "if skeleton.is_empty() {",
+        "let mesh = self.skinned_geometry(mesh_id, skeleton_id)?;",
+        "key: (mesh_id, skeleton_id),",
+    ] {
+        assert!(
+            theirs.contains(fragment),
+            "`resolve_skinned_with_palette` no longer contains `{fragment}`:\n{theirs}"
+        );
+    }
+    for (label, path) in [("editor viewport", VIEWPORT), ("shipped player", PLAYER)] {
+        let flat = squash(&read(path).replace("\r\n", "\n"));
+        for fragment in [
+            "match wearer_palettes.get(&pose_guid) {",
+            "resolve_skinned_with_palette(&sm, worn.clone())",
+        ] {
+            assert!(
+                flat.contains(&squash(fragment)),
+                "the {label} no longer reaches a wearer's palette through `{fragment}`"
+            );
+        }
+    }
+}
+
 /// **The tier → caster mapping is one rule, not two** (wave NPC1b).
 ///
 /// `crowd_shadow` is the only place either host decides whether an agent casts a

@@ -1427,11 +1427,20 @@ pub fn project_scene_full(
                 // its rig's shared rest palette — the same matrices the
                 // per-agent call would have produced for it, derived once per
                 // `(mesh, skeleton)` instead of once per agent per frame.
+                // **A wearer's later draws reuse its palette** (wave PERF1c):
+                // the first draw of a dressed character builds it, every
+                // wearable after it is handed it rather than building one more
+                // to throw away. MIRROR of the other host's arm.
                 let resolved = match agent {
                     Some(a) if !a.tier.poses() => {
                         skinned.resolve_skinned_shared(&sm, machine.as_ref())
                     }
-                    _ => skinned.resolve_skinned(&sm, player.as_ref(), posed, machine.as_ref()),
+                    _ => match wearer_palettes.get(&pose_guid) {
+                        Some(worn) => skinned.resolve_skinned_with_palette(&sm, worn.clone()),
+                        None => {
+                            skinned.resolve_skinned(&sm, player.as_ref(), posed, machine.as_ref())
+                        }
+                    },
                 };
                 match resolved {
                     Some(draw) => {
