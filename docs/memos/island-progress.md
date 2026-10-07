@@ -42412,3 +42412,60 @@ Near/Far, interpolated ~2 d); rapier step 4.0 / 5.2 (the remaining awake statics
 projection 4.2 / 6.1 (incremental ~2-3 d); character move 1.4 on the run (~1 d); the
 288 ms activation step, per-asset load distance, HLOD, vehicle LOD (1-2 d / 3 d / 5 d / --,
 untaken).
+
+## Wave PERF1b — adversarial audit (auditor, 2026-10-06)
+
+Six `audit(PERF1b)` commits over `c12d6f22` (`4a0230b3..948a32a8`); battery on the final
+code tree **7935 passed, 0 failed, 34 ignored over 412 binaries**. MEASURED unless marked.
+
+**The threaded step is sound, with one hole closed.** The worker borrows `&mut RuntimeSim`
+and nothing else (`window.rs` `frame`, the `std::thread::scope` around `live.host.render`);
+the main thread holds `self.live` and the owned `view` -- disjoint fields, so the borrow
+checker proves no shared mutable state crosses; the projection, the UI and the held set are
+taken BEFORE the scope opens; no stateful thread-local, no non-`Send` resource on the step
+path; no editor crate links inf-player (embedded Play is a subprocess). The hole: `unsafe
+impl Send for ModState` rests on "the world pointer is `None` outside a call", and
+`call_with_world` cleared it with a statement an unwinding host import skips. Now caught,
+cleared, resumed, debug-asserted at entry (`perf1b_send_tests`, clear-after-call RED). The
+input path is unchanged (a key resolved in frame N reaches frame N's steps); the price is one
+frame of DISPLAY latency, now stated in `budget.rs` and docs/profiling.md and pinned by the
+source arm.
+
+**Dormancy was NOT invisible: a body put somewhere landed in sleeping scenery.** rapier
+re-poses colliders inside the pipeline, so after `set_body_translation` (a teleport, a
+dispatcher placement, every kinematic pose the bridge pushes) the dormancy measured the mover
+at its LAST pose: a teleported ball fell 1.6 mm through a dormant floor on its first step.
+Reach now from the body's current + next pose. `perf1b_dormancy_cases`: nine arms, dormancy
+on vs off (off = the base world exactly), every step compared (translations + contact events
+by pair), scenery proven asleep at the case's start, an ordering-noise control per case --
+spawn, teleport, kinematic at 75 m/s, static released + collapse, collider re-described under
+a resting body, trigger, jointed door into a kerb, ragdoll at 25 m/s, CCD at 240 m/s. Seven
+bit-identical; the door's tail 0.11 mm; the collapse 1.8 mm against a 0.62 mm reversed-order
+control. Mutations: collider-pose reach RED (teleport), kind-change hook removed RED
+(released), movers unregistered RED (7/9). Not falsified by these arms: `MARGIN_M` = 0 (the
+4 m fat box covers) and the sensor exemption (held by `step_cost_3d`).
+
+**The sweep skip holds**: the bridge's only identity is the guid; count + 128-bit signature;
+`a_swap_at_the_same_count_runs_the_sweep` (count-only RED).
+
+**The step ratchet now has its arm and it is RED**: `the_shipped_island_by_the_hour` asserts
+`CITY_STEP_BUDGET_MS` (release, off CI): **6.64 ms noon, 12.80 at 21:00** against 6.0. The
+ceiling 90 holds on the audit's rounds: noon p95 43.1-48.3, 21:00 78.4-84.6 (worst 82.92).
+
+**The window, re-read (audit sessions, release final tree, p95 / sim rate / dropped over the leg):**
+noon walk 31.0-33.2 ms at 0.98-0.99x (0.65-1.28 s dropped); noon run/drive 31.5-39.8 at
+0.90-1.00x; 21:00 walk 37.4-40.7 at 0.94-0.97x (2.1-3.8 s); 21:00 run/drive 36.6-50.6 at 0.69-0.93x
+(8-19 s); stand legs 29.3-31.7 at 1.00x everywhere. **The floor (p95 <= 33 at 1.0x) holds on
+the stand legs only**; noon walk is 1-3 % off real time; 21:00 misses. The window arm reads the
+sessions `demo.ps1 -PerfOnly` records (`target/perf1b-sessions.txt`) and is RED on them in
+release, as it should be. The 1080p window is now placed whole (counter uncut).
+
+**Release editor**: `cargo build --release -p inf-studio` without `custom-protocol` now
+refuses to build, naming `npx tauri build --no-bundle`.
+
+**PERF1c inherits** (21:00, window 1080p walk / run, audit session): submit 11.1 / 11.5 ms
+per frame; record graph 9.4 / 10.8; VSM raster 5.6 / 6.2 CPU (+7.05 GPU on the instrument);
+animation 2.1 / 4.3 per step (4.76 on the instrument's strip); rapier 4.0 / 5.5 per step;
+projection 4.2 / 5.8 per frame; character move 1.5 per step on the run. Arms to turn green:
+`fps_instrument::the_shipped_island_by_the_hour` (step ratchet), `perf1b_frame_gate::
+the_window_counter_holds_the_floor_at_real_time`.
