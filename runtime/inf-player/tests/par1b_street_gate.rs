@@ -1167,7 +1167,8 @@ fn a_car_at_fifteen_metres_a_second_stops_at_a_lamp_post() {
 /// derivation over all of them (flat ground — counts do not depend on it), by
 /// kind, per 100 m of city (20 m) and town (16 m) street, island totals, and the
 /// signalised junctions nearest the hero's start with a place to stand at each
-/// approach's stop line (for the frames). REPORTS, never asserts.
+/// approach's stop line (for the frames). Asserts the island-wide placement
+/// (audit PAR1b (i'), below); the counts it reports.
 #[test]
 #[ignore = "prints the shipped island's census; run by hand"]
 fn the_shipped_islands_furniture_census() {
@@ -1230,6 +1231,109 @@ fn the_shipped_islands_furniture_census() {
             k.name(),
             *n as f64 / (total / 100.0)
         );
+    }
+    // ── audit PAR1b (i'): THE ISLAND-WIDE PLACEMENT, over every piece of the
+    //    SHIPPED island (the gate's own arm reads the CI island's 33). Plan
+    //    checks — the derivation's flat ground does not move a foot in plan:
+    //    a foot in any street's CARRIAGEWAY (within its kerb face + the kerb
+    //    stone; the parking slots lie in it), in any crossing's BOX (the two
+    //    reserves' rectangle, crossings + junction fans), inside a BLOCK (the
+    //    building plots), or within a metre of the hero's spawn; and every
+    //    cable span's catenary sampled against the blocks (a span through a
+    //    building) and against every lamp head and signal head (within 0.3 m).
+    let rects = inf_editor_core::island::island_block_rects(&design);
+    let mut bad: BTreeMap<(&'static str, &'static str), usize> = BTreeMap::new();
+    let start0 = design.start(0.0);
+    let heads: Vec<DVec3> = f
+        .pieces
+        .iter()
+        .filter(|p| matches!(p.kind, PieceKind::LampPost | PieceKind::SignalPost))
+        .flat_map(|p| p.lights.iter().map(|l| l.at))
+        .collect();
+    let mut checked = 0usize;
+    for p in &f.pieces {
+        checked += 1;
+        let foot = DVec2::new(p.foot.x, p.foot.z);
+        if p.kind != PieceKind::Span {
+            for s in &streets {
+                let (lo, hi, perp, along) = if s.along_x() {
+                    (s.a.x.min(s.b.x), s.a.x.max(s.b.x), s.a.y, foot.x)
+                } else {
+                    (s.a.y.min(s.b.y), s.a.y.max(s.b.y), s.a.x, foot.y)
+                };
+                let lat = if s.along_x() {
+                    foot.y - perp
+                } else {
+                    foot.x - perp
+                };
+                let face = street::kerb_offset_m(s.gap_m) + street::KERB_WIDTH_M;
+                if along >= lo && along <= hi && lat.abs() < face {
+                    *bad.entry((p.kind.name(), "carriageway")).or_default() += 1;
+                }
+            }
+            for sx in streets.iter().filter(|s| s.along_x()) {
+                for sz in streets.iter().filter(|s| !s.along_x()) {
+                    let c = DVec2::new(sz.a.x, sx.a.y);
+                    let (xl, xh) = (sx.a.x.min(sx.b.x), sx.a.x.max(sx.b.x));
+                    let (zl, zh) = (sz.a.y.min(sz.b.y), sz.a.y.max(sz.b.y));
+                    if !(c.x >= xl - 0.5 && c.x <= xh + 0.5 && c.y >= zl - 0.5 && c.y <= zh + 0.5) {
+                        continue;
+                    }
+                    let (hx, hz) = (
+                        street::kerb_offset_m(sz.gap_m) + street::KERB_WIDTH_M,
+                        street::kerb_offset_m(sx.gap_m) + street::KERB_WIDTH_M,
+                    );
+                    if (foot.x - c.x).abs() < hx && (foot.y - c.y).abs() < hz {
+                        *bad.entry((p.kind.name(), "crossing box")).or_default() += 1;
+                    }
+                }
+            }
+            for r in &rects {
+                let d = (foot - r.centre).abs();
+                if d.x < r.half.x && d.y < r.half.y {
+                    *bad.entry((p.kind.name(), "block")).or_default() += 1;
+                }
+            }
+            if (foot - DVec2::new(start0.x, start0.z)).length() < 1.0 {
+                *bad.entry((p.kind.name(), "hero spawn")).or_default() += 1;
+            }
+        } else {
+            for i in &p.instances {
+                let c = DVec2::new(i.pos.x, i.pos.z);
+                for r in &rects {
+                    let d = (c - r.centre).abs();
+                    if d.x < r.half.x && d.y < r.half.y {
+                        *bad.entry(("cable span", "through a block")).or_default() += 1;
+                    }
+                }
+                if heads.iter().any(|h| (*h - i.pos).length() < 0.3) {
+                    *bad.entry(("cable span", "through a head")).or_default() += 1;
+                }
+            }
+        }
+    }
+    println!(
+        "PAR1b ISLAND PLACEMENT: {checked} pieces checked (spans by every segment); defects {:?}",
+        bad
+    );
+    assert!(bad.is_empty(), "furniture where it must not stand: {bad:?}");
+    // The nearest piece of each kind to the hero's start (for the frames).
+    for k in PieceKind::ALL {
+        if let Some(p) = f.pieces.iter().filter(|p| p.kind == k).min_by(|a, b| {
+            let s = DVec3::new(start0.x, 0.0, start0.z);
+            let (da, db) = (
+                DVec3::new(a.foot.x, 0.0, a.foot.z) - s,
+                DVec3::new(b.foot.x, 0.0, b.foot.z) - s,
+            );
+            da.length().total_cmp(&db.length())
+        }) {
+            println!(
+                "PAR1b NEAREST {:<13} foot ({:.1}, {:.1})",
+                k.name(),
+                p.foot.x,
+                p.foot.z
+            );
+        }
     }
     let start = design.start(0.0);
     let mut near: Vec<&inf_ecs::traffic::SignalJunction> = junctions.iter().collect();

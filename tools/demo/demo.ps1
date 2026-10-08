@@ -130,6 +130,9 @@ param(
     # (`INF_FPS_LOG`) and the leg's spans, in seconds since the player booted,
     # to `perf-legs.txt`. `-AudioOnly`'s shape.
     [switch]$PerfOnly,
+    # **A STILL SESSION OF THIS MANY SECONDS** (audit PAR1b): no leg, no input --
+    # the frame scripts' placements are photographed from outside. 0 is off.
+    [int]$HoldOnlyS = 0,
     # **A COOKED PACK TO RUN WITHOUT THE EDITOR** (the PERF1 audit): the
     # shipped player is launched on this pack directly (`--pack`), with the same
     # preview doors and the same legs; no editor, no Play button.
@@ -1870,7 +1873,15 @@ if ($PerfOnly) {
     Say "PERF ONLY (-PerfOnly): the frame-rate leg, and nothing else"
     Invoke-PerfLeg
 }
-if (-not $BoardingOnly -and -not $AudioOnly -and -not $RosterOnly -and -not $GalleryOnly -and -not $AirOnly -and -not $WeaponsOnly -and -not $CertOnly -and -not $PerfOnly) {
+# **THE STILL SESSION** (audit PAR1b): the player up, the window foreground, NO
+# input for `-HoldOnlyS` seconds -- so a frame script driving `-SpawnAt`
+# placements photographs each one without a scripted walk moving the hero.
+if ($HoldOnlyS -gt 0) {
+    Say "HOLD ONLY (-HoldOnlyS): $HoldOnlyS s with no input"
+    Restore-PlayerFocus "before the hold"
+    Start-Sleep -Seconds $HoldOnlyS
+}
+if (-not $BoardingOnly -and -not $AudioOnly -and -not $RosterOnly -and -not $GalleryOnly -and -not $AirOnly -and -not $WeaponsOnly -and -not $CertOnly -and -not $PerfOnly -and $HoldOnlyS -le 0) {
 
 # ── 5a. THE ISLAND'S OWN SIDEARM, with no environment variable ───────────────
 #
@@ -3581,7 +3592,7 @@ if (Test-Path $heroCsv) {
 Say ("windows now: " + ((Get-Process | Where-Object { $_.MainWindowTitle -ne "" -and ($_.ProcessName -like "inf*") } |
     ForEach-Object { "$($_.ProcessName)[$($_.Id)] '$($_.MainWindowTitle)'" }) -join " | "))
 
-if (-not $BoardingOnly -and -not $AudioOnly -and -not $RosterOnly -and -not $GalleryOnly -and -not $AirOnly -and -not $WeaponsOnly -and -not $CertOnly -and -not $PerfOnly) {
+if (-not $BoardingOnly -and -not $AudioOnly -and -not $RosterOnly -and -not $GalleryOnly -and -not $AirOnly -and -not $WeaponsOnly -and -not $CertOnly -and -not $PerfOnly -and $HoldOnlyS -le 0) {
 # ── 6z. WAVE VEH3a — THE TYRES, AND WHAT THE GROUND UNDER THEM IS ────────────
 #
 # Four frames, every one TRIGGERED on `hero.csv`'s eight new columns rather than
