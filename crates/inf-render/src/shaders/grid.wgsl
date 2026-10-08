@@ -90,7 +90,13 @@ fn fs(in: VsOut) -> FsOut {
 
     let ro = view.eye.xyz;
     let rd = view_ray(in.ndc);
-    let t = -ro.y / rd.y;
+    // PAR1b.2: the plane is WORLD y = 0 — render-local `-origin.y`
+    // (`mode_axis.y`). It used to be render-local 0, which is wherever the
+    // floating origin snapped the camera's height to: on the island that put
+    // the grid a few metres over the streets, drawn over every road and
+    // pavement. At world zero the terrain, the roads and the buildings above
+    // sea level occlude it through the depth test like any surface.
+    let t = (view.mode_axis.y - ro.y) / rd.y;
     if (t <= 0.0 || rd.y == 0.0) {
         return out;
     }
@@ -125,6 +131,15 @@ fn fs(in: VsOut) -> FsOut {
         col = vec3<f32>(0.25, 0.45, 1.0);
         a = max(a, 0.85 * fade);
     }
+
+    // PAR1b.2: NIGHT-FADED. The grid is drawn into the HDR scene before the
+    // eye's exposure, so at night (the island's eye opens x40 - x180) its
+    // 0.3-grey lines tonemapped to a white lattice. Below the horizon the
+    // grid dims to 1/64 (six stops — the eye's night opening), back to full
+    // over the civil-twilight band; a day sun (every golden) is untouched.
+    let day = clamp((view.sun_dir.y + 0.10) / 0.20, 0.0, 1.0);
+    let dim = mix(1.0 / 64.0, 1.0, day);
+    a = a * dim;
 
     // Premultiplied alpha over the sky/meshes.
     out.color = vec4<f32>(col * a, a);
