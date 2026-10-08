@@ -1192,7 +1192,7 @@ exist), and LSP/terminal/git runtime.
 | D-15 | The asset-LOD switch is un-morphed | terrain | 0.6359 m at 1088 m, 2.1737 m at 2176 m |
 | D-16 | Ring 0 is 4 m a vertex over 1 m data | terrain | max 0.2843 m; 128 cells closes 75 % at ~22.6 % more terrain time |
 | D-17 | A tile-edge apron for continuous normals | terrain | the residual is 1.318° across a seam; needs a `.inf_terrain` change |
-| D-18 | The hero spawns ~1 m above its ground | island | 0.9883 m (fixture), 0.9769 m (shipped) |
+| ~~D-18~~ | ~~The hero spawns ~1 m above its ground~~ — **CLOSED (wave PAR1b)**: the lift was `START_LIFT_M` (FIX1 set it to 0); PAR1b arms the spawn in BOTH hosts on the island's own spawn, `par1b_street_gate::the_island_is_furnished_and_nothing_stands_where_it_must_not` (0): \|spawn − rest\| ≤ 0.05 m, measured −0.0201 m on the fixture (shipping and PIE alike) | island | was 0.9883 m (fixture), 0.9769 m (shipped) |
 | D-19 | 14:00 and 21:00 are the same street | NPC | identical counts; the schedule has no evening |
 | D-20 | A crowd is a wall | NPC | 4.7 m in 10 s against 87.4 m on an empty street |
 | D-21 | No committed capture of the island's frame at any resolution | — | every golden is 320 × 180; strict compares at 64 × 36 |

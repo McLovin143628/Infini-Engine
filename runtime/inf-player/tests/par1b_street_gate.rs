@@ -279,6 +279,39 @@ fn the_island_is_furnished_and_nothing_stands_where_it_must_not() {
     let plans = inf_editor_core::settlement::settlements(&design);
     let core = plans[0].centre;
     let at = DVec3::new(core.x, 0.0, core.y);
+
+    // (0) D-18 (clause 5): the hero spawns ON its ground in both hosts — the
+    // island's own spawn, before anything moves it: the height it settles by
+    // over five seconds standing still is at most 5 cm either way.
+    for (name, sim) in [("shipping", &mut ship), ("PIE", &mut pie)] {
+        let hero_y = |sim: &RuntimeSim| {
+            sim.world()
+                .world()
+                .iter_entities()
+                .find(|e| {
+                    e.get::<inf_ecs::components::CharacterMovement>()
+                        .is_some_and(|m| m.player_controlled)
+                })
+                .and_then(|e| e.get::<inf_ecs::components::Transform>())
+                .map(|t| t.translation.y)
+                .expect("the island has a hero")
+        };
+        let spawn = hero_y(sim);
+        for _ in 0..300 {
+            sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+        }
+        let settled = hero_y(sim);
+        println!(
+            "PAR1b D-18 ({name}): spawned at y {spawn:.4}, at rest at y {settled:.4} — {:+.4} m",
+            spawn - settled
+        );
+        assert!(
+            (spawn - settled).abs() <= 0.05,
+            "{name}: the hero spawned {:+.4} m off its ground",
+            spawn - settled
+        );
+    }
+
     let mut worst_agent = f64::INFINITY;
     let mut agent_samples = 0usize;
     let mut overlaps = 0usize;

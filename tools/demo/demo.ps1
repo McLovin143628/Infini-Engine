@@ -843,8 +843,23 @@ public class InfInput {
     uint pid; GetWindowThreadProcessId(h, out pid);
     return string.Format("hwnd=0x{0:x} pid={1}", h.ToInt64(), pid);
   }
+  // **THE CAPTURE HARNESS LAW** (wave PAR1b, from the PAR1a audit): the
+  // session window's handle, once known. Every synthetic key-down, click and
+  // look is REFUSED unless that window is the foreground one, and counted --
+  // the PAR1a audit's E / W presses filled a foreground terminal's input line
+  // with junk when the Play window lost focus. Key-ups always pass, so a held
+  // key is never left down.
+  public static IntPtr Target = IntPtr.Zero;
+  public static int Refused = 0;
+  public static bool Ours() {
+    if (Target == IntPtr.Zero) return true;
+    if (GetForegroundWindow() == Target) return true;
+    Refused++;
+    return false;
+  }
   const uint KEYEVENTF_SCANCODE = 0x0008, KEYEVENTF_KEYUP = 0x0002;
   static void Key(ushort scan, bool down) {
+    if (down && !Ours()) return;
     INPUT[] i = new INPUT[1];
     i[0].type = 1;
     i[0].ki.wScan = scan;
@@ -858,24 +873,26 @@ public class InfInput {
   // a delta of whatever is left over. `MOUSEEVENTF_MOVE` is what a mouse
   // sends, and it is what a look-at has to be driven with.
   public static void Look(int dx, int dy) {
+    if (!Ours()) return;
     mouse_event(0x0001, (uint)dx, (uint)dy, 0, IntPtr.Zero);
   }
   // **The RIGHT button, which is `aim`** (audit CHAR1b.1). Holding it puts the
   // character in `RotationMode::Aiming`; RELEASING it leaves it in
   // `LookingDirection`, and that is the only door to the mode ALS turns in
   // place in. A demo that never right-clicks can never film a turn.
-  public static void RightDown() { mouse_event(0x0008, 0, 0, 0, IntPtr.Zero); }
+  public static void RightDown() { if (!Ours()) return; mouse_event(0x0008, 0, 0, 0, IntPtr.Zero); }
   public static void RightUp() { mouse_event(0x0010, 0, 0, 0, IntPtr.Zero); }
   // **The LEFT button, which is `attack`** (wave WPN2a). `Click` presses and
   // releases in one call, which is a single semi-automatic shot and nothing an
   // automatic weapon can be filmed with; a tracer in flight needs the trigger
   // HELD across several 60 Hz steps.
-  public static void LeftDown() { mouse_event(0x0002, 0, 0, 0, IntPtr.Zero); }
+  public static void LeftDown() { if (!Ours()) return; mouse_event(0x0002, 0, 0, 0, IntPtr.Zero); }
   public static void LeftUp() { mouse_event(0x0004, 0, 0, 0, IntPtr.Zero); }
   // **THE SCROLL WHEEL, which is `weapon_switch`** (wave WPN2a). One notch is
   // 120; the sign is the direction. It is how the loop gets one frame per
   // weapon CLASS out of one session, through the verb a player uses.
   public static void Wheel(int notches) {
+    if (!Ours()) return;
     mouse_event(0x0800, 0, 0, (uint)(notches * 120), IntPtr.Zero);
   }
   public static void Click(int x, int y) {
@@ -983,6 +1000,17 @@ if ($hasWindow) {
     [InfInput]::Click([int]($screen.Width / 2), [int]($screen.Height / 2))
 }
 Start-Sleep -Milliseconds 800
+# **THE CAPTURE HARNESS LAW** (wave PAR1b): from here on every synthetic key
+# burst is refused unless the session's own window is the foreground one, and
+# every frame is that window's own pixels (`screenshot.ps1` reads the handle).
+# An embedded session's keyboard window is the EDITOR's (the player is its
+# child), so that is the one asserted there.
+$sessionHwnd = if ($hasWindow) { $player.MainWindowHandle } else { $proc.MainWindowHandle }
+if ($sessionHwnd -ne [IntPtr]::Zero) {
+    [InfInput]::Target = $sessionHwnd
+    $env:INF_SHOT_HWND = [string]$sessionHwnd.ToInt64()
+    Say ("capture harness: key bursts asserted against hwnd 0x{0:x}; frames captured by that handle" -f $sessionHwnd.ToInt64())
+}
 
 # **THE PLAYER LOSES THE KEYBOARD MID-SESSION, AND NOTHING TAKES IT BACK**
 # (CHAR1b.2 audit). `window.rs`'s grab ladder is BOUNDED to GRAB_LADDER_FRAMES
@@ -1836,6 +1864,7 @@ function Invoke-PerfLeg {
     $sessions = Join-Path $repo "target\perf1b-sessions.txt"
     Add-Content -Path $sessions -Value ((Resolve-Path $OutDir).Path)
     Say "PERF: session recorded in $sessions"
+    Say ("capture harness: {0} synthetic input(s) REFUSED because the session window was not foreground" -f [InfInput]::Refused)
 }
 if ($PerfOnly) {
     Say "PERF ONLY (-PerfOnly): the frame-rate leg, and nothing else"

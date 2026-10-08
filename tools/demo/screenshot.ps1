@@ -48,7 +48,25 @@ if ($WindowTitle -ne "") {
 # screen copy photographs and a window capture does not. Falls back to the
 # screen copy when the window refuses.
 $printed = $false
-if ($env:INF_SHOT_PRINTWINDOW) {
+# **BY HANDLE** (wave PAR1b, the capture harness law): `demo.ps1` publishes the
+# session window's own handle in `INF_SHOT_HWND` once it knows it, and every
+# frame is then that window's own pixels -- a frame of the desktop (the PAR1a
+# audit's failed captures) cannot happen. A refusal falls back to the screen
+# copy and says so in the line it prints.
+if ($env:INF_SHOT_HWND) {
+    $h = [IntPtr][int64]$env:INF_SHOT_HWND
+    $r = New-Object InfShot+RECT
+    if ([InfShot]::GetWindowRect($h, [ref]$r) -and ($r.Right - $r.Left) -gt 0 -and ($r.Bottom - $r.Top) -gt 0) {
+        $bounds = New-Object System.Drawing.Rectangle($r.Left, $r.Top, ($r.Right - $r.Left), ($r.Bottom - $r.Top))
+        $bmp = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+        $g = [System.Drawing.Graphics]::FromImage($bmp)
+        $hdc = $g.GetHdc()
+        $printed = [InfShot]::PrintWindow($h, $hdc, 2)
+        $g.ReleaseHdc($hdc)
+        if (-not $printed) { $g.Dispose(); $bmp.Dispose(); Write-Output "PrintWindow refused hwnd $($env:INF_SHOT_HWND) [SCREEN FALLBACK]" }
+    }
+}
+if (-not $printed -and $env:INF_SHOT_PRINTWINDOW) {
     $pw = Get-Process | Where-Object { $_.MainWindowTitle -like "*$($env:INF_SHOT_PRINTWINDOW)*" } | Select-Object -First 1
     if ($pw) {
         $r = New-Object InfShot+RECT
