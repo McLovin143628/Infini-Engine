@@ -2195,11 +2195,8 @@ impl EngineHost {
                         && inf_pcg::building::fixtures::FixtureRow::from_code(l.row)
                             == Some(inf_pcg::building::fixtures::FixtureRow::SignalHead);
                     let colour = if signal {
-                        let aspect = inf_ecs::traffic::aspect_at(
-                            f64::from(l.seed),
-                            l.phase == 0,
-                            signal_t_s,
-                        );
+                        let (offset, along_x) = (f64::from(l.seed), l.phase == 0);
+                        let aspect = inf_ecs::traffic::aspect_at(offset, along_x, signal_t_s);
                         signal_lenses.push((l.at, l.dir, aspect));
                         inf_pcg::street::aspect_rgb(aspect.as_u8())
                     } else {

@@ -3607,7 +3607,8 @@ fn the_street_is_furnished_and_signalled_by_one_body_in_both_hosts() {
     // (2) the signal head, in the shared light fence.
     let rig = fenced(&read(PLAYER), "venue_rig_lights", "the shipped player");
     for needle in [
-        "inf_ecs::traffic::aspect_at(f64::from(l.seed),l.phase==0,signal_t_s)",
+        "inf_ecs::traffic::aspect_at(offset,along_x,signal_t_s)",
+        "let(offset,along_x)=(f64::from(l.seed),l.phase==0);",
         "signal_lenses.push((l.at,l.dir,aspect));",
         "inf_pcg::street::aspect_rgb(aspect.as_u8())",
     ] {
