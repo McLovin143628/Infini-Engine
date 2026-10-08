@@ -293,6 +293,7 @@ pub fn kelvin_rgb(k: u32) -> [f32; 3] {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // one positional row of the vocabulary table
 const fn def(
     row: FixtureRow,
     shape: ModuleShape,
