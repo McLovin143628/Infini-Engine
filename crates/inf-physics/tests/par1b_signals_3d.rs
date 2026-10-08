@@ -99,8 +99,8 @@ fn town(cols: i32, rows: i32, hero_at: DVec3, hour: f64) -> (EcsWorld, PhysicsBr
     (world, PhysicsBridge3D::new(DVec3::new(0.0, -9.81, 0.0)))
 }
 
-fn step(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, signals_off: bool) {
-    inf_physics::d3::traffic::step_traffic(world, bridge, DT);
+fn step(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, signals_off: bool) -> usize {
+    let stats = inf_physics::d3::traffic::step_traffic(world, bridge, DT);
     if signals_off {
         if let Some(mut r) = world.world_mut().get_resource_mut::<traffic::TrafficRes>() {
             r.junctions.clear();
@@ -112,6 +112,7 @@ fn step(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, signals_off: bool) {
     bridge.step(DT);
     bridge.write_back_into(world);
     world.propagate();
+    stats.signal_holds
 }
 
 /// What one run measured.
@@ -129,20 +130,92 @@ struct Run {
     worst_overrun_m: f64,
     /// Steered cars observed driving, summed over steps.
     driving_steps: usize,
+    /// **The clock tier** (audit PAR1b): distinct `(car, junction)` holds of a
+    /// `Near` car at a red, and the step-count of holds the step reported.
+    near_waits: std::collections::BTreeSet<(Uuid, i64, i64)>,
+    near_hold_steps: usize,
+    /// `Near` cars whose nose CROSSED a stop line (ahead of it the step
+    /// before, at or past it now) while their approach showed red.
+    near_red_entries: usize,
+    /// `Near` cars observed driving, summed over steps.
+    near_driving_steps: usize,
 }
 
 fn run(signals_off: bool, steps: usize) -> Run {
     let (mut world, mut bridge) = town(4, 4, DVec3::new(150.0, 0.0, 150.0), 8.4);
     let mut out = Run::default();
     let mut waiting: std::collections::BTreeMap<Uuid, (i64, i64)> = Default::default();
+    let mut noses: std::collections::BTreeMap<(Uuid, i64, i64), f64> = Default::default();
+    let mut next_noses: std::collections::BTreeMap<(Uuid, i64, i64), f64> = Default::default();
     for _ in 0..steps {
-        step(&mut world, &mut bridge, signals_off);
+        out.near_hold_steps += step(&mut world, &mut bridge, signals_off);
         let Some(res) = traffic::carriageway_of(&world) else {
             continue;
         };
         let junctions = traffic::signal_junctions(&res.streets);
         let t_s = traffic::signal_clock_of(&world);
         let recs = inf_physics::d3::traffic::records(&world);
+        // ── the clock tier: holds, and stop lines crossed on a red.
+        for (guid, rec) in &recs {
+            if rec.tier != inf_ecs::crowd::CrowdTier::Near || rec.taken {
+                continue;
+            }
+            if rec.last.distance(rec.home) > 0.5 {
+                out.near_driving_steps += 1;
+            }
+            let yaw = rec.yaw_deg.to_radians();
+            let fwd = DVec3::new(inf_math::psin64(yaw), 0.0, inf_math::pcos64(yaw));
+            let along_x = fwd.x.abs() >= fwd.z.abs();
+            if rec.signal_held {
+                // The junction it is held for: the nearest one ahead of it.
+                if let Some(j) = junctions.iter().min_by(|a, b| {
+                    let da = DVec2::new(a.centre.x - rec.last.x, a.centre.y - rec.last.z);
+                    let db = DVec2::new(b.centre.x - rec.last.x, b.centre.y - rec.last.z);
+                    da.length().total_cmp(&db.length())
+                }) {
+                    out.near_waits.insert((
+                        *guid,
+                        (j.centre.x * 10.0) as i64,
+                        (j.centre.y * 10.0) as i64,
+                    ));
+                }
+            }
+            // Its nose against every stop line it is driving toward, and a
+            // CROSSING of one (ahead of it last step, behind it now) while its
+            // approach shows red.
+            for j in &junctions {
+                let (d_along, d_lat) = if along_x {
+                    (
+                        (j.centre.x - rec.last.x) * fwd.x.signum(),
+                        (j.centre.y - rec.last.z).abs(),
+                    )
+                } else {
+                    (
+                        (j.centre.y - rec.last.z) * fwd.z.signum(),
+                        (j.centre.x - rec.last.x).abs(),
+                    )
+                };
+                if d_lat > traffic::SIGNAL_LANE_REACH_M || !(0.0..=40.0).contains(&d_along) {
+                    continue;
+                }
+                let nose = d_along - rec.def.half_extents.z.abs() - traffic::STOP_LINE_M;
+                let key = (
+                    *guid,
+                    (j.centre.x * 10.0) as i64,
+                    (j.centre.y * 10.0) as i64,
+                );
+                if let Some(prev) = noses.get(&key) {
+                    if *prev > 0.0
+                        && nose <= 0.0
+                        && traffic::signal_aspect(j, along_x, t_s) == traffic::Aspect::Red
+                    {
+                        out.near_red_entries += 1;
+                    }
+                }
+                next_noses.insert(key, nose);
+            }
+        }
+        noses = std::mem::take(&mut next_noses);
         // Footprints of every steered car this step.
         let mut boxes: Vec<(Uuid, DVec3, DVec3, f64, f64)> = Vec::new();
         for (guid, rec) in &recs {
@@ -282,3 +355,55 @@ fn a_traffic_car_waits_at_a_red_and_goes_on_green_and_the_box_stays_clear() {
         off.box_contacts
     );
 }
+
+/// **THE CLOCK TIER OBEYS TOO** (audit PAR1b, closing "only the steered tier
+/// obeys; clock-placed cars beyond 64 m drive through reds"). The same rush on
+/// the same grid, the cars between 64 and 128 m of the hero — drawn, moved by
+/// their clocks:
+///
+/// * they are HELD at red lines — distinct `(car, junction)` holds, at least
+///   [`MIN_NEAR_WAITS`] over the run (the morning rush puts tens of clock cars
+///   on the nine signalised crossings; the floor is a measured count's third);
+/// * a `Near` car drives INTO a junction box on its red at most a third as
+///   often as with the signals switched off (an entry on red can still be the
+///   last metre of an amber it was committed to when the step that read it
+///   ran) — the measured with/without pair is printed.
+///
+/// Mutation (measured): the phase table frozen on green (`aspect_at` answering
+/// `Green` always) -> 0 holds, red; the hold dropped from the step -> 0 holds,
+/// red.
+#[test]
+fn a_clock_tier_car_is_held_at_a_red_and_does_not_enter_the_box_on_it() {
+    let on = run(false, 2400);
+    let off = run(true, 2400);
+    println!(
+        "PAR1b CLOCK TIER: on: {} distinct holds ({} hold-steps), {} red entries, {} driving near-steps | off: {} holds, {} red entries, {} driving near-steps",
+        on.near_waits.len(),
+        on.near_hold_steps,
+        on.near_red_entries,
+        on.near_driving_steps,
+        off.near_waits.len(),
+        off.near_red_entries,
+        off.near_driving_steps
+    );
+    assert!(on.near_driving_steps > 0, "no clock-tier car drove");
+    assert!(
+        on.near_waits.len() >= MIN_NEAR_WAITS,
+        "only {} clock-tier holds at a red (floor {MIN_NEAR_WAITS})",
+        on.near_waits.len()
+    );
+    assert!(off.near_waits.is_empty(), "a hold with the signals off");
+    assert!(
+        off.near_red_entries > 0,
+        "the control never put a clock car into a box on a red: the arm cannot see"
+    );
+    assert_eq!(
+        on.near_red_entries, 0,
+        "clock cars crossed a stop line on a red ({} without the signals)",
+        off.near_red_entries
+    );
+}
+
+/// The floor of distinct clock-tier holds the rush must show — a third of the
+/// 13 measured (audit PAR1b).
+const MIN_NEAR_WAITS: usize = 4;

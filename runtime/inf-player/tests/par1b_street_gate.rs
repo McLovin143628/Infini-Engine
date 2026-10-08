@@ -1387,14 +1387,14 @@ fn the_shipped_islands_furniture_census() {
 /// the signalised crossing it spawns at (-1750, 2050), the morning rush
 /// (08:24), a whole 50 s cycle ([`SPAWN_STEPS`]) after a warm-up that lets the
 /// traffic plan its day: every traffic car within 64 m of the crossing is
-/// watched, steered (`Full`) and clock-moved (`Near`) alike. REPORTS: the
-/// distinct steered cars at rest at a red line there (nose within 4 m short of
-/// / 1 m past it), the steps on which two cars' footprints overlap inside the
-/// crossing's box, and the stop lines crossed on a red. The clock tier does
-/// NOT obey signals on this tree (the audit's fix was reverted — it stalled
-/// three EMS dispatch arms; see `par1b-audit-report.md`), so the crossings
-/// count is the carried defect's measurement, and the arm becomes an assertion
-/// with that fix (PAR1b.2).
+/// watched, steered (`Full`) and clock-moved (`Near`) alike. Asserts:
+///
+/// * at least [`SPAWN_MIN_WAITS`] distinct cars stand at a red line there
+///   (steered: at rest, nose within 4 m short of / 1 m past the line; clock: held
+///   by `clock_signal_hold`), and at least [`SPAWN_MIN_HOLD_STEPS`] clock-tier
+///   hold-steps island-wide;
+/// * ZERO steps on which two cars' footprints overlap inside the crossing's box;
+/// * ZERO stop lines crossed on a red by a car that was not already over it.
 ///
 /// Off CI (CI never cooks the island): skips without `INF_ISLAND_PACK`.
 #[test]
@@ -1432,6 +1432,7 @@ fn the_spawn_junction_holds_its_traffic_at_a_red_and_keeps_its_box_clear() {
         inf_ecs::traffic::street_kerb_offset_m(j.gap_x),
     );
     let mut waits: std::collections::BTreeSet<uuid::Uuid> = Default::default();
+    let mut holds = 0usize;
     let mut box_contacts = 0usize;
     let mut red_crossings = 0usize;
     let mut watched: std::collections::BTreeSet<uuid::Uuid> = Default::default();
@@ -1439,6 +1440,7 @@ fn the_spawn_junction_holds_its_traffic_at_a_red_and_keeps_its_box_clear() {
     let mut noses: BTreeMap<uuid::Uuid, f64> = BTreeMap::new();
     for _ in 0..SPAWN_STEPS {
         sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+        holds += sim.traffic_stats().signal_holds;
         let t_s = inf_ecs::traffic::signal_clock_of(sim.world());
         let recs = inf_physics::d3::traffic::records(sim.world());
         let mut in_box: Vec<(DVec3, f64)> = Vec::new();
@@ -1457,7 +1459,7 @@ fn the_spawn_junction_holds_its_traffic_at_a_red_and_keeps_its_box_clear() {
                 continue;
             }
             watched.insert(*g);
-            if (rec.last - at).length() > 0.0 {
+            if (rec.last - at).length() > 0.0 || rec.signal_held {
                 moving.insert(*g);
             }
             let half = rec.def.half_extents.z.abs();
@@ -1484,9 +1486,10 @@ fn the_spawn_junction_holds_its_traffic_at_a_red_and_keeps_its_box_clear() {
                 }
             }
             next.insert(*g, nose);
-            let still = rec.tier == inf_ecs::crowd::CrowdTier::Full
-                && (rec.last - at).length() < 0.01
-                && (-1.0..=4.0).contains(&nose);
+            let still = rec.signal_held
+                || (rec.tier == inf_ecs::crowd::CrowdTier::Full
+                    && (rec.last - at).length() < 0.01
+                    && (-1.0..=4.0).contains(&nose));
             if still && red {
                 waits.insert(*g);
             }
@@ -1503,16 +1506,28 @@ fn the_spawn_junction_holds_its_traffic_at_a_red_and_keeps_its_box_clear() {
         box_contacts += usize::from(touched);
     }
     println!(
-        "PAR1b SPAWN JUNCTION ({:.0}, {:.0}) offset {:.0} s: {} cars watched within 64 m ({} of them moved), {} distinct steered cars waited at a red, {} box-contact steps, {} red line crossings over {SPAWN_STEPS} steps",
+        "PAR1b SPAWN JUNCTION ({:.0}, {:.0}) offset {:.0} s: {} cars watched within 64 m ({} of them moved), {} distinct waited at a red, {} clock hold-steps island-wide, {} box-contact steps, {} red line crossings over {SPAWN_STEPS} steps",
         j.centre.x,
         j.centre.y,
         j.offset_s,
         watched.len(),
         moving.len(),
         waits.len(),
+        holds,
         box_contacts,
         red_crossings
     );
+    assert!(
+        waits.len() >= SPAWN_MIN_WAITS,
+        "only {} cars waited at the spawn crossing's reds",
+        waits.len()
+    );
+    assert!(
+        holds >= SPAWN_MIN_HOLD_STEPS,
+        "only {holds} clock-tier hold-steps island-wide"
+    );
+    assert_eq!(box_contacts, 0, "two cars met in the spawn crossing's box");
+    assert_eq!(red_crossings, 0, "a car crossed a stop line on a red");
 }
 
 /// **THE HITCH PROFILE** (audit PAR1b (a')): is re-furnishing on a cell
@@ -1608,5 +1623,15 @@ fn the_walk_down_the_strip_files_its_slow_steps() {
 /// Steps the shipped-island signal arm warms the traffic up over before it
 /// watches (the day plans `TRAFFIC_PLANS_PER_STEP` routes a step).
 const SPAWN_WARMUP: usize = 240;
-/// Steps it watches — a whole 50 s signal cycle.
+/// Steps it watches — ten seconds, a fifth of a cycle each way.
 const SPAWN_STEPS: usize = 3000;
+/// The distinct waits it asks for at the spawn crossing — the measured count
+/// (audit PAR1b, `cook-h/perf1`): ONE car over a whole 50 s cycle, because a
+/// frozen level clock (the arm's, and `INF_PIE_HOUR`'s) freezes every commute
+/// where it stands and only the circuits move. The island-wide clock holds
+/// (2 459 hold-steps measured) are the arm's real engagement and are asserted
+/// beside it.
+const SPAWN_MIN_WAITS: usize = 1;
+/// The island-wide clock-tier hold-steps the run must show (a tenth of the
+/// 2 459 measured).
+const SPAWN_MIN_HOLD_STEPS: usize = 245;

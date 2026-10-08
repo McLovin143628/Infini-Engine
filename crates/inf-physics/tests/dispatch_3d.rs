@@ -1802,3 +1802,253 @@ fn a_teleported_rig_moves_as_a_unit() {
         "the drag tore the door off — a rig that moves as a unit puts nothing through its own hinge"
     );
 }
+
+// ── (PAR1b.2) the signals and the fleet ─────────────────────────────────────
+
+/// Where `at` (heading `fwd`) stands against `j`'s stop line on its own
+/// approach: `Some((nose-to-line metres, approach along X))` when it is in the
+/// approach's lanes, `None` otherwise. `half_z` is its half-length.
+fn line_reading(
+    j: &inf_ecs::traffic::SignalJunction,
+    at: DVec3,
+    fwd: DVec3,
+    half_z: f64,
+) -> Option<(f64, bool)> {
+    let along_x = fwd.x.abs() >= fwd.z.abs();
+    let (d_along, d_lat) = if along_x {
+        (
+            (j.centre.x - at.x) * fwd.x.signum(),
+            (j.centre.y - at.z).abs(),
+        )
+    } else {
+        (
+            (j.centre.y - at.z) * fwd.z.signum(),
+            (j.centre.x - at.x).abs(),
+        )
+    };
+    if d_lat > inf_ecs::traffic::SIGNAL_LANE_REACH_M || d_along < 0.0 {
+        return None;
+    }
+    Some((d_along - half_z - inf_ecs::traffic::STOP_LINE_M, along_x))
+}
+
+/// What [`signals_and_the_fleet`] measured.
+#[derive(Debug, Default)]
+struct SignalRun {
+    /// Stop lines a RESPONDING unit's nose crossed while its approach showed red.
+    unit_reds: usize,
+    /// Stop lines any traffic car's nose crossed while its approach showed red
+    /// (a car whose nose was over before the red is not counted: it is
+    /// committed).
+    traffic_reds: usize,
+    /// Of the red crossings by traffic, the ones made by a car MOVING OVER for
+    /// a siren behind it (EMS2's yield creeps a car on at walking pace, over
+    /// its line if that is where it stands — the queue parting, allowed).
+    yield_creeps: usize,
+    /// Traffic car-steps held at a red by the clock (`TrafficStats::signal_holds`).
+    holds: usize,
+    /// Steps on which a junction was pre-empted.
+    preempt_steps: usize,
+    /// Clock car-steps moved over for a siren (`TrafficStats::parted`).
+    parted: usize,
+    /// Steps on which the unit's footprint met a traffic car's inside a box.
+    box_contacts: usize,
+    /// Whether the fire was put out.
+    resolved: bool,
+}
+
+/// The fire at the far corner, the appliance's whole run, with every car and
+/// the unit read against every stop line each step.
+fn signals_and_the_fleet(hero_at: DVec3) -> SignalRun {
+    let mut town = Town::new();
+    hero(&mut town.world, hero_at);
+    town.steps(20);
+    let fire = inf_physics::d3::dispatch::report_incident(
+        &mut town.world,
+        inf_ecs::dispatch::IncidentKind::Fire {
+            building: Uuid::from_u128(0x0E52_2001),
+            intensity: 1.0,
+        },
+        DVec3::new(100.0, 0.0, 100.0),
+    )
+    .expect("the staging door opened a fire");
+    let mut out = SignalRun::default();
+    let mut last: std::collections::BTreeMap<(Uuid, usize), f64> = Default::default();
+    for _ in 0..6000 {
+        let t = inf_physics::d3::traffic::step_traffic(&mut town.world, &mut town.bridge, DT);
+        let s = inf_physics::d3::dispatch::step_dispatch(&mut town.world, &mut town.bridge, DT);
+        town.bridge
+            .sync_from_world_sim(&town.world, &Default::default(), &Default::default());
+        inf_physics::d3::step_character_movement(&mut town.world, &mut town.bridge, DT);
+        inf_physics::d3::step_vehicles(&mut town.world, &mut town.bridge, DT);
+        town.bridge.step(DT);
+        town.bridge.write_back_into(&mut town.world);
+        town.world.propagate();
+        out.holds += t.signal_holds;
+        out.parted += t.parted;
+        out.preempt_steps += usize::from(t.preempted > 0);
+        let Some(res) = inf_ecs::traffic::carriageway_of(&town.world) else {
+            continue;
+        };
+        let junctions = res.junctions.clone();
+        // The clock the traffic step DECIDED on: the population's count has
+        // moved on by one since (reading the new one calls a car that ran the
+        // last instant of an amber a red-runner by one step).
+        let t_s = inf_ecs::traffic::signal_clock_s(
+            inf_ecs::traffic::steps(&town.world).saturating_sub(1),
+        );
+        let hot = dispatch::dispatch_of(&town.world).is_some_and(|d| {
+            d.runs
+                .get(&APPLIANCE)
+                .is_some_and(|r| r.state.running_hot())
+        });
+        // Every car this step: the unit and the traffic, `(guid, at, fwd,
+        // half_x, half_z, is_unit)`.
+        let mut cars: Vec<(Uuid, DVec3, DVec3, f64, f64, bool)> = Vec::new();
+        let yaw_fwd = |deg: f64| {
+            let r = deg.to_radians();
+            DVec3::new(inf_math::psin64(r), 0.0, inf_math::pcos64(r))
+        };
+        if let Some(e) = town.world.entity_of(APPLIANCE) {
+            if let Some(tf) = town.world.world().get::<Transform>(e) {
+                cars.push((
+                    APPLIANCE,
+                    tf.translation.to_dvec3(),
+                    yaw_fwd(tf.rotation.y),
+                    1.05,
+                    3.9,
+                    true,
+                ));
+            }
+        }
+        for (g, rec) in inf_physics::d3::traffic::records(&town.world) {
+            if rec.tier == inf_ecs::crowd::CrowdTier::Dormant || rec.taken {
+                continue;
+            }
+            let Some(tf) = town
+                .world
+                .entity_of(g)
+                .and_then(|e| town.world.world().get::<Transform>(e))
+            else {
+                continue;
+            };
+            cars.push((
+                g,
+                tf.translation.to_dvec3(),
+                yaw_fwd(tf.rotation.y),
+                rec.def.half_extents.x.abs(),
+                rec.def.half_extents.z.abs(),
+                false,
+            ));
+        }
+        for (k, j) in junctions.iter().enumerate() {
+            for (g, at, fwd, _, half_z, is_unit) in &cars {
+                let Some((nose, along_x)) = line_reading(j, *at, *fwd, *half_z) else {
+                    last.remove(&(*g, k));
+                    continue;
+                };
+                if let Some(before) = last.insert((*g, k), nose) {
+                    let crossed = before > 0.0 && nose <= 0.0;
+                    let red = inf_ecs::traffic::signal_aspect(j, along_x, t_s)
+                        == inf_ecs::traffic::Aspect::Red;
+                    if crossed && red {
+                        if *is_unit {
+                            out.unit_reds += usize::from(hot);
+                        } else {
+                            let sirens = inf_physics::d3::dispatch::running_hot(&town.world);
+                            if inf_ecs::dispatch::yield_bias_m(*at, *fwd, &sirens) != 0.0 {
+                                out.yield_creeps += 1;
+                            } else {
+                                out.traffic_reds += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            // The unit against traffic, inside this junction's box.
+            let hx = inf_ecs::traffic::street_kerb_offset_m(j.gap_z);
+            let hz = inf_ecs::traffic::street_kerb_offset_m(j.gap_x);
+            let inside = |p: DVec3| (p.x - j.centre.x).abs() < hx && (p.z - j.centre.y).abs() < hz;
+            if let Some(u) = cars.iter().find(|c| c.5) {
+                if inside(u.1) {
+                    let ru = (u.3 * u.3 + u.4 * u.4).sqrt();
+                    let touched = cars.iter().filter(|c| !c.5 && inside(c.1)).any(|c| {
+                        let rc = (c.3 * c.3 + c.4 * c.4).sqrt();
+                        DVec3::new(u.1.x - c.1.x, 0.0, u.1.z - c.1.z).length() < 0.75 * (ru + rc)
+                    });
+                    out.box_contacts += usize::from(touched);
+                }
+            }
+        }
+        if let Some(i) = dispatch::dispatch_of(&town.world).and_then(|d| d.incidents.get(&fire)) {
+            out.resolved |= i.state == IncidentState::Resolved;
+        }
+        if s.returned > 0 {
+            break;
+        }
+    }
+    out
+}
+
+/// **THE SIGNALS EVERY TIER OBEYS, AND THE FLEET PRE-EMPTS THEM** (wave
+/// PAR1b.2, clause 1). Over the appliance's whole run to the fire at the far
+/// corner and home again, through the town's four signalised crossings at the
+/// morning hour this fixture's traffic runs:
+///
+/// * NO traffic car's nose crosses a stop line on a red (steered and clock
+///   tier alike — the clock tier is held by `clock_signal_hold`, at least one
+///   hold-step counted);
+/// * the RESPONDING appliance crosses at least one on a red — it treats every
+///   signal as green — with the junction pre-empted while it is near and the
+///   queue at the line parted for it (clock cars moved over, counted);
+/// * the appliance meets no traffic car inside a junction box;
+/// * and the fire is still put out (the dispatch arms above, unchanged).
+///
+/// Mutations (measured, in the PAR1b.2 report): `PREEMPT_RADIUS_M` 0 -> the
+/// fire arms above red (the appliance stalls short of the scene); the phase
+/// table frozen on green -> 0 holds, red.
+#[test]
+fn a_responding_unit_runs_the_red_the_traffic_waits_and_the_queue_parts() {
+    // Two viewpoints: the fixture's own (the appliance's route through steered
+    // traffic) and one a block east of the scene, from which the crossings
+    // the appliance runs are 100 m off — the CLOCK tier's queues, which is
+    // where the parting is engaged.
+    for hero_at in [DVec3::new(50.0, 0.0, 50.0), DVec3::new(250.0, 0.0, 50.0)] {
+        let r = signals_and_the_fleet(hero_at);
+        println!(
+            "PAR1b.2 FLEET (hero {hero_at:?}): unit red crossings {} | traffic red crossings {} (+{} creeping over for the siren) | clock hold-steps {} | pre-empt steps {} | parted car-steps {} | unit box contacts {} | resolved {}",
+            r.unit_reds,
+            r.traffic_reds,
+            r.yield_creeps,
+            r.holds,
+            r.preempt_steps,
+            r.parted,
+            r.box_contacts,
+            r.resolved
+        );
+        assert!(r.resolved, "the fire was never put out");
+        assert_eq!(
+            r.traffic_reds, 0,
+            "a traffic car crossed a stop line on a red"
+        );
+        assert!(r.holds > 0, "no clock-tier car was ever held at a red");
+        assert!(
+            r.preempt_steps > 0,
+            "the responding unit pre-empted nothing"
+        );
+        assert!(
+            r.unit_reds >= 1,
+            "the responding unit never crossed a line on a red — it is obeying the signals"
+        );
+        assert_eq!(
+            r.box_contacts, 0,
+            "the unit met traffic inside a junction box"
+        );
+        if hero_at.x > 200.0 {
+            assert!(
+                r.parted > 0,
+                "no clock car held at a line ever moved over for the siren"
+            );
+        }
+    }
+}

@@ -1458,8 +1458,17 @@ pub fn aspect_at(offset_s: f64, along_x: bool, t_s: f64) -> Aspect {
 /// does the rest: a red line is a stopped car's bumper. A car whose nose is
 /// already over its line is committed and drives on; an amber is obeyed only
 /// when the car can still stop for it at [`COMFORT_DECEL_MPS2`].
+///
+/// `preempt` is [`preempted_junctions`]' answer, parallel to `junctions` (an
+/// empty slice pre-empts nothing): a junction a responding unit is near shows
+/// EVERY approach a stop — a red stays a red and a green reads as an amber, so
+/// a car that can stop comfortably stops at its line and one already too close
+/// to stop goes on (the phase table itself is untouched; the head the player
+/// sees keeps cycling).
+#[allow(clippy::too_many_arguments)] // every term a measured quantity
 pub fn stop_line_gap(
     junctions: &[SignalJunction],
+    preempt: &[bool],
     path: &NavPath,
     s_m: f64,
     nose_m: f64,
@@ -1476,25 +1485,54 @@ pub fn stop_line_gap(
         0.0
     };
     let mut best: Option<f64> = None;
-    for j in junctions {
+    for (k, j) in junctions.iter().enumerate() {
         let (dx, dz) = (j.centre.x - here.x, j.centre.y - here.z);
         if dx * dx + dz * dz > (SIGNAL_LOOK_M + STOP_LINE_M) * (SIGNAL_LOOK_M + STOP_LINE_M) {
             continue;
         }
-        let proj = path.project(DVec3::new(j.centre.x, here.y, j.centre.y));
+        // **The crossing AHEAD on this run of the path** (audit PAR1b): the
+        // nearest point of the path to the junction within the look window
+        // from the car forward — not the nearest on the whole path, which on a
+        // circuit that passes the same junction twice is as likely the OTHER
+        // pass (the line the car then reads is behind it, and it drove the red
+        // — measured: three clock cars over the line on a red on the 4 x 4
+        // rush, all circuits).
+        let Some(proj) = project_ahead(path, s_m, SIGNAL_LOOK_M + STOP_LINE_M + nose_m, j.centre)
+        else {
+            continue;
+        };
         if proj.distance_m > SIGNAL_LANE_REACH_M {
             continue;
         }
-        let line_s = proj.s_m - STOP_LINE_M;
-        let gap = line_s - (s_m + nose_m);
+        // **The line is where the APPROACH meets it, not 10 m of path before
+        // the path's nearest point to the centre** (wave PAR1b.2). A path that
+        // turns at the junction comes nearest the centre inside its curve, a
+        // few metres past the line rather than `STOP_LINE_M`, so the old
+        // `proj.s_m - STOP_LINE_M` put a turning car's line BEHIND it and it
+        // drove the red (measured on `dispatch_3d`'s town: one circuit car's
+        // left turn, three crossings on a red). Every settlement street runs
+        // along X or Z, so the approach is the axis the junction lies along
+        // from the car, and the line is `STOP_LINE_M` short of the centre on
+        // it — for a straight-through lane, the same number as before.
+        let (along_x, along, lateral) = if dx.abs() >= dz.abs() {
+            (true, dx, dz)
+        } else {
+            (false, dz, dx)
+        };
+        let heading = path.direction_at(s_m);
+        let toward = if along_x { heading.x } else { heading.z };
+        if lateral.abs() > SIGNAL_LANE_REACH_M || toward * along.signum() < 0.5 {
+            continue;
+        }
+        let gap = along.abs() - STOP_LINE_M - nose_m;
         if !(gap > -0.25 && gap <= SIGNAL_LOOK_M) {
             continue;
         }
-        // The approach's axis is the lane's direction AT the line — a car about
-        // to turn is still on the street it is arriving along there.
-        let d = path.direction_at(line_s.max(0.0));
-        let along_x = d.x.abs() >= d.z.abs();
-        let stop = match signal_aspect(j, along_x, t_s) {
+        let aspect = match signal_aspect(j, along_x, t_s) {
+            Aspect::Green if preempt.get(k).copied().unwrap_or(false) => Aspect::Amber,
+            a => a,
+        };
+        let stop = match aspect {
             Aspect::Green => false,
             Aspect::Red => true,
             Aspect::Amber => v * v <= 2.0 * COMFORT_DECEL_MPS2 * gap.max(0.0),
@@ -1507,6 +1545,160 @@ pub fn stop_line_gap(
         }
     }
     best
+}
+
+/// **How near a responding unit must be to a signalised junction to pre-empt
+/// it**, metres, plan distance to the centre (wave PAR1b.2). Seventy metres is
+/// six seconds at a unit's 11.7 m/s on the island. A cross car already inside
+/// its stopping distance when the pre-empt begins goes on (the amber rule), and
+/// a car that entered the box on its green is committed: either needs at most
+/// a 20 m box plus its own length at street speed, about four seconds, to
+/// clear — so the box is empty when the unit reaches it. Measured on
+/// `dispatch_3d`'s town: at 45 m a circuit car that could not stop for the
+/// pre-empt was still turning through the box when the appliance arrived, and
+/// the contact shoved the appliance into the parked row for good.
+pub const PREEMPT_RADIUS_M: f64 = 70.0;
+
+/// **Which junctions a responding unit pre-empts this step** (wave PAR1b.2) —
+/// parallel to `junctions`, `true` where any of `hot` (the dispatcher's
+/// running-hot list, positions only) is within [`PREEMPT_RADIUS_M`] of the
+/// centre in plan. Empty when nothing is hot, so a street with no siren on it
+/// reads every signal exactly as before. A pure function of the step's state:
+/// both hosts compute the same list.
+pub fn preempted_junctions(junctions: &[SignalJunction], hot: &[DVec3]) -> Vec<bool> {
+    if hot.is_empty() || junctions.is_empty() {
+        return Vec::new();
+    }
+    junctions
+        .iter()
+        .map(|j| {
+            hot.iter().any(|u| {
+                let (dx, dz) = (u.x - j.centre.x, u.z - j.centre.y);
+                u.is_finite() && dx * dx + dz * dz <= PREEMPT_RADIUS_M * PREEMPT_RADIUS_M
+            })
+        })
+        .collect()
+}
+
+/// **The nearest point of `path` to `c` (plan) within `[s_m, s_m + window_m]`**
+/// (audit PAR1b) — a metre's sampling refined to a decimetre, `None` past the
+/// path's end. Plan distance, because the junction carries no height.
+fn project_ahead(
+    path: &NavPath,
+    s_m: f64,
+    window_m: f64,
+    c: DVec2,
+) -> Option<inf_nav::path::PathProjection> {
+    let total = path.length_m();
+    if !(s_m.is_finite() && window_m.is_finite()) || s_m >= total {
+        return None;
+    }
+    let end = (s_m + window_m).min(total);
+    let plan = |s: f64| {
+        let p = path.position_at(s);
+        DVec2::new(p.x - c.x, p.z - c.y).length()
+    };
+    let mut best = (s_m, plan(s_m));
+    let mut s = s_m;
+    while s < end {
+        s = (s + 1.0).min(end);
+        let d = plan(s);
+        if d < best.1 {
+            best = (s, d);
+        }
+    }
+    let (lo, hi) = ((best.0 - 1.0).max(s_m), (best.0 + 1.0).min(end));
+    let mut s = lo;
+    while s <= hi {
+        let d = plan(s);
+        if d < best.1 {
+            best = (s, d);
+        }
+        s += 0.1;
+    }
+    Some(inf_nav::path::PathProjection {
+        s_m: best.0,
+        distance_m: best.1,
+        leg: path.leg_at(best.0),
+    })
+}
+
+/// **A clock-tier car standing at a signal** (audit PAR1b) — where it stands,
+/// which way it points and half its length, so the car arriving behind it on
+/// the same lane queues behind its bumper rather than inside it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HeldCar {
+    /// The chassis origin, world metres.
+    pub at: DVec3,
+    /// Half the car's length, metres.
+    pub half_len_m: f64,
+}
+
+/// How near a held car's origin must be to a lane to be standing IN it,
+/// metres — half a lane.
+pub const QUEUE_LANE_REACH_M: f64 = DEFAULT_LANE_WIDTH_M * 0.5;
+
+/// **Where a car moved by the CLOCK must stand, if a signal holds it** (audit
+/// PAR1b, closing "only the steered tier obeys") — `Some(s)`, the metre of
+/// `path` it may not pass, when the approach ahead is red (or an amber it can
+/// still stop for); `None` when nothing holds it. The caller clamps the car's
+/// clock to it when `s_now` would pass it, and the car is STANDING at a signal
+/// while it is there.
+///
+/// A pure function of the step's state, so both hosts agree: `s_prev` is where
+/// the car stood last step, `s_now` where its clock puts it this step, `v_mps`
+/// how fast it is moving (zero for a car that stood at the line last step,
+/// the clock's speed otherwise), `preempt` the junctions a responding unit
+/// pre-empts ([`preempted_junctions`]). The car is held a
+/// [`STANDING_GAP_M`] short of the line exactly as [`drive_intent`] stops a
+/// steered one, and BEHIND any car in `queue` standing in its lane ahead of it
+/// — so a red builds a queue, not a stack. The caller turns the answer into a
+/// re-phase of the car's clock (`TrafficRecord::rephase_m`), so the metres the
+/// car spent standing are owed by its clock, never teleported away.
+#[allow(clippy::too_many_arguments)] // one call site, every term a measured quantity
+pub fn clock_signal_hold(
+    junctions: &[SignalJunction],
+    preempt: &[bool],
+    path: &NavPath,
+    s_prev: f64,
+    s_now: f64,
+    nose_m: f64,
+    half_len_m: f64,
+    v_mps: f64,
+    t_s: f64,
+    queue: &[HeldCar],
+) -> Option<f64> {
+    if junctions.is_empty() || !(s_prev.is_finite() && s_now.is_finite()) || s_now < s_prev {
+        return None;
+    }
+    // The car's speed is the CALLER's (wave PAR1b.2): a car the clock is
+    // carrying moves at the clock's speed, but one that stood at this line last
+    // step is standing — reading the clock's speed for it made a held car
+    // "unable to stop" for an amber (or a pre-empt) a metre and a half from its
+    // line, and it drove off into the box (measured on `dispatch_3d`'s town: a
+    // circuit car held 107 m of clock at a red went on the step the pre-empt
+    // turned its green to an amber, into the appliance's turn).
+    let v = if v_mps.is_finite() {
+        v_mps.max(0.0)
+    } else {
+        0.0
+    };
+    let gap = stop_line_gap(junctions, preempt, path, s_prev, nose_m, v, t_s)?;
+    let mut hold = s_prev + (gap - STANDING_GAP_M).max(0.0);
+    // Plan distance to the lane: a held car's origin is its resting height
+    // over the street, the lane is on it.
+    let lane_y = path.position_at(s_prev).y;
+    for q in queue {
+        let p = path.project(DVec3::new(q.at.x, lane_y, q.at.z));
+        if p.distance_m > QUEUE_LANE_REACH_M || p.s_m <= s_prev + 0.1 {
+            continue;
+        }
+        let behind = p.s_m - q.half_len_m - half_len_m - STANDING_GAP_M;
+        if behind < hold {
+            hold = behind;
+        }
+    }
+    Some(hold.max(s_prev))
 }
 
 // ── the population ──────────────────────────────────────────────────────────
@@ -1825,6 +2017,11 @@ pub struct TrafficRecord {
     /// [`crate::crowd::CrowdRecord::rephase_m`]'s reason: it is produced by the
     /// simulation, and two hosts that disagreed about it have diverged.
     pub taken: bool,
+    /// **The clock held this car at a signal on the last step** (audit PAR1b)
+    /// — [`clock_signal_hold`] answered for it, so the car arriving behind it
+    /// queues behind its bumper. Its effect on where the car is lives in
+    /// [`rephase_m`](Self::rephase_m), which the trace already folds.
+    pub signal_held: bool,
 }
 
 impl TrafficRecord {
@@ -1850,6 +2047,25 @@ impl TrafficRecord {
             rephase_m: 0.0,
             ground_y: None,
             taken: false,
+            signal_held: false,
+        }
+    }
+
+    /// **How far along the path it is driving the clock puts it**, metres —
+    /// the `s` [`place`](Self::place) resolves, or `None` when it is not on a
+    /// path (parked, standing at the end of a leg, a circuit off shift).
+    pub fn progress(
+        &self,
+        guid: Uuid,
+        clock: crate::crowd::CrowdClock,
+        leg: crate::crowd::ActiveLeg,
+    ) -> Option<f64> {
+        match self.circuit.as_ref() {
+            Some(c) if c.running(clock.hour) => {
+                Some(c.route.progress_at(clock.t_s, self.phase_of(guid)).s_m)
+            }
+            Some(_) => None,
+            None => self.path_on(leg).map(|_| self.progress_on(leg)),
         }
     }
 
@@ -2182,6 +2398,15 @@ pub struct TrafficStats {
     pub pending: usize,
     /// The band's membership stamp.
     pub band_stamp: u64,
+    /// How many clock-tier cars a signal held this step (audit PAR1b) — see
+    /// [`clock_signal_hold`].
+    pub signal_holds: usize,
+    /// How many signalised junctions a responding unit pre-empted this step
+    /// (wave PAR1b.2) — see [`preempted_junctions`].
+    pub preempted: usize,
+    /// How many clock-tier cars held at a line moved over to the kerb side for
+    /// a siren behind them this step (wave PAR1b.2) — the queue parting.
+    pub parted: usize,
 }
 
 /// **Grow the level's traffic** — the derivation, one batch per step.
@@ -3469,29 +3694,161 @@ mod tests {
             .expect("a green");
         let s = 90.0 - 40.0; // 40 m short of the centre
         let nose = 2.3;
-        let g = stop_line_gap(&[j], &path, s, nose, 8.0, red_t).expect("a red stops");
+        let g = stop_line_gap(&[j], &[], &path, s, nose, 8.0, red_t).expect("a red stops");
         assert!(
             (g - (40.0 - STOP_LINE_M - nose)).abs() < 1e-9,
             "the gap {g} is not to the stop line"
         );
-        assert!(stop_line_gap(&[j], &path, s, nose, 8.0, green_t).is_none());
+        assert!(stop_line_gap(&[j], &[], &path, s, nose, 8.0, green_t).is_none());
         // Over the line: committed.
         let over = 90.0 - STOP_LINE_M - nose + 0.5;
-        assert!(stop_line_gap(&[j], &path, over, nose, 8.0, red_t).is_none());
+        assert!(stop_line_gap(&[j], &[], &path, over, nose, 8.0, red_t).is_none());
         // An amber too close to stop for at 8 m/s is run; far back it is obeyed.
         let amber_t = (0..3000)
             .map(signal_clock_s)
             .find(|t| signal_aspect(&j, true, *t) == Aspect::Amber)
             .expect("an amber");
         let close = 90.0 - STOP_LINE_M - nose - 2.0;
-        assert!(stop_line_gap(&[j], &path, close, nose, 8.0, amber_t).is_none());
-        assert!(stop_line_gap(&[j], &path, s, nose, 8.0, amber_t).is_some());
+        assert!(stop_line_gap(&[j], &[], &path, close, nose, 8.0, amber_t).is_none());
+        assert!(stop_line_gap(&[j], &[], &path, s, nose, 8.0, amber_t).is_some());
         // A lane on a parallel street a block away does not see it.
         let far = NavPath::new([
             DVec3::new(-90.0, 3.0, -21.75),
             DVec3::new(90.0, 3.0, -21.75),
         ]);
-        assert!(stop_line_gap(&[j], &far, s, nose, 8.0, red_t).is_none());
+        assert!(stop_line_gap(&[j], &[], &far, s, nose, 8.0, red_t).is_none());
+    }
+
+    /// **A responding unit near a junction stops its green approaches** (wave
+    /// PAR1b.2): the pre-empt list marks the junction a hot unit is within
+    /// [`PREEMPT_RADIUS_M`] of; on it a green approach reads as an amber — a car
+    /// that can stop stops at its line, one too close to stop goes on — and a red
+    /// stays a red. A unit a block away pre-empts nothing; no unit, no list.
+    /// Mutation (measured): treating the pre-empt as `Green` -> the first
+    /// assertion reds.
+    #[test]
+    fn a_responding_unit_preempts_the_junction_it_nears() {
+        let j = signal_junctions(&grid_streets())[0];
+        let c = DVec3::new(j.centre.x, 3.0, j.centre.y);
+        let path = NavPath::new([DVec3::new(-90.0, 3.0, -1.75), DVec3::new(90.0, 3.0, -1.75)]);
+        let green_t = (0..3000)
+            .map(signal_clock_s)
+            .find(|t| signal_aspect(&j, true, *t) == Aspect::Green)
+            .expect("a green");
+        let near = preempted_junctions(&[j], &[c + DVec3::new(0.0, 0.0, 30.0)]);
+        assert_eq!(near, vec![true]);
+        assert_eq!(
+            preempted_junctions(&[j], &[c + DVec3::new(0.0, 0.0, 80.0)]),
+            vec![false]
+        );
+        assert!(preempted_junctions(&[j], &[]).is_empty());
+        let nose = 2.3;
+        let s = 90.0 - 40.0;
+        let g = stop_line_gap(&[j], &near, &path, s, nose, 8.0, green_t)
+            .expect("a pre-empted green stops a car that can stop");
+        assert!((g - (40.0 - STOP_LINE_M - nose)).abs() < 1e-9);
+        // Too close to stop at 8 m/s: it goes on rather than brake in the box.
+        let close = 90.0 - STOP_LINE_M - nose - 2.0;
+        assert!(stop_line_gap(&[j], &near, &path, close, nose, 8.0, green_t).is_none());
+        // Without the pre-empt the same green is clear road.
+        assert!(stop_line_gap(&[j], &[false], &path, s, nose, 8.0, green_t).is_none());
+    }
+
+    /// **A clock car is held at the line, and the next one behind it** (audit
+    /// PAR1b): the first car's clock would carry it over the line on a red and
+    /// is held a standing gap short; a second car arriving in the same lane
+    /// stops a standing gap behind the first one's bumper, not inside it; a
+    /// green holds nobody. Mutation: dropping the queue walk puts the second
+    /// car on the first one's spot (red).
+    #[test]
+    fn a_clock_car_is_held_at_a_red_line_and_the_next_one_queues_behind_it() {
+        let j = signal_junctions(&grid_streets())[0];
+        let path = NavPath::new([DVec3::new(-90.0, 3.0, -1.75), DVec3::new(90.0, 3.0, -1.75)]);
+        let red_t = (0..3000)
+            .map(signal_clock_s)
+            .find(|t| signal_aspect(&j, true, *t) == Aspect::Red)
+            .expect("a red");
+        let green_t = (0..3000)
+            .map(signal_clock_s)
+            .find(|t| signal_aspect(&j, true, *t) == Aspect::Green)
+            .expect("a green");
+        let half = 2.3;
+        let line = 90.0 - STOP_LINE_M;
+        // The clock's speed: 0.2 m in a 60 Hz step.
+        let v = 12.0;
+        // The first car: its clock would put its nose 0.1 m short of the line.
+        let s_prev = line - half - 0.3;
+        let s_now = line - half - 0.1;
+        let hold = clock_signal_hold(&[j], &[], &path, s_prev, s_now, half, half, v, red_t, &[])
+            .expect("held");
+        assert!(
+            (hold - (line - half - STANDING_GAP_M)).abs() < 1e-9 || hold == s_prev,
+            "held at {hold}, not a standing gap short of the line"
+        );
+        assert!(hold < s_now, "the clock was not clamped");
+        // The second car, ten metres behind, the first standing at its hold.
+        let first = HeldCar {
+            at: path.position_at(hold) + DVec3::Y * 0.6,
+            half_len_m: half,
+        };
+        let s2 = hold - 10.0;
+        let h2 = clock_signal_hold(
+            &[j],
+            &[],
+            &path,
+            s2,
+            s2 + 9.0,
+            half,
+            half,
+            v,
+            red_t,
+            &[first],
+        )
+        .expect("the second is held");
+        assert!(
+            h2 <= hold - 2.0 * half - STANDING_GAP_M + 1e-9,
+            "the second car stands at {h2}, inside the first (held at {hold})"
+        );
+        // A green holds nobody.
+        assert!(
+            clock_signal_hold(&[j], &[], &path, s_prev, s_now, half, half, v, green_t, &[])
+                .is_none()
+        );
+        // (PAR1b.2) A car STANDING at its line is held through a pre-empted
+        // green (it can stop: it has stopped); the same car read at the clock's
+        // speed would be "unable to stop" for it and drive into the box — the
+        // measured defect. Mutation: passing the clock speed for a held car
+        // reds the first of these.
+        let stood = line - half - STANDING_GAP_M;
+        assert!(
+            clock_signal_hold(
+                &[j],
+                &[true],
+                &path,
+                stood,
+                stood + 0.2,
+                half,
+                half,
+                0.0,
+                green_t,
+                &[]
+            )
+            .is_some(),
+            "a standing car left its line on a pre-empt"
+        );
+        assert!(clock_signal_hold(
+            &[j],
+            &[true],
+            &path,
+            stood,
+            stood + 0.2,
+            half,
+            half,
+            v,
+            green_t,
+            &[]
+        )
+        .is_none());
     }
 
     #[test]

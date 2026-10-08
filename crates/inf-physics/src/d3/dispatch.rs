@@ -1160,6 +1160,33 @@ fn steer(
         ),
         loops: false,
     };
+    // ── PAR1b.2 A UNIT NOT RESPONDING OBEYS THE SIGNALS LIKE ANY CAR. A unit
+    //    running hot treats every signal as green (and pre-empts the junction
+    //    it nears — `inf_ecs::traffic::preempted_junctions`, read by the
+    //    traffic); one going home with its siren off stops at a red line on the
+    //    same `stop_line_gap` a traffic car reads.
+    let view = if run.state.running_hot() {
+        view
+    } else {
+        let signal = traffic::carriageway_of(world).and_then(|r| {
+            traffic::stop_line_gap(
+                &r.junctions,
+                &[],
+                path,
+                s_m,
+                view_half_z(world, chassis),
+                view.forward_mps,
+                traffic::signal_clock_of(world),
+            )
+        });
+        DriveView {
+            gap_m: match (view.gap_m, signal) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            },
+            ..view
+        }
+    };
     let intent = traffic::drive_intent(&view);
     let Some(e) = world.entity_of(crew) else {
         return false;
@@ -1170,6 +1197,18 @@ fn steer(
         return true;
     }
     false
+}
+
+/// A unit's chassis half-length, metres — its nose from its origin, what the
+/// stop line is measured to.
+fn view_half_z(world: &EcsWorld, chassis: Uuid) -> f64 {
+    world
+        .entity_of(chassis)
+        .and_then(|e| world.world().get::<inf_ecs::components::Collider3D>(e))
+        .map(inf_ecs::vehicle::chassis_half_extents)
+        .unwrap_or(inf_ecs::math::Vec3d::new(1.0, 0.8, 2.4))
+        .z
+        .abs()
 }
 
 /// **Put a unit that is not moving back on its own route** (wave WPN2e audit) —
@@ -1219,6 +1258,30 @@ fn escort(
     // Where the schedule says it should be. `since_step` is the step the unit
     // was assigned on, which is exactly when the route was built.
     let due = step.saturating_sub(run.since_step) as f64 * dt * dispatch::ESCORT_SPEED_MPS;
+    // **A unit with its siren off owes the signals their reds** (wave
+    // PAR1b.2): it stops at red lines like any car, so its schedule allows each
+    // signalised crossing on its route a whole red (`SIGNAL_CYCLE_S` less the
+    // approach's green and amber) at the schedule's speed. Without it, an
+    // ambulance home from a collapse waited 12 s at a red, fell 25 m behind,
+    // and was escorted the instant it moved off on the green — and the escort's
+    // reset (both velocities zeroed) pinned it under `ESCORT_STALL_MPS`: it
+    // crawled 16 m in 2 000 steps at full throttle (`dispatch_3d`'s collapse
+    // arm, measured). A responding unit reads no signal and owes nothing.
+    let due = if run.state.running_hot() {
+        due
+    } else {
+        let crossings = traffic::carriageway_of(world).map_or(0, |r| {
+            r.junctions
+                .iter()
+                .filter(|j| {
+                    let c = DVec3::new(j.centre.x, j.y, j.centre.y);
+                    path.project(c).distance_m <= traffic::SIGNAL_LANE_REACH_M
+                })
+                .count()
+        });
+        let red_s = traffic::SIGNAL_CYCLE_S - traffic::SIGNAL_GREEN_S - traffic::SIGNAL_AMBER_S;
+        due - crossings as f64 * red_s * dispatch::ESCORT_SPEED_MPS
+    };
     // **BEHIND, AND NOT MOVING.** Both halves, and the second is what keeps this
     // off a unit that is merely taking the long way round — see
     // `inf_ecs::dispatch::ESCORT_STALL_MPS`. The speed is the chassis' own rapier

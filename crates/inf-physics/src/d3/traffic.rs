@@ -64,6 +64,24 @@ pub const CORRIDOR_HALF_M: f64 = 2.5;
 /// its rig where it stopped rather than be written onto the slot in view.
 pub const ARRIVAL_HOLD_M: f64 = 0.5;
 
+/// **How far back a car coming into the clock tier is asked about the signal
+/// ahead**, metres beyond its own nose (audit PAR1b): a car the clock puts
+/// inside a junction box on a red, or just over its line, is placed standing at
+/// the line instead. A crossing's box is at most a 20 m street's width, so
+/// twelve metres reaches back over the line from anywhere the clock can put a
+/// car in it.
+pub const CLOCK_ENTRY_LOOKBACK_M: f64 = 12.0;
+
+/// How near its hold point a clock-tier car must be to be STANDING at a signal,
+/// metres (audit PAR1b) — a queue forms behind a car within this of its hold.
+pub const HELD_SLACK_M: f64 = 0.05;
+
+/// **Over how many metres of a siren's approach a held clock car slides over**
+/// (wave PAR1b.2): from nothing at `inf_ecs::dispatch::YIELD_RANGE_M` to the
+/// whole `YIELD_BIAS_M` this much nearer — at a unit's 11.7 m/s, under two
+/// seconds, the time EMS2 measured a steered car's own pull-over to take.
+pub const PART_RAMP_M: f64 = 20.0;
+
 /// How far ahead the following rule looks, metres.
 ///
 /// Sixty metres is four seconds at a 50 km/h limit and two at a highway's, so a
@@ -178,6 +196,21 @@ pub fn step_traffic(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64)
     //    the dispatcher's runs on every street in the world that has no
     //    emergency vehicle within a mile of it.
     let mut hot: Option<Vec<(Uuid, DVec3)>> = None;
+    // ── PAR1b.2 THE PRE-EMPT. A level with signals asks the dispatcher once a
+    //    step which units are running hot (the list the yield rule reads, so
+    //    it is gathered here and handed down rather than twice), and marks the
+    //    junctions they are near: every approach of a pre-empted junction reads
+    //    "stop" (a red stays red, a green reads amber), so the box is empty when
+    //    the unit reaches it. A level with no signal never asks.
+    let preempt: Vec<bool> = if signals.is_empty() {
+        Vec::new()
+    } else {
+        let h = super::dispatch::running_hot(world);
+        let at: Vec<DVec3> = h.iter().map(|(_, p)| *p).collect();
+        hot = Some(h);
+        traffic::preempted_junctions(&signals, &at)
+    };
+    stats.preempted = preempt.iter().filter(|p| **p).count();
     // ── and the colliders a settle ray must look THROUGH, on the same terms:
     //    built the first time a car actually asks what it is standing on, and
     //    not at all on a settled street where every car already knows.
@@ -188,6 +221,22 @@ pub fn step_traffic(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64)
     //    no per-transition bookkeeping to forget.
     let mut riders: std::collections::BTreeMap<Uuid, (Uuid, u8)> =
         std::collections::BTreeMap::new();
+    // ── PAR1b audit: the clock-tier cars a signal held LAST step, where they
+    //    stand — the queue a car arriving behind one stops behind. Gathered
+    //    before the walk so the queue does not depend on the order the records
+    //    are visited in; this step's holds are appended as they are made.
+    let mut held: Vec<traffic::HeldCar> = if signals.is_empty() {
+        Vec::new()
+    } else {
+        pop.records
+            .values()
+            .filter(|r| r.signal_held && !r.taken)
+            .map(|r| traffic::HeldCar {
+                at: r.last,
+                half_len_m: r.def.half_extents.z.abs(),
+            })
+            .collect()
+    };
 
     for (guid, rec) in pop.records.iter_mut() {
         let guid = *guid;
@@ -285,6 +334,120 @@ pub fn step_traffic(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64)
                     yaw = y2;
                 }
             }
+        }
+
+        // ── PAR1b audit: THE CLOCK OBEYS THE SIGNALS TOO. A `Near` car is
+        //    drawn and moved by its clock, and before this it drove through
+        //    every red the steered tier stops at -- a junction 70 m down the
+        //    street at night was cars crossing both ways at once. Now its clock
+        //    is HELD at the line (behind any car already standing there) for as
+        //    long as the approach is red, the metres it stood owed by the clock
+        //    (`rephase_m`), so it moves off on the green from where it stood
+        //    with nothing teleported. A car that comes INTO the band is asked
+        //    as if it had just driven the last few metres, so one the clock put
+        //    in the box on a red is placed standing at the line instead -- it
+        //    was not drawn the step before, so the move is never seen.
+        let was_held = rec.signal_held;
+        rec.signal_held = false;
+        if tier == CrowdTier::Near && driving && !signals.is_empty() {
+            let half = rec.def.half_extents.z.abs();
+            let hold = rec.active_path(clock, leg).and_then(|path| {
+                let s_now = rec.progress(guid, clock, leg)?;
+                let entered = was != CrowdTier::Near && was != CrowdTier::Full;
+                let s_prev = if entered {
+                    (s_now - half - CLOCK_ENTRY_LOOKBACK_M).max(0.0)
+                } else {
+                    let y = path.position_at(s_now).y;
+                    path.project(DVec3::new(rec.last.x, y, rec.last.z)).s_m
+                };
+                // PAR1b.2: a circuit's seam puts last step's place at the far end
+                // of the loop (the seam point is both `0` and `len`): it is read
+                // as the same metre on THIS lap (`clock_signal_hold` refuses a
+                // pair that runs backwards, so without this a car at the seam was
+                // asked nothing for the one step after it).
+                let s_prev = if s_prev > s_now {
+                    (s_prev - path.length_m()).clamp(0.0, s_now)
+                } else {
+                    s_prev
+                };
+                // …and a car that STOOD at the line last step is standing, not
+                // moving at its clock's speed (see `clock_signal_hold`).
+                let v = if was_held {
+                    0.0
+                } else if entered || dt <= 0.0 {
+                    traffic::street_speed_mps()
+                } else {
+                    (s_now - s_prev) / dt
+                };
+                let hold = traffic::clock_signal_hold(
+                    &signals, &preempt, path, s_prev, s_now, half, half, v, signal_t_s, &held,
+                )?;
+                // `(the clamp, standing at the line)`: a car the clock does not
+                // move (a commute on a frozen level clock) is still STANDING.
+                Some(((hold - s_now).min(0.0), s_now >= hold - HELD_SLACK_M))
+            });
+            if let Some((delta, standing)) = hold {
+                if delta < 0.0 {
+                    rec.rephase_m += delta;
+                    let (a2, y2) = rec.place(guid, clock, leg);
+                    at = a2;
+                    yaw = y2;
+                }
+                if standing {
+                    rec.signal_held = true;
+                    stats.signal_holds += 1;
+                    held.push(traffic::HeldCar {
+                        at,
+                        half_len_m: half,
+                    });
+                }
+            }
+            // ── PAR1b.2 THE QUEUE PARTS. A clock car standing at a line with
+            //    a siren behind it moves over to the kerb side, so the unit's
+            //    own following rule (`gap_ahead`, the corridor a steered car
+            //    leaves with EMS2's 2.6 m pull-over) no longer sees it in the
+            //    lane. The same rule and the same side as a steered car's
+            //    yield (`dispatch::yield_bias_m`, `right_of` the heading), as a
+            //    pure function of where the unit is: the shift grows from
+            //    nothing at the yield's range to the whole bias 20 m nearer,
+            //    so a drawn car slides over rather than jumping. It is a place
+            //    on the transform, nothing stored: the step the unit has gone,
+            //    the car is back in its lane.
+            if rec.signal_held {
+                if let Some(h) = hot.as_deref() {
+                    let yr = yaw.to_radians();
+                    let fwd = DVec3::new(inf_math::psin64(yr), 0.0, inf_math::pcos64(yr));
+                    let bias = inf_ecs::dispatch::yield_bias_m(at, fwd, h);
+                    if bias != 0.0 {
+                        let near = h
+                            .iter()
+                            .map(|(_, u)| DVec3::new(u.x - at.x, 0.0, u.z - at.z).length())
+                            .fold(f64::INFINITY, f64::min);
+                        let ramp = ((inf_ecs::dispatch::YIELD_RANGE_M - near) / PART_RAMP_M)
+                            .clamp(0.0, 1.0);
+                        if ramp > 0.0 {
+                            // `inf_nav::lane::right_of` of a unit heading.
+                            at += DVec3::new(fwd.z, 0.0, -fwd.x) * (bias * ramp);
+                            stats.parted += 1;
+                        }
+                    }
+                }
+            }
+        }
+        // …and a commuter whose leg CLOSED while it stood owes its slot the
+        // metres it waited: it drives them on at the street's speed rather than
+        // standing in the lane short of its space all day. A car never held
+        // (`rephase_m >= 0`, or a steered car's hand-off) is untouched.
+        if !driving
+            && tier != CrowdTier::Full
+            && rec.schedule.is_some()
+            && rec.rephase_m < 0.0
+            && (was_held || rec.signal_held || tier == CrowdTier::Near)
+        {
+            rec.rephase_m = (rec.rephase_m + traffic::street_speed_mps() * dt).min(0.0);
+            let (a2, y2) = rec.place(guid, clock, leg);
+            at = a2;
+            yaw = y2;
         }
 
         // ── the ground, measured once, and **NO BODY UNTIL IT IS KNOWN**.
@@ -401,6 +564,7 @@ pub fn step_traffic(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64)
                         obstacles: obstacles.as_deref().unwrap_or(&[]),
                         hot: hot.as_deref().unwrap_or(&[]),
                         signals: &signals,
+                        preempt: &preempt,
                         signal_t_s,
                     };
                     steer_car(world, bridge, guid, rec, clock, leg, around);
@@ -818,6 +982,9 @@ pub(crate) struct Around<'a> {
     pub hot: &'a [(Uuid, DVec3)],
     /// **The signalised junctions** (wave PAR1b) — `TrafficRes::junctions`.
     pub signals: &'a [inf_ecs::traffic::SignalJunction],
+    /// **Which of them a responding unit pre-empts** (wave PAR1b.2) —
+    /// `traffic::preempted_junctions`, parallel to `signals` (empty: none).
+    pub preempt: &'a [bool],
     /// The signal clock, seconds (`traffic::signal_clock_s` of the step count).
     pub signal_t_s: f64,
 }
@@ -866,6 +1033,7 @@ fn view_of<'a>(
     //    not a junction, so a loop reads the signal only on its own run.
     let signal = traffic::stop_line_gap(
         around.signals,
+        around.preempt,
         path,
         s_m,
         rec.def.half_extents.z.abs(),
@@ -911,10 +1079,13 @@ pub fn probe_intent(
     let signals: Vec<inf_ecs::traffic::SignalJunction> = traffic::carriageway_of(world)
         .map(|r| r.junctions.clone())
         .unwrap_or_default();
+    let at: Vec<DVec3> = hot.iter().map(|(_, p)| *p).collect();
+    let preempt = traffic::preempted_junctions(&signals, &at);
     let around = Around {
         obstacles: &obstacles,
         hot: &hot,
         signals: &signals,
+        preempt: &preempt,
         signal_t_s: traffic::signal_clock_s(pop.steps),
     };
     let view = view_of(bridge, chassis, rec, clock, leg, around)?;
