@@ -853,8 +853,8 @@ fn a_signal_head_tints_its_approach_faintly_and_not_the_hero() {
         .filter(|p| p.kind == PieceKind::SignalPost)
         .flat_map(|p| p.lights.iter())
         .find(|l| l.dir.x < -0.5)
-        .expect("the +X approach's head")
-        .clone();
+        .copied()
+        .expect("the +X approach's head");
     // `(light colour, lens colour)`: the lit lens is drawn as the projectors'
     // `push_signal_lenses` draws it (an emissive sphere on the housing's face,
     // `SIGNAL_LENS_EMISSIVE` = 1.6 x the aspect), because the GI carries a lit
