@@ -1481,17 +1481,7 @@ pub fn stop_line_gap(
         if dx * dx + dz * dz > (SIGNAL_LOOK_M + STOP_LINE_M) * (SIGNAL_LOOK_M + STOP_LINE_M) {
             continue;
         }
-        // **The crossing AHEAD on this run of the path** (audit PAR1b): the
-        // nearest point of the path to the junction within the look window
-        // from the car forward — not the nearest on the whole path, which on a
-        // circuit that passes the same junction twice is as likely the OTHER
-        // pass (the line the car then reads is behind it, and it drove the red
-        // — measured: three clock cars over the line on a red on the 4 x 4
-        // rush, all circuits).
-        let Some(proj) = project_ahead(path, s_m, SIGNAL_LOOK_M + STOP_LINE_M + nose_m, j.centre)
-        else {
-            continue;
-        };
+        let proj = path.project(DVec3::new(j.centre.x, here.y, j.centre.y));
         if proj.distance_m > SIGNAL_LANE_REACH_M {
             continue;
         }
@@ -1517,113 +1507,6 @@ pub fn stop_line_gap(
         }
     }
     best
-}
-
-/// **The nearest point of `path` to `c` (plan) within `[s_m, s_m + window_m]`**
-/// (audit PAR1b) — a metre's sampling refined to a decimetre, `None` past the
-/// path's end. Plan distance, because the junction carries no height.
-fn project_ahead(
-    path: &NavPath,
-    s_m: f64,
-    window_m: f64,
-    c: DVec2,
-) -> Option<inf_nav::path::PathProjection> {
-    let total = path.length_m();
-    if !(s_m.is_finite() && window_m.is_finite()) || s_m >= total {
-        return None;
-    }
-    let end = (s_m + window_m).min(total);
-    let plan = |s: f64| {
-        let p = path.position_at(s);
-        DVec2::new(p.x - c.x, p.z - c.y).length()
-    };
-    let mut best = (s_m, plan(s_m));
-    let mut s = s_m;
-    while s < end {
-        s = (s + 1.0).min(end);
-        let d = plan(s);
-        if d < best.1 {
-            best = (s, d);
-        }
-    }
-    let (lo, hi) = ((best.0 - 1.0).max(s_m), (best.0 + 1.0).min(end));
-    let mut s = lo;
-    while s <= hi {
-        let d = plan(s);
-        if d < best.1 {
-            best = (s, d);
-        }
-        s += 0.1;
-    }
-    Some(inf_nav::path::PathProjection {
-        s_m: best.0,
-        distance_m: best.1,
-        leg: path.leg_at(best.0),
-    })
-}
-
-/// **A clock-tier car standing at a signal** (audit PAR1b) — where it stands,
-/// which way it points and half its length, so the car arriving behind it on
-/// the same lane queues behind its bumper rather than inside it.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct HeldCar {
-    /// The chassis origin, world metres.
-    pub at: DVec3,
-    /// Half the car's length, metres.
-    pub half_len_m: f64,
-}
-
-/// How near a held car's origin must be to a lane to be standing IN it,
-/// metres — half a lane.
-pub const QUEUE_LANE_REACH_M: f64 = DEFAULT_LANE_WIDTH_M * 0.5;
-
-/// **Where a car moved by the CLOCK must stand, if a signal holds it** (audit
-/// PAR1b, closing "only the steered tier obeys") — `Some(s)`, the metre of
-/// `path` it may not pass, when the approach ahead is red (or an amber it can
-/// still stop for); `None` when nothing holds it. The caller clamps the car's
-/// clock to it when `s_now` would pass it, and the car is STANDING at a signal
-/// while it is there.
-///
-/// A pure function of the step's state, so both hosts agree: `s_prev` is where
-/// the car stood last step, `s_now` where its clock puts it this step, `dt` the
-/// step (the clock speed is their difference over it). The car is held a
-/// [`STANDING_GAP_M`] short of the line exactly as [`drive_intent`] stops a
-/// steered one, and BEHIND any car in `queue` standing in its lane ahead of it
-/// — so a red builds a queue, not a stack. The caller turns the answer into a
-/// re-phase of the car's clock (`TrafficRecord::rephase_m`), so the metres the
-/// car spent standing are owed by its clock, never teleported away.
-#[allow(clippy::too_many_arguments)] // one call site, every term a measured quantity
-pub fn clock_signal_hold(
-    junctions: &[SignalJunction],
-    path: &NavPath,
-    s_prev: f64,
-    s_now: f64,
-    nose_m: f64,
-    half_len_m: f64,
-    dt: f64,
-    t_s: f64,
-    queue: &[HeldCar],
-) -> Option<f64> {
-    if junctions.is_empty() || !(s_prev.is_finite() && s_now.is_finite()) || s_now < s_prev {
-        return None;
-    }
-    let v = if dt > 0.0 { (s_now - s_prev) / dt } else { 0.0 };
-    let gap = stop_line_gap(junctions, path, s_prev, nose_m, v, t_s)?;
-    let mut hold = s_prev + (gap - STANDING_GAP_M).max(0.0);
-    // Plan distance to the lane: a held car's origin is its resting height
-    // over the street, the lane is on it.
-    let lane_y = path.position_at(s_prev).y;
-    for q in queue {
-        let p = path.project(DVec3::new(q.at.x, lane_y, q.at.z));
-        if p.distance_m > QUEUE_LANE_REACH_M || p.s_m <= s_prev + 0.1 {
-            continue;
-        }
-        let behind = p.s_m - q.half_len_m - half_len_m - STANDING_GAP_M;
-        if behind < hold {
-            hold = behind;
-        }
-    }
-    Some(hold.max(s_prev))
 }
 
 // ── the population ──────────────────────────────────────────────────────────
@@ -1942,11 +1825,6 @@ pub struct TrafficRecord {
     /// [`crate::crowd::CrowdRecord::rephase_m`]'s reason: it is produced by the
     /// simulation, and two hosts that disagreed about it have diverged.
     pub taken: bool,
-    /// **The clock held this car at a signal on the last step** (audit PAR1b)
-    /// — [`clock_signal_hold`] answered for it, so the car arriving behind it
-    /// queues behind its bumper. Its effect on where the car is lives in
-    /// [`rephase_m`](Self::rephase_m), which the trace already folds.
-    pub signal_held: bool,
 }
 
 impl TrafficRecord {
@@ -1972,25 +1850,6 @@ impl TrafficRecord {
             rephase_m: 0.0,
             ground_y: None,
             taken: false,
-            signal_held: false,
-        }
-    }
-
-    /// **How far along the path it is driving the clock puts it**, metres —
-    /// the `s` [`place`](Self::place) resolves, or `None` when it is not on a
-    /// path (parked, standing at the end of a leg, a circuit off shift).
-    pub fn progress(
-        &self,
-        guid: Uuid,
-        clock: crate::crowd::CrowdClock,
-        leg: crate::crowd::ActiveLeg,
-    ) -> Option<f64> {
-        match self.circuit.as_ref() {
-            Some(c) if c.running(clock.hour) => {
-                Some(c.route.progress_at(clock.t_s, self.phase_of(guid)).s_m)
-            }
-            Some(_) => None,
-            None => self.path_on(leg).map(|_| self.progress_on(leg)),
         }
     }
 
@@ -2323,9 +2182,6 @@ pub struct TrafficStats {
     pub pending: usize,
     /// The band's membership stamp.
     pub band_stamp: u64,
-    /// How many clock-tier cars a signal held this step (audit PAR1b) — see
-    /// [`clock_signal_hold`].
-    pub signal_holds: usize,
 }
 
 /// **Grow the level's traffic** — the derivation, one batch per step.
@@ -3636,55 +3492,6 @@ mod tests {
             DVec3::new(90.0, 3.0, -21.75),
         ]);
         assert!(stop_line_gap(&[j], &far, s, nose, 8.0, red_t).is_none());
-    }
-
-    /// **A clock car is held at the line, and the next one behind it** (audit
-    /// PAR1b): the first car's clock would carry it over the line on a red and
-    /// is held a standing gap short; a second car arriving in the same lane
-    /// stops a standing gap behind the first one's bumper, not inside it; a
-    /// green holds nobody. Mutation: dropping the queue walk puts the second
-    /// car on the first one's spot (red).
-    #[test]
-    fn a_clock_car_is_held_at_a_red_line_and_the_next_one_queues_behind_it() {
-        let j = signal_junctions(&grid_streets())[0];
-        let path = NavPath::new([DVec3::new(-90.0, 3.0, -1.75), DVec3::new(90.0, 3.0, -1.75)]);
-        let red_t = (0..3000)
-            .map(signal_clock_s)
-            .find(|t| signal_aspect(&j, true, *t) == Aspect::Red)
-            .expect("a red");
-        let green_t = (0..3000)
-            .map(signal_clock_s)
-            .find(|t| signal_aspect(&j, true, *t) == Aspect::Green)
-            .expect("a green");
-        let half = 2.3;
-        let line = 90.0 - STOP_LINE_M;
-        let dt = 1.0 / 60.0;
-        // The first car: its clock would put its nose 0.1 m short of the line.
-        let s_prev = line - half - 0.3;
-        let s_now = line - half - 0.1;
-        let hold = clock_signal_hold(&[j], &path, s_prev, s_now, half, half, dt, red_t, &[])
-            .expect("held");
-        assert!(
-            (hold - (line - half - STANDING_GAP_M)).abs() < 1e-9 || hold == s_prev,
-            "held at {hold}, not a standing gap short of the line"
-        );
-        assert!(hold < s_now, "the clock was not clamped");
-        // The second car, ten metres behind, the first standing at its hold.
-        let first = HeldCar {
-            at: path.position_at(hold) + DVec3::Y * 0.6,
-            half_len_m: half,
-        };
-        let s2 = hold - 10.0;
-        let h2 = clock_signal_hold(&[j], &path, s2, s2 + 9.0, half, half, dt, red_t, &[first])
-            .expect("the second is held");
-        assert!(
-            h2 <= hold - 2.0 * half - STANDING_GAP_M + 1e-9,
-            "the second car stands at {h2}, inside the first (held at {hold})"
-        );
-        // A green holds nobody.
-        assert!(
-            clock_signal_hold(&[j], &path, s_prev, s_now, half, half, dt, green_t, &[]).is_none()
-        );
     }
 
     #[test]
