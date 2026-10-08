@@ -814,7 +814,10 @@ const KERB_EXPOSURE: f32 = 8.0;
 /// * a pale shirt standing in the junction box in the beam (chest height)
 ///   shifts its lit channel by at most [`SIGNAL_SHIRT_MAX`] codes over dark.
 ///
-/// Mutation (measured): the first cut's 350 lm -> the shirt over, red.
+/// * the corner facade beside the approach stays within [`SIGNAL_FACADE_MAX`].
+///
+/// Mutations (measured): the first cut's 350 lm / 24 degrees -> the shirt
+/// +3.6, red; 100 lm / 24 degrees -> the corner facade +0.8, red.
 #[test]
 fn a_signal_head_tints_its_approach_faintly_and_not_the_hero() {
     let Some(gpu) = gpu() else { return };
@@ -888,6 +891,15 @@ fn a_signal_head_tints_its_approach_faintly_and_not_the_hero() {
             Vec3::new(0.25, 0.6, 0.45),
             [0.7, 0.7, 0.7, 1.0],
             2,
+        ));
+        // The corner facade beside the approach (the block's face 10.5 m off
+        // the centreline, the window's green-washed wall): a pale panel.
+        scene.instances.push(MeshInstance::lit(
+            DVec3::new(-inf_ecs::traffic::STOP_LINE_M - 8.0, 3.0, -10.6),
+            glam::Quat::IDENTITY,
+            Vec3::new(16.0, 6.0, 0.2),
+            [0.6, 0.6, 0.6, 1.0],
+            4,
         ));
         if let Some(c) = lens {
             let mut m = MeshInstance::lit(
@@ -983,6 +995,16 @@ fn a_signal_head_tints_its_approach_faintly_and_not_the_hero() {
     let asphalt_green = ag[1] - ad[1];
     let shirt_red = hr[0] - hd[0];
     let shirt_green = hg[1] - hd[1];
+    let wall = DVec3::new(line_x - 3.0, 2.5, -10.45);
+    let (wr, wg, wd) = (rgb_at(&ir, wall), rgb_at(&ig, wall), rgb_at(&id, wall));
+    let (wall_red, wall_green) = (wr[0] - wd[0], wg[1] - wd[1]);
+    println!(
+        "PAR1b SIGNAL corner facade: red {wr:.1?} / green {wg:.1?} / dark {wd:.1?} (lift +{wall_red:.1} / +{wall_green:.1})"
+    );
+    assert!(
+        wall_red <= SIGNAL_FACADE_MAX && wall_green <= SIGNAL_FACADE_MAX,
+        "the corner facade takes the lens colour: red +{wall_red:.1}, green +{wall_green:.1}"
+    );
     assert!(
         asphalt_red >= SIGNAL_ASPHALT_MIN && asphalt_green >= SIGNAL_ASPHALT_MIN,
         "the asphalt before the line does not read the lens at all: red +{asphalt_red:.1}, green +{asphalt_green:.1}"
@@ -997,8 +1019,13 @@ fn a_signal_head_tints_its_approach_faintly_and_not_the_hero() {
     );
 }
 
+/// The most the lens may lift its own channel on the corner facade beside the
+/// approach, codes at x8 — the beam is down the lanes only (measured: 0.0 at
+/// 40 lm / 14 degrees; 0.8 at the 100 lm / 24-degree cone the window showed
+/// washing that facade green).
+const SIGNAL_FACADE_MAX: f64 = 0.3;
 /// The most the lens may lift its own channel on the asphalt before the line,
-/// 8-bit codes at x24 — "faintly" (audit PAR1b).
+/// 8-bit codes at x8 — "faintly" (audit PAR1b).
 const SIGNAL_ASPHALT_MAX: f64 = 6.0;
 /// The least it must lift it — the lens is SEEN on its approach, codes at x8.
 const SIGNAL_ASPHALT_MIN: f64 = 0.5;

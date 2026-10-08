@@ -625,10 +625,14 @@ pub fn fixture(row: FixtureRow) -> FixtureDef {
         ),
         // **The signal head's lit lens** (wave PAR1b; audit PAR1b
         // re-calibrated): a signal is SEEN, it does not light a junction. The
-        // first cut's 350 lm turned the hero's shirt green in the box at 21:00
-        // (`par1b_street_gate`'s shirt +3.6 codes at x8); 100 lm in the same
-        // narrow beam down the approach tints the asphalt before the line
-        // faintly (+1.2) and the shirt by +1.0. The colour is the aspect's
+        // first cut's 350 lm in a 24-degree cone turned the hero's shirt green
+        // in the box at 21:00 (`par1b_street_gate`'s shirt +3.6 codes at x8)
+        // and, at 100 lm, still washed the corner facade beside the approach
+        // green / red in the window (`AUDIT-PAR1b-FINAL\frames-a21\305..316`:
+        // a facade 10 m off the beam's axis at 21 m is inside 24 degrees).
+        // 40 lm in a 14-degree cone (inner 6) is a beam down the lanes only:
+        // the asphalt before the line takes the lens colour faintly and
+        // neither the shirt nor the corner does. The colour is the aspect's
         // (`crate::street::aspect_rgb`), not a kelvin row.
         R::SignalHead => def(
             row,
@@ -637,8 +641,8 @@ pub fn fixture(row: FixtureRow) -> FixtureDef {
             M::Wall,
             0.0,
             4000,
-            100.0,
-            Some((10.0, 24.0)),
+            40.0,
+            Some((6.0, 14.0)),
             0.0,
             false,
         ),

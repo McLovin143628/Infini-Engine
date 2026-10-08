@@ -133,6 +133,9 @@ param(
     # **A STILL SESSION OF THIS MANY SECONDS** (audit PAR1b): no leg, no input --
     # the frame scripts' placements are photographed from outside. 0 is off.
     [int]$HoldOnlyS = 0,
+    # With `-HoldOnlyS`: `t[:label];...` -- a frame (by the session window's
+    # handle) when the sim clock in the hero log passes each `t` seconds.
+    [string]$HoldShots = "",
     # **A COOKED PACK TO RUN WITHOUT THE EDITOR** (the PERF1 audit): the
     # shipped player is launched on this pack directly (`--pack`), with the same
     # preview doors and the same legs; no editor, no Play button.
@@ -1879,7 +1882,24 @@ if ($PerfOnly) {
 if ($HoldOnlyS -gt 0) {
     Say "HOLD ONLY (-HoldOnlyS): $HoldOnlyS s with no input"
     Restore-PlayerFocus "before the hold"
-    Start-Sleep -Seconds $HoldOnlyS
+    $holdEnd = (Get-Date).AddSeconds($HoldOnlyS)
+    # `-HoldShots "t[:label];..."`: one frame BY THE SESSION WINDOW's handle
+    # when the hero log's sim clock passes each `t` (seconds).
+    if ($HoldShots -ne "") {
+        $k = 0
+        foreach ($entry in $HoldShots.Split(";")) {
+            $parts = $entry.Split(":")
+            $t = [double]$parts[0]
+            $label = if ($parts.Count -gt 1) { $parts[1] } else { "shot" }
+            $hit = @(Wait-ForHero -Csv $heroCsv -What "sim t >= $t ($label)" -TimeoutS 240 `
+                -Predicate { param($c) ($c.Count -gt 1) -and ([double]$c[0] -ge $t) } `
+                -Out (Join-Path $OutDir ("3{0:D2}-{1}.png" -f $k, $label)))[-1]
+            if (-not $hit) { Say "HOLD SHOT $label at t=$t NEVER FIRED" }
+            $k++
+        }
+    }
+    $left = ($holdEnd - (Get-Date)).TotalSeconds
+    if ($left -gt 0) { Start-Sleep -Seconds ([int]$left) }
 }
 if (-not $BoardingOnly -and -not $AudioOnly -and -not $RosterOnly -and -not $GalleryOnly -and -not $AirOnly -and -not $WeaponsOnly -and -not $CertOnly -and -not $PerfOnly -and $HoldOnlyS -le 0) {
 
