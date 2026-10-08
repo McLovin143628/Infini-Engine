@@ -755,6 +755,26 @@ fn the_lots_respect_the_partition_cells() {
         // lot by construction (`PcgVolume::furniture`); the footprint is the
         // buildings'.
         let built_len = vol.evaluated.len() - vol.furniture.instances;
+        // Audit PAR1b: the tail is EXACTLY the furniture — every instance in
+        // it is the street family's mesh, and none before it is — so a
+        // building instance cannot hide past `built_len`.
+        let street = inf_pcg::building::modules::module_mesh_guid(
+            inf_pcg::building::modules::ModuleShape::Street,
+        );
+        assert!(
+            vol.evaluated[built_len..]
+                .iter()
+                .all(|i| i.mesh == Some(street)),
+            "{}: the furniture tail holds a non-furniture instance",
+            id.name()
+        );
+        assert!(
+            vol.evaluated[..built_len]
+                .iter()
+                .all(|i| i.mesh != Some(street)),
+            "{}: a street-furniture instance outside the tail",
+            id.name()
+        );
         for inst in &vol.evaluated[..built_len] {
             let d = DVec2::new(inst.position.x - at.x, inst.position.z - at.y).abs();
             assert!(

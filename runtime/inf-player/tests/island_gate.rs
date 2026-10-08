@@ -2887,6 +2887,11 @@ fn the_scattered_cover_draws_its_authored_meshes() {
         })
         .count();
     println!("NIGHT STREET LAMPS: {lamps_lit} street-lamp batch(es) light up at midnight");
+    // Audit PAR1b: "required to light" was a comment and a print. The CI
+    // island's two streets carry fifteen lamps; with none of them lit (or
+    // with the furniture off, `INF_NO_STREET_FURNITURE` -- the measured
+    // mutation) the band the pane rule skips is empty and this arm says so.
+    assert!(lamps_lit > 0, "no street-lamp batch lights up at midnight");
     let lit_instances: usize = lit.iter().map(|b| b.data.len()).sum();
     println!(
         "NIGHT WINDOWS: sun y {:.3} -> glow step {}; {} of {} batches light up at \
