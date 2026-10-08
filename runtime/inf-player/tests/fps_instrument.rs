@@ -4196,6 +4196,50 @@ fn the_shipped_island_by_the_hour() {
         fx.sim
             .step_once(inf_player::runtime_sim::RuntimeInput::default());
     }
+    // PAR1b.2 clause 7: the narrow phase's pairs at the strip with the
+    // street furniture's static solids in the world (`INF_NO_STREET_FURNITURE`
+    // is the control on the same binary).
+    let (tracked, touching) = fx.sim.bridge3d().world().contact_pair_counts();
+    println!(
+        "PAIRS at the strip after warm-up: {tracked} tracked, {touching} touching (street furniture {})",
+        if std::env::var_os("INF_NO_STREET_FURNITURE").is_some() {
+            "OFF"
+        } else {
+            "on"
+        }
+    );
+    // An A/B door for ROAD1's road meshes (wave PAR1b.2, clause 7: "1.24 M
+    // tris always loaded, unpriced"): `PAR1B2_NO_ROADS` hides the four road
+    // entities (carriageway, kerbs + pavements, both paints) through their
+    // own `Visibility`, so the same frames price them on one binary.
+    if std::env::var_os("PAR1B2_NO_ROADS").is_some() {
+        let names = [
+            "Roads",
+            "Kerbs and pavements",
+            "Road markings",
+            "Road markings (yellow)",
+        ];
+        let hide: Vec<inf_ecs::Entity> = fx
+            .sim
+            .world()
+            .world()
+            .iter_entities()
+            .filter(|e| {
+                e.get::<inf_ecs::components::Name>()
+                    .is_some_and(|n| names.contains(&n.0.as_str()))
+            })
+            .map(|e| e.id())
+            .collect();
+        println!("PAR1B2_NO_ROADS: hiding {} road entities", hide.len());
+        for e in hide {
+            fx.sim
+                .world_mut()
+                .world_mut()
+                .entity_mut(e)
+                .insert(inf_ecs::components::Visibility { visible: false });
+        }
+        fx.sim.world_mut().mark_dirty();
+    }
     let (mut shipped, tier) = shipped_settings(&gpu, fx.record);
     // An A/B door for the GI's probe visibility (PAR0b): `PAR0B_NO_VISIBILITY`
     // renders the same frames with it off.
