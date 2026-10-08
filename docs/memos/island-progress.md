@@ -42654,3 +42654,49 @@ cascade item; airfield apron floods (an authored `Light` has no schedule: a sche
 the office 19:00 vs 02:00 street-side frame and the editor at 21:00 (the frames taken show the
 interior and the editor at its authored clock); hard reflections of fittings in glossy panes /
 floors (SSR, the renderer's).
+
+### PAR1a — the adversarial audit (2026-10-07)
+
+**What the audit found.** The "bright fittings scattered on the grass and road" were NOT fixtures
+outside their rooms: world-side, 0 of 1 429 lights / 1 428 fittings around the frame's spawn lie
+outside a building shell (shipped island), 0 of 2 371 resident fixtures misplaced on the CI island
+with its real terrain. Two renderer causes: (1) the lens flare's ghost chain sampled the bright
+pass at ONE point per ghost, so every lit fitting threw pixel-sharp copies through the frame
+centre — onto lawns, cars and the hero (two rows of "floor tiles" in the shop frame lie exactly
+on the source->centre lines of two fittings; the "hard reflections" the wave carried as SSR were
+these ghosts); (2) 107 resident fixtures hang under the grade in the lowest storeys of buildings
+sunk into slopes, and a room's boxed lamp lit the terrain inside its box as a hard rectangle. The
+night eye collapsed (kerb x67 / x191 / x204 -> x6.2 / x10.2 / x11.8; ground band 6.2 / 4.5 /
+4.9) because a lit city's small highlights drove the highlight guard. No light left a lit room
+(shop pavement 3.5 boxed vs 0.0 dark). The indoor 48-52 ms is the BASE's (hospital 47.7-52.5 ms
+p50 before the wave: crowd + animation + VSM raster), not the wave's.
+
+**Fixes (`audit(PAR1a)`).** `68b60635` + `ada323eb` the ghost is defocused (32-tap disc, 0.1
+gain) and the chain fades out with the sun; `fee5e1b7` a clipped light says whose box it is
+(kind 3 room / 4 exterior) and terrain + water skip ROOM boxes; `ebab8556` `OpeningSpill`: a
+wide spot outside every street-facing ground-floor window and door, the room's colour and its
+flux share through the opening, lit exactly while the room is (pavement 75.5; 9 036 island-wide);
+`ee51f2e5` the highlight guard keys on the brightest 3 % (kerb x15.6 / x51.5 / x73.0, ground band
+13.7 / 21.4 / 26.4, noon x1.000); `095efacb` the storey door (a room lamp of the anchor's own
+building more than a storey away is not submitted) + twenty rooms drawn by hash, all lit from
+inside.
+
+**Numbers.** Street walk 21:00 1080p p95 min of five 31.5 -> 33.7 (+2.2). Indoors, min of three,
+p50 / p95: shop 26.1/30.1 -> 27.5/32.2; flat 37.5/38.9 -> 38.5/40.0; flat 5th floor 22.0/26.9
+-> 25.2/27.7; office 3rd floor 25.9/28.0 -> 26.6/28.6; hospital 47.7/50.8 -> 51.2/57.4 (median
+52.1/58.8 -> 53.2/58.2; the base's own spread 4.8 / 8.5 ms).
+
+**Laws.** A ghost is an image of the source: sampled at one point it is a copy, and a city at
+night is ten thousand sources. A box keeps a light in its room only if nothing that is not a room
+can be inside the box — terrain on a slope is. The highlight guard's percentile is a statement
+about how big a highlight may be before it is the scene: at 1 % a lit city's lamps were the
+scene. Measure the base before blaming the wave: the indoor frame the brief cited was 52 ms
+before a single room fixture existed.
+
+**Carried.** The room-visibility door in full (~1.5 d); six fitting families instanced across
+volumes (~1.5 d); night ghosts of streetlights as a feature (bloom-mip-sourced, ~0.5 d); the
+building datum on slopes (foundations; 107 buried fixtures, ratcheted); the longest froxel
+indoors (0.25 d); the water-pass toggle frame for the blue-room band (inferred glass, 0.5 d);
+live presence + a light switch (~2.5 d); the office 19:00 vs 02:00 street frames and a captured
+editor-at-21:00 frame (the clock set through `scene_set_settings` read back 21:00, sun -7.6 deg;
+the window capture failed).
