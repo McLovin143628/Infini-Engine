@@ -929,3 +929,93 @@ fn a_car_at_fifteen_metres_a_second_stops_at_a_lamp_post() {
     assert!(front_free > 45.0, "without the post the car stopped anyway");
     assert!(lost > 0.0, "the post took no blow off the bodywork");
 }
+
+// ── the whole shipped island's census (off CI, prints) ─────────────────────
+
+/// **THE SHIPPED ISLAND'S FURNITURE, COUNTED** (the census the brief asks for
+/// beside the reference frames): every street the island's blocks imply, the
+/// derivation over all of them (flat ground — counts do not depend on it), by
+/// kind, per 100 m of city (20 m) and town (16 m) street, island totals, and the
+/// signalised junctions nearest the hero's start with a place to stand at each
+/// approach's stop line (for the frames). REPORTS, never asserts.
+#[test]
+#[ignore = "prints the shipped island's census; run by hand"]
+fn the_shipped_islands_furniture_census() {
+    let recipe = inf_island::IslandRecipe::load(
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../samples/island/island.toml"),
+    )
+    .expect("the shipped recipe");
+    let design = inf_island::read_design(&recipe).expect("the design");
+    let streets = inf_editor_core::island::island_streets(&design);
+    let junctions = inf_ecs::traffic::signal_junctions(&streets);
+    let lines: Vec<street::StreetLine> = streets
+        .iter()
+        .map(|s| street::StreetLine {
+            a: s.a,
+            b: s.b,
+            gap_m: s.gap_m,
+        })
+        .collect();
+    let sites: Vec<street::SignalSite> = junctions
+        .iter()
+        .map(|j| street::SignalSite {
+            centre: j.centre,
+            gap_x: j.gap_x,
+            gap_z: j.gap_z,
+            offset_s: j.offset_s as u32,
+        })
+        .collect();
+    let f = street::furnish(
+        &lines,
+        &sites,
+        &[],
+        &inf_pcg::FnHeight::new(|_, _| Some(0.0)),
+    );
+    let mut len_by_class: BTreeMap<u32, f64> = BTreeMap::new();
+    for s in &streets {
+        *len_by_class.entry(s.gap_m.round() as u32).or_default() += (s.b - s.a).length();
+    }
+    let total: f64 = len_by_class.values().sum();
+    let mut by_kind: BTreeMap<PieceKind, usize> = BTreeMap::new();
+    let (mut inst, mut solids, mut lights) = (0usize, 0usize, 0usize);
+    for p in &f.pieces {
+        *by_kind.entry(p.kind).or_default() += 1;
+        inst += p.instances.len();
+        solids += p.colliders.len();
+        lights += p.lights.len();
+    }
+    println!(
+        "PAR1b ISLAND CENSUS: {} streets, {:.0} m ({:?} m by reserve); {} signalised junctions; {} pieces, {inst} instances, {solids} solids, {lights} lights; refused at junctions {}, at doors {}",
+        streets.len(),
+        total,
+        len_by_class.iter().map(|(k, v)| (*k, v.round())).collect::<Vec<_>>(),
+        junctions.len(),
+        f.pieces.len(),
+        f.at_junction,
+        f.at_door
+    );
+    for (k, n) in &by_kind {
+        println!(
+            "  {:<13} {n:>6}  {:>5.2} per 100 m of street",
+            k.name(),
+            *n as f64 / (total / 100.0)
+        );
+    }
+    let start = design.start(0.0);
+    let mut near: Vec<&inf_ecs::traffic::SignalJunction> = junctions.iter().collect();
+    near.sort_by(|a, b| {
+        (a.centre - DVec2::new(start.x, start.z))
+            .length()
+            .total_cmp(&(b.centre - DVec2::new(start.x, start.z)).length())
+    });
+    println!("PAR1b START {:.1} {:.1} {:.1}", start.x, start.y, start.z);
+    for j in near.iter().take(6) {
+        let d = (j.centre - DVec2::new(start.x, start.z)).length();
+        // A place 12 m back along the +X approach, on its lane, facing +X.
+        let stand = DVec2::new(j.centre.x - 14.0, j.centre.y - 1.75);
+        println!(
+            "PAR1b JUNCTION at ({:.1}, {:.1}) gaps {}x{} offset {:.0} s, {d:.0} m from the start; stand on the +X approach at ({:.1}, {:.1}) facing yaw 90",
+            j.centre.x, j.centre.y, j.gap_x, j.gap_z, j.offset_s, stand.x, stand.y
+        );
+    }
+}

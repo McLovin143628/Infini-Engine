@@ -165,6 +165,14 @@ pub fn furniture_key(world: &EcsWorld) -> u64 {
 /// against the current key** — the cheap answer a host gets on a call that has
 /// nothing to do.
 pub fn furnish_inputs(world: &EcsWorld) -> Option<FurnishInputs<'_>> {
+    // **The measuring door** (wave PAR1b): with `INF_NO_STREET_FURNITURE`
+    // set, no block is ever furnished — the same binary with and without the
+    // wave's furniture, which is how the instrument prices it (a frame row, a
+    // triangle count, an exposure). Read here, in the one Ring-0 door both
+    // hosts pass, so neither host can be measured differently from the other.
+    if std::env::var_os("INF_NO_STREET_FURNITURE").is_some() {
+        return None;
+    }
     let blocks = resident_blocks(world);
     if blocks.is_empty() {
         return None;

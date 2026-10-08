@@ -3604,8 +3604,12 @@ fn push_scatter(
             draw_distance: bucket_draw,
             near_distance,
             // Wave PAR0: glass casts no shadow (a pane lets the sun into the
-            // room it glazes) and draws in the glass pass.
-            casts_shadows: casts_shadows && f32::from_bits(surface[6]) <= 0.0,
+            // room it glazes) and draws in the glass pass. Wave PAR1b: street
+            // furniture casts none either -- thin posts and cables are a page
+            // re-raster and a caster-pack walk for a shadow a pixel wide.
+            casts_shadows: casts_shadows
+                && f32::from_bits(surface[6]) <= 0.0
+                && band != Some(inf_pcg::building::modules::STREET_FURNITURE_LOD_M),
             transmission: f32::from_bits(surface[6]),
         });
     }

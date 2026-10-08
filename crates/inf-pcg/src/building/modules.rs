@@ -354,11 +354,12 @@ pub enum ModuleShape {
 }
 
 /// **How far from the eye street furniture is drawn**, metres (wave PAR1b) —
-/// the load distance the PAR1b brief asks for. A 0.16 m lamp shaft is one
-/// pixel at 1080p at ~250 m, and a pole line's cables are sub-pixel well before
-/// that; past this distance a post is nothing. The light it carries is culled
+/// the load distance the PAR1b brief asks for. A 0.18 m lamp shaft is ~1.4
+/// pixels at 1080p at 180 m, and a pole line's cables are sub-pixel well before
+/// that; past this distance a post is nothing. (250 m at the first cut; the
+/// frame delta brought it in.) The light it carries is culled
 /// by its own draw distance long before (`street::LAMP_DRAW_M`).
-pub const STREET_FURNITURE_LOD_M: f64 = 250.0;
+pub const STREET_FURNITURE_LOD_M: f64 = 180.0;
 
 /// **The draw band a module mesh's batch takes**, metres, or `None` for the
 /// volume's own (wave PAR1b) — fit-out at the interior band (CERT1's CP-C3,

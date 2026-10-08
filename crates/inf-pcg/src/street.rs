@@ -78,7 +78,7 @@ pub const LAMP_RANGE_M: f32 = 28.0;
 /// How far from the eye a street lamp is a LIGHT, metres; past it PAR0's
 /// distance door has dropped it and the post itself still draws to
 /// `modules::STREET_FURNITURE_LOD_M`.
-pub const LAMP_DRAW_M: f32 = 150.0;
+pub const LAMP_DRAW_M: f32 = 110.0;
 /// **The luminaire's emission**, authored, before the Dusk schedule and
 /// `inf_render::POWERED_RADIANCE_SCALE`: at the island's night eye (x15 - x73
 /// at the kerb cameras) the head reads 0.7 - 3.4, a small highlight that may
@@ -97,7 +97,7 @@ pub const POLE_HALF_M: f64 = 0.13;
 /// top conductors dipping ~1 m over the ~40 m span: 2.5 %.
 pub const CABLE_SAG_FRAC: f64 = 0.025;
 /// Straight segments one span's catenary is drawn with.
-pub const CABLE_SEGMENTS: usize = 8;
+pub const CABLE_SEGMENTS: usize = 6;
 /// The longest span the line carries across a junction, metres.
 pub const MAX_SPAN_M: f64 = 2.3 * POLE_SPACING_M;
 
@@ -659,11 +659,12 @@ fn signal_post(
     }
 }
 
-/// The three conductors' and the telecom line's `(lateral, height)` on a pole,
-/// metres — lateral toward the street's +side of the pole's own side line.
-const CABLES: [(f64, f64, f64); 4] = [
+/// The two conductors' and the telecom line's `(lateral, height, radius)` on a
+/// pole, metres — lateral toward the carriageway from the pole's side line.
+/// Three lines, not four: each line is [`CABLE_SEGMENTS`] instances a span, and
+/// the fourth cost more frame than it read (the PAR1b frame delta).
+const CABLES: [(f64, f64, f64); 3] = [
     (-0.75, POLE_HEIGHT_M - 0.45, 0.018),
-    (0.0, POLE_HEIGHT_M - 0.45, 0.018),
     (0.4, POLE_HEIGHT_M - 0.45, 0.018),
     (0.3, 7.5, 0.028),
 ];
