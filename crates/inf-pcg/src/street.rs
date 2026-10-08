@@ -1582,8 +1582,8 @@ mod tests {
     }
 
     /// **The posts stand at the kerb, the broad pieces at the frontage**
-    /// (wave PAR1b.2): on a 20 m city street the post line is the kerb face
-    /// + 0.5 m (7.5 m, `steal-car/0022`'s offset); on a 16 m town street, whose
+    /// (wave PAR1b.2): on a 20 m city street the post line is half a metre
+    /// behind the kerb face (7.5 m, `steal-car/0022`'s offset); on a 16 m town street, whose
     /// parked cars overhang the 5.25 m kerb, it clears a parked car's door
     /// (6.22 m); both are behind the kerb stone; the broad line is behind the
     /// post line. A city street carries bus shelters against the frontage on

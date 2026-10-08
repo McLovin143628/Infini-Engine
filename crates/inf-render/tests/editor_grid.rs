@@ -83,9 +83,10 @@ fn scene(grid: bool, night: bool, with_road: bool) -> RenderScene {
 fn render(gpu: &GpuContext, s: &RenderScene, view: &RenderView, exposure: f32) -> Vec<u8> {
     let target = HeadlessTarget::new(gpu, W, H);
     let mut r = EngineRenderer::new(gpu, HEADLESS_FORMAT);
-    let mut st = RenderSettings::default();
-    st.exposure = exposure;
-    r.set_settings(st);
+    r.set_settings(RenderSettings {
+        exposure,
+        ..RenderSettings::default()
+    });
     for _ in 0..4 {
         r.render(gpu, s, view, &target.view, (W, H));
         let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
