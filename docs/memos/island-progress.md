@@ -42751,3 +42751,35 @@ pixel wide.
 tiers ignore signals (only the steered tier stops, ~1 d); activation re-furnishing hitches
 (incremental per street, ~1 d, PERF1d); the instrument GPU / kerb-exposure re-time and the
 ROAD1 triangle price (~0.5 d); the frames list beyond the 21:00 walk frame.
+
+## Wave PAR1b — ADVERSARIAL AUDIT (2026-10-08)
+
+Audit commits over `7a9c1145`: `981258fc` (clock-tier signal hold; REVERTED by `57ac1dab`),
+`8bffc0b0` (lamp + signal re-calibration, pool / tint arms), `01812d29` (inherited arms tightened),
+`d8127be9` (island-wide placement arm on the shipped island), `8c2cc47e` (signal beam down the lanes
+only), `57ac1dab` (the revert) + this docs commit. Report: `campaign-briefs/par1b-audit-report.md`.
+Zero schema / level / golden / dependency moves.
+
+**Fixed.** The lamp lit one wash over the street and the auto-exposure keyed on it: the shipped
+kerb eyes at 21:00 fell from x15.6 / x51.5 / x73.8 (furniture off, same binary) to x5.7 / x6.3 /
+x10.6, which is why no frame showed a pool. Now 4 000 lm, a 55-degree cone leaned 20 degrees toward
+the road, 16 m: x12.4 / x39.0 / x46.2, a chain of pools (+98..+154 codes) with the road between at
++0. The signal light washed the hero and the corner facade: 40 lm in a 14-degree beam down the
+lanes. Two inherited arms that printed instead of asserting now assert.
+
+**Measured.** The hitch rise was NOT re-furnishing (one re-furnish a minute, +14 ms; identical
+`cell_stream` sums): it is GPU / present waits. Final vs base, min / median p95: 21:00 walk +1.1 /
++1.5, noon walk +1.5 / +2.0, 21:00 drive (real, 10 of 10 boarded) -0.2 / +2.6; instrument GPU 21:00
++0.86 (geometry +0.42, 128 lights +0.44). Frames > 50 ms at 21:00 walk 26.3 -> 32.1 a minute — open.
+The car "that could not be boarded" was the demo's hunt; boarding at 21:00 works.
+
+**Laws.** A night "with no pool" can be the eye compensating a wash — read the exposure before the
+pixels. A traffic rule and the emergency fleet are one change: the clock-tier hold (13 holds, 0 red
+crossings on its own arm) stalled three EMS dispatch arms, because a unit reads no signal and cannot
+pass a queue. An arm that prints its claim is not an arm.
+
+**Carried.** Clock-tier signal obedience with the fleet obeying / pre-empting (~1.5-2 d); the +6
+hitches a minute (GPU timestamps 0.5 d + 1-2 d); posts at the KERB as the reference stands them, with
+ring avoidance (~1 d); a signalised crossing on the CI island (0.5-1 d); a light-draw fade (~0.5 d);
+doors + slope feet over the shipped island (~0.5 d); the ROAD1 triangle price (~0.5 d); a frame of a
+car waiting at a red and of each kerbside kind (~1 h).
