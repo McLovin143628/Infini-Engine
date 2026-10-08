@@ -626,6 +626,10 @@ fn look(eye: DVec3, target: DVec3) -> RenderView {
 }
 
 fn render(gpu: &GpuContext, scene: &RenderScene, view: &RenderView) -> Vec<u8> {
+    render_at(gpu, scene, view, NIGHT_EXPOSURE)
+}
+
+fn render_at(gpu: &GpuContext, scene: &RenderScene, view: &RenderView, exposure: f32) -> Vec<u8> {
     let target = HeadlessTarget::new(gpu, W, H);
     let mut r = EngineRenderer::new(gpu, HEADLESS_FORMAT);
     let mut s = RenderSettings::default();
@@ -633,7 +637,7 @@ fn render(gpu: &GpuContext, scene: &RenderScene, view: &RenderView) -> Vec<u8> {
     s.shadows.enabled = false;
     s.vsm.enabled = false;
     s.lights.local_shadow_budget = 0;
-    s.exposure = NIGHT_EXPOSURE;
+    s.exposure = exposure;
     r.set_settings(s);
     for _ in 0..WARM {
         r.render(gpu, scene, view, &target.view, (W, H));
@@ -725,11 +729,19 @@ fn street_scene(with_lights: bool) -> (RenderScene, Vec<FurniturePiece>) {
     (scene, lamps)
 }
 
-/// **THE LAMP'S POOL IS REAL** (clause 1): on the asphalt under a lamp's head,
-/// midway between two lamps, and the same spots with no lamp lit — fixed
-/// camera, fixed night exposure x8, GI on. The lamp is unboxed (terrain and
-/// water read it: `par0_lights_gate::a_point_light_over_terrain_raises_its_luminance`).
-/// Mutation: the lights removed -> under == between == dark.
+/// **THE LAMP'S POOL IS REAL** (clause 1; audit PAR1b re-aimed): on the
+/// asphalt where a lamp's beam lands, midway between two lamps on the same
+/// line, and the same spots with no lamp lit — fixed camera, fixed night
+/// exposure x8, GI on. The lamp is unboxed (terrain and water read it:
+/// `par0_lights_gate::a_point_light_over_terrain_raises_its_luminance`).
+///
+/// A night street is a CHAIN of pools (`steal-car/0035`: the pool reads 2.2x
+/// the road beside it in 8-bit), so the arm asks for a pool at least
+/// [`POOL_MIN_LIFT`] codes over dark AND for the asphalt between two lamps to
+/// stay within [`BETWEEN_MAX_LIFT`] of dark — one wash over the whole street
+/// is a defect. Mutations (measured): the lights removed -> under == dark,
+/// red; the first cut's 8 000 lm / 75 degrees / 28 m -> between 124.7 vs dark
+/// 104.5, red.
 #[test]
 fn a_lamp_pools_on_the_asphalt_under_it_and_between_lamps_against_the_dark() {
     let Some(gpu) = gpu() else { return };
@@ -746,12 +758,15 @@ fn a_lamp_pools_on_the_asphalt_under_it_and_between_lamps_against_the_dark() {
         .iter()
         .find(|p| p.foot.x > a.foot.x + 1.0)
         .expect("its neighbour");
-    let head = a.lights[0].at;
-    let under = DVec3::new(head.x, 0.0, head.z);
-    let between = DVec3::new((a.foot.x + b.foot.x) * 0.5, 0.0, head.z);
+    // Where the beam lands: the head's light, along its leaned axis, to the
+    // road.
+    let l = &a.lights[0];
+    let land = l.at + l.dir * (l.at.y / -l.dir.y);
+    let under = DVec3::new(land.x, 0.0, land.z);
+    let between = DVec3::new((a.foot.x + b.foot.x) * 0.5, 0.0, land.z);
     let view = look(
         DVec3::new(a.foot.x - 6.0, 1.7, -8.5),
-        DVec3::new(a.foot.x + 8.0, 0.0, head.z),
+        DVec3::new(a.foot.x + 8.0, 0.0, land.z),
     );
     let (li, di) = (render(&gpu, &lit, &view), render(&gpu, &dark, &view));
     let (u, m, ud, md) = (
@@ -766,15 +781,230 @@ fn a_lamp_pools_on_the_asphalt_under_it_and_between_lamps_against_the_dark() {
         a.lights[0].intensity
     );
     assert!(
-        u >= ud + 20.0,
+        u >= ud + POOL_MIN_LIFT,
         "the asphalt under a lamp {u:.1} vs dark {ud:.1}"
     );
     assert!(
-        m > md + 2.0,
-        "the asphalt between lamps {m:.1} vs dark {md:.1}"
+        m <= md + BETWEEN_MAX_LIFT,
+        "the asphalt between lamps {m:.1} vs dark {md:.1}: one wash, not a chain of pools"
     );
     assert!(u > m, "under {u:.1} is not brighter than between {m:.1}");
 }
+
+/// The least a lamp's pool lifts the asphalt over dark, codes at x8.
+const POOL_MIN_LIFT: f64 = 40.0;
+/// The most the asphalt midway between two lamps may sit over dark, codes at
+/// x8 — the dark between the pools.
+const BETWEEN_MAX_LIFT: f64 = 6.0;
+
+/// The exposure the signal arm reads at — the pool arm's x8 (this synthetic
+/// scene's default sky is far brighter than the island's night, so the
+/// shipped kerb eyes' x12 - x46 would clip its dark control).
+const KERB_EXPOSURE: f32 = 8.0;
+
+/// **A SIGNAL IS SEEN, IT DOES NOT LIGHT THE JUNCTION** (audit PAR1b (d')): the
+/// first cut's lens light (350 lm, 30 m) tinted the hero's shirt and the
+/// junction asphalt green in the window at 21:00. One signalised crossing of
+/// two 20 m streets over dark asphalt, the +X approach's head lit RED (light +
+/// lens), then GREEN, then the green lens alone (its GI share), then nothing
+/// (the dark control), at x8:
+///
+/// * the asphalt a metre before the approach's stop line reads the lens's
+///   colour FAINTLY — lit, but at most [`SIGNAL_ASPHALT_MAX`] codes over dark;
+/// * a pale shirt standing in the junction box in the beam (chest height)
+///   shifts its lit channel by at most [`SIGNAL_SHIRT_MAX`] codes over dark.
+///
+/// Mutation (measured): the first cut's 350 lm -> the shirt over, red.
+#[test]
+fn a_signal_head_tints_its_approach_faintly_and_not_the_hero() {
+    let Some(gpu) = gpu() else { return };
+    let streets = [
+        street::StreetLine {
+            a: DVec2::new(-150.0, 0.0),
+            b: DVec2::new(150.0, 0.0),
+            gap_m: 20.0,
+        },
+        street::StreetLine {
+            a: DVec2::new(0.0, -150.0),
+            b: DVec2::new(0.0, 150.0),
+            gap_m: 20.0,
+        },
+    ];
+    let site = street::SignalSite {
+        centre: DVec2::ZERO,
+        gap_x: 20.0,
+        gap_z: 20.0,
+        offset_s: 0,
+    };
+    let f = street::furnish(
+        &streets,
+        &[site],
+        &[],
+        &inf_pcg::FnHeight::new(|_, _| Some(0.0)),
+    );
+    // The head serving the approach travelling +X (from -X toward the centre):
+    // its light's beam points back down that approach (-X).
+    let head = f
+        .pieces
+        .iter()
+        .filter(|p| p.kind == PieceKind::SignalPost)
+        .flat_map(|p| p.lights.iter())
+        .find(|l| l.dir.x < -0.5)
+        .expect("the +X approach's head")
+        .clone();
+    // `(light colour, lens colour)`: the lit lens is drawn as the projectors'
+    // `push_signal_lenses` draws it (an emissive sphere on the housing's face,
+    // `SIGNAL_LENS_EMISSIVE` = 1.6 x the aspect), because the GI carries a lit
+    // emitter's colour too.
+    let scene_of = |colour: Option<[f32; 3]>, lens: Option<[f32; 3]>| {
+        let mut scene = RenderScene::default();
+        scene.lights.push(RenderLight {
+            kind: LightKind::Directional,
+            color: [0.6, 0.7, 1.0],
+            intensity: 0.002,
+            direction: Vec3::new(0.2, 1.0, 0.1).normalize(),
+            position: DVec3::ZERO,
+            range: 0.0,
+            inner_cos: 1.0,
+            outer_cos: 1.0,
+            cast_shadows: false,
+        });
+        scene.instances.push(MeshInstance::lit(
+            DVec3::new(0.0, -0.5, 0.0),
+            glam::Quat::IDENTITY,
+            Vec3::new(400.0, 1.0, 400.0),
+            [0.16, 0.16, 0.17, 1.0],
+            1,
+        ));
+        // A pale shirt (a 0.5 m torso) IN the junction box, 10 m back along the
+        // beam from the far-side head — where the window's hero stood when
+        // the first cut turned his shirt green (`fin5-window-21\200`). At 5 m
+        // a chest is 40 degrees under the head, outside its 24-degree cone; at
+        // 10 m it is inside it.
+        let shirt = DVec3::new(head.at.x - 10.0, 1.35, head.at.z);
+        scene.instances.push(MeshInstance::lit(
+            shirt,
+            glam::Quat::IDENTITY,
+            Vec3::new(0.25, 0.6, 0.45),
+            [0.7, 0.7, 0.7, 1.0],
+            2,
+        ));
+        if let Some(c) = lens {
+            let mut m = MeshInstance::lit(
+                head.at + DVec3::new(-0.08, 0.0, 0.0),
+                glam::Quat::IDENTITY,
+                Vec3::new(0.05, 0.22, 0.22),
+                [c[0] * 0.12, c[1] * 0.12, c[2] * 0.12, 1.0],
+                3,
+            );
+            m.mesh = inf_render::PrimMesh::Sphere;
+            m.emissive = [c[0] * 1.6, c[1] * 1.6, c[2] * 1.6];
+            scene.instances.push(m);
+        }
+        if let Some(c) = colour {
+            scene.light_bounds.push(LightBound {
+                light: scene.lights.len() as u32,
+                clip: None,
+                draw_m: head.draw_m,
+            });
+            scene.lights.push(RenderLight {
+                kind: LightKind::Spot,
+                color: c,
+                intensity: head.intensity,
+                direction: (-head.dir).as_vec3(),
+                position: head.at,
+                range: head.range_m,
+                inner_cos: head.inner_deg.to_radians().cos(),
+                outer_cos: head.outer_deg.to_radians().cos(),
+                cast_shadows: false,
+            });
+        }
+        (scene, shirt)
+    };
+    // The camera on the approach, behind the line, looking at the junction.
+    let line_x = -inf_ecs::traffic::STOP_LINE_M;
+    let view = look(
+        DVec3::new(line_x - 14.0, 1.7, -4.0),
+        DVec3::new(line_x, 1.0, -1.75),
+    );
+    let before_line = DVec3::new(line_x - 1.0, 0.0, -1.75);
+    let rgb_at = |img: &[u8], p: DVec3| -> [f64; 3] {
+        let c = view.view_proj() * (p - view.origin.origin()).as_vec3().extend(1.0);
+        let n = c.truncate() / c.w;
+        let (x, y) = (
+            ((n.x * 0.5 + 0.5) * W as f32).clamp(0.0, W as f32 - 1.0) as u32,
+            ((0.5 - n.y * 0.5) * H as f32).clamp(0.0, H as f32 - 1.0) as u32,
+        );
+        let mut s = [0.0f64; 3];
+        let mut k = 0.0;
+        for yy in y.saturating_sub(3)..(y + 3).min(H) {
+            for xx in x.saturating_sub(3)..(x + 3).min(W) {
+                let i = ((yy * W + xx) * 4) as usize;
+                for ch in 0..3 {
+                    s[ch] += f64::from(img[i + ch]);
+                }
+                k += 1.0;
+            }
+        }
+        s.map(|v| v / k)
+    };
+    let red = inf_pcg::street::aspect_rgb(2);
+    let green = inf_pcg::street::aspect_rgb(0);
+    let (sr, shirt) = scene_of(Some(red), Some(red));
+    let (sg, _) = scene_of(Some(green), Some(green));
+    let (sl, _) = scene_of(None, Some(green));
+    let (sd, _) = scene_of(None, None);
+    let (ir, ig, il, id) = (
+        render_at(&gpu, &sr, &view, KERB_EXPOSURE),
+        render_at(&gpu, &sg, &view, KERB_EXPOSURE),
+        render_at(&gpu, &sl, &view, KERB_EXPOSURE),
+        render_at(&gpu, &sd, &view, KERB_EXPOSURE),
+    );
+    let (ar, ag, al, ad) = (
+        rgb_at(&ir, before_line),
+        rgb_at(&ig, before_line),
+        rgb_at(&il, before_line),
+        rgb_at(&id, before_line),
+    );
+    let (hr, hg, hl, hd) = (
+        rgb_at(&ir, shirt),
+        rgb_at(&ig, shirt),
+        rgb_at(&il, shirt),
+        rgb_at(&id, shirt),
+    );
+    println!(
+        "PAR1b SIGNAL (x{KERB_EXPOSURE}, {:.0} lm-row intensity {:.2}, range {:.0} m): asphalt before the line red {ar:.1?} / green {ag:.1?} / green lens alone {al:.1?} / dark {ad:.1?}; shirt in the box red {hr:.1?} / green {hg:.1?} / green lens alone {hl:.1?} / dark {hd:.1?}",
+        inf_pcg::building::fixtures::fixture(FixtureRow::SignalHead).lumens,
+        head.intensity,
+        head.range_m
+    );
+    // The lens's own channel: red's R, green's G.
+    let asphalt_red = ar[0] - ad[0];
+    let asphalt_green = ag[1] - ad[1];
+    let shirt_red = hr[0] - hd[0];
+    let shirt_green = hg[1] - hd[1];
+    assert!(
+        asphalt_red >= SIGNAL_ASPHALT_MIN && asphalt_green >= SIGNAL_ASPHALT_MIN,
+        "the asphalt before the line does not read the lens at all: red +{asphalt_red:.1}, green +{asphalt_green:.1}"
+    );
+    assert!(
+        asphalt_red <= SIGNAL_ASPHALT_MAX && asphalt_green <= SIGNAL_ASPHALT_MAX,
+        "the junction is washed in the lens colour: red +{asphalt_red:.1}, green +{asphalt_green:.1} (max {SIGNAL_ASPHALT_MAX})"
+    );
+    assert!(
+        shirt_red <= SIGNAL_SHIRT_MAX && shirt_green <= SIGNAL_SHIRT_MAX,
+        "the shirt in the box takes the lens colour: red +{shirt_red:.1}, green +{shirt_green:.1} (max {SIGNAL_SHIRT_MAX})"
+    );
+}
+
+/// The most the lens may lift its own channel on the asphalt before the line,
+/// 8-bit codes at x24 — "faintly" (audit PAR1b).
+const SIGNAL_ASPHALT_MAX: f64 = 6.0;
+/// The least it must lift it — the lens is SEEN on its approach, codes at x8.
+const SIGNAL_ASPHALT_MIN: f64 = 0.5;
+/// The most the lens may lift its own channel on a pale shirt in the box,
+/// codes at x8.
+const SIGNAL_SHIRT_MAX: f64 = 2.0;
 
 // ── a post stops a car ───────────────────────────────────────────────────────
 
@@ -1019,3 +1249,258 @@ fn the_shipped_islands_furniture_census() {
         );
     }
 }
+
+/// **THE SPAWN JUNCTION OBEYS ITS SIGNAL, ON THE SHIPPED ISLAND** (audit
+/// PAR1b — the world arm's single wait over 2 400 steps on a synthetic grid
+/// was vacuous). The cooked island (`INF_ISLAND_PACK`), the hero standing at
+/// the signalised crossing it spawns at (-1750, 2050), the morning rush
+/// (08:24), a whole 50 s cycle ([`SPAWN_STEPS`]) after a warm-up that lets the
+/// traffic plan its day: every traffic car within 64 m of the crossing is
+/// watched, steered (`Full`) and clock-moved (`Near`) alike. Asserts:
+///
+/// * at least [`SPAWN_MIN_WAITS`] distinct cars stand at a red line there
+///   (steered: at rest, nose within 4 m short of / 1 m past the line; clock: held
+///   by `clock_signal_hold`), and at least [`SPAWN_MIN_HOLD_STEPS`] clock-tier
+///   hold-steps island-wide;
+/// * ZERO steps on which two cars' footprints overlap inside the crossing's box;
+/// * ZERO stop lines crossed on a red by a car that was not already over it.
+///
+/// Off CI (CI never cooks the island): skips without `INF_ISLAND_PACK`.
+#[test]
+#[ignore = "needs a cooked island pack (INF_ISLAND_PACK); run by hand"]
+fn the_spawn_junction_holds_its_traffic_at_a_red_and_keeps_its_box_clear() {
+    let Some(pack) = std::env::var_os("INF_ISLAND_PACK").map(PathBuf::from) else {
+        println!("SKIP: INF_ISLAND_PACK names no pack");
+        return;
+    };
+    let source = inf_player::level::PackLevelSource::open(&pack).expect("the pack opens");
+    let mut built = inf_player::build_world_from_pack(&source).expect("the world builds");
+    let partition = built.take_partition();
+    let pcg = built.pcg_context();
+    let mut sim = inf_player::sim_from_built(built);
+    inf_player::attach_cell_streaming(&mut sim, &partition, pcg);
+    inf_player::attach_terrain_streaming(&mut sim, &inf_player::TerrainContent::Pack(source));
+    let centre = DVec2::new(-1750.0, 2050.0);
+    let ground = sim.terrain_height_at(centre.x, centre.y);
+    stand(
+        &mut sim,
+        DVec3::new(centre.x + 9.0, ground, centre.y + 9.0),
+        8.4,
+        SPAWN_WARMUP,
+    );
+    let Some(j) = inf_ecs::traffic::carriageway_of(sim.world()).and_then(|r| {
+        r.junctions
+            .iter()
+            .find(|j| (j.centre - centre).length() < 1.0)
+            .copied()
+    }) else {
+        panic!("the spawn crossing is not signalised");
+    };
+    let (hx, hz) = (
+        inf_ecs::traffic::street_kerb_offset_m(j.gap_z),
+        inf_ecs::traffic::street_kerb_offset_m(j.gap_x),
+    );
+    let mut waits: std::collections::BTreeSet<uuid::Uuid> = Default::default();
+    let mut holds = 0usize;
+    let mut box_contacts = 0usize;
+    let mut red_crossings = 0usize;
+    let mut watched: std::collections::BTreeSet<uuid::Uuid> = Default::default();
+    let mut moving: std::collections::BTreeSet<uuid::Uuid> = Default::default();
+    let mut noses: BTreeMap<uuid::Uuid, f64> = BTreeMap::new();
+    for _ in 0..SPAWN_STEPS {
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+        holds += sim.traffic_stats().signal_holds;
+        let t_s = inf_ecs::traffic::signal_clock_of(sim.world());
+        let recs = inf_physics::d3::traffic::records(sim.world());
+        let mut in_box: Vec<(DVec3, f64)> = Vec::new();
+        let mut next: BTreeMap<uuid::Uuid, f64> = BTreeMap::new();
+        for (g, rec) in &recs {
+            if rec.taken {
+                continue;
+            }
+            let at = sim
+                .world()
+                .entity_of(*g)
+                .and_then(|e| sim.world().world().get::<inf_ecs::components::Transform>(e))
+                .map(|t| t.translation.to_dvec3())
+                .unwrap_or(rec.last);
+            if DVec2::new(at.x - centre.x, at.z - centre.y).length() > 64.0 {
+                continue;
+            }
+            watched.insert(*g);
+            if (rec.last - at).length() > 0.0 || rec.signal_held {
+                moving.insert(*g);
+            }
+            let half = rec.def.half_extents.z.abs();
+            if (at.x - centre.x).abs() < hx && (at.z - centre.y).abs() < hz {
+                in_box.push((at, (half * half + rec.def.half_extents.x.powi(2)).sqrt()));
+            }
+            let yaw = rec.yaw_deg.to_radians();
+            let fwd = DVec3::new(inf_math::psin64(yaw), 0.0, inf_math::pcos64(yaw));
+            let along_x = fwd.x.abs() >= fwd.z.abs();
+            let (d_along, d_lat) = if along_x {
+                ((centre.x - at.x) * fwd.x.signum(), (centre.y - at.z).abs())
+            } else {
+                ((centre.y - at.z) * fwd.z.signum(), (centre.x - at.x).abs())
+            };
+            if d_lat > inf_ecs::traffic::SIGNAL_LANE_REACH_M || !(0.0..=40.0).contains(&d_along) {
+                continue;
+            }
+            let nose = d_along - half - inf_ecs::traffic::STOP_LINE_M;
+            let red =
+                inf_ecs::traffic::signal_aspect(&j, along_x, t_s) == inf_ecs::traffic::Aspect::Red;
+            if let Some(prev) = noses.get(g) {
+                if *prev > 0.0 && nose <= 0.0 && red {
+                    red_crossings += 1;
+                }
+            }
+            next.insert(*g, nose);
+            let still = rec.signal_held
+                || (rec.tier == inf_ecs::crowd::CrowdTier::Full
+                    && (rec.last - at).length() < 0.01
+                    && (-1.0..=4.0).contains(&nose));
+            if still && red {
+                waits.insert(*g);
+            }
+        }
+        noses = next;
+        let mut touched = false;
+        for a in 0..in_box.len() {
+            for b in a + 1..in_box.len() {
+                let d = DVec2::new(in_box[a].0.x - in_box[b].0.x, in_box[a].0.z - in_box[b].0.z)
+                    .length();
+                touched |= d < 0.75 * (in_box[a].1 + in_box[b].1);
+            }
+        }
+        box_contacts += usize::from(touched);
+    }
+    println!(
+        "PAR1b SPAWN JUNCTION ({:.0}, {:.0}) offset {:.0} s: {} cars watched within 64 m ({} of them moved), {} distinct waited at a red, {} clock hold-steps island-wide, {} box-contact steps, {} red line crossings over {SPAWN_STEPS} steps",
+        j.centre.x,
+        j.centre.y,
+        j.offset_s,
+        watched.len(),
+        moving.len(),
+        waits.len(),
+        holds,
+        box_contacts,
+        red_crossings
+    );
+    assert!(
+        waits.len() >= SPAWN_MIN_WAITS,
+        "only {} cars waited at the spawn crossing's reds",
+        waits.len()
+    );
+    assert!(
+        holds >= SPAWN_MIN_HOLD_STEPS,
+        "only {holds} clock-tier hold-steps island-wide"
+    );
+    assert_eq!(box_contacts, 0, "two cars met in the spawn crossing's box");
+    assert_eq!(red_crossings, 0, "a car crossed a stop line on a red");
+}
+
+/// **THE HITCH PROFILE** (audit PAR1b (a')): is re-furnishing on a cell
+/// activation what the window's frames > 50 ms are? The cooked island, the hero
+/// carried down the strip from the spawn at a walk (1.4 m/s) for 60 s of sim,
+/// every step timed; a step whose furniture census changed (a re-furnish that
+/// moved pieces) is filed apart, and so is a step that activated a cell. With
+/// `INF_NO_STREET_FURNITURE` the same run is the control. REPORTS, never
+/// asserts.
+#[test]
+#[ignore = "needs a cooked island pack (INF_ISLAND_PACK); run by hand"]
+fn the_walk_down_the_strip_files_its_slow_steps() {
+    let Some(pack) = std::env::var_os("INF_ISLAND_PACK").map(PathBuf::from) else {
+        println!("SKIP: INF_ISLAND_PACK names no pack");
+        return;
+    };
+    let source = inf_player::level::PackLevelSource::open(&pack).expect("the pack opens");
+    let mut built = inf_player::build_world_from_pack(&source).expect("the world builds");
+    let partition = built.take_partition();
+    let pcg = built.pcg_context();
+    let mut sim = inf_player::sim_from_built(built);
+    inf_player::attach_cell_streaming(&mut sim, &partition, pcg);
+    inf_player::attach_terrain_streaming(&mut sim, &inf_player::TerrainContent::Pack(source));
+    let start = DVec2::new(-1750.0, 2050.0);
+    let g = sim.terrain_height_at(start.x, start.y);
+    stand(&mut sim, DVec3::new(start.x, g, start.y), 21.0, 300);
+    let mut times: Vec<(f64, bool, bool)> = Vec::new();
+    let mut census = inf_ecs::furniture::census(sim.world());
+    let mut acts = sim.cell_streaming().stats().activations;
+    for k in 0..3600 {
+        // Down the street along -Z at a walk, then along +X past the next
+        // crossing: the cells a walk crosses.
+        let s = k as f64 * 1.4 / 60.0;
+        let p = if s < 50.0 {
+            DVec2::new(start.x, start.y - s)
+        } else {
+            DVec2::new(start.x + (s - 50.0), start.y - 50.0)
+        };
+        let hero = sim
+            .world()
+            .world()
+            .iter_entities()
+            .find(|e| {
+                e.get::<inf_ecs::components::CharacterMovement>()
+                    .is_some_and(|m| m.player_controlled)
+            })
+            .map(|e| e.id());
+        if let Some(e) = hero {
+            if let Some(mut t) = sim
+                .world_mut()
+                .world_mut()
+                .get_mut::<inf_ecs::components::Transform>(e)
+            {
+                t.translation.x = p.x;
+                t.translation.z = p.y;
+            }
+        }
+        let t0 = std::time::Instant::now();
+        sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+        let ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let now = inf_ecs::furniture::census(sim.world());
+        let a = sim.cell_streaming().stats().activations;
+        times.push((ms, now != census, a != acts));
+        census = now;
+        acts = a;
+    }
+    let mut all: Vec<f64> = times.iter().map(|t| t.0).collect();
+    all.sort_by(f64::total_cmp);
+    let p = |v: &[f64], q: f64| v[((v.len() - 1) as f64 * q) as usize];
+    let refurnished: Vec<f64> = times.iter().filter(|t| t.1).map(|t| t.0).collect();
+    let activated: Vec<f64> = times.iter().filter(|t| t.2).map(|t| t.0).collect();
+    let slow = times.iter().filter(|t| t.0 > 25.0).count();
+    let slow_ref = times.iter().filter(|t| t.0 > 25.0 && t.1).count();
+    let slow_act = times.iter().filter(|t| t.0 > 25.0 && t.2).count();
+    println!(
+        "PAR1b HITCH PROFILE (furniture {}): {} steps, p50 {:.2} p95 {:.2} p99 {:.2} max {:.2} ms; {} steps re-furnished (max {:.2} ms, sum {:.1}); {} steps activated a cell (max {:.2} ms, sum {:.1}); steps > 25 ms: {slow} ({slow_ref} re-furnished, {slow_act} activated); final census {:?}",
+        if std::env::var_os("INF_NO_STREET_FURNITURE").is_some() { "OFF" } else { "on" },
+        all.len(),
+        p(&all, 0.5),
+        p(&all, 0.95),
+        p(&all, 0.99),
+        all[all.len() - 1],
+        refurnished.len(),
+        refurnished.iter().cloned().fold(0.0, f64::max),
+        refurnished.iter().sum::<f64>(),
+        activated.len(),
+        activated.iter().cloned().fold(0.0, f64::max),
+        activated.iter().sum::<f64>(),
+        census
+    );
+}
+
+/// Steps the shipped-island signal arm warms the traffic up over before it
+/// watches (the day plans `TRAFFIC_PLANS_PER_STEP` routes a step).
+const SPAWN_WARMUP: usize = 240;
+/// Steps it watches — ten seconds, a fifth of a cycle each way.
+const SPAWN_STEPS: usize = 3000;
+/// The distinct waits it asks for at the spawn crossing — the measured count
+/// (audit PAR1b, `cook-h/perf1`): ONE car over a whole 50 s cycle, because a
+/// frozen level clock (the arm's, and `INF_PIE_HOUR`'s) freezes every commute
+/// where it stands and only the circuits move. The island-wide clock holds
+/// (2 459 hold-steps measured) are the arm's real engagement and are asserted
+/// beside it.
+const SPAWN_MIN_WAITS: usize = 1;
+/// The island-wide clock-tier hold-steps the run must show (a tenth of the
+/// 2 459 measured).
+const SPAWN_MIN_HOLD_STEPS: usize = 245;

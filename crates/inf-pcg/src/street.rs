@@ -72,9 +72,24 @@ pub const LAMP_HEIGHT_M: f64 = 9.0;
 pub const LAMP_OVERHANG_M: f64 = 0.5;
 /// The lamp shaft's half-width, metres.
 pub const LAMP_SHAFT_HALF_M: f64 = 0.09;
-/// A lamp's reach on the ground, metres — overlapping pools at
-/// [`LAMP_SPACING_M`].
-pub const LAMP_RANGE_M: f32 = 28.0;
+/// A lamp's light range, metres (audit PAR1b: 28 -> 16). The first cut's 28 m
+/// and 75-degree cone laid ONE pool over the whole street — the measured
+/// asphalt midway between two lamps was lit 1.46x less than under one, and the
+/// shipped kerb eyes closed from x15.6 / x51.5 / x73.8 to x5.7 / x6.3 / x10.6
+/// under it (the street a lamp did not reach went dark). At 16 m, with the
+/// 55-degree cone and the throw tilted toward the road, a pool ends before the
+/// next lamp's begins — a CHAIN of pools, which is what `steal-car/0035`'s
+/// night street is (its pool reads 2.2x the road beside it, 8-bit) — and the
+/// clustered pass touches a third of the froxels.
+pub const LAMP_RANGE_M: f32 = 16.0;
+/// **How far the lamp's beam leans toward the carriageway** from straight
+/// down: 20 degrees, as its cosine and sine (literals, not a libm call — the
+/// P14 law: derived content two hosts compare). A real cobra head throws its
+/// light street-side; leaning the spot reproduces that, puts the pool on the
+/// near lane, and leaves the lamp's own column at the back edge of its cone.
+pub const LAMP_TILT_COS: f64 = 0.939_692_620_785_908_4;
+/// See [`LAMP_TILT_COS`].
+pub const LAMP_TILT_SIN: f64 = 0.342_020_143_325_668_7;
 /// How far from the eye a street lamp is a LIGHT, metres; past it PAR0's
 /// distance door has dropped it and the post itself still draws to
 /// `modules::STREET_FURNITURE_LOD_M`.
@@ -522,6 +537,10 @@ fn lamp_post(foot: DVec3, toward: DVec3, reach: f64) -> FurniturePiece {
     head_part.surface.schedule = Some(FixtureSchedule::Dusk);
     head_part.surface.roughness = 0.5;
     let colour = def.colour();
+    // The throw: tilted LAMP_TILT toward the carriageway (a cobra head's
+    // street-side distribution), so the pool lies on the road and its own
+    // column stands at the back edge of the cone, not lit full height by it.
+    let beam = -DVec3::Y * LAMP_TILT_COS + toward * LAMP_TILT_SIN;
     FurniturePiece {
         kind: PieceKind::LampPost,
         foot,
@@ -549,7 +568,7 @@ fn lamp_post(foot: DVec3, toward: DVec3, reach: f64) -> FurniturePiece {
         )],
         lights: vec![PcgLight {
             at: head - DVec3::Y * fixtures::DIFFUSER_GAP_M,
-            dir: -DVec3::Y,
+            dir: beam,
             sweep: (colour, colour),
             intensity: def.intensity(),
             range_m: LAMP_RANGE_M,

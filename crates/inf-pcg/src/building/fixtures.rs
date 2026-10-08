@@ -599,11 +599,18 @@ pub fn fixture(row: FixtureRow) -> FixtureDef {
             0.0,
             false,
         ),
-        // **The street lamp** (wave PAR1b): a 4000 K LED cobra head, 8 000 lm
-        // (a 9 m residential / collector luminaire), a wide asymmetric throw
-        // modelled as a 75-degree spot straight down. No shadow ask (PAR1a's
-        // ruling: the budget is PAR0's eight). The visible luminaire is
-        // `crate::street`'s own part, so `half` is the head it hangs.
+        // **The street lamp** (wave PAR1b; audit PAR1b re-calibrated): a
+        // 4000 K LED cobra head, 4 000 lm (a 40 W residential luminaire), its
+        // street-side throw modelled as a 55-degree spot (inner 30) leaned 20
+        // degrees toward the carriageway (`crate::street::LAMP_TILT_COS`).
+        // Physically: 4 000 lm into 2.68 sr is 1 492 cd — 15 lux on the road
+        // under the head (9.6 m along the beam), and NONE direct 15 m along
+        // the street (outside the cone), so a pool and the dark between. The
+        // first cut's 8 000 lm in a 75-degree cone (1 719 cd, 21 lux under,
+        // ~3 lux at 15 m from each neighbour) was one wash over the street,
+        // and it closed the shipped eye to x5.7 at the kerb. No shadow ask
+        // (PAR1a's ruling: the budget is PAR0's eight). The visible luminaire
+        // is `crate::street`'s own part, so `half` is the head it hangs.
         R::StreetLamp => def(
             row,
             S::Street,
@@ -611,14 +618,18 @@ pub fn fixture(row: FixtureRow) -> FixtureDef {
             M::Ceiling,
             0.0,
             4000,
-            8000.0,
-            Some((50.0, 75.0)),
+            4000.0,
+            Some((30.0, 55.0)),
             0.0,
             false,
         ),
-        // **The signal head's lit lens** (wave PAR1b): a 300 mm LED lens is
-        // ~350 lm in a narrow beam down the approach; the colour is the
-        // aspect's (`crate::street::aspect_rgb`), not a kelvin row.
+        // **The signal head's lit lens** (wave PAR1b; audit PAR1b
+        // re-calibrated): a signal is SEEN, it does not light a junction. The
+        // first cut's 350 lm turned the hero's shirt green in the box at 21:00
+        // (`par1b_street_gate`'s shirt +3.6 codes at x8); 100 lm in the same
+        // narrow beam down the approach tints the asphalt before the line
+        // faintly (+1.2) and the shirt by +1.0. The colour is the aspect's
+        // (`crate::street::aspect_rgb`), not a kelvin row.
         R::SignalHead => def(
             row,
             S::Street,
@@ -626,7 +637,7 @@ pub fn fixture(row: FixtureRow) -> FixtureDef {
             M::Wall,
             0.0,
             4000,
-            350.0,
+            100.0,
             Some((10.0, 24.0)),
             0.0,
             false,
