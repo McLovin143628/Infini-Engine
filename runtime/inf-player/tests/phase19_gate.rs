@@ -751,7 +751,11 @@ fn the_lots_respect_the_partition_cells() {
             .unwrap_or_else(|| panic!("{} lot missing", id.name()));
         assert!(!vol.evaluated.is_empty(), "{} placed nothing", id.name());
         let slack = 1.0;
-        for inst in &vol.evaluated {
+        // Wave PAR1b: the furniture tail stands on the pavement OUTSIDE the
+        // lot by construction (`PcgVolume::furniture`); the footprint is the
+        // buildings'.
+        let built_len = vol.evaluated.len() - vol.furniture.instances;
+        for inst in &vol.evaluated[..built_len] {
             let d = DVec2::new(inst.position.x - at.x, inst.position.z - at.y).abs();
             assert!(
                 d.x <= PHASE19_LOT_EXTENT.0 + slack && d.y <= PHASE19_LOT_EXTENT.1 + slack,

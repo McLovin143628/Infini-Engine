@@ -80,10 +80,14 @@ pub const LAMP_RANGE_M: f32 = 28.0;
 /// `modules::STREET_FURNITURE_LOD_M`.
 pub const LAMP_DRAW_M: f32 = 110.0;
 /// **The luminaire's emission**, authored, before the Dusk schedule and
-/// `inf_render::POWERED_RADIANCE_SCALE`: at the island's night eye (x15 - x73
-/// at the kerb cameras) the head reads 0.7 - 3.4, a small highlight that may
-/// clip, never a surface that closes the eye.
-pub const LAMP_HEAD_EMISSIVE: f32 = 24.0;
+/// `inf_render::POWERED_RADIANCE_SCALE` — the brightest venue sign's own 3.0,
+/// calibrated against the same eight-stop ceiling: at the most open night eye
+/// the island allows (x256) it tonemaps to 0.877, under clipping
+/// (`par0b_night_gate::a_closed_venues_emitters_are_off_and_an_open_ones_sit_under_clipping`
+/// measured the first cut's 24.0 at 1.013 — clipping). At the shipped kerb
+/// cameras' x15 - x73 it reads 0.09 - 0.43: a lit opal head, not a lamp-shaped
+/// white hole.
+pub const LAMP_HEAD_EMISSIVE: f32 = 3.0;
 
 /// **Utility pole spacing**, metres — `driving/0006`: the near pole (left) and
 /// the next one down the road, ~40 m on the verge.

@@ -2871,7 +2871,22 @@ fn the_scattered_cover_draws_its_authored_meshes() {
         .zip(day_lit.iter())
         .filter(|(b, was)| !**was && b.emissive != [0.0; 3])
         .map(|(b, _)| b)
+        // Wave PAR1b: a street lamp's luminaire IS dusk-to-dawn by design (the
+        // Dusk schedule), and its batch is the one drawn at the street band —
+        // counted apart, and required to light, so a pane cannot hide in it.
+        .filter(|b| b.draw_distance != inf_pcg::building::modules::STREET_FURNITURE_LOD_M)
         .collect();
+    let lamps_lit = night
+        .scatter
+        .iter()
+        .zip(day_lit.iter())
+        .filter(|(b, was)| {
+            !**was
+                && b.emissive != [0.0; 3]
+                && b.draw_distance == inf_pcg::building::modules::STREET_FURNITURE_LOD_M
+        })
+        .count();
+    println!("NIGHT STREET LAMPS: {lamps_lit} street-lamp batch(es) light up at midnight");
     let lit_instances: usize = lit.iter().map(|b| b.data.len()).sum();
     println!(
         "NIGHT WINDOWS: sun y {:.3} -> glow step {}; {} of {} batches light up at \
