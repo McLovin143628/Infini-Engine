@@ -42700,3 +42700,54 @@ indoors (0.25 d); the water-pass toggle frame for the blue-room band (inferred g
 live presence + a light switch (~2.5 d); the office 19:00 vs 02:00 street frames and a captured
 editor-at-21:00 frame (the clock set through `scene_set_settings` read back 21:00, sun -7.6 deg;
 the window capture failed).
+
+## Wave PAR1b — STREET LIGHTING + STREET FURNITURE (implementer, 2026-10-08)
+
+Base `619e3763`. Commits `9a91ef9b..fdd68f53` (5) + this docs commit. Report:
+`campaign-briefs/par1b-implementer-report.md`. Zero schema moves (v28 / payload 14 /
+EXPECTED_LEVELS 24); no `.inf_lvl` moved (every piece is derived, serde-skipped state);
+goldens unmoved; no new dependency; `Cargo.lock` untouched.
+
+**What landed.** `inf_pcg::street::furnish` — ONE derivation over the street centrelines
+the blocks imply, the signalised junctions, the exterior doors and the ground: lamp posts
+(30 m, opposite on a 20 m city street, staggered on a 16 m town street; a 9 m column, an arm
+to 0.5 m over the kerb, an emissive luminaire (3.0, under clipping) on the Dusk schedule and a REAL unboxed 8 000 lm
+4 000 K spot), a signal mast at the far-right corner of every approach of every four-way city
+crossing (head at 5.6 m, one light of the lit aspect's colour, three lenses drawn by
+`push_signal_lenses`), utility poles at 40 m with three cables each a true catenary (cosh
+series, 2.5 % sag), stop signs at the unsignalised crossings, benches + bins, hydrants,
+mailboxes. Every piece stands on ONE furniture line 0.35 m inside the footway's back — 0.95 m
+(20 m street) / 1.20 m (16 m) behind the crowd's walking ring, which sits too close to the kerb
+for a kerb-edge post on any town street — clear of every junction and its crossing, every
+exterior door and every other piece, on the pavement surface (or the bank above it).
+`inf_ecs::furniture` + `PcgVolume::set_furniture` append each piece to the block whose
+frontage it stands in front of, so the scatter projection draws it (`ModuleShape::Street`,
+banded at 180 m), the light fence lights it and the physics bridge makes it an ungrouped
+static box (dormant like any scenery). `inf_ecs::traffic`: `signal_junctions`, the phase table
+(`aspect_at`: 20 s green, 3 s amber, 2 s all-red per axis, offset by position, on the traffic
+step clock) and `stop_line_gap` — a red stop line is a stopped car's bumper, so a steered car
+stops a standing gap short of it, holds, and goes on green; the player's car is not forced.
+
+**Numbers.** Whole shipped island (derivation, 58 streets, 34 960 m): 1 779 lamp posts
+(5.09 / 100 m), 392 signal masts at 98 junctions, 769 poles, 711 cable spans, 180 signs, 280
+benches, 280 bins, 287 hydrants, 137 mailboxes — 24 768 instances, 4 104 solids, 2 171 lights.
+CI island, both hosts: 0 of 33 solids in a carriageway / parking slot / doorway / building;
+feet within 0.016 m of their pavement; 0 crowd overlaps; PIE == shipping on the furniture,
+the light list at four hours and the phase trace; a saloon at 15.0 m/s stops at a post (nose
+39.88 m vs the post face 39.91 m, bodywork 12 768). Lamp pool at x8: under 182 / between
+125 / dark 89-105. A world rush on a signalised grid: cars wait at red lines and go on green,
+junction-box contacts 0 with and without. D-18: spawn vs rest −0.0201 m in both hosts. Frame,
+1080p window, min of five: 21:00 walk p95 33.8 -> 36.1 (+2.3), noon 32.2 -> 34.6 (+2.4); the
+medians rose +3.6 / +2.5 and the 21:00 walk's frames over 50 ms 23 -> 32 a minute (mean).
+
+**Laws.** A crowd's ring decides where a post may stand: on every town street the kerb edge
+IS the walking line. A hard link is not a copy: overwriting `target\release\*.exe` rewrote
+cargo's own artefact and the next build left the base binary in place as "fresh". A thin
+caster is not free: posts and cables in the shadow pack cost a page re-raster for a shadow a
+pixel wide.
+
+**Carried.** Arterial (GIS road) lamps + the gantry (the road graph is not in the runtime,
+~1 d); bus shelters, parking meters, awnings, billboards (PAR1b.2); the clock-placed traffic
+tiers ignore signals (only the steered tier stops, ~1 d); activation re-furnishing hitches
+(incremental per street, ~1 d, PERF1d); the instrument GPU / kerb-exposure re-time and the
+ROAD1 triangle price (~0.5 d); the frames list beyond the 21:00 walk frame.

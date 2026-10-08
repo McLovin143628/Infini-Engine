@@ -19,7 +19,8 @@
 //!
 //! Whenever a host has just changed which blocks are resident (a load, a cell
 //! activation, an editor stream tick). [`furnish_inputs`] answers `None` when
-//! every resident block is already furnished against the current [`key`], so a
+//! every resident block is already furnished against the current
+//! [`furniture_key`], so a
 //! call that has nothing to do costs one walk.
 
 use std::collections::BTreeMap;
