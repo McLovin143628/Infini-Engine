@@ -300,6 +300,8 @@ struct Run {
     returned: usize,
     steered: usize,
     hot_steps: usize,
+    /// Clock-tier car-steps held at a red (wave PAR1b.2).
+    held: usize,
     /// The trace, step by step.
     ///
     /// **Three sections, not one.** `dispatch_state_bytes` alone proves the two
@@ -321,7 +323,39 @@ fn trace_of(world: &EcsWorld) -> Vec<u8> {
     let mut out = inf_ecs::dispatch::dispatch_state_bytes(world);
     out.extend_from_slice(&inf_ecs::traffic::traffic_state_bytes(world));
     out.extend_from_slice(&inf_ecs::crowd::crowd_state_bytes(world));
+    out.extend_from_slice(&signal_bytes(world));
     out
+}
+
+/// **The signals' half of the trace** (wave PAR1b.2): this town's four
+/// signalised crossings' aspects on both axes at the signal clock, and which
+/// clock-tier cars a signal holds — the phase + hold trace the CI island has
+/// no subject for (its streets are 16 m town streets; no crossing there is
+/// signalised).
+fn signal_bytes(world: &EcsWorld) -> Vec<u8> {
+    let mut out = Vec::new();
+    let t = inf_ecs::traffic::signal_clock_of(world);
+    if let Some(r) = inf_ecs::traffic::carriageway_of(world) {
+        for j in &r.junctions {
+            out.push(inf_ecs::traffic::signal_aspect(j, true, t).as_u8());
+            out.push(inf_ecs::traffic::signal_aspect(j, false, t).as_u8());
+        }
+    }
+    if let Some(pop) = inf_ecs::traffic::traffic_of(world) {
+        for (g, rec) in &pop.records {
+            if rec.signal_held {
+                out.extend_from_slice(g.as_bytes());
+            }
+        }
+    }
+    out
+}
+
+/// How many clock-tier cars a signal holds in `world` right now.
+fn held_now(world: &EcsWorld) -> usize {
+    inf_ecs::traffic::traffic_of(world)
+        .map(|p| p.records.values().filter(|r| r.signal_held).count())
+        .unwrap_or(0)
 }
 
 fn player_run(with_fleet: bool) -> (Run, RuntimeSim) {
@@ -355,6 +389,7 @@ fn player_run(with_fleet: bool) -> (Run, RuntimeSim) {
         returned: 0,
         steered: 0,
         hot_steps: 0,
+        held: 0,
         trace: Vec::with_capacity(RUN as usize),
     };
     for _ in 0..RUN {
@@ -366,6 +401,7 @@ fn player_run(with_fleet: bool) -> (Run, RuntimeSim) {
         run.returned += s.returned;
         run.steered += s.steered;
         run.hot_steps += usize::from(s.running_hot > 0);
+        run.held += held_now(sim.world());
         run.trace.push(trace_of(sim.world()));
         observe(&mut run, sim.world(), &staged);
     }
@@ -397,6 +433,7 @@ fn editor_run(with_fleet: bool) -> Run {
         returned: 0,
         steered: 0,
         hot_steps: 0,
+        held: 0,
         trace: Vec::with_capacity(RUN as usize),
     };
     for _ in 0..RUN {
@@ -408,6 +445,7 @@ fn editor_run(with_fleet: bool) -> Run {
         run.returned += s.returned;
         run.steered += s.steered;
         run.hot_steps += usize::from(s.running_hot > 0);
+        run.held += held_now(doc.world());
         run.trace.push(trace_of(doc.world()));
         observe(&mut run, doc.world(), &staged);
     }
@@ -849,11 +887,22 @@ fn pie_equals_shipping_over_three_responses() {
         (ship.assigned, ship.arrived, ship.resolved, ship.returned),
         (pie.assigned, pie.arrived, pie.resolved, pie.returned)
     );
+    // PAR1b.2: the trace carries the four crossings' phases and the clock
+    // tier's holds — engaged, so the compare above is over signals that held
+    // traffic, not over an empty section.
+    assert_eq!(ship.held, pie.held);
+    assert!(
+        ship.held > 0,
+        "no clock-tier car was held at a red over the run — the signal half of \
+         the trace compared nothing"
+    );
     println!(
-        "\nEMS2 PIE == shipping: {RUN} step(s) of dispatch+traffic+crowd \
-         compared, {} bytes at the end, {} assignment(s) either way",
+        "\nEMS2 PIE == shipping: {RUN} step(s) of dispatch+traffic+crowd+signals \
+         compared, {} bytes at the end, {} assignment(s) either way, {} clock \
+         hold-step(s) either way",
         last.len(),
-        ship.assigned
+        ship.assigned,
+        ship.held
     );
 }
 
