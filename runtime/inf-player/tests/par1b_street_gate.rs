@@ -194,6 +194,10 @@ fn kind_of_solid(h: DVec3) -> Option<PieceKind> {
             PieceKind::UtilityPole
         } else if close(h.x, 0.05) && close(h.y, 1.25) {
             PieceKind::Sign
+        } else if close(h.x, 0.07) && close(h.y, 0.65) {
+            PieceKind::ParkingMeter
+        } else if close(h.y, street::SHELTER_HEIGHT_M * 0.5) {
+            PieceKind::BusShelter
         } else if close(h.y, 0.45) {
             PieceKind::Bench
         } else if close(h.x, 0.28) {
@@ -312,15 +316,36 @@ fn the_island_is_furnished_and_nothing_stands_where_it_must_not() {
         );
     }
 
+    // PAR1b.2: the by-value constants `inf_pcg::street` keeps (it names
+    // neither `inf-ecs` nor `inf-gis`) are the ones the traffic uses.
+    assert_eq!(
+        street::KERB_PARK_OFFSET_M,
+        inf_ecs::traffic::KERB_PARK_OFFSET_M
+    );
+    assert_eq!(street::KERB_SLOT_M, inf_ecs::traffic::KERB_SLOT_M);
+    assert_eq!(street::KERB_WIDTH_M, inf_ecs::traffic::KERB_WIDTH_M);
+    for gap in [16.0, 20.0, 24.0] {
+        assert_eq!(
+            street::kerb_offset_m(gap),
+            inf_ecs::traffic::street_kerb_offset_m(gap)
+        );
+        assert_eq!(street::parks_at_kerb(gap), inf_ecs::traffic::kerb_fits(gap));
+    }
+
     let mut worst_agent = f64::INFINITY;
     let mut agent_samples = 0usize;
     let mut overlaps = 0usize;
     for (k, sim) in [&mut ship, &mut pie].into_iter().enumerate() {
-        stand(sim, at, 21.0, 0);
-        for step in 0..600 {
+        // PAR1b.2: the morning walk to work (08:24), when the crowd is on the
+        // pavements — at 21:00 (PAR1b's hour) the CI island's 34 agents stood
+        // at home and no sample came within 2.3 m of a piece.
+        stand(sim, at, 8.4, 0);
+        for _ in 0..600 {
             sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
-            // (4) on the shipping host, every 20 steps: crowd capsules vs pieces.
-            if k == 0 && step % 20 == 19 {
+            // (4) on the shipping host, every step (PAR1b.2: every 20th step
+            // could not see an agent walk past a 0.13 m post at 1.4 m/s):
+            // crowd capsules vs pieces.
+            if k == 0 {
                 let (solids, _, _, _, _) = furniture_of(sim);
                 for e in sim.world().world().iter_entities() {
                     let Some(cm) = e.get::<inf_ecs::components::CharacterMovement>() else {
@@ -519,6 +544,13 @@ fn the_island_is_furnished_and_nothing_stands_where_it_must_not() {
         "PAR1b CROWD: {agent_samples} agent samples over 600 steps, nearest approach to a piece {worst_agent:.2} m, {overlaps} overlaps"
     );
     assert_eq!(overlaps, 0, "a crowd agent inside a piece of furniture");
+    // PAR1b.2: …and the crowd walks PAST the furniture, not three metres from
+    // it (PAR1b's 3.17 m was placement, not avoidance): some agent's centre
+    // comes within 0.6 m of some piece's footprint.
+    assert!(
+        worst_agent < 0.6,
+        "the nearest a crowd agent came to a piece was {worst_agent:.2} m — nothing is being walked past"
+    );
 
     // (5) PIE == shipping.
     assert_eq!(
@@ -1311,6 +1343,145 @@ fn a_car_at_fifteen_metres_a_second_stops_at_a_lamp_post() {
     );
     assert!(front_free > 45.0, "without the post the car stopped anyway");
     assert!(lost > 0.0, "the post took no blow off the bodywork");
+}
+
+/// **A BODY CANNOT WALK THROUGH A POST, A BENCH, A BIN OR A SHELTER** (wave
+/// PAR1b.2, clause 2): one piece of each kind, derived by
+/// `inf_pcg::street::furnish` and written through `set_furniture` (the door
+/// both hosts furnish through — the physics bridge makes its solids static
+/// colliders), and a character built through the one body door
+/// (`inf_ecs::crowd::spawn_body`, the hero's capsule and movement model) walked
+/// straight at it from 4 m for 5 s through `step_character_movement`. Reads:
+/// the capsule centre's nearest plan approach to the piece's solids — never
+/// inside its radius (2 cm of solver slack), and it DID reach the piece (within
+/// its radius + 0.3 m: the walk engaged). Mutation (measured): the solids
+/// withheld (`set_furniture` with none) -> the body walks through, red.
+#[test]
+fn a_body_cannot_walk_through_a_post_a_bench_a_bin_or_a_shelter() {
+    use inf_ecs::components::{
+        BodyKind3D, Collider3D, ColliderShape3DKind, PcgVolume, RigidBody3D, Transform,
+    };
+    use inf_ecs::math::{Vec2d, Vec3d};
+    let line = [street::StreetLine {
+        a: DVec2::new(-200.0, 0.0),
+        b: DVec2::new(200.0, 0.0),
+        gap_m: 20.0,
+    }];
+    let f = street::furnish(&line, &[], &[], &inf_pcg::FnHeight::new(|_, _| Some(0.0)));
+    let walk = |kind: PieceKind, solid: bool| -> (f64, f64) {
+        let piece = f
+            .pieces
+            .iter()
+            .find(|p| p.kind == kind)
+            .unwrap_or_else(|| panic!("the street carries a {}", kind.name()));
+        let mut world = inf_ecs::EcsWorld::default();
+        let g = world.spawn_with_guid(GROUND, "Ground", None);
+        world.world_mut().entity_mut(g).insert((
+            Transform {
+                translation: Vec3d::new(piece.foot.x, -0.5, piece.foot.z),
+                ..Default::default()
+            },
+            RigidBody3D {
+                kind: BodyKind3D::Static,
+                ..Default::default()
+            },
+            Collider3D {
+                shape_kind: ColliderShape3DKind::Box,
+                half_extents: Vec3d::new(60.0, 0.5, 60.0),
+                friction: 0.9,
+                ..Default::default()
+            },
+        ));
+        let b = world.spawn_with_guid(BLOCK, "Block", None);
+        world.world_mut().entity_mut(b).insert(Transform {
+            translation: Vec3d::new(piece.foot.x, 0.0, piece.foot.z + 20.0),
+            ..Default::default()
+        });
+        let mut vol = PcgVolume {
+            extent: Vec2d::new(10.0, 10.0),
+            ..Default::default()
+        };
+        let solids: Vec<inf_ecs::components::ScatteredSolid> = piece
+            .colliders
+            .iter()
+            .map(|c| inf_ecs::components::ScatteredSolid {
+                center: c.center,
+                half_extents: c.half_extents,
+                rotation: c.rotation,
+            })
+            .collect();
+        vol.set_furniture(
+            7,
+            Vec::new(),
+            if solid { solids.clone() } else { Vec::new() },
+            Vec::new(),
+        );
+        world.world_mut().entity_mut(b).insert(vol);
+        // The body on the carriageway side, walking across the footway at
+        // the piece's middle (a shelter is walked into from its open front's
+        // corner: at an end panel).
+        let target = DVec3::new(
+            solids.iter().map(|s| s.center.x).sum::<f64>() / solids.len() as f64,
+            0.0,
+            solids[solids.len() - 1].center.z,
+        );
+        let start = target - DVec3::Z * 4.0 + DVec3::Y * 1.0;
+        let archetype = inf_ecs::society::level_archetype(&world);
+        let hero = uuid::Uuid::from_u128(0x0BAD_BEEF_0001);
+        let e = inf_ecs::crowd::spawn_body(&mut world, hero, &archetype, start);
+        world.mark_dirty();
+        world.propagate();
+        let mut bridge = inf_physics::d3::PhysicsBridge3D::new(DVec3::new(0.0, -9.81, 0.0));
+        let mut nearest = f64::INFINITY;
+        for _ in 0..300 {
+            if let Some(mut cm) = world
+                .world_mut()
+                .get_mut::<inf_ecs::components::CharacterMovement>(e)
+            {
+                cm.runtime.intent_move = inf_ecs::math::Vec2d::new(0.0, 1.0);
+            }
+            bridge.sync_from_world(&world);
+            inf_physics::d3::step_character_movement(&mut world, &mut bridge, DT);
+            bridge.step(DT);
+            bridge.write_back_into(&mut world);
+            world.propagate();
+            let p = world
+                .world()
+                .get::<Transform>(e)
+                .map(|t| t.translation.to_dvec3())
+                .unwrap_or(start);
+            for s in &solids {
+                let dx = ((p.x - s.center.x).abs() - s.half_extents.x).max(0.0);
+                let dz = ((p.z - s.center.z).abs() - s.half_extents.z).max(0.0);
+                nearest = nearest.min((dx * dx + dz * dz).sqrt());
+            }
+        }
+        (nearest, archetype.radius_m)
+    };
+    for kind in [
+        PieceKind::LampPost,
+        PieceKind::Bench,
+        PieceKind::Bin,
+        PieceKind::BusShelter,
+    ] {
+        let (d, r) = walk(kind, true);
+        let (free, _) = walk(kind, false);
+        println!(
+            "PAR1b.2 BODY vs {}: nearest {d:.3} m (radius {r:.2}); with no solid {free:.3} m",
+            kind.name()
+        );
+        assert!(
+            d >= r - 0.02,
+            "the body walked {:.3} m into the {}",
+            r - d,
+            kind.name()
+        );
+        assert!(
+            d <= r + 0.3,
+            "the body never reached the {} ({d:.3} m) — the walk did not engage",
+            kind.name()
+        );
+    }
 }
 
 // ── the whole shipped island's census (off CI, prints) ─────────────────────

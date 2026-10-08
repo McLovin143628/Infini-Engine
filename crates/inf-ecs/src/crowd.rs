@@ -2286,6 +2286,13 @@ pub fn step_crowd_banded(world: &mut EcsWorld, dt: f64, radii: (f64, f64, f64)) 
             }
         }
 
+        // PAR1b.2: a clock-placed agent walks PAST the street furniture — its
+        // place on the route, pushed clear of every piece's footprint by its
+        // own radius (`furniture::clear_of_furniture`; the route itself is
+        // untouched, so the clock owes nothing) — and a body materializes
+        // there, not inside a hydrant (measured on the CI island at 08:24: a
+        // `Full` agent built on a hydrant's footprint was mantled onto it).
+        let at = crate::furniture::clear_of_furniture(world, at, rec.archetype.radius_m);
         if !tier.materialized() {
             rec.last = at;
             if let Some(e) = entity {
@@ -2377,6 +2384,13 @@ pub fn step_crowd_banded(world: &mut EcsWorld, dt: f64, radii: (f64, f64, f64)) 
 /// movement model's `walk_speed_mps` covers in a second, so at a walk the agent
 /// is aiming about where it will be next second.
 pub const PURSUIT_LOOKAHEAD_M: f64 = 1.5;
+
+/// **The margin at which a steered agent starts turning off a piece of street
+/// furniture**, metres beyond its radius (wave PAR1b.2) — the movement model's
+/// own ledge reach: an agent still walking at a knee-high piece from 0.86 m
+/// was taken over it by the mantle (measured on the CI island at 08:24, a
+/// hydrant), so the turn begins a metre out.
+pub const FURNITURE_STEER_MARGIN_M: f64 = 1.0;
 
 /// How far the pursuit lookahead may grow looking for a horizontal lead,
 /// metres.
@@ -3219,7 +3233,14 @@ fn steer_agent(
         let mut reach = PURSUIT_LOOKAHEAD_M;
         while reach <= PURSUIT_LOOKAHEAD_MAX_M {
             let ahead = (on.s_m + dir * reach).clamp(0.0, len);
-            let target = path.position_at(ahead);
+            // PAR1b.2: the pursuit aims at a point clear of the street
+            // furniture, so a steered agent steps round a post rather than
+            // walking into its collider and sliding.
+            let target = crate::furniture::clear_of_furniture(
+                world,
+                path.position_at(ahead),
+                rec.archetype.radius_m,
+            );
             let d = crate::math::Vec2d::new(target.x - feet.x, target.z - feet.z);
             let m = (d.x * d.x + d.y * d.y).sqrt();
             if m >= MIN_LEAD_M {
@@ -3233,10 +3254,51 @@ fn steer_agent(
             }
             reach += PURSUIT_LOOKAHEAD_M;
         }
+        // PAR1b.2: …and a body already closing on a piece is steered off it
+        // — the push its own feet would get at a stride's margin, added to the
+        // wish. The aim point alone left an agent close enough to a hydrant
+        // for the movement model's mantle to climb it (measured on the CI
+        // island at 08:24: a `Full` agent stood on a hydrant for 35 steps).
+        let off = crate::furniture::clear_of_furniture(
+            world,
+            feet,
+            rec.archetype.radius_m + FURNITURE_STEER_MARGIN_M,
+        ) - feet;
+        let off = DVec3::new(off.x, 0.0, off.z);
+        let m = off.length();
+        // Only the part of the wish that heads INTO the piece is turned: an
+        // agent walking past a post keeps its line, one walking at it steps
+        // round it.
+        let into = -(wish.x * off.x + wish.z * off.z) / m.max(1e-9);
+        if wish != DVec3::ZERO && m > 1e-9 && into > 0.0 {
+            // Sideways round it: the push's part across the wish (to the
+            // agent's right when it is dead ahead).
+            let side = off / m + wish * into;
+            let side = if side.length() > 1e-6 {
+                side / side.length()
+            } else {
+                DVec3::new(wish.z, 0.0, -wish.x)
+            };
+            let w = wish + side * into * (m / FURNITURE_STEER_MARGIN_M).min(1.0) * 2.0;
+            let l = w.length();
+            if l > 1e-9 {
+                wish = w / l;
+            }
+        }
         wish
     };
     let Some(mut cm) = world.world_mut().get_mut::<CharacterMovement>(entity) else {
         return;
+    };
+    // PAR1b.2: an agent still FALLING (a body built over its ground settles
+    // onto it) does not press forward: the movement model's falling catch
+    // reaches for any ledge ahead of a stick, and a crowd agent settling beside
+    // a hydrant was caught onto it (measured on the CI island at 08:24). It
+    // walks on from where it lands.
+    let wish = if cm.mode.is_falling() {
+        DVec3::ZERO
+    } else {
+        wish
     };
     // Into the AIM frame, through the model's own door. A crowd agent never
     // looks anywhere, so its aim yaw stays where `step_one` seeded it and this

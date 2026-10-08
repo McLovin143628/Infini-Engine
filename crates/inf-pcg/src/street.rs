@@ -15,16 +15,17 @@
 //!
 //! # Where on the pavement
 //!
-//! Every piece stands on ONE line per side of a street: [`FURNITURE_BACK_M`]
-//! inside the footway's back edge (`kerb + KERB_WIDTH_M + PAVEMENT_M`). That is
-//! not a stylistic choice. The crowd walks a ring `PAVEMENT_M` outside each
-//! block — 0.45 m behind the kerb stone on a 16 m street, 0.70 m on a 20 m one
-//! (ROAD1b's KERB table) — so a post at the kerb edge would stand IN the walking
-//! line on every town street, and the line is the one place on the footway
-//! that is clear of it on every reserve the derivation admits: 1.20 m on a
-//! 16 m street, 0.95 m on a 20 m one, against an agent's 0.30 m radius and a
-//! post's 0.13 m. A lamp's arm and a signal's mast arm reach out over the
-//! carriageway from there, which is what their arms are for.
+//! Two lines per side of a street (wave PAR1b.2). The POSTS — lamps, signal
+//! masts, utility poles, signs, hydrants, parking meters — stand at the kerb
+//! ([`post_line_m`]: [`KERB_POST_OFFSET_M`] behind the kerb face, as
+//! `steal-car/0022` and `0028` show them; behind a parked car's door where the
+//! reserve parks at its kerb). The BROAD pieces — benches, bins, mailboxes,
+//! bus shelters — stand against the frontage ([`furniture_line_m`],
+//! [`FURNITURE_BACK_M`] inside the footway's back edge), facing the street.
+//! The crowd walks a ring `PAVEMENT_M` outside each block, between the two
+//! lines, and walks PAST the posts: `inf_ecs::furniture::clear_of_furniture`
+//! keeps every agent its radius clear of every piece's footprint (PAR1b
+//! placed the posts at the back line because the ring had no such term).
 //!
 //! # What it never does
 //!
@@ -57,9 +58,31 @@ pub const PAVEMENT_FALL: f64 = 0.02;
 /// One lane, metres — `inf_ecs::traffic::DEFAULT_LANE_WIDTH_M`.
 pub const LANE_WIDTH_M: f64 = 3.5;
 
-/// **How far inside the footway's back edge the furniture line is**, metres.
-/// The module docs say why it is the back: the crowd's ring is nearer the kerb.
+/// **How far inside the footway's back edge the furniture line is**, metres —
+/// where the BROAD pieces stand (benches, bins, mailboxes, bus shelters):
+/// against the frontage, facing the street, out of the walking line.
 pub const FURNITURE_BACK_M: f64 = 0.35;
+
+/// **How far behind the kerb FACE the posts stand**, metres (wave PAR1b.2) —
+/// read off `steal-car/0022` (the hydrant, the sign post and the signal mast
+/// at the near-left corner, each about half a metre in from the kerb face) and
+/// `0028` (the pole and the sign on the verge at the kerb). Lamps, signal
+/// masts, utility poles, signs, hydrants and parking meters stand on this
+/// line; the crowd walks past them (`inf_ecs::furniture::clear_of_furniture`).
+pub const KERB_POST_OFFSET_M: f64 = 0.5;
+
+/// `inf_ecs::traffic::KERB_PARK_OFFSET_M` by value — where a kerb slot's car
+/// stands from the centreline (the PAR1b.2 gate pins the equality).
+pub const KERB_PARK_OFFSET_M: f64 = 5.0;
+/// `inf_ecs::traffic::KERB_SLOT_M` by value — the kerb slots' world lattice
+/// pitch (the PAR1b.2 gate pins the equality).
+pub const KERB_SLOT_M: f64 = 14.0;
+/// **How far from the centreline a post must stand to clear a parked car**,
+/// metres: the slot's offset, a saloon's half-width (0.92), a door's swing
+/// clearance of 0.15 and a post's half-width. On a 16 m town street the kerb
+/// face is at 5.25 and a car parked at 5.0 overhangs it, so the post line is
+/// this rather than the kerb's half metre.
+pub const PARKED_CLEAR_M: f64 = KERB_PARK_OFFSET_M + 0.92 + 0.15 + 0.15;
 
 /// **Lamp spacing**, metres — read off `driving/0006` (the brief's ~30 m: four
 /// heads over the left verge between the near pole and the junction).
@@ -238,11 +261,18 @@ pub enum PieceKind {
     Hydrant,
     /// A mailbox.
     Mailbox,
+    /// A bus shelter (wave PAR1b.2): back and end panels and a roof, against
+    /// the frontage on an arterial.
+    BusShelter,
+    /// A parking meter (wave PAR1b.2): a post with a head, on the post line
+    /// between kerb slots.
+    ParkingMeter,
 }
 
 impl PieceKind {
-    /// Every kind, in catalogue order (the PAR1b brief's order).
-    pub const ALL: [PieceKind; 9] = [
+    /// Every kind, in catalogue order (the PAR1b brief's order; PAR1b.2's
+    /// kinds appended so every earlier code is unchanged).
+    pub const ALL: [PieceKind; 11] = [
         PieceKind::LampPost,
         PieceKind::SignalPost,
         PieceKind::UtilityPole,
@@ -252,6 +282,8 @@ impl PieceKind {
         PieceKind::Bin,
         PieceKind::Hydrant,
         PieceKind::Mailbox,
+        PieceKind::BusShelter,
+        PieceKind::ParkingMeter,
     ];
     /// A short name for census tables.
     pub fn name(self) -> &'static str {
@@ -265,6 +297,8 @@ impl PieceKind {
             PieceKind::Bin => "bin",
             PieceKind::Hydrant => "hydrant",
             PieceKind::Mailbox => "mailbox",
+            PieceKind::BusShelter => "bus shelter",
+            PieceKind::ParkingMeter => "parking meter",
         }
     }
     /// The census code (declaration index).
@@ -326,6 +360,26 @@ pub fn furniture_line_m(gap_m: f64) -> f64 {
     // reserve, `FURNITURE_BACK_M` short of the frontage.
     (kerb_offset_m(gap_m) + KERB_WIDTH_M + PAVEMENT_M - FURNITURE_BACK_M)
         .min(gap_m * 0.5 - FURNITURE_BACK_M)
+}
+
+/// Whether a reserve parks cars at its kerb — `inf_ecs::traffic::kerb_fits`
+/// by value: the footway leaves a slot and a metre.
+pub fn parks_at_kerb(gap_m: f64) -> bool {
+    gap_m * 0.5 - PAVEMENT_M >= KERB_PARK_OFFSET_M + 1.0
+}
+
+/// **The post line**, metres from a street's centreline (wave PAR1b.2):
+/// [`KERB_POST_OFFSET_M`] behind the kerb face, behind a parked car's door
+/// where the reserve parks at its kerb ([`PARKED_CLEAR_M`]), and never behind
+/// the broad pieces' line.
+pub fn post_line_m(gap_m: f64) -> f64 {
+    let kerb = kerb_offset_m(gap_m) + KERB_POST_OFFSET_M;
+    let line = if parks_at_kerb(gap_m) {
+        kerb.max(PARKED_CLEAR_M)
+    } else {
+        kerb
+    };
+    line.min(furniture_line_m(gap_m))
 }
 
 /// **The pavement's surface** at `lateral` metres from a street's centreline,
@@ -849,6 +903,124 @@ fn drum(kind: PieceKind, foot: DVec3, half_h: f64, r: f64, tint: [f32; 4]) -> Fu
     }
 }
 
+/// A shelter panel's glazing (smoked, opaque in this renderer's opaque pass).
+const GLAZING: [f32; 4] = [0.22, 0.27, 0.30, 1.0];
+/// A meter's head.
+const METER_GREY: [f32; 4] = [0.30, 0.32, 0.30, 1.0];
+
+/// **A bus shelter's length along the street**, metres (a two-bay steel
+/// shelter: 3.2 m).
+pub const SHELTER_LEN_M: f64 = 3.2;
+/// Its depth across the footway, metres.
+pub const SHELTER_DEPTH_M: f64 = 1.2;
+/// Its eave height, metres.
+pub const SHELTER_HEIGHT_M: f64 = 2.4;
+/// **Bus shelter spacing**, metres, on each side of an arterial (a 20 m+
+/// city street) — a stop every 240 m, the two sides offset by half, there
+/// being no bus layer in the society to place them at stops.
+pub const SHELTER_SPACING_M: f64 = 240.0;
+/// **Kerb slots per parking meter** — one meter for every three spaces.
+pub const SLOTS_PER_METER: f64 = 3.0;
+
+/// A panel instance: centre, plan unit axis its LENGTH runs along, and its
+/// half-length / half-height / half-thickness.
+fn panel(
+    centre: DVec3,
+    along: DVec3,
+    half_len: f64,
+    half_h: f64,
+    half_t: f64,
+    tint: [f32; 4],
+) -> PcgInstance {
+    let x_long = along.x.abs() > 0.5;
+    PcgInstance {
+        extent: Some(if x_long {
+            [half_len as f32, half_h as f32, half_t as f32]
+        } else {
+            [half_t as f32, half_h as f32, half_len as f32]
+        }),
+        ..prism(centre, DVec3::Y, half_h, half_t, tint)
+    }
+}
+
+/// **A bus shelter** whose back stands at `back` (the footway's back edge at
+/// the shelter's middle), its open front toward `toward` (the carriageway),
+/// running along `axis`.
+fn bus_shelter(back: DVec3, axis: DVec3, toward: DVec3) -> FurniturePiece {
+    let (hl, hd, h) = (SHELTER_LEN_M * 0.5, SHELTER_DEPTH_M * 0.5, SHELTER_HEIGHT_M);
+    let t = 0.04;
+    let mid = back + toward * hd;
+    let back_c = back + toward * t + DVec3::Y * (h * 0.5);
+    let ends = [mid + axis * (hl - t), mid - axis * (hl - t)];
+    let mut instances = vec![
+        // The back panel.
+        panel(back_c, axis, hl, h * 0.5, t, GLAZING),
+        // The roof, overhanging the front by 0.2 m.
+        panel(
+            mid + toward * 0.1 + DVec3::Y * (h + 0.05),
+            axis,
+            hl + 0.1,
+            0.05,
+            hd + 0.1,
+            STEEL,
+        ),
+    ];
+    let mut colliders = vec![solid(
+        back_c,
+        if axis.x.abs() > 0.5 {
+            DVec3::new(hl, h * 0.5, t)
+        } else {
+            DVec3::new(t, h * 0.5, hl)
+        },
+    )];
+    for e in ends {
+        let c = e + DVec3::Y * (h * 0.5);
+        instances.push(panel(c, toward, hd, h * 0.5, t, GLAZING));
+        colliders.push(solid(
+            c,
+            if axis.x.abs() > 0.5 {
+                DVec3::new(t, h * 0.5, hd)
+            } else {
+                DVec3::new(hd, h * 0.5, t)
+            },
+        ));
+    }
+    // The bench inside, against the back panel (drawn; the panels are the
+    // solids a body meets).
+    instances.push(panel(
+        back + toward * 0.35 + DVec3::Y * 0.45,
+        axis,
+        hl - 0.3,
+        0.03,
+        0.2,
+        WOOD,
+    ));
+    let foot = DVec3::new(mid.x, back.y, mid.z);
+    FurniturePiece {
+        kind: PieceKind::BusShelter,
+        foot,
+        id: piece_id(PieceKind::BusShelter, foot),
+        instances,
+        colliders,
+        lights: Vec::new(),
+    }
+}
+
+/// **A parking meter**: a 1.3 m post with its head.
+fn parking_meter(foot: DVec3) -> FurniturePiece {
+    FurniturePiece {
+        kind: PieceKind::ParkingMeter,
+        foot,
+        id: piece_id(PieceKind::ParkingMeter, foot),
+        instances: vec![
+            prism(foot + DVec3::Y * 0.55, DVec3::Y, 0.55, 0.04, STEEL),
+            prism(foot + DVec3::Y * 1.2, DVec3::Y, 0.14, 0.09, METER_GREY),
+        ],
+        colliders: vec![solid(foot + DVec3::Y * 0.65, DVec3::new(0.07, 0.65, 0.07))],
+        lights: Vec::new(),
+    }
+}
+
 /// **The junction clearance** of an along-coordinate on `street`: the nearest
 /// crossing street's centre is closer than its own half reserve or the
 /// crossing's far edge (whichever is further) plus [`JUNCTION_CLEAR_M`].
@@ -899,17 +1071,20 @@ pub fn furnish(
         }
         let kerb = kerb_offset_m(street.gap_m);
         let line = furniture_line_m(street.gap_m);
+        let post = post_line_m(street.gap_m);
         let wide = street.gap_m >= 20.0 - 1e-9;
         for side in [1.0f64, -1.0] {
-            // Every piece placed on this side line so far, by along-coordinate.
+            // Every piece placed on this side so far, by along-coordinate.
             let mut taken: Vec<f64> = Vec::new();
             let toward = -street.side_dir() * side;
             let axis = street.axis();
-            // One lattice walk per kind, in catalogue priority.
+            // One lattice walk per kind, in catalogue priority, on the
+            // lateral line the kind stands on (`post` or `line`).
             let place = |kind: PieceKind,
                          spacing: f64,
                          phase: f64,
                          share: f64,
+                         line: f64,
                          taken: &mut Vec<f64>,
                          out: &mut Furnished|
              -> Vec<(f64, DVec3)> {
@@ -951,12 +1126,13 @@ pub fn furnish(
             } else {
                 LAMP_SPACING_M * 0.5
             };
-            let reach = line - (kerb - LAMP_OVERHANG_M);
+            let reach = post - (kerb - LAMP_OVERHANG_M);
             for (_, foot) in place(
                 PieceKind::LampPost,
                 LAMP_SPACING_M,
                 lamp_phase,
                 1.0,
+                post,
                 &mut taken,
                 &mut out,
             ) {
@@ -975,6 +1151,7 @@ pub fn furnish(
                     POLE_SPACING_M,
                     pole_phase,
                     1.0,
+                    post,
                     &mut taken,
                     &mut out,
                 );
@@ -988,9 +1165,81 @@ pub fn furnish(
                 }
             }
             // ── benches + bins: on the +side, between lamps, a share of slots.
+            // ── bus shelters (PAR1b.2): on an arterial, against the frontage,
+            //    every `SHELTER_SPACING_M` a side, the sides offset by half.
+            //    Placed before the benches so a shelter's length is clear.
+            if wide {
+                let shelter_phase = if side > 0.0 {
+                    100.0
+                } else {
+                    100.0 + SHELTER_SPACING_M * 0.5
+                };
+                let back = (kerb + KERB_WIDTH_M + PAVEMENT_M).min(street.gap_m * 0.5) - 0.05;
+                let k0 = ((lo - shelter_phase) / SHELTER_SPACING_M).ceil() as i64;
+                let k1 = ((hi - shelter_phase) / SHELTER_SPACING_M).floor() as i64;
+                for k in k0..=k1 {
+                    let along = k as f64 * SHELTER_SPACING_M + shelter_phase;
+                    let hl = SHELTER_LEN_M * 0.5;
+                    if along - hl < lo + 1.0 || along + hl > hi - 1.0 {
+                        continue;
+                    }
+                    if near_junction(streets, street, along - hl)
+                        || near_junction(streets, street, along + hl)
+                    {
+                        out.at_junction += 1;
+                        continue;
+                    }
+                    if taken
+                        .iter()
+                        .any(|t| (t - along).abs() < hl + MIN_SEPARATION_M)
+                    {
+                        continue;
+                    }
+                    let p = street.at(along, side * back);
+                    if doors.iter().any(|d| (*d - p).length() < DOOR_CLEAR_M + hl) {
+                        out.at_door += 1;
+                        continue;
+                    }
+                    let Some(y) = pavement_y(street, along, side, back, ground) else {
+                        out.groundless += 1;
+                        continue;
+                    };
+                    taken.push(along - hl);
+                    taken.push(along);
+                    taken.push(along + hl);
+                    out.pieces
+                        .push(bus_shelter(DVec3::new(p.x, y, p.y), axis, toward));
+                }
+            }
+            // ── parking meters (PAR1b.2): on the post line, one for every
+            //    `SLOTS_PER_METER` kerb slots, at the boundary between two
+            //    slots on their world lattice (`kerb_slots`' own pitch), where
+            //    the reserve parks at its kerb.
+            if parks_at_kerb(street.gap_m) {
+                let pitch = KERB_SLOT_M * SLOTS_PER_METER;
+                let phase = KERB_SLOT_M * 0.5 + if side > 0.0 { 0.0 } else { KERB_SLOT_M };
+                for (_, foot) in place(
+                    PieceKind::ParkingMeter,
+                    pitch,
+                    phase,
+                    1.0,
+                    post,
+                    &mut taken,
+                    &mut out,
+                ) {
+                    out.pieces.push(parking_meter(foot));
+                }
+            }
             if side > 0.0 {
-                for (along, foot) in place(PieceKind::Bench, 60.0, 15.0, 0.75, &mut taken, &mut out)
-                {
+                for (along, foot) in place(
+                    PieceKind::Bench,
+                    60.0,
+                    15.0,
+                    0.75,
+                    line,
+                    &mut taken,
+                    &mut out,
+                ) {
                     out.pieces.push(bench(foot, axis, toward));
                     // The bin beside it, when the line has room.
                     let b_along = along + 1.9;
@@ -1013,12 +1262,28 @@ pub fn furnish(
                         }
                     }
                 }
-                for (_, foot) in place(PieceKind::Mailbox, 120.0, 47.0, 0.6, &mut taken, &mut out) {
+                for (_, foot) in place(
+                    PieceKind::Mailbox,
+                    120.0,
+                    47.0,
+                    0.6,
+                    line,
+                    &mut taken,
+                    &mut out,
+                ) {
                     out.pieces
                         .push(drum(PieceKind::Mailbox, foot, 0.6, 0.26, MAIL_BLUE));
                 }
             } else {
-                for (_, foot) in place(PieceKind::Hydrant, 90.0, 53.0, 0.8, &mut taken, &mut out) {
+                for (_, foot) in place(
+                    PieceKind::Hydrant,
+                    90.0,
+                    53.0,
+                    0.8,
+                    post,
+                    &mut taken,
+                    &mut out,
+                ) {
                     out.pieces
                         .push(drum(PieceKind::Hydrant, foot, 0.36, 0.15, HYDRANT_RED));
                 }
@@ -1037,7 +1302,8 @@ pub fn furnish(
             };
             // The right of travel, `inf_nav::lane::right_of`'s sense.
             let right = DVec3::new(d.z, 0.0, -d.x);
-            let line = furniture_line_m(own_gap);
+            // PAR1b.2: the mast stands on the post line, at the kerb.
+            let line = post_line_m(own_gap);
             let kerb = kerb_offset_m(own_gap);
             let past = (cross_gap * 0.5).max(CROSSWALK_FAR_M) + 0.5;
             let c = DVec3::new(site.centre.x, 0.0, site.centre.y);
@@ -1112,7 +1378,8 @@ pub fn furnish(
                 let along_x = d.x.abs() > 0.5;
                 let (own, cross) = if along_x { (sx, sz) } else { (sz, sx) };
                 let right = DVec3::new(d.z, 0.0, -d.x);
-                let line = furniture_line_m(own.gap_m);
+                // PAR1b.2: the sign post stands on the post line.
+                let line = post_line_m(own.gap_m);
                 let back = (cross.gap_m * 0.5).max(CROSSWALK_FAR_M) + 0.8;
                 let c = DVec3::new(x, 0.0, z);
                 let p = c - d * back + right * line;
@@ -1240,7 +1507,7 @@ mod tests {
             assert_eq!(lt.schedule, FixtureSchedule::Dusk);
             assert!(lt.clip.is_none(), "a street lamp is unboxed");
             assert!(lt.intensity > 10.0);
-            let line = furniture_line_m(20.0);
+            let line = post_line_m(20.0);
             let lateral = if (l.foot.z.abs() - line).abs() < 1e-9 {
                 l.foot.z
             } else {
@@ -1311,6 +1578,73 @@ mod tests {
             }
             let d = (DVec2::new(p.foot.x, p.foot.z) - door).length();
             assert!(d >= DOOR_CLEAR_M, "{} {d} m from the door", p.kind.name());
+        }
+    }
+
+    /// **The posts stand at the kerb, the broad pieces at the frontage**
+    /// (wave PAR1b.2): on a 20 m city street the post line is the kerb face
+    /// + 0.5 m (7.5 m, `steal-car/0022`'s offset); on a 16 m town street, whose
+    /// parked cars overhang the 5.25 m kerb, it clears a parked car's door
+    /// (6.22 m); both are behind the kerb stone; the broad line is behind the
+    /// post line. A city street carries bus shelters against the frontage on
+    /// both sides and parking meters on the post line; every shelter's span is
+    /// clear of the junction and of every lamp. Mutation: `KERB_POST_OFFSET_M`
+    /// 0.5 -> 0.0 (posts on the kerb face) reds the first.
+    #[test]
+    fn posts_stand_at_the_kerb_and_shelters_and_meters_line_a_city_street() {
+        assert!(
+            (post_line_m(20.0) - 7.5).abs() < 1e-12,
+            "{}",
+            post_line_m(20.0)
+        );
+        assert!((post_line_m(16.0) - PARKED_CLEAR_M).abs() < 1e-12);
+        for gap in [16.0, 18.0, 20.0, 24.0, 32.0] {
+            let post = post_line_m(gap);
+            assert!(
+                post - 0.15 > kerb_offset_m(gap) + KERB_WIDTH_M,
+                "{gap}: on the kerb stone"
+            );
+            assert!(
+                post <= furniture_line_m(gap),
+                "{gap}: the posts behind the benches"
+            );
+        }
+        let f = furnish(&grid(), &[], &[], &flat());
+        let shelters: Vec<&FurniturePiece> = f
+            .pieces
+            .iter()
+            .filter(|p| p.kind == PieceKind::BusShelter)
+            .collect();
+        let meters = f
+            .pieces
+            .iter()
+            .filter(|p| p.kind == PieceKind::ParkingMeter)
+            .count();
+        // 2 streets x 400 m x 2 sides at 240 m: at least one shelter a side.
+        assert!(shelters.len() >= 4, "shelters {}", shelters.len());
+        assert!(meters >= 8, "meters {meters}");
+        for s in &shelters {
+            assert_eq!(
+                s.colliders.len(),
+                3,
+                "a shelter is three panels a body meets"
+            );
+            let along = if s.foot.z.abs() > s.foot.x.abs() {
+                s.foot.z
+            } else {
+                s.foot.x
+            };
+            assert!(
+                along.abs() - SHELTER_LEN_M * 0.5 >= 12.5,
+                "a shelter at the junction"
+            );
+            for l in f.pieces.iter().filter(|p| p.kind == PieceKind::LampPost) {
+                assert!(
+                    (DVec2::new(l.foot.x, l.foot.z) - DVec2::new(s.foot.x, s.foot.z)).length()
+                        > SHELTER_LEN_M * 0.5,
+                    "a lamp inside a shelter"
+                );
+            }
         }
     }
 

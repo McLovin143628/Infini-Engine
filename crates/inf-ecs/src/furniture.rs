@@ -244,18 +244,141 @@ pub fn apply_furniture(
         })
         .collect();
     let mut changed = 0usize;
-    for (g, e) in targets {
+    let mut sorted = targets;
+    sorted.sort_by_key(|(g, _)| *g);
+    let mut footprints = FurnitureFootprints::default();
+    for (g, e) in sorted {
         let (inst, solids, lights) = per.remove(&g).unwrap_or_default();
         if let Some(mut vol) = world.world_mut().get_mut::<PcgVolume>(e) {
             let before = vol.structures_gen;
             vol.set_furniture(key, inst, solids, lights);
             changed += usize::from(vol.structures_gen != before);
+            for s in tail(&vol).1 {
+                footprints.push(s);
+            }
         }
+    }
+    // PAR1b.2: the crowd's obstacle term reads the pieces' plan footprints
+    // from one index rebuilt here, the one door every furnishing passes.
+    if footprints.boxes.is_empty() {
+        world.world_mut().remove_resource::<FurnitureFootprints>();
+    } else {
+        world.world_mut().insert_resource(footprints);
     }
     if changed > 0 {
         world.mark_dirty();
     }
     changed
+}
+
+/// **How far clear of a piece of furniture a crowd agent keeps**, metres,
+/// beyond its own radius (wave PAR1b.2) — a hand's breadth.
+pub const FURNITURE_CLEARANCE_M: f64 = 0.05;
+
+/// The footprint index's cell, metres.
+const FOOTPRINT_CELL_M: f64 = 8.0;
+
+/// **Every furniture solid's plan footprint, indexed** (wave PAR1b.2) — what
+/// [`clear_of_furniture`] reads. Rebuilt by [`apply_furniture`] in block-`Guid`
+/// order, so both hosts hold the same index; absent on a level with no
+/// furniture, and a bevy resource, so nothing of it reaches a level's bytes.
+#[derive(bevy_ecs::prelude::Resource, Debug, Clone, Default, PartialEq)]
+pub struct FurnitureFootprints {
+    /// `(centre x, centre z, half x, half z)` per solid (every street piece's
+    /// solids are axis-aligned in plan).
+    pub boxes: Vec<[f64; 4]>,
+    grid: BTreeMap<(i64, i64), Vec<u32>>,
+}
+
+impl FurnitureFootprints {
+    fn push(&mut self, s: &ScatteredSolid) {
+        let (c, h) = (s.center, s.half_extents);
+        if !(c.is_finite() && h.is_finite()) {
+            return;
+        }
+        let i = self.boxes.len() as u32;
+        self.boxes.push([c.x, c.z, h.x.abs(), h.z.abs()]);
+        let cell = |v: f64| (v / FOOTPRINT_CELL_M).floor() as i64;
+        for gx in cell(c.x - h.x.abs())..=cell(c.x + h.x.abs()) {
+            for gz in cell(c.z - h.z.abs())..=cell(c.z + h.z.abs()) {
+                self.grid.entry((gx, gz)).or_default().push(i);
+            }
+        }
+    }
+
+    /// The boxes whose cells a disc of `reach` at `(x, z)` touches, each once,
+    /// in index order.
+    fn near(&self, x: f64, z: f64, reach: f64) -> Vec<u32> {
+        let cell = |v: f64| (v / FOOTPRINT_CELL_M).floor() as i64;
+        let mut out: Vec<u32> = Vec::new();
+        for gx in cell(x - reach)..=cell(x + reach) {
+            for gz in cell(z - reach)..=cell(z + reach) {
+                if let Some(v) = self.grid.get(&(gx, gz)) {
+                    out.extend_from_slice(v);
+                }
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+}
+
+/// **Where an agent of `radius` at `p` stands clear of every piece of street
+/// furniture** (wave PAR1b.2, the crowd's obstacle term): pushed straight out
+/// of each footprint it would overlap (radius + [`FURNITURE_CLEARANCE_M`])
+/// from the footprint's nearest point — a disc grazing a post slides round it,
+/// a disc inside a box (a clock-placed agent whose route runs through a bus
+/// shelter's panel) leaves through the nearest face. Two passes, so a push off
+/// one piece into another is answered. A pure function of `p` and the index:
+/// `p` itself on a level with no furniture (bit for bit), and only `x`/`z`
+/// move.
+pub fn clear_of_furniture(world: &EcsWorld, p: DVec3, radius: f64) -> DVec3 {
+    let Some(f) = world.world().get_resource::<FurnitureFootprints>() else {
+        return p;
+    };
+    if !p.is_finite() {
+        return p;
+    }
+    let need = radius.max(0.0) + FURNITURE_CLEARANCE_M;
+    let mut q = p;
+    for _ in 0..2 {
+        let mut moved = false;
+        for i in f.near(q.x, q.z, need + 2.0) {
+            let [cx, cz, hx, hz] = f.boxes[i as usize];
+            let (dx, dz) = (q.x - cx, q.z - cz);
+            let (nx, nz) = (dx.clamp(-hx, hx), dz.clamp(-hz, hz));
+            let (ox, oz) = (dx - nx, dz - nz);
+            let d2 = ox * ox + oz * oz;
+            if d2 >= need * need {
+                continue;
+            }
+            moved = true;
+            if d2 > 1e-18 {
+                let d = d2.sqrt();
+                q.x += ox / d * (need - d);
+                q.z += oz / d * (need - d);
+            } else {
+                // Inside the box: out through the nearest face.
+                let (px, pz) = (hx - dx.abs(), hz - dz.abs());
+                if px < pz {
+                    q.x = cx + dx.signum() * (hx + need);
+                    if dx == 0.0 {
+                        q.x = cx + hx + need;
+                    }
+                } else {
+                    q.z = cz + dz.signum() * (hz + need);
+                    if dz == 0.0 {
+                        q.z = cz + hz + need;
+                    }
+                }
+            }
+        }
+        if !moved {
+            break;
+        }
+    }
+    q
 }
 
 /// **The furniture a world carries, counted** — a world-side census over every
@@ -285,4 +408,61 @@ pub fn tail(v: &PcgVolume) -> (&[ScatteredInstance], &[ScatteredSolid], &[Scatte
         &v.structures[v.structures.len().saturating_sub(f.solids)..],
         &v.lights[v.lights.len().saturating_sub(f.lights)..],
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn post(x: f64, z: f64) -> ScatteredSolid {
+        ScatteredSolid {
+            center: DVec3::new(x, 4.5, z),
+            half_extents: DVec3::new(0.13, 4.5, 0.13),
+            rotation: glam::DQuat::IDENTITY,
+        }
+    }
+
+    /// **An agent walking a line through a post walks round it** (wave
+    /// PAR1b.2): a clock-placed agent stepped along a line that runs 0.2 m
+    /// from a post's centre (the 16 m street's ring past its post line) stays
+    /// its radius + `FURNITURE_CLEARANCE_M` clear of the footprint at every
+    /// step, passes within 0.6 m of it, and is moved no more than the overlap
+    /// asks; a world with no furniture moves nobody, bit for bit. Mutation:
+    /// `clear_of_furniture` answering `p` -> the closest sample is inside the
+    /// post's radius, red.
+    #[test]
+    fn an_agent_walking_through_a_post_walks_round_it() {
+        let mut world = EcsWorld::new();
+        let p0 = DVec3::new(3.0, 1.0, 2.0);
+        assert_eq!(clear_of_furniture(&world, p0, 0.3), p0);
+        let mut f = FurnitureFootprints::default();
+        f.push(&post(0.0, 6.22));
+        world.world_mut().insert_resource(f);
+        let r = 0.3;
+        let need = r + FURNITURE_CLEARANCE_M;
+        let mut nearest = f64::INFINITY;
+        for i in -40..=40 {
+            let raw = DVec3::new(f64::from(i) * 0.05, 1.0, 6.0);
+            let q = clear_of_furniture(&world, raw, r);
+            let dx = (q.x.abs() - 0.13).max(0.0);
+            let dz = ((q.z - 6.22).abs() - 0.13).max(0.0);
+            let d = (dx * dx + dz * dz).sqrt();
+            nearest = nearest.min(d);
+            assert!(
+                d >= need - 1e-9,
+                "at x {:.2}: {d:.3} m from the post",
+                raw.x
+            );
+            assert!(
+                (q - raw).length() <= need + 0.2,
+                "moved {:.3} m",
+                (q - raw).length()
+            );
+            assert_eq!(q.y, raw.y, "the height moved");
+        }
+        assert!(
+            nearest < 0.6,
+            "the agent never came near the post ({nearest:.2})"
+        );
+    }
 }
