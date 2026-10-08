@@ -791,6 +791,132 @@ fn a_lamp_pools_on_the_asphalt_under_it_and_between_lamps_against_the_dark() {
     assert!(u > m, "under {u:.1} is not brighter than between {m:.1}");
 }
 
+/// **A LAMP'S POOL FADES IN, IT DOES NOT POP** (wave PAR1b.2, clause 4): the
+/// PAR1b audit measured the pool appearing on the asphalt at ~126 m because
+/// `inf_render::lights::plan_lights` cut a light at its draw distance at full
+/// strength. Down the 300 m straight a 20 m street derives, from the eye on
+/// the road at 1.7 m, at 1920 x 1080 and the brightest shipped kerb eye
+/// (x46.2, the PAR1b audit's kerb-venue camera), ONE lamp ~125 m off: the frame
+/// with the lamp's draw distance a few centimetres PAST its sphere's nearest
+/// point (inside, faded) against the frame with it a few centimetres SHORT
+/// (culled) — the swap the eye sees as the lamp crosses its draw distance.
+/// Same eye, same geometry, so the delta is the light alone: it must be under
+/// one 8-bit step (a contribution of a few hundredths of a code, visible only
+/// as single-code rounding flips on under 0.01 % of the channels). The
+/// control: the same lamp well inside its draw distance
+/// against culled shows the pool (so the arm is looking at a pool at all).
+/// Mutation (measured, in the PAR1b.2 report): `LIGHT_FADE_M` 24 -> 0.001
+/// (the old hard cut) -> the swap reds.
+#[test]
+fn a_lamp_pool_fades_in_at_its_draw_distance_and_does_not_pop() {
+    let Some(gpu) = gpu() else { return };
+    const FW: u32 = 1920;
+    const FH: u32 = 1080;
+    let (lit, lamps) = street_scene(true);
+    // The eye on the -side lane at the west end, looking east down the street.
+    let eye = DVec3::new(-140.0, 1.7, -1.75);
+    // The +side lamp nearest 125 m away.
+    let lamp = lamps
+        .iter()
+        .filter(|p| p.foot.z > 0.0)
+        .min_by(|a, b| {
+            ((a.foot.x - eye.x) - 125.0)
+                .abs()
+                .total_cmp(&((b.foot.x - eye.x) - 125.0).abs())
+        })
+        .expect("a lamp down the street");
+    let l = &lamp.lights[0];
+    // The scene: the moon, the asphalt and THIS lamp's light only.
+    let scene = RenderScene {
+        lights: lit.lights[..1].to_vec(),
+        instances: lit.instances.clone(),
+        ..RenderScene::default()
+    };
+    let near_m = (l.at - eye).length() - f64::from(l.range_m);
+    let with_draw = |draw_m: f32| {
+        let mut s = scene.clone();
+        s.light_bounds.push(LightBound {
+            light: s.lights.len() as u32,
+            clip: None,
+            draw_m,
+        });
+        s.lights.push(RenderLight {
+            kind: LightKind::Spot,
+            color: l.sweep.0,
+            intensity: l.intensity,
+            direction: (-l.dir).as_vec3(),
+            position: l.at,
+            range: l.range_m,
+            inner_cos: l.inner_deg.to_radians().cos(),
+            outer_cos: l.outer_deg.to_radians().cos(),
+            cast_shadows: false,
+        });
+        s
+    };
+    let view = RenderView {
+        origin: FloatingOrigin::new(DVec3::ZERO),
+        eye_world: eye,
+        forward: (DVec3::new(l.at.x, 0.0, l.at.z) - eye)
+            .as_vec3()
+            .normalize(),
+        up: Vec3::Y,
+        fov_y: 60f32.to_radians(),
+        near: 0.05,
+        width: FW,
+        height: FH,
+        ortho: None,
+    };
+    let frame = |s: &RenderScene| {
+        let target = HeadlessTarget::new(&gpu, FW, FH);
+        let mut r = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+        let mut st = RenderSettings::default();
+        st.gi.enabled = true;
+        st.shadows.enabled = false;
+        st.vsm.enabled = false;
+        st.lights.local_shadow_budget = 0;
+        st.exposure = 46.2;
+        r.set_settings(st);
+        for _ in 0..WARM {
+            r.render(&gpu, s, &view, &target.view, (FW, FH));
+            let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        }
+        target.read_rgba(&gpu).expect("readback")
+    };
+    let max_delta = |a: &[u8], b: &[u8]| {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| x.abs_diff(*y))
+            .max()
+            .unwrap_or(0)
+    };
+    let draw = near_m as f32;
+    let inside = frame(&with_draw(draw + 0.05));
+    let culled = frame(&with_draw(draw - 0.05));
+    let full = frame(&with_draw(draw + 2.0 * inf_render::lights::LIGHT_FADE_M));
+    let swap = max_delta(&inside, &culled);
+    let control = max_delta(&full, &culled);
+    let noise = max_delta(&frame(&with_draw(draw - 0.05)), &culled);
+    let differing = inside.iter().zip(&culled).filter(|(a, b)| a != b).count();
+    println!("PAR1b.2 FADE noise floor (culled vs culled) {noise}; channels differing in the swap {differing}");
+    println!(
+        "PAR1b.2 FADE (1920x1080, x46.2): lamp {:.1} m off (sphere's nearest point {near_m:.1} m); swap at the draw distance {swap} code(s); control (the same lamp well inside) {control} code(s); fade over {} m",
+        (l.at - eye).length(),
+        inf_render::lights::LIGHT_FADE_M
+    );
+    assert!(
+        control > 1,
+        "the lamp lights nothing this camera sees ({control}) — the arm is not looking at a pool"
+    );
+    // Sub-step: the light's whole contribution at the cut is the control's 21
+    // codes x 0.05 / 24 = 0.04 of a code — it can only show as rounding flips
+    // of channels already within 0.04 of a half-code, one code each, on a
+    // handful of the frame's 8.3 M channels (measured: 13).
+    assert!(
+        swap <= 1 && differing * 10_000 < inside.len(),
+        "the pool pops in by {swap} code(s) on {differing} channel(s) as the lamp crosses its draw distance"
+    );
+}
+
 /// The least a lamp's pool lifts the asphalt over dark, codes at x8.
 const POOL_MIN_LIFT: f64 = 40.0;
 /// The most the asphalt midway between two lamps may sit over dark, codes at

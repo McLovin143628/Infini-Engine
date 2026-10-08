@@ -455,8 +455,16 @@ pub fn plan_lights(
     for (i, r, _) in locals {
         let l = &scene.lights[i as usize];
         let p = (l.position - origin).as_vec3();
+        // PAR1b.2 THE DRAW-DISTANCE FADE: see [`LIGHT_FADE_M`].
+        let fade = if settings.cull {
+            bound_of(&scene.light_bounds, i).map_or(1.0, |b| {
+                draw_fade(b.draw_m, (l.position - viewer.eye).length() - r as f64)
+            })
+        } else {
+            1.0
+        };
         let mut g = GpuLight {
-            color: [l.color[0], l.color[1], l.color[2], l.intensity],
+            color: [l.color[0], l.color[1], l.color[2], l.intensity * fade],
             pos_dir: [p.x, p.y, p.z, 1.0],
             params: [l.range, 0.0, 0.0, slot(vsm_slots, i)],
             spot_dir: [0.0, 0.0, 0.0, r],
@@ -475,6 +483,31 @@ pub fn plan_lights(
         plan.scene_index.push(i);
     }
     plan
+}
+
+/// **Over how many metres a local light fades out before its draw distance**
+/// (wave PAR1b.2). [`plan_lights`] drops a light whose sphere's nearest point
+/// is past [`LightBound::draw_m`]; before this the light went from its whole
+/// intensity to nothing across that one metre, and a street lamp's pool popped
+/// onto the asphalt at ~126 m (`draw_m` 110 + its 16 m sphere — the PAR1b
+/// audit). Now its intensity ramps linearly to zero over the last
+/// `LIGHT_FADE_M` before the cut, so the record that is dropped was already
+/// dark. Applied HERE, in the one plan every lit pass reads its local lights
+/// from (mesh, terrain, scatter, water, GI inject), so every bounded light —
+/// PAR1a's room fixtures, PAR1b's lamps and signal heads, PAR1c's headlamps —
+/// inherits it; a multiply on the record, not a new light. A light with no
+/// bound (`draw_m` 0) is unchanged.
+pub const LIGHT_FADE_M: f32 = 24.0;
+
+/// The fade multiplier for a light whose sphere's nearest point is `near_m`
+/// from the eye against its draw distance `draw_m` — `1` inside
+/// `draw_m - LIGHT_FADE_M`, `0` at `draw_m`, linear between; `1` with no draw
+/// distance.
+pub fn draw_fade(draw_m: f32, near_m: f64) -> f32 {
+    if draw_m <= 0.0 || !near_m.is_finite() {
+        return 1.0;
+    }
+    ((f64::from(draw_m) - near_m) / f64::from(LIGHT_FADE_M)).clamp(0.0, 1.0) as f32
 }
 
 /// The bound a scene light carries, if any — `bounds` is in light order, so a
@@ -1001,5 +1034,25 @@ impl LightGrid {
         drop(data);
         staging.unmap();
         Ok(words)
+    }
+}
+
+#[cfg(test)]
+mod fade_tests {
+    use super::*;
+
+    /// **A bounded light fades to nothing at its draw distance** (wave
+    /// PAR1b.2): the multiplier is 1 inside `draw - LIGHT_FADE_M`, 0 at the
+    /// draw distance, linear between; a light with no draw distance is
+    /// untouched. Mutation: `LIGHT_FADE_M` 0.001 (the old hard cut) -> the
+    /// midpoint reads 0, red.
+    #[test]
+    fn a_bounded_light_fades_out_over_the_last_metres_of_its_draw_distance() {
+        assert_eq!(draw_fade(110.0, 50.0), 1.0);
+        assert_eq!(draw_fade(110.0, 110.0), 0.0);
+        assert_eq!(draw_fade(110.0, 130.0), 0.0);
+        let mid = draw_fade(110.0, 110.0 - f64::from(LIGHT_FADE_M) * 0.5);
+        assert!((mid - 0.5).abs() < 1e-6, "midpoint {mid}");
+        assert_eq!(draw_fade(0.0, 5_000.0), 1.0);
     }
 }
