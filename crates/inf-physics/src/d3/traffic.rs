@@ -64,6 +64,18 @@ pub const CORRIDOR_HALF_M: f64 = 2.5;
 /// its rig where it stopped rather than be written onto the slot in view.
 pub const ARRIVAL_HOLD_M: f64 = 0.5;
 
+/// **How far back a car coming into the clock tier is asked about the signal
+/// ahead**, metres beyond its own nose (audit PAR1b): a car the clock puts
+/// inside a junction box on a red, or just over its line, is placed standing at
+/// the line instead. A crossing's box is at most a 20 m street's width, so
+/// twelve metres reaches back over the line from anywhere the clock can put a
+/// car in it.
+pub const CLOCK_ENTRY_LOOKBACK_M: f64 = 12.0;
+
+/// How near its hold point a clock-tier car must be to be STANDING at a signal,
+/// metres (audit PAR1b) — a queue forms behind a car within this of its hold.
+pub const HELD_SLACK_M: f64 = 0.05;
+
 /// How far ahead the following rule looks, metres.
 ///
 /// Sixty metres is four seconds at a 50 km/h limit and two at a highway's, so a
@@ -188,6 +200,22 @@ pub fn step_traffic(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64)
     //    no per-transition bookkeeping to forget.
     let mut riders: std::collections::BTreeMap<Uuid, (Uuid, u8)> =
         std::collections::BTreeMap::new();
+    // ── PAR1b audit: the clock-tier cars a signal held LAST step, where they
+    //    stand — the queue a car arriving behind one stops behind. Gathered
+    //    before the walk so the queue does not depend on the order the records
+    //    are visited in; this step's holds are appended as they are made.
+    let mut held: Vec<traffic::HeldCar> = if signals.is_empty() {
+        Vec::new()
+    } else {
+        pop.records
+            .values()
+            .filter(|r| r.signal_held && !r.taken)
+            .map(|r| traffic::HeldCar {
+                at: r.last,
+                half_len_m: r.def.half_extents.z.abs(),
+            })
+            .collect()
+    };
 
     for (guid, rec) in pop.records.iter_mut() {
         let guid = *guid;
@@ -285,6 +313,70 @@ pub fn step_traffic(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64)
                     yaw = y2;
                 }
             }
+        }
+
+        // ── PAR1b audit: THE CLOCK OBEYS THE SIGNALS TOO. A `Near` car is
+        //    drawn and moved by its clock, and before this it drove through
+        //    every red the steered tier stops at -- a junction 70 m down the
+        //    street at night was cars crossing both ways at once. Now its clock
+        //    is HELD at the line (behind any car already standing there) for as
+        //    long as the approach is red, the metres it stood owed by the clock
+        //    (`rephase_m`), so it moves off on the green from where it stood
+        //    with nothing teleported. A car that comes INTO the band is asked
+        //    as if it had just driven the last few metres, so one the clock put
+        //    in the box on a red is placed standing at the line instead -- it
+        //    was not drawn the step before, so the move is never seen.
+        let was_held = rec.signal_held;
+        rec.signal_held = false;
+        if tier == CrowdTier::Near && driving && !signals.is_empty() {
+            let half = rec.def.half_extents.z.abs();
+            let hold = rec.active_path(clock, leg).and_then(|path| {
+                let s_now = rec.progress(guid, clock, leg)?;
+                let entered = was != CrowdTier::Near && was != CrowdTier::Full;
+                let s_prev = if entered {
+                    (s_now - half - CLOCK_ENTRY_LOOKBACK_M).max(0.0)
+                } else {
+                    let y = path.position_at(s_now).y;
+                    path.project(DVec3::new(rec.last.x, y, rec.last.z)).s_m
+                };
+                let hold = traffic::clock_signal_hold(
+                    &signals, path, s_prev, s_now, half, half, dt, signal_t_s, &held,
+                )?;
+                // `(the clamp, standing at the line)`: a car the clock does not
+                // move (a commute on a frozen level clock) is still STANDING.
+                Some(((hold - s_now).min(0.0), s_now >= hold - HELD_SLACK_M))
+            });
+            if let Some((delta, standing)) = hold {
+                if delta < 0.0 {
+                    rec.rephase_m += delta;
+                    let (a2, y2) = rec.place(guid, clock, leg);
+                    at = a2;
+                    yaw = y2;
+                }
+                if standing {
+                    rec.signal_held = true;
+                    stats.signal_holds += 1;
+                    held.push(traffic::HeldCar {
+                        at,
+                        half_len_m: half,
+                    });
+                }
+            }
+        }
+        // …and a commuter whose leg CLOSED while it stood owes its slot the
+        // metres it waited: it drives them on at the street's speed rather than
+        // standing in the lane short of its space all day. A car never held
+        // (`rephase_m >= 0`, or a steered car's hand-off) is untouched.
+        if !driving
+            && tier != CrowdTier::Full
+            && rec.schedule.is_some()
+            && rec.rephase_m < 0.0
+            && (was_held || rec.signal_held || tier == CrowdTier::Near)
+        {
+            rec.rephase_m = (rec.rephase_m + traffic::street_speed_mps() * dt).min(0.0);
+            let (a2, y2) = rec.place(guid, clock, leg);
+            at = a2;
+            yaw = y2;
         }
 
         // ── the ground, measured once, and **NO BODY UNTIL IT IS KNOWN**.
