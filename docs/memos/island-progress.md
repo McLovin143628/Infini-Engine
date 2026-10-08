@@ -42783,3 +42783,52 @@ hitches a minute (GPU timestamps 0.5 d + 1-2 d); posts at the KERB as the refere
 ring avoidance (~1 d); a signalised crossing on the CI island (0.5-1 d); a light-draw fade (~0.5 d);
 doors + slope feet over the shipped island (~0.5 d); the ROAD1 triangle price (~0.5 d); a frame of a
 car waiting at a red and of each kerbside kind (~1 h).
+
+## Wave PAR1b.2 — PAR1b IN FULL (implementer, 2026-10-08)
+
+Base `4f342459`. Commits `523b698b` (signals every tier obeys + the fleet pre-empts), `a58db2b3`
+(light-draw fade), `e55de6f9` (editor grid), `15d2459e` (kerb move + crowd avoidance + shelters +
+meters), `1bf0e6c7` (PIE == shipping over phases + holds), `c0c4980a` (instrument doors) + this
+docs commit. Report: `campaign-briefs/par1b2-implementer-report.md`. Zero schema / level / golden /
+dependency moves (strict goldens 140/140 unmoved).
+
+**Built.** (1) A responding unit pre-empts every signalised junction within 70 m (a green reads
+amber: a car that can stop stops, one inside its stopping distance goes on); a clock car held at
+its line is STANDING (speed 0, not its clock's); the stop line is measured on the approach axis, not
+10 m of path before the path's nearest point to the centre (a turning path's nearest point is inside
+its curve — the line fell behind the car and it ran the red); a clock car held with a siren behind
+slides to the kerb side (the queue parts); a returning unit obeys signals and its escort schedule
+owes each crossing on its route a red. The audit's clock-tier hold (`981258fc`) re-landed with all
+of it; the three dispatch arms it reddened are green unchanged. (2) Posts stand at the kerb
+(0.5 m behind the face, `steal-car/0022`; 6.22 m on a 16 m street, behind a parked car's door);
+the crowd walks past them (`inf_ecs::furniture::clear_of_furniture`, a footprint index both hosts
+rebuild in `apply_furniture`); bus shelters (240 m a side on 20 m streets, no bus layer) and parking
+meters (one per three kerb slots) each with collider + avoidance + LOD + arm. (4) Every bounded
+light fades over its last 24 m in `plan_lights` (the pool pop at ~126 m: a 21-code swap is now a
+0.04-code contribution). (6) The editor grid lies at WORLD y = 0 (it was the floating origin's
+snapped camera height, a few metres over the island's streets) and dims six stops below the
+horizon. (5) The phase + hold trace is compared PIE == shipping on `ems2_dispatch_gate`'s town
+(four signalised crossings, 7 119 hold-steps either way).
+
+**Measured.** dispatch_3d 15/15; EMS response times unchanged (48.53 / 57.80 / 61.18 s). Fleet arm:
+unit red crossings 2, traffic red crossings 0, unit box contacts 0, parted 524 clock car-steps.
+CI-island crowd at 08:24, every step: 0 overlaps, nearest approach 0.42 m (PAR1b: 3.17 m by
+placement). Shipped island: 6 124 pieces (shelters 224, meters 1 085), placement defects {}.
+Instrument (cooked island, same binary, furniture door off -> on): GPU 12:00 16.97 -> 17.54, 21:00
+22.11 -> 22.93; kerb eyes x12.2 / x36.3 / x46.9; narrow-phase pairs 16 348 -> 16 492. ROAD1's road
+meshes, hidden through their own Visibility: GPU 12:00 17.54 -> 16.47 (-1.07 ms), 21:00 22.93 ->
+21.16 (-1.77 ms) — the price of the "1.24 M tris always loaded". The window (1080p, release,
+PAR1b's final binaries vs these, alternated, five each, p95 min / median): 21:00 walk 34.9 / 36.3
+-> 33.6 / 35.8; noon walk 33.6 / 33.7 -> 33.9 / 34.0; 21:00 drive (5 of 5 boarded) 36.5 / 37.6 ->
+36.1 / 36.7; hitches > 50 ms a minute (median) 30.1 -> 31.1, 27.3 -> 25.3, 10.8 -> 4.9.
+
+**Laws.** A rule cars obey and the units that break it are one change, and so is the escort that
+rescues a stuck unit: a unit that now waits at a red is "behind schedule" — re-time the schedule,
+or the rescue pins it. A line measured along a path is wrong wherever the path turns. A crowd that
+"never overlaps" at night is a crowd at home: sample when it walks. A falling body with a stick
+forward climbs the first ledge it meets.
+
+**Carried.** The CI-island four-way (0.5-1 d, a committed-level move); the rest of clause 3
+(awnings, billboards, the arterial gantry + arterial lamps, the walk phase, the wanted star for a
+red); doors + slope feet on the steepest 20 streets of the shipped island (0.5 d); a frame of a
+fire engine running a red with the queue parted (no in-game trigger; ~2 h with a staging door).
