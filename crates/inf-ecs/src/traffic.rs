@@ -1043,6 +1043,10 @@ pub struct TrafficRes {
     /// assert is **one** over a settled level, which is what says the cache is
     /// a cache.
     pub derivations: u64,
+    /// **The signalised junctions** (wave PAR1b) — [`signal_junctions`] over
+    /// [`streets`](Self::streets), derived beside the lanes so the driver and
+    /// the signal head read ONE list.
+    pub junctions: Vec<SignalJunction>,
 }
 
 /// **Derive the level's streets if its blocks have moved** — the one door both
@@ -1060,6 +1064,7 @@ pub fn sync_carriageway(world: &mut EcsWorld) -> bool {
     }
     let streets = streets_of(world);
     let lanes = carriageway(&streets);
+    let junctions = signal_junctions(&streets);
     let derivations = world
         .world()
         .get_resource::<TrafficRes>()
@@ -1070,6 +1075,7 @@ pub fn sync_carriageway(world: &mut EcsWorld) -> bool {
         lanes,
         stamp,
         derivations: derivations + 1,
+        junctions,
     });
     true
 }
@@ -1239,6 +1245,268 @@ pub fn derived_guids(streets: &[Street]) -> BTreeSet<Uuid> {
         .into_iter()
         .map(|(p, _)| parked_car_guid(p))
         .collect()
+}
+
+// ── the signals (wave PAR1b) ────────────────────────────────────────────────
+//
+// A junction of two city streets carries a signal head on each approach, and
+// the traffic that reaches it OBEYS it: a car whose approach shows red (or an
+// amber it can still stop for) treats the STOP LINE as the bumper of a stopped
+// car, so `drive_intent`'s own stopping-distance rule brings it to rest a
+// standing gap short of the line, and the handbrake holds it there until the
+// phase turns green. No new state: the phase is a pure function of the
+// junction and the sim clock, and the stop is a gap the controller already
+// reads. The player's car is a player's car — nothing here reaches it.
+
+/// **The least reserve, metres, of the wider of two crossing streets that makes
+/// their crossing signalised** (wave PAR1b).
+///
+/// Twenty is the city street (four lanes, `street_lanes`): Harbour City's and
+/// Eastgate's grid, where the hero spawns. A sixteen-metre town street meeting
+/// another is a three-lane crossroads a resident walks across, which is a
+/// stop-sign junction in every North American town the reference frames show,
+/// not a signalised one.
+pub const SIGNAL_MIN_GAP_M: f64 = 20.0;
+
+/// **How far each arm must run past the crossing for it to be a four-way
+/// junction**, metres beyond the crossing street's half reserve (wave PAR1b).
+/// A line that stops at the crossing is a T, and a T on a lane is not
+/// signalised (the brief's own rule).
+pub const SIGNAL_ARM_M: f64 = 12.0;
+
+/// One approach's green, seconds.
+pub const SIGNAL_GREEN_S: f64 = 20.0;
+/// One approach's amber, seconds — three, the urban figure for a 30 km/h sign.
+pub const SIGNAL_AMBER_S: f64 = 3.0;
+/// The all-red clearance between the two approaches' phases, seconds.
+pub const SIGNAL_ALL_RED_S: f64 = 2.0;
+/// The whole cycle: green, amber, all-red for each of the two axes.
+pub const SIGNAL_CYCLE_S: f64 = 2.0 * (SIGNAL_GREEN_S + SIGNAL_AMBER_S + SIGNAL_ALL_RED_S);
+/// The sim step the signal clock counts in, seconds — `inf_runtime::FIXED_DT`
+/// by value (this crate cannot name it; the gate pins the equality).
+pub const SIGNAL_TICK_S: f64 = 1.0 / 60.0;
+
+/// **Where the stop line is**, metres from the junction's centre along the
+/// approach (wave PAR1b).
+///
+/// `inf_gis` paints a crossing `CROSSWALK_SETBACK_M` (6 m) to
+/// `CROSSWALK_SETBACK_M + CROSSWALK_DEPTH_M` (9 m) out from the junction node
+/// (a span's spine starts AT the node); the line is a metre behind the far
+/// edge of the ladder, so a car stopped at it leaves the crossing clear.
+/// `road_authority` pins [`CROSSWALK_FAR_M`] to the paint's own constants.
+pub const STOP_LINE_M: f64 = CROSSWALK_FAR_M + 1.0;
+
+/// The crossing's far edge from the junction node, metres — pinned by value to
+/// `inf_gis::CROSSWALK_SETBACK_M + inf_gis::CROSSWALK_DEPTH_M`.
+pub const CROSSWALK_FAR_M: f64 = 9.0;
+
+/// How near a lane must pass a junction's centre to be driving THROUGH it,
+/// metres: two lane widths, so a car in either lane of its own half is caught
+/// and a car on a parallel street a block away is not.
+pub const SIGNAL_LANE_REACH_M: f64 = 2.0 * DEFAULT_LANE_WIDTH_M;
+
+/// How far ahead a driver reads a signal, metres. A 30 km/h car needs 9.9 m to
+/// stop at [`COMFORT_DECEL_MPS2`]; sixty is the block and a half a driver
+/// actually watches.
+pub const SIGNAL_LOOK_M: f64 = 60.0;
+
+/// **One signalised junction** (wave PAR1b): where it is, the reserves of the
+/// two streets that cross there, and the phase offset its controller runs at.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SignalJunction {
+    /// The crossing, world XZ.
+    pub centre: DVec2,
+    /// The walking surface of the streets, world Y (the streets' first guess).
+    pub y: f64,
+    /// The reserve of the street that runs along X (constant Z), metres.
+    pub gap_x: f64,
+    /// The reserve of the street that runs along Z (constant X), metres.
+    pub gap_z: f64,
+    /// The controller's phase offset, seconds in `[0, SIGNAL_CYCLE_S)` — a
+    /// pure function of the junction's position, so two hosts agree and a grid
+    /// does not change all at once.
+    pub offset_s: f64,
+}
+
+/// **What a signal head shows an approach** (wave PAR1b).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Aspect {
+    /// Go.
+    Green,
+    /// Stop if you can.
+    Amber,
+    /// Stop.
+    Red,
+}
+
+impl Aspect {
+    /// The byte a phase trace folds: `Green` 0, `Amber` 1, `Red` 2.
+    pub fn as_u8(self) -> u8 {
+        match self {
+            Aspect::Green => 0,
+            Aspect::Amber => 1,
+            Aspect::Red => 2,
+        }
+    }
+}
+
+/// The signal clock at a traffic step count, seconds — the sim's own time
+/// since the traffic population was installed, the clock `CrowdClock::t_s`
+/// counts (`steps × dt`, never `+= dt`).
+pub fn signal_clock_s(steps: u64) -> f64 {
+    steps as f64 * SIGNAL_TICK_S
+}
+
+/// **The signal clock this world is on**, seconds — [`signal_clock_s`] over
+/// the traffic population's own step count, or `0` with no traffic (a frozen
+/// phase, which is what an editor viewport outside Simulate shows).
+pub fn signal_clock_of(world: &EcsWorld) -> f64 {
+    traffic_of(world).map_or(0.0, |p| signal_clock_s(p.steps))
+}
+
+/// The phase offset of a junction at `centre`, seconds.
+pub fn signal_offset_s(centre: DVec2) -> f64 {
+    let q = |v: f64| {
+        if v.is_finite() {
+            (v / PAVEMENT_LATTICE_M).round() as i64 as u64
+        } else {
+            0
+        }
+    };
+    let h = mix64(q(centre.x) ^ mix64(q(centre.y) ^ 0x5349_474e_414c_0001));
+    // An integer number of seconds, so the phase edges fall on whole steps.
+    (h % SIGNAL_CYCLE_S as u64) as f64
+}
+
+/// **Every signalised junction the streets imply**, in a deterministic order
+/// (wave PAR1b): every crossing of a line along X with a line along Z whose
+/// four arms each run [`SIGNAL_ARM_M`] past the other street's half reserve,
+/// and where the wider of the two reserves is at least [`SIGNAL_MIN_GAP_M`].
+pub fn signal_junctions(streets: &[Street]) -> Vec<SignalJunction> {
+    let mut out = Vec::new();
+    for sx in streets.iter().filter(|s| s.along_x()) {
+        let (x0, x1) = (sx.a.x.min(sx.b.x), sx.a.x.max(sx.b.x));
+        let z = sx.a.y;
+        for sz in streets.iter().filter(|s| !s.along_x()) {
+            let (z0, z1) = (sz.a.y.min(sz.b.y), sz.a.y.max(sz.b.y));
+            let x = sz.a.x;
+            let arm_x = sz.gap_m * 0.5 + SIGNAL_ARM_M;
+            let arm_z = sx.gap_m * 0.5 + SIGNAL_ARM_M;
+            let four_way = x - x0 >= arm_x && x1 - x >= arm_x && z - z0 >= arm_z && z1 - z >= arm_z;
+            if !four_way || sx.gap_m.max(sz.gap_m) < SIGNAL_MIN_GAP_M {
+                continue;
+            }
+            let centre = DVec2::new(x, z);
+            out.push(SignalJunction {
+                centre,
+                y: sx.y,
+                gap_x: sx.gap_m,
+                gap_z: sz.gap_m,
+                offset_s: signal_offset_s(centre),
+            });
+        }
+    }
+    out.sort_by(|p, q| {
+        p.centre
+            .x
+            .total_cmp(&q.centre.x)
+            .then(p.centre.y.total_cmp(&q.centre.y))
+    });
+    out
+}
+
+/// **What a junction shows the approach along one axis at `t_s`** (wave
+/// PAR1b) — the phase table, a pure function of the junction and the clock.
+///
+/// The X approaches run first: green [`SIGNAL_GREEN_S`], amber
+/// [`SIGNAL_AMBER_S`], then all-red [`SIGNAL_ALL_RED_S`] while Z waits; then
+/// the same for Z. So the two axes are never both anything but red at once,
+/// which is what keeps cross traffic out of each other's box.
+pub fn signal_aspect(j: &SignalJunction, along_x: bool, t_s: f64) -> Aspect {
+    aspect_at(j.offset_s, along_x, t_s)
+}
+
+/// [`signal_aspect`] from the controller's offset alone — what a signal
+/// head's light carries (its `seed`) and what both projectors resolve its
+/// colour through, so the head a player sees and the line a car stops at are
+/// one table.
+pub fn aspect_at(offset_s: f64, along_x: bool, t_s: f64) -> Aspect {
+    let t = if t_s.is_finite() { t_s } else { 0.0 };
+    let o = if offset_s.is_finite() { offset_s } else { 0.0 };
+    let u = (t + o).rem_euclid(SIGNAL_CYCLE_S);
+    let half = SIGNAL_GREEN_S + SIGNAL_AMBER_S + SIGNAL_ALL_RED_S;
+    let local = if along_x {
+        u
+    } else {
+        (u - half).rem_euclid(SIGNAL_CYCLE_S)
+    };
+    if local < SIGNAL_GREEN_S {
+        Aspect::Green
+    } else if local < SIGNAL_GREEN_S + SIGNAL_AMBER_S {
+        Aspect::Amber
+    } else {
+        Aspect::Red
+    }
+}
+
+/// **The clear road a signal leaves a car**, metres from its front bumper to
+/// the stop line it must stop at — `None` when no signal ahead asks it to stop
+/// (wave PAR1b).
+///
+/// The same unit [`DriveView::gap_m`] carries, so the caller takes the nearer
+/// of this and the car in front and [`drive_intent`]'s stopping-distance rule
+/// does the rest: a red line is a stopped car's bumper. A car whose nose is
+/// already over its line is committed and drives on; an amber is obeyed only
+/// when the car can still stop for it at [`COMFORT_DECEL_MPS2`].
+pub fn stop_line_gap(
+    junctions: &[SignalJunction],
+    path: &NavPath,
+    s_m: f64,
+    nose_m: f64,
+    forward_mps: f64,
+    t_s: f64,
+) -> Option<f64> {
+    if junctions.is_empty() || !s_m.is_finite() {
+        return None;
+    }
+    let here = path.position_at(s_m);
+    let v = if forward_mps.is_finite() {
+        forward_mps.max(0.0)
+    } else {
+        0.0
+    };
+    let mut best: Option<f64> = None;
+    for j in junctions {
+        let (dx, dz) = (j.centre.x - here.x, j.centre.y - here.z);
+        if dx * dx + dz * dz > (SIGNAL_LOOK_M + STOP_LINE_M) * (SIGNAL_LOOK_M + STOP_LINE_M) {
+            continue;
+        }
+        let proj = path.project(DVec3::new(j.centre.x, here.y, j.centre.y));
+        if proj.distance_m > SIGNAL_LANE_REACH_M {
+            continue;
+        }
+        let line_s = proj.s_m - STOP_LINE_M;
+        let gap = line_s - (s_m + nose_m);
+        if !(gap > -0.25 && gap <= SIGNAL_LOOK_M) {
+            continue;
+        }
+        // The approach's axis is the lane's direction AT the line — a car about
+        // to turn is still on the street it is arriving along there.
+        let d = path.direction_at(line_s.max(0.0));
+        let along_x = d.x.abs() >= d.z.abs();
+        let stop = match signal_aspect(j, along_x, t_s) {
+            Aspect::Green => false,
+            Aspect::Red => true,
+            Aspect::Amber => v * v <= 2.0 * COMFORT_DECEL_MPS2 * gap.max(0.0),
+        };
+        if stop {
+            let g = gap.max(0.0);
+            if best.is_none_or(|b| g < b) {
+                best = Some(g);
+            }
+        }
+    }
+    best
 }
 
 // ── the population ──────────────────────────────────────────────────────────
@@ -3137,6 +3405,93 @@ mod tests {
                 gap_m: 20.0,
             },
         ]
+    }
+
+    /// **THE PHASE TABLE** (wave PAR1b): the two axes are never both anything
+    /// but red, each sees green, amber and red every cycle, and the offset is a
+    /// pure function of the junction. Mutation: overlapping the Z green onto
+    /// the X green (dropping the `half` shift) reds the both-not-red count.
+    #[test]
+    fn the_phase_table_never_shows_two_axes_a_go_at_once() {
+        let j = signal_junctions(&grid_streets())[0];
+        let mut seen = [[false; 3]; 2];
+        let mut both_go = 0usize;
+        let steps = (SIGNAL_CYCLE_S / SIGNAL_TICK_S) as u64 + 1;
+        for s in 0..steps {
+            let t = signal_clock_s(s);
+            let (x, z) = (signal_aspect(&j, true, t), signal_aspect(&j, false, t));
+            seen[0][x.as_u8() as usize] = true;
+            seen[1][z.as_u8() as usize] = true;
+            both_go += usize::from(x != Aspect::Red && z != Aspect::Red);
+        }
+        assert_eq!(both_go, 0, "both approaches had a go together");
+        assert_eq!(seen, [[true; 3]; 2], "an aspect never shown");
+        assert_eq!(j.offset_s, signal_offset_s(j.centre));
+        assert!(j.offset_s >= 0.0 && j.offset_s < SIGNAL_CYCLE_S);
+    }
+
+    /// **Which crossings are signalised**: a four-way crossing of city streets
+    /// is; a town street crossing (16 m) and a T are not.
+    #[test]
+    fn a_city_crossroads_is_signalised_and_a_t_or_a_town_crossing_is_not() {
+        assert_eq!(signal_junctions(&grid_streets()).len(), 1);
+        let mut town = grid_streets();
+        for s in &mut town {
+            s.gap_m = 16.0;
+        }
+        assert!(
+            signal_junctions(&town).is_empty(),
+            "a town crossing signalised"
+        );
+        // A T: the line along X stops at the line along Z.
+        let mut t = grid_streets();
+        t[1].a = DVec2::new(0.0, 0.0);
+        assert!(signal_junctions(&t).is_empty(), "a T signalised");
+    }
+
+    /// **A red is a bumper at the stop line**: the gap is measured from the
+    /// nose to the line (not the junction centre), a green gives none, a car
+    /// whose nose is over the line is committed, and an amber it cannot stop
+    /// for is run. Mutation: `line_s = proj.s_m` (the centre) reds the first.
+    #[test]
+    fn a_red_is_a_stopped_car_at_the_line_and_a_green_is_clear_road() {
+        let j = signal_junctions(&grid_streets())[0];
+        // A lane along +X, 1.75 m right of the centreline, through the crossing.
+        let path = NavPath::new([DVec3::new(-90.0, 3.0, -1.75), DVec3::new(90.0, 3.0, -1.75)]);
+        // A time at which the X approach is red.
+        let red_t = (0..3000)
+            .map(signal_clock_s)
+            .find(|t| signal_aspect(&j, true, *t) == Aspect::Red)
+            .expect("a red");
+        let green_t = (0..3000)
+            .map(signal_clock_s)
+            .find(|t| signal_aspect(&j, true, *t) == Aspect::Green)
+            .expect("a green");
+        let s = 90.0 - 40.0; // 40 m short of the centre
+        let nose = 2.3;
+        let g = stop_line_gap(&[j], &path, s, nose, 8.0, red_t).expect("a red stops");
+        assert!(
+            (g - (40.0 - STOP_LINE_M - nose)).abs() < 1e-9,
+            "the gap {g} is not to the stop line"
+        );
+        assert!(stop_line_gap(&[j], &path, s, nose, 8.0, green_t).is_none());
+        // Over the line: committed.
+        let over = 90.0 - STOP_LINE_M - nose + 0.5;
+        assert!(stop_line_gap(&[j], &path, over, nose, 8.0, red_t).is_none());
+        // An amber too close to stop for at 8 m/s is run; far back it is obeyed.
+        let amber_t = (0..3000)
+            .map(signal_clock_s)
+            .find(|t| signal_aspect(&j, true, *t) == Aspect::Amber)
+            .expect("an amber");
+        let close = 90.0 - STOP_LINE_M - nose - 2.0;
+        assert!(stop_line_gap(&[j], &path, close, nose, 8.0, amber_t).is_none());
+        assert!(stop_line_gap(&[j], &path, s, nose, 8.0, amber_t).is_some());
+        // A lane on a parallel street a block away does not see it.
+        let far = NavPath::new([
+            DVec3::new(-90.0, 3.0, -21.75),
+            DVec3::new(90.0, 3.0, -21.75),
+        ]);
+        assert!(stop_line_gap(&[j], &far, s, nose, 8.0, red_t).is_none());
     }
 
     #[test]

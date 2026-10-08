@@ -1415,6 +1415,9 @@ pub fn evaluate_pcg_volumes_in(
             );
         }
     }
+    // PAR1b: the blocks that just arrived change the streets, so the frontage
+    // furniture is re-derived (a no-op for every block whose pieces did not move).
+    furnish_streets(world);
 }
 
 /// What one volume's evaluation becomes in the ECS's own mirror types -- the
@@ -1652,6 +1655,69 @@ pub fn population_of(out: inf_pcg::VolumeOutput) -> VolumePopulation {
         instances, solids, groups, doorways, residents, interior, lights, emitters,
     )
     // MIRROR-END population_of
+}
+
+/// **Furnish the level's streets** (wave PAR1b) — derive every lamp post,
+/// signal, pole, cable and kerbside piece from the resident blocks' streets
+/// (`inf_ecs::furniture::furnish_inputs`) through `inf_pcg::street::furnish`,
+/// and append each piece to the block whose frontage it stands in front of
+/// (`inf_ecs::furniture::apply_furniture`). Answers how many blocks' populations
+/// changed.
+///
+/// Cheap when nothing moved: `furnish_inputs` answers `None` when every block
+/// is already current against the key, so the call after an activation that
+/// moved nothing is one walk.
+///
+/// MIRROR: identical in the editor's `commands::pcg` between the
+/// `furnish_streets` fences, pinned by `inf-editor-core`'s
+/// `tests/projector_mirror.rs`.
+pub fn furnish_streets(world: &mut EcsWorld) -> usize {
+    // MIRROR-BEGIN furnish_streets
+    let (key, per) = {
+        let Some(inputs) = inf_ecs::furniture::furnish_inputs(world) else {
+            return 0;
+        };
+        let streets: Vec<inf_pcg::street::StreetLine> = inputs
+            .streets
+            .iter()
+            .map(|s| inf_pcg::street::StreetLine {
+                a: s.a,
+                b: s.b,
+                gap_m: s.gap_m,
+            })
+            .collect();
+        let sites: Vec<inf_pcg::street::SignalSite> = inputs
+            .junctions
+            .iter()
+            .map(|j| inf_pcg::street::SignalSite {
+                centre: j.centre,
+                gap_x: j.gap_x,
+                gap_z: j.gap_z,
+                offset_s: j.offset_s as u32,
+            })
+            .collect();
+        let ground = inf_pcg::FnHeight::new(|x, z| inputs.ground_at(x, z));
+        let furnished = inf_pcg::street::furnish(&streets, &sites, &inputs.doors, &ground);
+        let mut outs: std::collections::BTreeMap<uuid::Uuid, inf_pcg::VolumeOutput> =
+            std::collections::BTreeMap::new();
+        for piece in furnished.pieces {
+            let Some(owner) = inputs.owner_of(piece.foot) else {
+                continue;
+            };
+            let o = outs.entry(owner).or_default();
+            o.instances.extend(piece.instances);
+            o.colliders.extend(piece.colliders);
+            o.lights.extend(piece.lights);
+        }
+        let mut per = std::collections::BTreeMap::new();
+        for (g, o) in outs {
+            let (inst, solid, _, _, _, _, lights, _) = population_of(o);
+            per.insert(g, (inst, solid, lights));
+        }
+        (inputs.key, per)
+    };
+    inf_ecs::furniture::apply_furniture(world, key, per)
+    // MIRROR-END furnish_streets
 }
 
 /// Every entity's [`Spline`] resolved into **world space**, keyed by its stable

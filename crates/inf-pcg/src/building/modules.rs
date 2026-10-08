@@ -343,6 +343,33 @@ pub enum ModuleShape {
     /// +0.46 ms submit per frame in the 21:00 window (a batch per family per
     /// volume, each with its own cull dispatch and draws).
     Fitting,
+    /// **Street furniture** (wave PAR1b): one octagonal prism, unit in every
+    /// axis, scaled per part onto a lamp post's shaft, its arm and its
+    /// luminaire, a signal mast and its head, a utility pole, its cross-arm and
+    /// every segment of every cable it carries, a sign, a bench, a bin, a
+    /// hydrant. ONE family for PAR1a's measured reason — a family is a scatter
+    /// bucket per volume — and its own GUID so the projectors can band it at
+    /// [`STREET_FURNITURE_LOD_M`] rather than at the volume's 1 km.
+    Street,
+}
+
+/// **How far from the eye street furniture is drawn**, metres (wave PAR1b) —
+/// the load distance the PAR1b brief asks for. A 0.16 m lamp shaft is one
+/// pixel at 1080p at ~250 m, and a pole line's cables are sub-pixel well before
+/// that; past this distance a post is nothing. The light it carries is culled
+/// by its own draw distance long before (`street::LAMP_DRAW_M`).
+pub const STREET_FURNITURE_LOD_M: f64 = 250.0;
+
+/// **The draw band a module mesh's batch takes**, metres, or `None` for the
+/// volume's own (wave PAR1b) — fit-out at the interior band (CERT1's CP-C3,
+/// [`ModuleShape::is_fit_out`]) and street furniture at
+/// [`STREET_FURNITURE_LOD_M`]. The projectors' ONE door onto both bands,
+/// asked once per batch.
+pub fn mesh_band_m(guid: Uuid, interior_m: f64) -> Option<f64> {
+    if guid == module_mesh_guid(ModuleShape::Street) {
+        return Some(STREET_FURNITURE_LOD_M);
+    }
+    is_fit_out_mesh(guid).then_some(interior_m)
 }
 
 /// Which entry of an archetype's surface set a [`ModuleShape`] takes (wave
@@ -368,7 +395,7 @@ impl ModuleShape {
     /// end, and the seven venue families (wave VEN1a) and the institutions' one
     /// (wave EMS1) are appended for that reason rather than filed beside their
     /// nearest relatives.
-    pub const ALL: [ModuleShape; 22] = [
+    pub const ALL: [ModuleShape; 23] = [
         ModuleShape::Panel,
         ModuleShape::Glazing,
         ModuleShape::Column,
@@ -391,6 +418,7 @@ impl ModuleShape {
         ModuleShape::Grille,
         ModuleShape::Wardrobe,
         ModuleShape::Fitting,
+        ModuleShape::Street,
     ];
 
     /// The stable name the GUID is derived from. **Never change one of these
@@ -420,6 +448,7 @@ impl ModuleShape {
             ModuleShape::Grille => "grille",
             ModuleShape::Wardrobe => "wardrobe",
             ModuleShape::Fitting => "fitting",
+            ModuleShape::Street => "street",
         }
     }
 
@@ -481,7 +510,9 @@ impl ModuleShape {
             // PAR1a: a fitting fixed to the building is fabric — a lit room is
             // seen from the street, and its lamp must not vanish at the fit-out
             // band while its light still lights the room.
-            | ModuleShape::Fitting => false,
+            | ModuleShape::Fitting
+            // PAR1b: street furniture has its OWN band (`mesh_band_m`).
+            | ModuleShape::Street => false,
             ModuleShape::Legged
             | ModuleShape::Carcass
             | ModuleShape::Soft
@@ -664,6 +695,10 @@ impl ModuleShape {
                 tint: Some([0.62, 0.61, 0.58, 1.0]),
                 ..PcgSurface::DEFAULT
             },
+            // **Galvanised / painted steel and timber** (wave PAR1b): the
+            // furniture derivation states every part's own tint and the lamp
+            // head's emission; the family answers the default surface.
+            ModuleShape::Street => PcgSurface::DEFAULT,
         }
     }
 
@@ -878,6 +913,11 @@ impl ModuleShape {
             ModuleShape::Fitting => {
                 m.push_box([0.0, 0.4, 0.0], [0.4, 0.1, 0.4]);
                 m.push_box([0.0, -0.1, 0.0], [0.5, 0.4, 0.5]);
+            }
+            // One octagonal prism filling the unit box along `Y`: a shaft, a
+            // cable segment, a luminaire, a bin are all this at their own scale.
+            ModuleShape::Street => {
+                m.push_prism_y(0.5, -0.5, 0.5);
             }
         }
         m

@@ -816,7 +816,9 @@ fn fixtures_in_their_buildings(sim: &mut RuntimeSim) -> (usize, Vec<String>, Vec
     let (mut checked, mut bad, mut buried) = (0usize, Vec::new(), Vec::new());
     for (lights, groups) in &vols {
         for l in lights {
-            if fixtures::FixtureRow::from_code(l.row).is_some_and(|r| r.is_rig()) {
+            // PAR1b: a street lamp / signal head stands in the street, not in a
+            // building — `par1b_street_gate` places it.
+            if fixtures::FixtureRow::from_code(l.row).is_some_and(|r| r.is_rig() || r.is_street()) {
                 continue;
             }
             checked += 1;
@@ -868,6 +870,11 @@ fn fixtures_in_their_buildings(sim: &mut RuntimeSim) -> (usize, Vec<String>, Vec
 /// The occupancy class a census table groups a fixture under.
 fn class_of(l: &inf_ecs::components::ScatteredLight) -> &'static str {
     use inf_ecs::components::FixtureOccupancy as O;
+    // PAR1b: the street's own lights (lamps dusk to dawn, signal heads always)
+    // are their own class, never a building's exterior.
+    if fixtures::FixtureRow::from_code(l.row).is_some_and(|r| r.is_street()) {
+        return "street";
+    }
     if l.room == u32::MAX {
         return "exterior";
     }

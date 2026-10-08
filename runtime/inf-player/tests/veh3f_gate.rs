@@ -1981,6 +1981,7 @@ fn the_kerb_lattice_steps_around_an_authored_car_on_its_slot() {
             streets: streets.clone(),
             stamp,
             derivations: 1,
+            junctions: traffic::signal_junctions(&streets),
         });
         traffic::sync_traffic(world);
     };

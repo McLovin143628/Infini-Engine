@@ -129,11 +129,17 @@ pub enum FixtureRow {
     /// fixtures' share through the opening, lit exactly when the room is. No
     /// fitting: it is the room's light leaving, not a lamp.
     OpeningSpill,
+    /// **A street lamp** (wave PAR1b): the luminaire on a lamp post at the
+    /// kerb, dusk to dawn. Placed by `crate::street`, never by a room.
+    StreetLamp,
+    /// **A traffic signal head's lit lens** (wave PAR1b): one light per head,
+    /// the colour of the aspect it shows. Placed by `crate::street`.
+    SignalHead,
 }
 
 impl FixtureRow {
     /// Every row, in declaration order.
-    pub const ALL: [FixtureRow; 22] = [
+    pub const ALL: [FixtureRow; 24] = [
         FixtureRow::Pendant,
         FixtureRow::OfficeBatten,
         FixtureRow::ShopStrip,
@@ -156,6 +162,8 @@ impl FixtureRow {
         FixtureRow::BarGlow,
         FixtureRow::VenuePendant,
         FixtureRow::OpeningSpill,
+        FixtureRow::StreetLamp,
+        FixtureRow::SignalHead,
     ];
 
     /// The row's wire word (its declaration index).
@@ -177,7 +185,14 @@ impl FixtureRow {
     /// Whether a light of this row hangs a fitting mesh (the rig carries its
     /// own, an opening's spill is the room's light and has none).
     pub fn has_fitting(self) -> bool {
-        !self.is_rig() && self != FixtureRow::OpeningSpill
+        !self.is_rig() && self != FixtureRow::OpeningSpill && !self.is_street()
+    }
+
+    /// Whether this row stands in the STREET (wave PAR1b) rather than on or in
+    /// a building: its fitting is the furniture's own luminaire / head, and no
+    /// room or building census counts it.
+    pub fn is_street(self) -> bool {
+        matches!(self, FixtureRow::StreetLamp | FixtureRow::SignalHead)
     }
 
     /// Whether this row hangs on the OUTSIDE of a building.
@@ -216,6 +231,8 @@ impl FixtureRow {
             FixtureRow::BarGlow => "bar glow",
             FixtureRow::VenuePendant => "venue pendant",
             FixtureRow::OpeningSpill => "opening spill",
+            FixtureRow::StreetLamp => "street lamp",
+            FixtureRow::SignalHead => "signal head",
         }
     }
 }
@@ -579,6 +596,38 @@ pub fn fixture(row: FixtureRow) -> FixtureDef {
             3000,
             300.0,
             Some((SPILL_INNER_DEG, SPILL_OUTER_DEG)),
+            0.0,
+            false,
+        ),
+        // **The street lamp** (wave PAR1b): a 4000 K LED cobra head, 8 000 lm
+        // (a 9 m residential / collector luminaire), a wide asymmetric throw
+        // modelled as a 75-degree spot straight down. No shadow ask (PAR1a's
+        // ruling: the budget is PAR0's eight). The visible luminaire is
+        // `crate::street`'s own part, so `half` is the head it hangs.
+        R::StreetLamp => def(
+            row,
+            S::Street,
+            [0.34, 0.07, 0.17],
+            M::Ceiling,
+            0.0,
+            4000,
+            8000.0,
+            Some((50.0, 75.0)),
+            0.0,
+            false,
+        ),
+        // **The signal head's lit lens** (wave PAR1b): a 300 mm LED lens is
+        // ~350 lm in a narrow beam down the approach; the colour is the
+        // aspect's (`crate::street::aspect_rgb`), not a kelvin row.
+        R::SignalHead => def(
+            row,
+            S::Street,
+            [0.17, 0.5, 0.15],
+            M::Wall,
+            0.0,
+            4000,
+            350.0,
+            Some((10.0, 24.0)),
             0.0,
             false,
         ),

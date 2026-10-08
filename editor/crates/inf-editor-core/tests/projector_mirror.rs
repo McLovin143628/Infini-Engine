@@ -3536,3 +3536,115 @@ fn the_light_projection_and_its_clock_are_one_body_in_both_projectors() {
         "the powered_clock fence no longer resolves the schedules through the fixture door"
     );
 }
+
+/// **THE STREET IS FURNISHED BY ONE BODY IN BOTH HOSTS** (wave PAR1b).
+///
+/// Three claims, each separately falsifiable:
+///
+/// 1. the `furnish_streets` fence — the inputs read, the derivation called, a
+///    piece handed to the block whose frontage it stands in front of, the
+///    population mapping and the write-back — is character-identical between
+///    the shipped player's `level.rs` and the editor's `commands::pcg`, and it
+///    names each of its four doors (an equality pin cannot see a door deleted
+///    from BOTH copies);
+/// 2. the signal head is resolved by the SAME phase table the traffic stops
+///    by (`inf_ecs::traffic::aspect_at`) inside the light fence of both
+///    projectors, and its lenses are drawn by one `push_signal_lenses` body;
+/// 3. street furniture is banded by `mesh_band_m` inside the scatter fold,
+///    so a post 400 m away is nothing in both hosts.
+///
+/// Mutation-verified while written: dropping `owner_of` from either copy fails
+/// (1); replacing `aspect_at(` with a constant aspect in either fence fails (2).
+#[test]
+fn the_street_is_furnished_and_signalled_by_one_body_in_both_hosts() {
+    const EDITOR_PCG: &str = "editor/studio/src-tauri/src/commands/pcg.rs";
+    const PLAYER_LEVEL: &str = "runtime/inf-player/src/level.rs";
+    let editor = fenced(&read(EDITOR_PCG), "furnish_streets", "the editor's pcg");
+    let player = fenced(&read(PLAYER_LEVEL), "furnish_streets", "the player's level");
+    assert!(
+        editor.len() > 600,
+        "the furnish_streets fence is {} chars",
+        editor.len()
+    );
+    assert_eq!(
+        editor, player,
+        "the street furniture derivation has drifted between the editor and the shipped player"
+    );
+    for door in [
+        "inf_ecs::furniture::furnish_inputs(world)",
+        "inf_pcg::street::furnish(",
+        "inputs.owner_of(piece.foot)",
+        "population_of(o)",
+        "inf_ecs::furniture::apply_furniture(world,key,per)",
+    ] {
+        assert!(player.contains(door), "the furnish fence lost `{door}`");
+    }
+    // Both hosts actually CALL it where blocks arrive or leave.
+    for (label, path, call) in [
+        ("player level", PLAYER_LEVEL, "furnish_streets(world);"),
+        (
+            "player cell stream",
+            "runtime/inf-player/src/cell_stream.rs",
+            "crate::level::furnish_streets(world);",
+        ),
+        (
+            "editor stream tick",
+            "editor/studio/src-tauri/src/commands/pcg_stream.rs",
+            "super::pcg::furnish_streets(doc.world_mut());",
+        ),
+        (
+            "editor evaluate",
+            EDITOR_PCG,
+            "furnish_streets(doc.world_mut());",
+        ),
+    ] {
+        let src = support::strip_comments_and_strings(&read(path).replace("\r\n", "\n"));
+        assert!(
+            src.contains(call),
+            "the {label} never furnishes its streets"
+        );
+    }
+    // (2) the signal head, in the shared light fence.
+    let rig = fenced(&read(PLAYER), "venue_rig_lights", "the shipped player");
+    for needle in [
+        "inf_ecs::traffic::aspect_at(f64::from(l.seed),l.phase==0,signal_t_s)",
+        "signal_lenses.push((l.at,l.dir,aspect));",
+        "inf_pcg::street::aspect_rgb(aspect.as_u8())",
+    ] {
+        assert!(rig.contains(needle), "the light fence lost `{needle}`");
+    }
+    let clock = fenced(&read(PLAYER), "fixture_clock", "the shipped player");
+    assert!(
+        clock.contains("letsignal_t_s=inf_ecs::traffic::signal_clock_of(world);"),
+        "the signal clock is not resolved inside the fixture clock fence"
+    );
+    assert_eq!(
+        extract_fn(&read(VIEWPORT), "push_signal_lenses"),
+        extract_fn(&read(PLAYER), "push_signal_lenses"),
+        "`push_signal_lenses` has drifted between the two projectors"
+    );
+    for (label, path, call) in [
+        (
+            "editor viewport",
+            VIEWPORT,
+            "push_signal_lenses(&mut self.scene, &signal_lenses);",
+        ),
+        (
+            "shipped player",
+            PLAYER,
+            "push_signal_lenses(scene, &signal_lenses);",
+        ),
+    ] {
+        let src = support::strip_comments_and_strings(&read(path).replace("\r\n", "\n"));
+        assert!(
+            src.contains(call),
+            "the {label} never draws its signal lenses"
+        );
+    }
+    // (3) the street band in the scatter fold.
+    let fold = fenced(&read(PLAYER), "scatter_mesh_buckets", "the shipped player");
+    assert!(
+        fold.contains("inf_pcg::building::modules::mesh_band_m(g,inf_render::INTERIOR_LOD_M)"),
+        "the scatter fold no longer bands street furniture"
+    );
+}

@@ -473,6 +473,9 @@ fn tick(app: &AppHandle, registry: &inf_graph::NodeRegistry) {
             );
         }
         if changed {
+            // PAR1b: the blocks this tick evaluated or released moved the
+            // streets; re-derive the frontage furniture once for the tick.
+            super::pcg::furnish_streets(doc.world_mut());
             // ONE bump for the whole tick. The viewport's projection is
             // version-gated and rebuilds the entire scene, so bumping per volume
             // would pay for that rebuild once per block.

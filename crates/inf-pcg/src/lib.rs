@@ -57,6 +57,7 @@ pub mod noise;
 pub mod rules;
 pub mod sampler;
 pub mod scatter;
+pub mod street;
 pub mod volume;
 
 pub use asset::{PcgAssetPayload, PcgError};

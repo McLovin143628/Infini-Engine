@@ -63,6 +63,11 @@ pub mod cover;
 pub mod crime;
 pub mod crowd;
 pub mod deform;
+// PAR1b: street furniture — the inputs a block's frontage furniture is derived
+// from and the door it is written back through. The derivation itself is
+// `inf_pcg::street` (which owns the meshes and the light vocabulary); both hosts
+// join the two inside one fenced body.
+pub mod furniture;
 // EMS2: the dispatcher — who is sent to what, and the named responder predicate
 // the panic exemption is written in terms of. Decides only; the applying half is
 // `inf_physics::d3::dispatch`.

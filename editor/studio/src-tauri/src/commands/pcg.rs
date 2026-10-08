@@ -408,6 +408,68 @@ fn population_of(out: inf_pcg::VolumeOutput) -> VolumePopulation {
     // MIRROR-END population_of
 }
 
+/// **Furnish the level's streets** (wave PAR1b) — derive every lamp post,
+/// signal, pole, cable and kerbside piece from the resident blocks' streets
+/// (`inf_ecs::furniture::furnish_inputs`) through `inf_pcg::street::furnish`,
+/// and append each piece to the block whose frontage it stands in front of
+/// (`inf_ecs::furniture::apply_furniture`). Answers how many blocks' populations
+/// changed.
+///
+/// Called by the stream tick after it evaluates or releases blocks, and by the
+/// Evaluate command — never inside `evaluate_volume_into`, whose population the
+/// EDIT1 pins digest.
+///
+/// MIRROR: identical in `inf_player::level` between the `furnish_streets`
+/// fences, pinned by `inf-editor-core`'s `tests/projector_mirror.rs`.
+pub(super) fn furnish_streets(world: &mut inf_ecs::EcsWorld) -> usize {
+    // MIRROR-BEGIN furnish_streets
+    let (key, per) = {
+        let Some(inputs) = inf_ecs::furniture::furnish_inputs(world) else {
+            return 0;
+        };
+        let streets: Vec<inf_pcg::street::StreetLine> = inputs
+            .streets
+            .iter()
+            .map(|s| inf_pcg::street::StreetLine {
+                a: s.a,
+                b: s.b,
+                gap_m: s.gap_m,
+            })
+            .collect();
+        let sites: Vec<inf_pcg::street::SignalSite> = inputs
+            .junctions
+            .iter()
+            .map(|j| inf_pcg::street::SignalSite {
+                centre: j.centre,
+                gap_x: j.gap_x,
+                gap_z: j.gap_z,
+                offset_s: j.offset_s as u32,
+            })
+            .collect();
+        let ground = inf_pcg::FnHeight::new(|x, z| inputs.ground_at(x, z));
+        let furnished = inf_pcg::street::furnish(&streets, &sites, &inputs.doors, &ground);
+        let mut outs: std::collections::BTreeMap<uuid::Uuid, inf_pcg::VolumeOutput> =
+            std::collections::BTreeMap::new();
+        for piece in furnished.pieces {
+            let Some(owner) = inputs.owner_of(piece.foot) else {
+                continue;
+            };
+            let o = outs.entry(owner).or_default();
+            o.instances.extend(piece.instances);
+            o.colliders.extend(piece.colliders);
+            o.lights.extend(piece.lights);
+        }
+        let mut per = std::collections::BTreeMap::new();
+        for (g, o) in outs {
+            let (inst, solid, _, _, _, _, lights, _) = population_of(o);
+            per.insert(g, (inst, solid, lights));
+        }
+        (inputs.key, per)
+    };
+    inf_ecs::furniture::apply_furniture(world, key, per)
+    // MIRROR-END furnish_streets
+}
+
 /// The editor's [`MaskSource`]: resolves a `mask.image` node's texture GUID to
 /// the live project's `.inf_tex` pixels.
 ///
@@ -1158,6 +1220,8 @@ pub async fn pcg_evaluate(
                 .ok_or("select an entity to scatter into (or add a PCG Volume)")?,
         };
         let placed = evaluate_volume_into(&mut doc, guid, &lowered)?;
+        // PAR1b: the block's frontage furniture, beside its population.
+        furnish_streets(doc.world_mut());
         doc.bump_version_for_runtime();
         Ok::<(Uuid, u32), String>((guid, placed))
     })

@@ -777,6 +777,9 @@ impl CellStreaming {
             .copied()
             .filter(|c| !holding.contains(c))
             .collect();
+        // PAR1b: a block leaving changes the streets the frontage furniture of
+        // the blocks that stay was derived against.
+        let blocks_left = !leaving.is_empty();
         // The re-homes this reconcile performed, applied after the loop so the
         // walk over `leaving` does not mutate the map it is reading.
         let mut rehomed: Vec<(CellCoord, Uuid)> = Vec::new();
@@ -952,6 +955,12 @@ impl CellStreaming {
                     "inf-player: evaluated {before} streamed PcgVolume(s) on activation"
                 );
             }
+        }
+        // 6c. PAR1b: the streets moved when a block LEFT (an arrival already
+        //     re-furnished inside `evaluate_pcg_volumes_in`). Only on a step
+        //     that deactivated something, so a settled step pays nothing.
+        if blocks_left && !self.pcg.is_empty() {
+            crate::level::furnish_streets(world);
         }
         self.refresh_stats(&activate);
         // 7. Cross-cell reference health (P16.6). A read-only scan of sim state

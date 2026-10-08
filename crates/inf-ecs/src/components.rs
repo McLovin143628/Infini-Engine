@@ -4587,6 +4587,39 @@ pub struct PcgVolume {
     #[serde(skip)]
     #[reflect(ignore)]
     pub emitters: Vec<AudioEmitterSlot>,
+    /// **The street furniture this block's frontage carries** (wave PAR1b) —
+    /// how many of the TRAILING entries of [`evaluated`](Self::evaluated),
+    /// [`structures`](Self::structures) and [`lights`](Self::lights) are the
+    /// lamp posts, signals, poles, cables and kerbside pieces standing on the
+    /// pavement in front of this block, and the street set they were derived
+    /// against.
+    ///
+    /// Derived from the level's own streets at load in both hosts
+    /// ([`set_furniture`](Self::set_furniture)), so it reaches no bytes and
+    /// moves no schema — `#[serde(skip)]` + `#[reflect(ignore)]` on the terms
+    /// every field above is. Appended AFTER the building groups, so every
+    /// [`StructureGroup`] range still names the lists it was derived from and
+    /// the physics bridge's single-cursor walk admits each piece as an
+    /// ungrouped solid.
+    #[serde(skip)]
+    #[reflect(ignore)]
+    pub furniture: FurnitureSpan,
+}
+
+/// **The furniture tail of a volume's population** (wave PAR1b) — see
+/// [`PcgVolume::furniture`]. Counts, not ranges: the tail always ends at the
+/// end of each list.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FurnitureSpan {
+    /// The street-set fold the tail was derived against; `0` is "never
+    /// furnished", which no derivation produces.
+    pub key: u64,
+    /// Trailing instances of [`PcgVolume::evaluated`].
+    pub instances: usize,
+    /// Trailing solids of [`PcgVolume::structures`].
+    pub solids: usize,
+    /// Trailing lights of [`PcgVolume::lights`].
+    pub lights: usize,
 }
 
 /// **One place one person can be** (NPC1d): a dependency-light mirror of
@@ -4798,6 +4831,7 @@ impl Default for PcgVolume {
             residents: Vec::new(),
             interior_nav: inf_nav::NavGraph::new(),
             emitters: Vec::new(),
+            furniture: FurnitureSpan::default(),
         }
     }
 }
@@ -4905,6 +4939,56 @@ impl PcgVolume {
                 ok
             })
             .collect();
+        // A fresh population carries no furniture: the furnishing step sees
+        // `key == 0` and derives the frontage again (wave PAR1b).
+        self.furniture = FurnitureSpan::default();
+        self.structures_gen = next_structures_gen();
+    }
+
+    /// **Replace this block's street furniture** (wave PAR1b) — the trailing
+    /// instances, solids and lights [`furniture`](Self::furniture) counts are
+    /// dropped and the new ones appended, bumping the change stamp once so the
+    /// physics bridge and both projectors re-describe the block.
+    ///
+    /// Appended AFTER everything [`set_population`](Self::set_population)
+    /// wrote, so every [`StructureGroup`] keeps naming its own runs, and a
+    /// solid here is an ungrouped one (admitted only `Near`, box by box).
+    ///
+    /// A call whose three lists equal the tail already there changes nothing
+    /// and does not bump the stamp — a cell arriving across the island must not
+    /// make every resident block re-pack its scatter for furniture that did not
+    /// move.
+    pub fn set_furniture(
+        &mut self,
+        key: u64,
+        instances: Vec<ScatteredInstance>,
+        solids: Vec<ScatteredSolid>,
+        lights: Vec<ScatteredLight>,
+    ) {
+        let f = self.furniture;
+        let ib = self.evaluated.len().saturating_sub(f.instances);
+        let sb = self.structures.len().saturating_sub(f.solids);
+        let lb = self.lights.len().saturating_sub(f.lights);
+        if self.evaluated[ib..] == instances[..]
+            && self.structures[sb..] == solids[..]
+            && self.lights[lb..] == lights[..]
+        {
+            self.furniture.key = key;
+            return;
+        }
+        self.evaluated.truncate(ib);
+        self.structures.truncate(sb);
+        self.lights.truncate(lb);
+        self.furniture = FurnitureSpan {
+            key,
+            instances: instances.len(),
+            solids: solids.len(),
+            lights: lights.len(),
+        };
+        self.evaluated.extend(instances);
+        self.structures.extend(solids);
+        self.lights.extend(lights);
+        self.pulses = self.evaluated.iter().any(|i| i.surface.pulse_hz > 0.0);
         self.structures_gen = next_structures_gen();
     }
 }
@@ -7631,6 +7715,13 @@ mod tests {
             lights: Vec::new(),
             emitters: Vec::new(),
             pulses: false,
+            // PAR1b: the furniture tail is derived state on the same terms.
+            furniture: FurnitureSpan {
+                key: 9,
+                instances: 1,
+                solids: 0,
+                lights: 0,
+            },
             evaluated: vec![ScatteredInstance {
                 position: DVec3::new(1.0, 2.0, 3.0),
                 rotation: DQuat::IDENTITY,
@@ -7700,7 +7791,12 @@ mod tests {
         assert!(!json.contains("residents"));
         assert!(!json.contains("interior_nav"));
         assert!(!json.contains("pulses"), "the pulse flag is derived too");
+        assert!(
+            !json.contains("furniture"),
+            "the street furniture tail is derived (PAR1b)"
+        );
         let back: PcgVolume = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.furniture, FurnitureSpan::default());
         // … and decode empty, while the persisted fields round-trip.
         assert!(back.evaluated.is_empty());
         assert!(back.structures.is_empty());

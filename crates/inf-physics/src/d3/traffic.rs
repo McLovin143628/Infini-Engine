@@ -145,6 +145,12 @@ pub fn step_traffic(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64)
         None => return TrafficStats::default(),
     };
     let clock = CrowdClock::from_world(world, pop.steps as f64 * dt);
+    // ── PAR1b: the signals every steered car reads, ONCE a step, and the clock
+    //    their phase table runs on (the step count, which both hosts share).
+    let signals: Vec<inf_ecs::traffic::SignalJunction> = traffic::carriageway_of(world)
+        .map(|r| r.junctions.clone())
+        .unwrap_or_default();
+    let signal_t_s = traffic::signal_clock_s(pop.steps);
     let mut stats = TrafficStats {
         cars: pop.records.len(),
         planned_now: planned,
@@ -394,6 +400,8 @@ pub fn step_traffic(world: &mut EcsWorld, bridge: &mut PhysicsBridge3D, dt: f64)
                     let around = Around {
                         obstacles: obstacles.as_deref().unwrap_or(&[]),
                         hot: hot.as_deref().unwrap_or(&[]),
+                        signals: &signals,
+                        signal_t_s,
                     };
                     steer_car(world, bridge, guid, rec, clock, leg, around);
                 } else {
@@ -808,6 +816,10 @@ pub(crate) struct Around<'a> {
     pub obstacles: &'a [Obstacle],
     /// Every unit running with its lights and siren on.
     pub hot: &'a [(Uuid, DVec3)],
+    /// **The signalised junctions** (wave PAR1b) — `TrafficRes::junctions`.
+    pub signals: &'a [inf_ecs::traffic::SignalJunction],
+    /// The signal clock, seconds (`traffic::signal_clock_s` of the step count).
+    pub signal_t_s: f64,
 }
 
 /// **What one car's driver can see** — the `DriveView` both the steering and
@@ -834,6 +846,36 @@ fn view_of<'a>(
     //    list, gathered once a step by the caller and handed down — the
     //    `obstacles` shape one system along.
     let yield_bias = inf_ecs::dispatch::yield_bias_m(at, forward, around.hot);
+    let gap = gap_ahead(
+        path,
+        s_m,
+        &Mover {
+            guid: chassis,
+            driver,
+            at,
+            forward,
+            forward_mps: linvel.dot(forward),
+            half: rec.def.half_extents,
+        },
+        around.obstacles,
+    );
+    // ── PAR1b THE SIGNAL. A red stop line is a stopped car's bumper: the
+    //    nearer of the two is the clear road this driver has, and
+    //    `drive_intent`'s own stopping-distance rule brings it to rest a
+    //    standing gap short of the line. A circuit's loop wraps and a seam is
+    //    not a junction, so a loop reads the signal only on its own run.
+    let signal = traffic::stop_line_gap(
+        around.signals,
+        path,
+        s_m,
+        rec.def.half_extents.z.abs(),
+        linvel.dot(forward),
+        around.signal_t_s,
+    );
+    let gap = match (gap, signal) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
     Some(DriveView {
         at,
         forward,
@@ -841,19 +883,7 @@ fn view_of<'a>(
         path,
         s_m,
         speed_limit_mps: traffic::street_speed_mps(),
-        gap_m: gap_ahead(
-            path,
-            s_m,
-            &Mover {
-                guid: chassis,
-                driver,
-                at,
-                forward,
-                forward_mps: linvel.dot(forward),
-                half: rec.def.half_extents,
-            },
-            around.obstacles,
-        ),
+        gap_m: gap,
         lateral_bias_m: yield_bias,
         loops: rec.circuit.is_some(),
     })
@@ -878,9 +908,14 @@ pub fn probe_intent(
     let leg = rec.leg_at(chassis, clock);
     let obstacles = obstacles_of(world);
     let hot = super::dispatch::running_hot(world);
+    let signals: Vec<inf_ecs::traffic::SignalJunction> = traffic::carriageway_of(world)
+        .map(|r| r.junctions.clone())
+        .unwrap_or_default();
     let around = Around {
         obstacles: &obstacles,
         hot: &hot,
+        signals: &signals,
+        signal_t_s: traffic::signal_clock_s(pop.steps),
     };
     let view = view_of(bridge, chassis, rec, clock, leg, around)?;
     Some(traffic::drive_intent(&view))

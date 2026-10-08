@@ -1771,6 +1771,9 @@ impl EngineHost {
         // Wave PAR0: the LOCAL hour every scheduled fixture is lit against
         // (`inf_ecs::sky::fixture_level`), resolved once beside the clock.
         let fixture_hour = inf_ecs::sky::local_hour(world);
+        // Wave PAR1b: the clock the signal phase table runs on — the traffic's own
+        // step count, so a head shows what the car at its line is obeying.
+        let signal_t_s = inf_ecs::traffic::signal_clock_of(world);
         // MIRROR-END fixture_clock
         let fixture_sun_y = self.scene.sun.direction.y;
         // PAR1a: the editor re-projects on a document change, not on a camera
@@ -1866,6 +1869,9 @@ impl EngineHost {
         // skeletons, clips) — the input to the end-of-projection `retain_only`
         // audit (P16.4b's lesson in mesh form).
         let mut live_render_assets: BTreeSet<Uuid> = BTreeSet::new();
+        // PAR1b: every signal head's lit aspect, gathered in the light fence and
+        // drawn as three lenses after the walk (`push_signal_lenses`).
+        let mut signal_lenses: Vec<(DVec3, DVec3, inf_ecs::traffic::Aspect)> = Vec::new();
         for &guid in doc.order() {
             let Some(entity) = world.entity_of(guid) else {
                 continue;
@@ -2181,8 +2187,24 @@ impl EngineHost {
                     if level <= 0.0 {
                         continue;
                     }
-                    let colour =
-                        inf_render::swept_colour(l.sweep, l.cycle_hz, l.phase, l.phases, clock_s);
+                    // **PAR1b: a signal head shows its ASPECT** — the phase table
+                    // the traffic stops by (`inf_ecs::traffic::aspect_at` over the
+                    // controller offset its `seed` carries and the axis its `phase`
+                    // names) — and its three lenses are drawn after the walk.
+                    let signal = l.phases == 2
+                        && inf_pcg::building::fixtures::FixtureRow::from_code(l.row)
+                            == Some(inf_pcg::building::fixtures::FixtureRow::SignalHead);
+                    let colour = if signal {
+                        let aspect = inf_ecs::traffic::aspect_at(
+                            f64::from(l.seed),
+                            l.phase == 0,
+                            signal_t_s,
+                        );
+                        signal_lenses.push((l.at, l.dir, aspect));
+                        inf_pcg::street::aspect_rgb(aspect.as_u8())
+                    } else {
+                        inf_render::swept_colour(l.sweep, l.cycle_hz, l.phase, l.phases, clock_s)
+                    };
                     // A cone that covers the sphere IS a point light, and the rig
                     // says so with a 180-degree outer angle rather than a second
                     // type. Resolved here, once, because `RenderLight` has a kind.
@@ -3061,6 +3083,8 @@ impl EngineHost {
             self.debris_cache.retain_live(&live);
         }
 
+        push_signal_lenses(&mut self.scene, &signal_lenses);
+
         // P21.2 SEAM. Fill every projected volume's per-vertex seam terms from
         // the heightfields projected beside them, and arm the blend at
         // [`DEFAULT_SEAM_BAND_M`]. `inf_render::apply_seam` is the ONE
@@ -3296,6 +3320,68 @@ fn draw_volume_outline(
     }
 }
 
+/// **A signal head's three lenses** (wave PAR1b) — red over amber over green
+/// on the housing's face, the lit one emitting the aspect's own colour and the
+/// other two dark glass. Each entry is the head light's position (just proud of
+/// the face), its beam direction (whose plan part is the way the head faces)
+/// and the aspect it shows.
+///
+/// Drawn as plain instances because a lens changes with the phase, and a
+/// scatter batch's emission is part of the scatter memo's key — a lens in the
+/// block's batch would re-pack the block every phase change.
+///
+/// MIRROR: identical in the other host, pinned by `projector_mirror`.
+fn push_signal_lenses(
+    scene: &mut RenderScene,
+    lenses: &[(DVec3, DVec3, inf_ecs::traffic::Aspect)],
+) {
+    for (at, dir, aspect) in lenses {
+        let f = glam::DVec3::new(dir.x, 0.0, dir.z).normalize_or(glam::DVec3::Z);
+        let face = *at - f * 0.08;
+        let lit = inf_pcg::street::aspect_rgb(aspect.as_u8());
+        for (k, which) in [
+            (1.0f64, inf_ecs::traffic::Aspect::Red),
+            (0.0, inf_ecs::traffic::Aspect::Amber),
+            (-1.0, inf_ecs::traffic::Aspect::Green),
+        ] {
+            let on = which == *aspect;
+            let hue = inf_pcg::street::aspect_rgb(which.as_u8());
+            let scale = if f.x.abs() > 0.5 {
+                glam::Vec3::new(0.05, 0.22, 0.22)
+            } else {
+                glam::Vec3::new(0.22, 0.22, 0.05)
+            };
+            scene.instances.push(inf_render::MeshInstance {
+                vt: inf_render::VtTextureSet::NONE,
+                translation: face + glam::DVec3::Y * (0.33 * k),
+                rotation: glam::Quat::IDENTITY,
+                scale,
+                color: [hue[0] * 0.12, hue[1] * 0.12, hue[2] * 0.12, 1.0],
+                metallic: 0.0,
+                roughness: 0.15,
+                emissive: if on {
+                    [
+                        lit[0] * SIGNAL_LENS_EMISSIVE,
+                        lit[1] * SIGNAL_LENS_EMISSIVE,
+                        lit[2] * SIGNAL_LENS_EMISSIVE,
+                    ]
+                } else {
+                    [0.0; 3]
+                },
+                id: 0,
+                mesh: inf_render::PrimMesh::Sphere,
+                blend: 0,
+                cutoff: 0.5,
+            });
+        }
+    }
+}
+
+/// A lit lens's emission (wave PAR1b): bright at noon's exposure (x1) and a
+/// clipped, blooming dot at the night eye — a small highlight the 3 % guard
+/// lets clip.
+const SIGNAL_LENS_EMISSIVE: f32 = 1.6;
+
 /// A distinct placeholder colour per PCG kind index, so a multi-kind scatter
 /// reads as varied content even before real meshes upload (P10.5b). Cycles
 /// through a small foliage/rock palette. Shared by the volume path and P19.3's
@@ -3467,14 +3553,19 @@ fn push_scatter(
         // `draw_distance == 0.0` is "no limit", so it is a MATCH and not a
         // `min`: `0.0.min(64.0)` is zero, which would cull the fit-out of every
         // volume that never set a distance.
-        let bucket_draw = match key.map(uuid::Uuid::from_u128) {
-            Some(g) if inf_pcg::building::modules::is_fit_out_mesh(g) => {
-                match draw_distance > 0.0 {
-                    true => draw_distance.min(inf_render::INTERIOR_LOD_M),
-                    false => inf_render::INTERIOR_LOD_M,
-                }
-            }
-            _ => draw_distance,
+        //
+        // **…and the street band** (wave PAR1b): street furniture draws to
+        // `inf_pcg::building::modules::STREET_FURNITURE_LOD_M` whatever the
+        // volume's own distance — a lamp post 400 m away is nothing.
+        let band = key
+            .map(uuid::Uuid::from_u128)
+            .and_then(|g| inf_pcg::building::modules::mesh_band_m(g, inf_render::INTERIOR_LOD_M));
+        let bucket_draw = match band {
+            Some(b) => match draw_distance > 0.0 {
+                true => draw_distance.min(b),
+                false => b,
+            },
+            None => draw_distance,
         };
         let data = ScatterData::build_with_geometry(
             PrimMesh::Cube,
