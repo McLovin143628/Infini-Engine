@@ -3421,14 +3421,18 @@ fn structure_snaps_of(
         {
             let s = solid_snap(i, solid);
             // **What it is** (wave COV1, carried 162): a façade's box has no
-            // entity, so this row is the only thing that can name it.
+            // entity, so this row is the only thing that can name it. The
+            // street-furniture tail (PAR1b) is named as furniture, a post or a
+            // broad piece by its footprint (the PAR1b.2 audit: a lamp column
+            // labelled `Structure` was taken for a façade by the cover search).
+            let family = if i >= vol.structures.len().saturating_sub(vol.furniture.solids) {
+                super::label::ColliderFamily::of_furniture(solid.half_extents)
+            } else {
+                super::label::ColliderFamily::Structure
+            };
             labels.insert(
                 s.guid,
-                super::label::ColliderLabel::part(
-                    super::label::ColliderFamily::Structure,
-                    guid,
-                    i as u32,
-                ),
+                super::label::ColliderLabel::part(family, guid, i as u32),
             );
             admitted.push(s.guid);
             out.push(s);

@@ -68,9 +68,41 @@ pub enum ColliderFamily {
     Fracture,
     /// A door leaf.
     DoorLeaf,
+    /// One solid of a **slender** piece of street furniture (the PAR1b.2
+    /// audit): a lamp column, a signal mast, a utility pole, a sign post, a
+    /// hydrant, a parking meter, a mailbox — a piece of a volume's furniture
+    /// tail whose plan footprint is no wider than [`STREET_POST_MAX_HALF_M`]
+    /// either way. Appended so every earlier variant keeps its order.
+    StreetPost,
+    /// One solid of a **broad** piece of street furniture (the PAR1b.2 audit):
+    /// a bench, a bin, a bus shelter's panel.
+    StreetFurniture,
 }
 
+/// **The widest half-footprint a street post has**, metres (the PAR1b.2
+/// audit) — a furniture solid narrower than this both ways is a POST and is
+/// never cover: a 0.26 m lamp column or a 0.30 m hydrant hides no body, and
+/// on the island the cover search took a lamp column at the kerb for a
+/// "façade" and a shot from behind it hit the hero. The broadest post is a
+/// mailbox drum (0.26 m); the narrowest broad piece is a shelter's end panel
+/// (0.60 m deep).
+pub const STREET_POST_MAX_HALF_M: f64 = 0.3;
+
 impl ColliderFamily {
+    /// The family of a solid of a volume's **street-furniture tail**, by its
+    /// plan half-extents: [`ColliderFamily::StreetPost`] when both are under
+    /// [`STREET_POST_MAX_HALF_M`], [`ColliderFamily::StreetFurniture`]
+    /// otherwise.
+    pub fn of_furniture(half_extents: glam::DVec3) -> Self {
+        if half_extents.x.abs() < STREET_POST_MAX_HALF_M
+            && half_extents.z.abs() < STREET_POST_MAX_HALF_M
+        {
+            ColliderFamily::StreetPost
+        } else {
+            ColliderFamily::StreetFurniture
+        }
+    }
+
     /// The word a failure message uses.
     pub fn noun(self) -> &'static str {
         match self {
@@ -82,6 +114,8 @@ impl ColliderFamily {
             ColliderFamily::Kerb => "kerb slab",
             ColliderFamily::Fracture => "fracture chunk",
             ColliderFamily::DoorLeaf => "door leaf",
+            ColliderFamily::StreetPost => "street post",
+            ColliderFamily::StreetFurniture => "street furniture",
         }
     }
 
@@ -94,11 +128,15 @@ impl ColliderFamily {
     /// 12 cm tall and the class floor refuses it on height anyway — this says
     /// so by NAME so the refusal message reads "a kerb is not cover" rather
     /// than "0.12 m is below 0.55 m"), and a door leaf (a thing that swings
-    /// open is not a thing to put your back against).
+    /// open is not a thing to put your back against). The PAR1b.2 audit added
+    /// a fourth: a street post (see [`ColliderFamily::StreetPost`]).
     pub fn is_coverable(self) -> bool {
         !matches!(
             self,
-            ColliderFamily::Terrain | ColliderFamily::Kerb | ColliderFamily::DoorLeaf
+            ColliderFamily::Terrain
+                | ColliderFamily::Kerb
+                | ColliderFamily::DoorLeaf
+                | ColliderFamily::StreetPost
         )
     }
 }
@@ -174,6 +212,7 @@ mod tests {
             ColliderFamily::Terrain,
             ColliderFamily::Kerb,
             ColliderFamily::DoorLeaf,
+            ColliderFamily::StreetPost,
         ] {
             assert!(!f.is_coverable(), "{f:?}");
         }
@@ -183,8 +222,30 @@ mod tests {
             ColliderFamily::StructureShell,
             ColliderFamily::Voxel,
             ColliderFamily::Fracture,
+            ColliderFamily::StreetFurniture,
         ] {
             assert!(f.is_coverable(), "{f:?}");
+        }
+    }
+
+    /// **A post is a post by its footprint** (the PAR1b.2 audit): a lamp
+    /// column (0.13), a hydrant (0.15), a mailbox (0.26) are posts; a
+    /// shelter's end panel (0.04 x 0.60) and its back panel (1.60 x 0.04) are
+    /// not.
+    #[test]
+    fn a_furniture_solid_is_a_post_by_its_footprint() {
+        use glam::DVec3;
+        for h in [0.13, 0.15, 0.26] {
+            assert_eq!(
+                ColliderFamily::of_furniture(DVec3::new(h, 5.0, h)),
+                ColliderFamily::StreetPost
+            );
+        }
+        for h in [DVec3::new(0.04, 1.2, 0.6), DVec3::new(1.6, 1.2, 0.04)] {
+            assert_eq!(
+                ColliderFamily::of_furniture(h),
+                ColliderFamily::StreetFurniture
+            );
         }
     }
 
