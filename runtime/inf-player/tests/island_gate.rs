@@ -1285,21 +1285,26 @@ fn pie_equals_shipping_with_a_crowd_across_tier_transitions() {
     }
 }
 
-/// **A `ScenePayload` CARRIES NO PARTITION**, so a PIE preview of the island
-/// runs it whole.
+/// **A `ScenePayload` CARRIES NO PARTITION — AND THE PIE HOST STREAMS THE ONE
+/// IT DERIVES** (re-stated by the PAR1b.2 audit).
 ///
-/// This is a pre-existing engine property, not a defect this wave introduced,
-/// and it is measured here rather than described: the wire has `level_bytes`,
-/// classes, pcgs, skeletons, clips, machines, biome sets and voxels — and no
-/// `.inf_part`, because the partition is **derived at cook** and a payload is
-/// what the editor has *before* a cook.
+/// The wire has `level_bytes`, classes, pcgs, skeletons, clips, machines,
+/// biome sets and voxels — and no `.inf_part`. The arm used to draw the
+/// consequence "so a `--pie` preview builds every entity at once" (fifteen
+/// against six on the fixture, once) and assert that a payload preview holds
+/// MORE entities than the loose reading's resident set. That stopped being
+/// true at some earlier wave: the PIE host now derives a partition from the
+/// level's own entities and streams it, so both hosts hold the same cells and
+/// the same level entities at step 0 — and the old count kept passing only
+/// because, under bevy_ecs 0.19, a resource is an entity and the payload host
+/// inserts one resource the loose reading does not (measured by the PAR1b.2
+/// audit: 66 / 65 world entities, 63 / 63 level entities, identical sets).
 ///
-/// The consequence for an author is worth stating plainly: previewing a 51 km²
-/// island with `--pie` builds every entity in it at once, where the shipped
-/// player streams them. For the *fixture* that is fifteen entities against six;
-/// for the island it is every lake, river and site at once. It is why
-/// `pie_equals_shipping_on_an_island_drive` compares the loose document against
-/// the pack — which is the pair P16.5's own gate compares, for this reason.
+/// What it asserts now, and can fail on: the PIE payload host streams (more
+/// cells available than resident, entities spawned by its cells), the same
+/// cells as the loose reading, and the same level entities. Mutation: a PIE
+/// host that built every cell at once reds the first; a host that dropped a
+/// cell's entities reds the last.
 #[test]
 fn a_scene_payload_carries_no_partition() {
     let tmp = tempfile::tempdir().expect("a temp dir");
@@ -1311,17 +1316,62 @@ fn a_scene_payload_carries_no_partition() {
     let slug = inf_island::slug(&recipe.name);
     let streamed = loose_sim(&proj.join("Content"), &slug);
 
-    let count = |sim: &RuntimeSim| sim.world().world().iter_entities().count();
-    let (whole, part) = (count(&payload_sim), count(&streamed));
+    // **Level entities, not `World` entities** (the PAR1b.2 audit): under
+    // bevy_ecs 0.19 every RESOURCE lives on an entity of its own, so
+    // `iter_entities().count()` counts resources too. This arm passed for
+    // waves on ONE resource the payload host inserts and the loose reading
+    // does not (66 against 65 world entities, the same 63 level entities on
+    // both sides, the same four blocks resident) and went red the day PAR1b.2
+    // gave the loose reading a resource of its own (`FurnitureFootprints`):
+    // the "partition" it reported was a resource count.
+    let level = |sim: &RuntimeSim| -> Vec<Uuid> {
+        let mut v: Vec<Uuid> = sim
+            .world()
+            .world()
+            .iter_entities()
+            .filter_map(|e| e.get::<inf_ecs::Guid>().map(|g| g.0))
+            .collect();
+        v.sort();
+        v
+    };
+    let (whole, part) = (level(&payload_sim), level(&streamed));
+    let (pc, sc) = (payload_sim.cell_streaming(), streamed.cell_streaming());
     println!(
-        "PIE PAYLOAD: {whole} entities built at once; the streamed reading has \
-         {part} resident at step 0"
+        "PIE PAYLOAD: {} level entities at step 0 ({} cell(s) available, {} resident, \
+         {} streamed entit(ies)); the loose reading has {} ({} available, {} resident, \
+         {} streamed)",
+        whole.len(),
+        pc.available().count(),
+        pc.resident().count(),
+        pc.stats().entities_resident,
+        part.len(),
+        sc.available().count(),
+        sc.resident().count(),
+        sc.stats().entities_resident,
+    );
+    // **The PIE host streams the partition it derives** — it does not build
+    // the island at once. Every claim of the older arm inverted: the payload
+    // carries no `.inf_part`, the host derives one from the level's entities
+    // and streams it exactly as the loose reading does.
+    assert!(
+        !pc.is_empty() && pc.available().count() > pc.resident().count(),
+        "the PIE payload host builds the whole level at once ({} cell(s) available, {} \
+         resident) — it no longer streams the partition it derives",
+        pc.available().count(),
+        pc.resident().count()
     );
     assert!(
-        whole > part,
-        "a payload preview ({whole}) should hold MORE than a streamed world's \
-         resident set ({part}) — if they are equal the level is not partitioned \
-         and this arm is measuring nothing"
+        pc.stats().entities_resident > 0,
+        "the PIE payload host's partition spawned nothing — the cells are empty"
+    );
+    assert_eq!(
+        pc.resident().collect::<Vec<_>>(),
+        sc.resident().collect::<Vec<_>>(),
+        "the PIE payload host and the loose reading streamed different cells"
+    );
+    assert_eq!(
+        whole, part,
+        "the PIE payload host and the loose reading hold different level entities at step 0"
     );
     // …and the level really does ask to be partitioned, or the difference above
     // is about something else.
