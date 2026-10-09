@@ -42832,3 +42832,50 @@ forward climbs the first ledge it meets.
 (awnings, billboards, the arterial gantry + arterial lamps, the walk phase, the wanted star for a
 red); doors + slope feet on the steepest 20 streets of the shipped island (0.5 d); a frame of a
 fire engine running a red with the queue parted (no in-game trigger; ~2 h with a staging door).
+
+## Wave PAR1b.2 — the audit (2026-10-08)
+
+Handed back RED (`e787da09`: 7 974 passed, 6 failed). Commits `c4f2f39e`, `40c06360`, `4dda03ef`,
+`7a96eb76` + this ledger. Report: `campaign-briefs/par1b2-audit-report.md`. Zero schema / level /
+golden / dependency moves.
+
+**The six reds, each at its cause.** (1-3) `cov1_gate` x3: the furniture solids ride a block's
+`structures` tail and were labelled `Structure`, so the cover search took a lamp column at the kerb
+for a facade (the shot from behind hit the hero) and a hydrant for a low wall — the bridge now
+labels the tail `StreetPost` (plan half under 0.3 m: never cover) / `StreetFurniture`; island
+census NotCoverable 8 -> 21. (4) `island_gate` partition: VACUOUS for waves — under bevy_ecs 0.19 a
+resource is an entity, and the arm passed on one resource the payload host inserts (66 vs 65
+world entities; the same 63 level entities; the PIE payload host itself derives and streams the
+partition, 3 cells / 1 resident / 41 entities like the loose reading); PAR1b.2's
+`FurnitureFootprints` evened it. Re-stated on level entities and cells. (5) `phase19_gate`: the
+bus shelter's back panel stood 5 cm off an Office frontage inside a ground-floor window band —
+the shelter is now a kerbside screen on the post line, open to the footway, nothing within 1.7 m
+of any frontage. (6) `veh3h` imported lap: the SUV overshot a corner (the lane driver's bend rule
+reads one second of path) and stopped dead against the southbound sign post — the obstacle of
+the VEH3h audit's carried 37.82 g impact, now 1 m nearer the kerb. `drive_intent` brakes for every
+corner inside its stopping distance (`CORNER_BRAKE_MPS2` 6.0): the imported lap is clean (1.07 g),
+the shell lap and the driving memo's LAP-FACTS re-derived (2 107 rows, 27.12 s), EMS2 responses
+unchanged (48.53 / 57.80 / 61.18 s).
+
+**Measured.** The signals' cost (cooked island, debug, ON vs OFF at the spawn crossing, an
+arterial crossing and the walk pavement): traffic phase 0.76 / 0.74, 0.54 / 0.49, 0.77 / 0.74 ms
+median — the hold is not the junction's sim time. The crowd push: 537 000 Far / Dormant samples
+on the cooked island at 08:24, 0 inside a piece with the push OFF as well as ON (nearest 0.370 m)
+— not engaged by any shipped tier, kept for the Full steer term's measured mantle. The signal
+head on a body at x8: near crosswalk +0.3, pavement +0.0, in the lane +0.1 codes — the synthetic
+scene does not reproduce the window's pink-red hero (carried). Shipped island 6 124 pieces,
+placement defects {}. The window (1080p, release, `4f342459` bins vs the audit's, alternated, five
+each, p95 min / median): 21:00 walk 34.7 / 36.4 -> 34.3 / 35.4; noon walk 33.6 / 34.5 -> 33.5 /
+34.1; 21:00 drive 35.7 / 36.0 -> 35.1 / 36.1; noon drive 36.5 / 38.1 -> 36.9 / 37.9; hitches a
+minute (median) 32.2 -> 29.2, 25.3 -> 23.4, 3.9 -> 6.9, 3.0 -> 3.0; boarded 5 / 5 every leg.
+
+**Laws.** Under bevy 0.19 `iter_entities().count()` counts resources: count what the claim names.
+A thing the cover search can stand behind must say what it is — a post labelled "structure" is a
+facade to every reader. A carried impact is a carried cause: the obstacle it names will move, and
+the stall arrives the day it does. A shelter is not furniture against the frontage on a 2.3 m
+footway: there the frontage is windows.
+
+**Carried.** The pink-red hero at the spawn crossing (in-window luminance with controls); the
+grid at world y = 0 against the ocean and the floating capsule (editor frames); the CI-island
+four-way; the two EMS defects (cruiser "home" 150-200 m off; the yielder wedged in the parked
+row); doors + slope feet on the steepest streets; the rest of clause 3; owed frames.
