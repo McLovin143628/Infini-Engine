@@ -196,8 +196,8 @@ tables after them are measurements, not rows.
 | **the arrival snap** (VEH3f.2b carried, 4.47 m) | `traffic_3d::a_car_whose_leg_closes_short_of_its_slot_is_not_snapped_onto_it` | each Full commuter's record against its chassis; the per-step XZ jump across the hand-off | **CLOSED by this wave** (the arrival hold): the jump was the whole shortfall (**112.54 m** under the arm's accelerated clock); now within the half-lane bound | ✓ |
 | the driving hand-off moves nothing | `traffic_3d::a_car_leaving_the_steered_tier_lands_where_its_body_already_was` | the body across the 64 m boundary | within the half-lane + two steps bound | ✓ |
 | **PIE == shipping on the island** | `island_gate::pie_equals_shipping_on_an_island_drive` | both hosts' `state_bytes` over 900 steps | **900** steps, **900** distinct states of **11 358** bytes, equal; **337** posed characters on both hosts | ✓ |
-| …over the whole lap | `veh3h_gate::the_lap_logs_at_sixty_hertz_and_pie_equals_shipping` | both hosts' 60 Hz rows and every step's state digest | **1 999** rows and **2 231** digests equal | ✓ |
-| …over the whole lap in an imported car | `veh3h_gate::the_imported_row_drives_the_same_lap_on_both_hosts` | the same, `obey_rocoto` (`dd_suv`) | equal (§10) — equal, not clean: one step at **37.82 g** off the line, carried (§13) | ✓ |
+| …over the whole lap | `veh3h_gate::the_lap_logs_at_sixty_hertz_and_pie_equals_shipping` | both hosts' 60 Hz rows and every step's state digest | **2 107** rows and every step digest equal (re-derived by the PAR1b.2 audit after `drive_intent`'s braking horizon; the VEH3h close read 1 999 / 2 231) | ✓ |
+| …over the whole lap in an imported car | `veh3h_gate::the_imported_row_drives_the_same_lap_on_both_hosts` | the same, `obey_rocoto` (`dd_suv`) | equal and CLEAN since the PAR1b.2 audit (§10): peak one-step deceleration **1.07 g** where it struck a sign post at **37.82 g** | ✓ |
 | **two cooks** | `veh3h_gate::the_lap_logs_at_sixty_hertz_and_pie_equals_shipping` | every file of two cooks of the CI island | byte-identical | ✓ |
 | **GPU instancing, mesh LOD** for high-poly vehicles | `veh3f2b_gate::sixty_four_shell_cars_cost_what_they_cost` | the projector's wall time and instance count; the GPU frame | 64 shells: **0.463 ms** projected (the cert: 0.461), **2 048** instances, **17 876** LOD-0 triangles a car, GPU **0.326 ms** (min of 30; the cert quoted 2.721 ms, the VEH3f.2a audit 2.274 — the GPU column does not reproduce across sessions and is printed, never asserted) — the meshlet DAG decides the tiers; there are no pack LODs for a shell and no HLOD | **PARTIAL** — vehicle LOD/HLOD is **PERF1**'s |
 | **the island's frame** at 1080p | the ignored `fps_instrument` island arm (`the_island_in_imported_traffic`, needs a local cook) | 1080p release at the Harbour City crossroads | §11 — SHIPPED p50 **69.2** / p95 **72.2 ms** (the audit's run; the cert's 68.5 / 71.0) against a 38 ms ceiling | **✗** — **PERF1** |
@@ -399,7 +399,13 @@ VEH3d's pipeline (one interact press); a three-second burnout at the line with t
 aid off; one lap on the engine's own lane driver (`traffic::drive_intent`, 22 m/s on the
 straights, its bend rule in the corners); a five-second cool-down straight.
 
-LAP-FACTS: 1999 rows at 60 Hz; the burnout took the rear tyres +4.11 C; the cool-down straight cooled them 2.34 C; boost 0.971 peak, 0.000 half a second after the lift; the front axle 49.6 % standing and 75.5 % braking; peak braking 1.82 g; the lap 25.32 s.
+LAP-FACTS: 2107 rows at 60 Hz; the burnout took the rear tyres +4.11 C; the cool-down straight cooled them 2.22 C; boost 0.971 peak, 0.000 half a second after the lift; the front axle 49.6 % standing and 84.6 % braking; peak braking 1.40 g; the lap 27.12 s.
+
+(Re-derived by the PAR1b.2 audit, 2026-10-08: `traffic::drive_intent` now brakes for a
+corner beyond its one-second look — the braking horizon at `CORNER_BRAKE_MPS2` — so every
+corner of the lap is entered slower and braked earlier and softer. The VEH3h close read
+1999 rows, 2.34 C, 75.5 %, 1.82 g, 25.32 s. The plot paragraph below is the VEH3h close's
+plot of that earlier lap; it was not regenerated.)
 
 The columns (the CSV's SHAPE is the arm's): `t, phase, x, z, s_m, speed_mps, long_g, lat_g,
 throttle, brake, rpm, gear, boost, slip_fl..rr, slip_lat_fl..rr, load_fl..rr, temp_fl..rr,
@@ -411,7 +417,8 @@ every straight (the hottest tyre peaks at **37.4 °C**), the boost spooling to
 **0.971** off the line (0.965 inside the burnout's three seconds) and to ~0.55-0.70 on every
 straight, dumping to 0 on every lift, and
 the front axle's share of the wheel loads jumping from ~49 % to **~65-76 %** in each braking
-zone. The steepest one-step deceleration of the lap is its braking (**1.82 g**) — asserted.
+zone. The steepest one-step deceleration of the lap is its braking (**1.82 g** on that
+lap; **1.40 g** on the PAR1b.2 audit's re-derivation) — asserted.
 
 **The cert's lap struck a terrace bank.** Its circuit (the settlement's largest, 609.6 m)
 read one step at **−36.75 g** on its west street, which the cert called "the fire hall's pad
@@ -425,17 +432,20 @@ new: the cert's lap read 3 161 rows / 44.68 s, +6.35 °C, 2.99 °C, boost 0.965,
 1.37 g.
 
 PIE == shipping over the whole lap: the editor's loose-level host drives the same lap and
-its **1 999** rows and **2 231** step digests of `state_bytes` are equal to the shipped
-host's, bit for bit. The same lap in the IMPORTED `obey_rocoto`
-(`veh3h_gate::the_imported_row_drives_the_same_lap_on_both_hosts`) is equal on both hosts
-too: **2 445** rows, the lap **32.75 s**, the burnout **+1.57 °C** (all four tyres share
-an all-wheel-drive launch), boost **0.953**, the front axle **47.9 % → 81.9 %** braking.
-Its CSV and plot are `AUDIT-VEH3h-FINAL\lap-imported.csv` / `.png`. **It is not a clean
-lap**: the heavier SUV runs ~13 m wide out of the second corner and meets something at
-(421.7, −287.1) — one step at **37.82 g** (`IMPORTED LAP IMPACT`, printed by the arm, NOT
-asserted; the shell lap's no-impact assertion does not cover this row), then ~2 s of
-scrabbling under 3.2 m/s before it drives on. Carried (§13; it leaves the brake at ~9.4 m/s into that corner where the coupe
-reaches ~4.5; what it strikes is not yet named).
+its **2 107** rows and every step digest of `state_bytes` are equal to the shipped host's,
+bit for bit (the VEH3h close: 1 999 rows, 2 231 digests). The same lap in the IMPORTED
+`obey_rocoto` (`veh3h_gate::the_imported_row_drives_the_same_lap_on_both_hosts`) is equal
+on both hosts too: **2 371** rows, the lap **31.52 s**, the burnout **+1.57 °C** (all four
+tyres share an all-wheel-drive launch), boost **0.945**, the front axle **47.9 % → 81.3 %**
+braking (the PAR1b.2 audit's re-derivation; the VEH3h close read 2 445 rows, 32.75 s, 0.953,
+81.9 %). **It is a clean lap since the PAR1b.2 audit**: the steepest one-step deceleration
+is **1.07 g**. Before, the heavier SUV ran ~13 m wide out of the second corner and struck
+something at (421.7, −287.1) at **37.82 g** — the PAR1b.2 audit NAMED it: the sign post of
+the southbound approach at (423.78, −290.2), on the far side of the junction the car was
+overshooting (it left the brake at ~9.4 m/s where the coupe reaches ~4.5, because the lane
+driver's bend rule saw only one second of path). PAR1b.2 moved that post 1 m toward the kerb
+and the car stopped dead against it; the fix is in the driver (`drive_intent`'s braking
+horizon), not in the post.
 
 ## §11 THE FPS ROW
 
@@ -559,7 +569,7 @@ contact sheet is `VEH3h-FINAL\reference-contact-sheet.png`. The honest sentence 
 | **the crowd pile** the cert found as the "Harbour City cruiser stall" — its COST is closed (`character_move_cost::a_pile_of_characters_is_set_aside_and_one_in_the_way_still_blocks`); the PILE remains: 204 residents on four points of one building, 80 on one quarter metre | `society::plan_day` sends every resident to the NEAREST workplace and its errand, unclaimed (the night shift and the evening are claimed; the day is not) | VEH3-carried to the society's owner (a claimed or capacity-bounded desk, and the NPC1d/VEN1 counts re-blessed) | ~0.5 d |
 | the in-band creep of the CI island's camp appliance (**1.51 m** in 15 s, ~0.11 m/s) | the generator parks it 6 m off its lane's centreline on a 7.8° grade between two buildings; it rolls 18.6° within 2 s with one wheel hanging (`island.rs`'s apron placement reads no ground by law) | VEH3-carried (the apron placement) | ~0.5 d |
 | `dinka_sugoi` (imported, Civic Type R) against FH5 — **+28 %**, OUTSIDE the band (the audit's random row) | a front-drive launch the traction aid holds at ~0.44 g; the car's own 400 N·m reaches only 5.83 s | VEH3-carried (a front-drive launch model) | ~0.5 d |
-| **the imported lap strikes something** (`obey_rocoto`: one step at **37.82 g**, ~13 m wide of the second corner, §10) | measured, not diagnosed: the SUV leaves the brake at ~9.4 m/s into that corner where the coupe's lap reaches ~4.5 (the same bend rule on a heavier car); what it strikes is not yet named; printed by `the_imported_row_drives_the_same_lap_on_both_hosts`, not asserted | VEH3-carried (name the obstacle, then the driver's braking or the arm's line) | ~0.5 d |
+| ~~**the imported lap strikes something**~~ **CLOSED by the PAR1b.2 audit** (§10) | the obstacle was the southbound approach's sign post at (423.78, −290.2); the cause the lane driver's one-second look (no braking for a corner beyond it); fixed by `drive_intent`'s braking horizon (`CORNER_BRAKE_MPS2` 6.0), unit arm `traffic::tests::a_corner_beyond_the_lookahead_is_braked_for` (mutation: horizon off -> 25 m/s against 17.03, red); the imported lap's peak one-step deceleration is now 1.07 g | closed | — |
 | the island kerb frame | a blind tap does not reach a kerb on the island's streets (the audit's cruiser session: thumps 0 again) | VEH3-carried (VEH3e's placement door) | ~2 h |
 | **the boarded fleet car is silent** (the Harbour City cruiser: squeal 0.00, no grain) | the island's EMS fleet spawns with `engine_voice: false` (EMS1); VEH3e already silences an unoccupied car | VEH3-carried: the fleet spawned with a voice, both committed island levels re-blessed with that cause, the island audio arms re-read | ~0.5 d |
 | the fallback-body island frame | not re-measured this wave (the art cook only) | PERF1's baseline row | ~1 h |

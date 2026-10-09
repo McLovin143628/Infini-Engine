@@ -722,6 +722,18 @@ pub const SPEED_BAND_MPS: f64 = 3.0;
 /// every time the car ahead slowed would be a queue of cars nose-diving.
 pub const COMFORT_DECEL_MPS2: f64 = 3.5;
 
+/// **How hard a driver brakes for a corner it can see coming**, m/s² (the
+/// PAR1b.2 audit) — the rate `drive_intent`'s braking horizon carries a
+/// corner's speed back along the path at. Firmer than
+/// [`COMFORT_DECEL_MPS2`] (the following-distance rate, sized for a queue that
+/// must never nose-dive) and still well under the tyre: about 0.6 g, a driver
+/// lifting and braking deliberately for a junction turn. Measured by the
+/// audit at this rate: the imported SUV's VEH3h lap runs clean (peak one-step
+/// deceleration 1.07 g where it struck a sign post at 37.82 g) and
+/// `ems2_dispatch_gate`'s three responses keep their times to the hundredth
+/// (48.53 / 57.80 / 61.18 s).
+pub const CORNER_BRAKE_MPS2: f64 = 6.0;
+
 /// The gap a stopped car keeps to the one in front, metres of CLEAR ROAD from
 /// its own bumper to the nearest point of whatever is ahead (wave VEH3f.2b).
 ///
@@ -908,7 +920,41 @@ pub fn drive_intent(view: &DriveView<'_>) -> DriveIntent {
     } else {
         0.0
     };
-    let bend = corner_speed_mps(view.path, view.s_m, lookahead, view.loops);
+    let mut bend = corner_speed_mps(view.path, view.s_m, lookahead, view.loops);
+    // ── the corner BEYOND the lookahead (the PAR1b.2 audit). The bend term
+    //    above sees only the next lookahead of path, one second of travel, and
+    //    a car needs `v^2 / 2a` to shed its speed: at 20 m/s that is 33 m at
+    //    [`CORNER_BRAKE_MPS2`] against a 20 m look, so a car met a sharp
+    //    corner at whatever speed one second of braking left it (the VEH3h
+    //    audit's carried "imported SUV runs ~13 m wide of the second corner",
+    //    which PAR1b.2's kerb sign post turned into a car stopped dead on the
+    //    footway). Each further window of path inside the stopping distance is
+    //    read the same way and its corner speed carried back on the gap rule's
+    //    own stopping-distance law, `sqrt(v_c^2 + 2 a d)`.
+    {
+        let horizon = v * v / (2.0 * CORNER_BRAKE_MPS2);
+        let len = view.path.length_m();
+        let mut d = lookahead;
+        while d < horizon && d < 4.0 * LOOKAHEAD_MAX_M {
+            let s = if view.loops {
+                if len > 0.0 {
+                    (view.s_m + d).rem_euclid(len)
+                } else {
+                    0.0
+                }
+            } else {
+                view.s_m + d
+            };
+            if !view.loops && s >= len {
+                break;
+            }
+            let vc = corner_speed_mps(view.path, s, lookahead, view.loops);
+            if vc.is_finite() {
+                bend = bend.min((vc * vc + 2.0 * CORNER_BRAKE_MPS2 * d).sqrt());
+            }
+            d += lookahead;
+        }
+    }
     let ahead_of_us = match view.gap_m {
         Some(g) if g.is_finite() => {
             let clear = (g - STANDING_GAP_M).max(0.0);
@@ -3500,6 +3546,40 @@ mod tests {
             loops: false,
         });
         assert!(i.target_mps < 25.0, "{i:?}");
+    }
+
+    /// **A corner beyond the lookahead is braked for** (the PAR1b.2 audit's
+    /// braking horizon): a car at 20 m/s on a straight with a right-angle
+    /// turn 30 m ahead — outside its 20 m look, inside its 33 m stopping
+    /// distance at [`CORNER_BRAKE_MPS2`] — already asks for less than the
+    /// limit, exactly the corner's speed carried back 20 m on the stopping
+    /// law; at 5 m/s (a 2 m stopping distance) the same place reads the open
+    /// road. Mutation (measured): the horizon loop removed -> the 20 m/s car
+    /// asks for the 25 m/s limit, red.
+    #[test]
+    fn a_corner_beyond_the_lookahead_is_braked_for() {
+        let bend = path(&[(0.0, 0.0), (100.0, 0.0), (100.0, 100.0)]);
+        let ask = |v: f64| {
+            drive_intent(&DriveView {
+                at: DVec3::new(70.0, 0.0, 0.0),
+                forward: DVec3::X,
+                forward_mps: v,
+                path: &bend,
+                s_m: 70.0,
+                speed_limit_mps: 25.0,
+                gap_m: None,
+                lateral_bias_m: 0.0,
+                loops: false,
+            })
+            .target_mps
+        };
+        // The window [s + 20, s + 40] holds the vertex: its corner speed over
+        // the 20 m look is sqrt(2.5 * 20), carried back d = 20 m.
+        let want = (CORNER_LATERAL_MPS2 * 20.0 + 2.0 * CORNER_BRAKE_MPS2 * 20.0).sqrt();
+        let fast = ask(20.0);
+        assert!((fast - want).abs() < 1e-9, "{fast} against {want}");
+        assert!(fast < 25.0);
+        assert_eq!(ask(5.0), 25.0, "a slow car 30 m short of the corner");
     }
 
     /// The stop-and-wait rule: closing on a queue slows continuously, and the
