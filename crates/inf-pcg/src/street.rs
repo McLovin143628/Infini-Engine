@@ -19,9 +19,11 @@
 //! masts, utility poles, signs, hydrants, parking meters — stand at the kerb
 //! ([`post_line_m`]: [`KERB_POST_OFFSET_M`] behind the kerb face, as
 //! `steal-car/0022` and `0028` show them; behind a parked car's door where the
-//! reserve parks at its kerb). The BROAD pieces — benches, bins, mailboxes,
-//! bus shelters — stand against the frontage ([`furniture_line_m`],
-//! [`FURNITURE_BACK_M`] inside the footway's back edge), facing the street.
+//! reserve parks at its kerb), and so does a bus shelter's screen (the PAR1b.2
+//! audit: a shelter against the frontage stood in a window band). The BROAD
+//! pieces — benches, bins, mailboxes — stand against the frontage
+//! ([`furniture_line_m`], [`FURNITURE_BACK_M`] inside the footway's back
+//! edge), facing the street.
 //! The crowd walks a ring `PAVEMENT_M` outside each block, between the two
 //! lines, and walks PAST the posts: `inf_ecs::furniture::clear_of_furniture`
 //! keeps every agent its radius clear of every piece's footprint (PAR1b
@@ -943,59 +945,61 @@ fn panel(
     }
 }
 
-/// **A bus shelter** whose back stands at `back` (the footway's back edge at
-/// the shelter's middle), its open front toward `toward` (the carriageway),
-/// running along `axis`.
-fn bus_shelter(back: DVec3, axis: DVec3, toward: DVec3) -> FurniturePiece {
+/// **A bus shelter** (the PAR1b.2 audit's placement): a kerbside canopy whose
+/// glazed screen stands on the POST line at `kerb_side` (the line's point at
+/// the shelter's middle), facing the traffic, with its roof cantilevered back
+/// over the footway away from `toward` (the carriageway) and a lean rail on the
+/// screen's footway face, running along `axis`.
+///
+/// # Why at the kerb, open to the footway
+///
+/// The wave first stood the shelter against the frontage, its back panel 5 cm
+/// off the building line — and on `phase19_gate`'s shipped town that panel
+/// stood in an Office's ground-floor window band (the arm's red). A 2.3 m
+/// footway has no room for a three-sided 1.2 m shelter anywhere a crowd walks,
+/// so this is the narrow-footway shelter real streets use: one screen at the
+/// kerb (0.5 m behind the kerb face, clear of a parked car's door), the roof
+/// over the walking line, NO end panels (the crowd ring passes under the roof,
+/// 0.42 m clear of the screen's face on a 20 m street), nothing against any
+/// frontage — so no window band and no doorway is ever behind one.
+fn bus_shelter(kerb_side: DVec3, axis: DVec3, toward: DVec3) -> FurniturePiece {
     let (hl, hd, h) = (SHELTER_LEN_M * 0.5, SHELTER_DEPTH_M * 0.5, SHELTER_HEIGHT_M);
     let t = 0.04;
-    let mid = back + toward * hd;
-    let back_c = back + toward * t + DVec3::Y * (h * 0.5);
-    let ends = [mid + axis * (hl - t), mid - axis * (hl - t)];
-    let mut instances = vec![
-        // The back panel.
-        panel(back_c, axis, hl, h * 0.5, t, GLAZING),
-        // The roof, overhanging the front by 0.2 m.
+    let away = -toward;
+    let mid = kerb_side + away * hd;
+    let screen_c = kerb_side + away * t + DVec3::Y * (h * 0.5);
+    let instances = vec![
+        // The screen.
+        panel(screen_c, axis, hl, h * 0.5, t, GLAZING),
+        // The roof, over the footway, overhanging the screen by 0.1 m.
         panel(
-            mid + toward * 0.1 + DVec3::Y * (h + 0.05),
+            mid + toward * 0.05 + DVec3::Y * (h + 0.05),
             axis,
             hl + 0.1,
             0.05,
-            hd + 0.1,
+            hd + 0.05,
+            STEEL,
+        ),
+        // The lean rail on the screen's footway face (drawn; the screen is
+        // the solid a body meets).
+        panel(
+            kerb_side + away * (2.0 * t + 0.025) + DVec3::Y * 0.8,
+            axis,
+            hl - 0.3,
+            0.03,
+            0.025,
             STEEL,
         ),
     ];
-    let mut colliders = vec![solid(
-        back_c,
+    let colliders = vec![solid(
+        screen_c,
         if axis.x.abs() > 0.5 {
             DVec3::new(hl, h * 0.5, t)
         } else {
             DVec3::new(t, h * 0.5, hl)
         },
     )];
-    for e in ends {
-        let c = e + DVec3::Y * (h * 0.5);
-        instances.push(panel(c, toward, hd, h * 0.5, t, GLAZING));
-        colliders.push(solid(
-            c,
-            if axis.x.abs() > 0.5 {
-                DVec3::new(t, h * 0.5, hd)
-            } else {
-                DVec3::new(hd, h * 0.5, t)
-            },
-        ));
-    }
-    // The bench inside, against the back panel (drawn; the panels are the
-    // solids a body meets).
-    instances.push(panel(
-        back + toward * 0.35 + DVec3::Y * 0.45,
-        axis,
-        hl - 0.3,
-        0.03,
-        0.2,
-        WOOD,
-    ));
-    let foot = DVec3::new(mid.x, back.y, mid.z);
+    let foot = DVec3::new(mid.x, kerb_side.y, mid.z);
     FurniturePiece {
         kind: PieceKind::BusShelter,
         foot,
@@ -1165,16 +1169,19 @@ pub fn furnish(
                 }
             }
             // ── benches + bins: on the +side, between lamps, a share of slots.
-            // ── bus shelters (PAR1b.2): on an arterial, against the frontage,
-            //    every `SHELTER_SPACING_M` a side, the sides offset by half.
-            //    Placed before the benches so a shelter's length is clear.
+            // ── bus shelters (PAR1b.2): on an arterial, every
+            //    `SHELTER_SPACING_M` a side, the sides offset by half; the
+            //    screen on the post line, open to the footway (the PAR1b.2
+            //    audit moved it off the frontage — see `bus_shelter`).
+            //    Placed before the meters and benches so a shelter's length
+            //    is clear.
             if wide {
                 let shelter_phase = if side > 0.0 {
                     100.0
                 } else {
                     100.0 + SHELTER_SPACING_M * 0.5
                 };
-                let back = (kerb + KERB_WIDTH_M + PAVEMENT_M).min(street.gap_m * 0.5) - 0.05;
+                let back = post;
                 let k0 = ((lo - shelter_phase) / SHELTER_SPACING_M).ceil() as i64;
                 let k1 = ((hi - shelter_phase) / SHELTER_SPACING_M).floor() as i64;
                 for k in k0..=k1 {
@@ -1624,10 +1631,34 @@ mod tests {
         assert!(shelters.len() >= 4, "shelters {}", shelters.len());
         assert!(meters >= 8, "meters {meters}");
         for s in &shelters {
-            assert_eq!(
-                s.colliders.len(),
-                3,
-                "a shelter is three panels a body meets"
+            // The PAR1b.2 audit's kerbside shelter: ONE screen a body meets,
+            // its roadside face on the post line (half a metre behind the
+            // kerb face), its footway face clear of the crowd's walking ring
+            // by an agent's radius and the furniture clearance, and nothing
+            // of it within a metre of the frontage (no window band, no
+            // doorway is ever behind it).
+            assert_eq!(s.colliders.len(), 1, "a shelter is one screen");
+            let c = &s.colliders[0];
+            let (lat, half) = if s.foot.z.abs() > s.foot.x.abs() {
+                (c.center.x.abs(), c.half_extents.x)
+            } else {
+                (c.center.z.abs(), c.half_extents.z)
+            };
+            let road_face = lat - half;
+            assert!(
+                (road_face - post_line_m(20.0)).abs() < 1e-9
+                    && road_face - kerb_offset_m(20.0) > 0.45,
+                "the screen's roadside face is at {road_face}"
+            );
+            let ring = 10.0 - PAVEMENT_M;
+            assert!(
+                ring - (lat + half) >= 0.30 + 0.05,
+                "the screen stands {} m from the crowd ring",
+                ring - (lat + half)
+            );
+            assert!(
+                (kerb_offset_m(20.0) + KERB_WIDTH_M + PAVEMENT_M) - (lat + half) > 1.0,
+                "the screen is against the frontage"
             );
             let along = if s.foot.z.abs() > s.foot.x.abs() {
                 s.foot.z

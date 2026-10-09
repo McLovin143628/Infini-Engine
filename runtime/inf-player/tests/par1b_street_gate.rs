@@ -1071,14 +1071,46 @@ fn a_signal_head_tints_its_approach_faintly_and_not_the_hero() {
             m.emissive = [c[0] * 1.6, c[1] * 1.6, c[2] * 1.6];
             scene.instances.push(m);
         }
+        // The PAR1b.2 audit's three more bodies (pale torsos, chest height):
+        // one standing in the NEAR crosswalk on the approach's half (where the
+        // window's hero stood washed red, `PAR1b2-FINAL\frames-a21\303`), one
+        // ten metres up the pavement beside the approach, and one standing IN
+        // the approach's lane a metre and a half before the line (printed).
+        let line_x = -inf_ecs::traffic::STOP_LINE_M;
+        let bodies = [
+            DVec3::new(-7.5, 1.35, -1.75),
+            DVec3::new(line_x - 7.5, 1.5, -8.6),
+            DVec3::new(line_x - 1.5, 1.35, -1.75),
+        ];
+        for (k, b) in bodies.iter().enumerate() {
+            scene.instances.push(MeshInstance::lit(
+                *b,
+                glam::Quat::IDENTITY,
+                Vec3::new(0.25, 0.6, 0.45),
+                [0.7, 0.7, 0.7, 1.0],
+                5 + k as u32,
+            ));
+        }
         if let Some(c) = colour {
+            // **As the projectors push it** (`render.rs` / the editor's
+            // `host.rs`): a 180-degree cone is a point; the light's box rides
+            // in its bound.
             scene.light_bounds.push(LightBound {
                 light: scene.lights.len() as u32,
-                clip: None,
+                clip: head.clip.map(|b| inf_render::LightClip {
+                    center: b.center,
+                    half: b.half.as_vec3(),
+                    u: [b.u.x as f32, b.u.y as f32],
+                    interior: false,
+                }),
                 draw_m: head.draw_m,
             });
             scene.lights.push(RenderLight {
-                kind: LightKind::Spot,
+                kind: if head.outer_deg >= 180.0 {
+                    LightKind::Point
+                } else {
+                    LightKind::Spot
+                },
                 color: c,
                 intensity: head.intensity,
                 direction: (-head.dir).as_vec3(),
@@ -1089,7 +1121,7 @@ fn a_signal_head_tints_its_approach_faintly_and_not_the_hero() {
                 cast_shadows: false,
             });
         }
-        (scene, shirt)
+        (scene, shirt, bodies)
     };
     // The camera on the approach, behind the line, looking at the junction.
     let line_x = -inf_ecs::traffic::STOP_LINE_M;
@@ -1120,10 +1152,10 @@ fn a_signal_head_tints_its_approach_faintly_and_not_the_hero() {
     };
     let red = inf_pcg::street::aspect_rgb(2);
     let green = inf_pcg::street::aspect_rgb(0);
-    let (sr, shirt) = scene_of(Some(red), Some(red));
-    let (sg, _) = scene_of(Some(green), Some(green));
-    let (sl, _) = scene_of(None, Some(green));
-    let (sd, _) = scene_of(None, None);
+    let (sr, shirt, bodies) = scene_of(Some(red), Some(red));
+    let (sg, _, _) = scene_of(Some(green), Some(green));
+    let (sl, _, _) = scene_of(None, Some(green));
+    let (sd, _, _) = scene_of(None, None);
     let (ir, ig, il, id) = (
         render_at(&gpu, &sr, &view, KERB_EXPOSURE),
         render_at(&gpu, &sg, &view, KERB_EXPOSURE),
@@ -1175,7 +1207,47 @@ fn a_signal_head_tints_its_approach_faintly_and_not_the_hero() {
         shirt_red <= SIGNAL_SHIRT_MAX && shirt_green <= SIGNAL_SHIRT_MAX,
         "the shirt in the box takes the lens colour: red +{shirt_red:.1}, green +{shirt_green:.1} (max {SIGNAL_SHIRT_MAX})"
     );
+    // ── the PAR1b.2 audit (d'): THE LANE BEFORE THE LINE, AND NOTHING ELSE.
+    let lift = |p: DVec3| -> (f64, f64, [f64; 3], [f64; 3], [f64; 3]) {
+        let (r, g, d) = (rgb_at(&ir, p), rgb_at(&ig, p), rgb_at(&id, p));
+        (r[0] - d[0], g[1] - d[1], r, g, d)
+    };
+    let names = [
+        "near crosswalk",
+        "10 m up the pavement",
+        "in the lane 1.5 m before the line",
+    ];
+    let mut lifts = Vec::new();
+    for (name, b) in names.iter().zip(bodies) {
+        let (lr, lg, r, g, d) = lift(b);
+        println!(
+            "PAR1b.2 SIGNAL BODY {name}: red {r:.1?} / green {g:.1?} / dark {d:.1?} (lift +{lr:.1} / +{lg:.1})"
+        );
+        lifts.push((lr, lg));
+    }
+    assert!(
+        lifts[0].0 <= SIGNAL_BODY_OFF_LANE_MAX && lifts[0].1 <= SIGNAL_BODY_OFF_LANE_MAX,
+        "a body in the near crosswalk takes the lens colour: red +{:.1}, green +{:.1}",
+        lifts[0].0,
+        lifts[0].1
+    );
+    assert!(
+        lifts[1].0 <= SIGNAL_BODY_OFF_LANE_MAX && lifts[1].1 <= SIGNAL_BODY_OFF_LANE_MAX,
+        "a body on the pavement takes the lens colour: red +{:.1}, green +{:.1}",
+        lifts[1].0,
+        lifts[1].1
+    );
+    // The body in the lane before the line is PRINTED, not asserted: it reads
+    // +0.1 at x8 (the beam lands on the asphalt, the body stands under it).
 }
+
+/// The most the lens may lift its own channel on a body OFF its lane — in the
+/// near crosswalk or on the pavement — codes at x8 (the PAR1b.2 audit (d'):
+/// measured +0.3 / +0.0 with the shipped 40 lm / 14-degree head). This
+/// synthetic scene does NOT reproduce the window's pink-red hero at the
+/// spawn crossing (`PAR1b2-FINAL\frames-a21\303`); that wash is carried to an
+/// in-window measurement with its controls (see the audit report).
+const SIGNAL_BODY_OFF_LANE_MAX: f64 = 0.5;
 
 /// The most the lens may lift its own channel on the corner facade beside the
 /// approach, codes at x8 — the beam is down the lanes only (measured: 0.0 at
@@ -1917,10 +1989,221 @@ fn the_walk_down_the_strip_files_its_slow_steps() {
     );
 }
 
+/// **THE CROWD PUSH ENGAGES ON THE TIERS NO COLLIDER HOLDS OFF** (the PAR1b.2
+/// audit, priority (e')). The implementer's own caveat: switching the push off
+/// still read 0 overlaps on the CI island, because the agents its arm sampled
+/// were `Full` bodies the colliders hold off. The crowd's `Far` and `Dormant`
+/// tiers are placed by their clocks and carry no collider at all, so the push
+/// is the only thing between a clock-placed agent and a hydrant. The cooked
+/// island, the hero at the spawn crossing at 08:24, 600 steps, every crowd
+/// record's place (`CrowdRecord::last`, the
+/// `Far` and `Dormant` tiers) against every furniture solid's plan footprint,
+/// twice: as shipped, and with the push's index (`FurnitureFootprints`)
+/// removed before every step — a test-side door (`clear_of_furniture` answers
+/// the place unchanged without it), nothing the shipped player can reach.
+/// Asserts what it measured: none inside either way (the push is not engaged
+/// by the shipped crowd; see the body), and it goes red the day a route does
+/// reach a piece, so the engagement claim is then written.
+#[test]
+#[ignore = "needs a cooked island pack (INF_ISLAND_PACK); run by hand"]
+fn the_crowd_push_engages_on_the_tiers_no_collider_holds_off() {
+    // The CI island cannot answer (measured: its Far / Dormant agents never
+    // come within 59 m of its 44 solids), so this reads the cooked island at
+    // its spawn crossing.
+    let Some(pack) = std::env::var_os("INF_ISLAND_PACK").map(PathBuf::from) else {
+        println!("SKIP: INF_ISLAND_PACK names no pack");
+        return;
+    };
+    let run = |push: bool| -> (usize, usize, f64) {
+        let source = inf_player::level::PackLevelSource::open(&pack).expect("the pack opens");
+        let mut built = inf_player::build_world_from_pack(&source).expect("the world builds");
+        let partition = built.take_partition();
+        let pcg = built.pcg_context();
+        let mut ship = inf_player::sim_from_built(built);
+        inf_player::attach_cell_streaming(&mut ship, &partition, pcg);
+        inf_player::attach_terrain_streaming(&mut ship, &inf_player::TerrainContent::Pack(source));
+        let ground = ship.terrain_height_at(-1741.0, 2059.0);
+        stand(&mut ship, DVec3::new(-1741.0, ground, 2059.0), 8.4, 0);
+        let (mut samples, mut inside, mut nearest) = (0usize, 0usize, f64::INFINITY);
+        for _ in 0..600 {
+            if !push {
+                ship.world_mut()
+                    .world_mut()
+                    .remove_resource::<inf_ecs::furniture::FurnitureFootprints>();
+            }
+            ship.step_once(inf_player::runtime_sim::RuntimeInput::default());
+            let (solids, _, _, _, _) = furniture_of(&ship);
+            let Some(pop) = ship
+                .world()
+                .world()
+                .get_resource::<inf_ecs::crowd::CrowdPopulationRes>()
+            else {
+                continue;
+            };
+            for rec in pop.records.values() {
+                // `Full` and `Near` carry a capsule the colliders hold off;
+                // `Far` (drawn, kinematic) and `Dormant` (data only) do not.
+                if matches!(
+                    rec.tier,
+                    inf_ecs::crowd::CrowdTier::Full | inf_ecs::crowd::CrowdTier::Near
+                ) {
+                    continue;
+                }
+                let p = rec.last;
+                samples += 1;
+                let r = rec.archetype.radius_m;
+                for s in &solids {
+                    if (p.y - s.center.y).abs() > s.half_extents.y + 1.0 {
+                        continue;
+                    }
+                    let dx = ((p.x - s.center.x).abs() - s.half_extents.x).max(0.0);
+                    let dz = ((p.z - s.center.z).abs() - s.half_extents.z).max(0.0);
+                    let d = (dx * dx + dz * dz).sqrt();
+                    nearest = nearest.min(d);
+                    if d < r - 0.02 {
+                        inside += 1;
+                    }
+                }
+            }
+        }
+        (samples, inside, nearest)
+    };
+    let (on_n, on_in, on_near) = run(true);
+    let (off_n, off_in, off_near) = run(false);
+    println!(
+        "PAR1b.2 CROWD PUSH (clock-placed tiers, cooked island spawn 08:24, 600 steps): ON {on_n} samples, {on_in} inside a piece's radius, nearest {on_near:.3} m | OFF {off_n} samples, {off_in} inside, nearest {off_near:.3} m"
+    );
+    // MEASURED by the PAR1b.2 audit: 537 000 samples each way, 0 inside with
+    // the push OFF as well as ON, nearest 0.370 m both — the clock-placed
+    // tiers' routes never reach a piece on the shipped island, so the push is
+    // NOT ENGAGED by any shipped tier; this arm says so rather than asserting
+    // an engagement it cannot show. (The push is kept for the `Full` steer
+    // term's measured reason: a body walking at a hydrant was mantled onto it.)
+    assert_eq!(
+        on_in, 0,
+        "a clock-placed agent stands inside a piece of furniture"
+    );
+    assert_eq!(
+        off_in, 0,
+        "a clock-placed agent stood inside a piece with the push off — the push now \
+         engages: make this arm assert it (off > 0, on = 0)"
+    );
+}
+
+/// **WHAT THE SIGNALS COST THE STEP** (the PAR1b.2 audit, priority (c')): the
+/// cooked island at 21:00, the hero at three places — the spawn crossing, the
+/// nearest arterial (20 m x 20 m) crossing at least 200 m off, and the
+/// pavement the demo's walk starts on — and at each, 300 profiled steps with
+/// the signals ON and 300 with them OFF (the junction list emptied before
+/// every step: a test-side door, nothing the shipped player can reach, the
+/// same control `par1b_signals_3d` runs). PRINTS the whole step and the
+/// traffic phase, min / median / p95, and the clock tier's hold-steps.
+/// Asserts only that the ON leg held something (the door engaged). Debug
+/// build: read the ON - OFF DIFFERENCE, not the absolute milliseconds.
+#[test]
+#[ignore = "needs a cooked island pack (INF_ISLAND_PACK); run by hand"]
+fn what_the_signals_cost_the_step() {
+    let Some(pack) = std::env::var_os("INF_ISLAND_PACK").map(PathBuf::from) else {
+        println!("SKIP: INF_ISLAND_PACK names no pack");
+        return;
+    };
+    let source = inf_player::level::PackLevelSource::open(&pack).expect("the pack opens");
+    let mut built = inf_player::build_world_from_pack(&source).expect("the world builds");
+    let partition = built.take_partition();
+    let pcg = built.pcg_context();
+    let mut sim = inf_player::sim_from_built(built);
+    inf_player::attach_cell_streaming(&mut sim, &partition, pcg);
+    inf_player::attach_terrain_streaming(&mut sim, &inf_player::TerrainContent::Pack(source));
+    sim.set_step_profiling(true);
+    let spawn = DVec2::new(-1750.0, 2050.0);
+    let ground = sim.terrain_height_at(spawn.x, spawn.y);
+    stand(
+        &mut sim,
+        DVec3::new(spawn.x + 9.0, ground, spawn.y + 9.0),
+        21.0,
+        SPAWN_WARMUP,
+    );
+    let all = inf_ecs::traffic::carriageway_of(sim.world())
+        .map(|r| r.junctions.clone())
+        .unwrap_or_default();
+    let arterial = all
+        .iter()
+        .filter(|j| j.gap_x >= 20.0 - 1e-9 && j.gap_z >= 20.0 - 1e-9)
+        .filter(|j| (j.centre - spawn).length() >= 200.0)
+        .min_by(|a, b| {
+            (a.centre - spawn)
+                .length()
+                .total_cmp(&(b.centre - spawn).length())
+        })
+        .map(|j| j.centre)
+        .unwrap_or(spawn + DVec2::new(240.0, 0.0));
+    let places = [
+        ("spawn crossing", spawn + DVec2::new(9.0, 9.0)),
+        ("arterial crossing", arterial + DVec2::new(9.0, 9.0)),
+        ("walk pavement", DVec2::new(-1747.3, 2001.6)),
+    ];
+    let traffic_phase = inf_player::step_profile::STEP_PHASE_NAMES
+        .iter()
+        .position(|n| *n == "traffic")
+        .expect("a traffic phase");
+    let stat = |v: &mut Vec<f64>| -> (f64, f64, f64) {
+        v.sort_by(f64::total_cmp);
+        let at = |q: f64| v[((v.len() - 1) as f64 * q).round() as usize];
+        (at(0.0), at(0.5), at(0.95))
+    };
+    let mut engaged = 0usize;
+    for (name, p) in places {
+        let y = sim.terrain_height_at(p.x, p.y);
+        stand(&mut sim, DVec3::new(p.x, y, p.y), 21.0, 120);
+        for off in [false, true] {
+            let (mut total, mut traffic, mut holds) = (Vec::new(), Vec::new(), 0usize);
+            for _ in 0..300 {
+                if off {
+                    if let Some(mut r) = sim
+                        .world_mut()
+                        .world_mut()
+                        .get_resource_mut::<inf_ecs::traffic::TrafficRes>()
+                    {
+                        r.junctions.clear();
+                    }
+                }
+                sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+                let prof = sim.step_profile();
+                total.push(prof.total_ms());
+                traffic.push(prof.ms[traffic_phase]);
+                holds += sim.traffic_stats().signal_holds;
+            }
+            if off {
+                if let Some(mut r) = sim
+                    .world_mut()
+                    .world_mut()
+                    .get_resource_mut::<inf_ecs::traffic::TrafficRes>()
+                {
+                    r.junctions = all.clone();
+                }
+            } else {
+                engaged += holds;
+            }
+            let (t0, t50, t95) = stat(&mut total);
+            let (f0, f50, f95) = stat(&mut traffic);
+            println!(
+                "PAR1b.2 SIGNAL COST {name} ({:.0}, {:.0}) signals {}: step min {t0:.2} / median {t50:.2} / p95 {t95:.2} ms; traffic phase {f0:.2} / {f50:.2} / {f95:.2} ms; {holds} clock hold-steps",
+                p.x,
+                p.y,
+                if off { "OFF" } else { "ON " },
+            );
+        }
+    }
+    assert!(
+        engaged > 0,
+        "no clock-tier hold over three places: the ON legs measured nothing"
+    );
+}
+
 /// Steps the shipped-island signal arm warms the traffic up over before it
 /// watches (the day plans `TRAFFIC_PLANS_PER_STEP` routes a step).
 const SPAWN_WARMUP: usize = 240;
-/// Steps it watches — ten seconds, a fifth of a cycle each way.
+/// Steps it watches — a whole 50 s signal cycle at 60 Hz.
 const SPAWN_STEPS: usize = 3000;
 /// The distinct waits it asks for at the spawn crossing — the measured count
 /// (audit PAR1b, `cook-h/perf1`): ONE car over a whole 50 s cycle, because a
